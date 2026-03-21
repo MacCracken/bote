@@ -1,0 +1,138 @@
+//! Tool registry — register, discover, and validate MCP tools.
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Tool input schema (JSON Schema subset).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSchema {
+    #[serde(rename = "type")]
+    pub schema_type: String,
+    #[serde(default)]
+    pub properties: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub required: Vec<String>,
+}
+
+/// Definition of a registered MCP tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDef {
+    pub name: String,
+    pub description: String,
+    pub input_schema: ToolSchema,
+}
+
+/// Registry of MCP tools.
+#[derive(Debug, Default)]
+pub struct ToolRegistry {
+    tools: HashMap<String, ToolDef>,
+}
+
+impl ToolRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&mut self, tool: ToolDef) {
+        self.tools.insert(tool.name.clone(), tool);
+    }
+
+    pub fn get(&self, name: &str) -> Option<&ToolDef> {
+        self.tools.get(name)
+    }
+
+    pub fn list(&self) -> Vec<&ToolDef> {
+        self.tools.values().collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.tools.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
+    /// Validate params against a tool's schema (basic required-field check).
+    pub fn validate_params(
+        &self,
+        tool_name: &str,
+        params: &serde_json::Value,
+    ) -> crate::Result<()> {
+        let tool = self
+            .get(tool_name)
+            .ok_or_else(|| crate::BoteError::ToolNotFound(tool_name.into()))?;
+
+        if let serde_json::Value::Object(map) = params {
+            for req in &tool.input_schema.required {
+                if !map.contains_key(req) {
+                    return Err(crate::BoteError::InvalidParams {
+                        tool: tool_name.into(),
+                        reason: format!("missing required field: {req}"),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tool(name: &str) -> ToolDef {
+        ToolDef {
+            name: name.into(),
+            description: format!("{name} tool"),
+            input_schema: ToolSchema {
+                schema_type: "object".into(),
+                properties: HashMap::new(),
+                required: vec!["path".into()],
+            },
+        }
+    }
+
+    #[test]
+    fn register_and_get() {
+        let mut reg = ToolRegistry::new();
+        reg.register(make_tool("test_tool"));
+        assert!(reg.contains("test_tool"));
+        assert!(!reg.contains("nope"));
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn list_tools() {
+        let mut reg = ToolRegistry::new();
+        reg.register(make_tool("a"));
+        reg.register(make_tool("b"));
+        assert_eq!(reg.list().len(), 2);
+    }
+
+    #[test]
+    fn validate_params_ok() {
+        let mut reg = ToolRegistry::new();
+        reg.register(make_tool("scan"));
+        let params = serde_json::json!({"path": "/tmp"});
+        assert!(reg.validate_params("scan", &params).is_ok());
+    }
+
+    #[test]
+    fn validate_params_missing() {
+        let mut reg = ToolRegistry::new();
+        reg.register(make_tool("scan"));
+        let params = serde_json::json!({});
+        assert!(reg.validate_params("scan", &params).is_err());
+    }
+
+    #[test]
+    fn validate_unknown_tool() {
+        let reg = ToolRegistry::new();
+        assert!(reg.validate_params("nope", &serde_json::json!({})).is_err());
+    }
+}

@@ -1,0 +1,30 @@
+[package]
+name = "bote"
+version = "0.21.3"
+edition = "2024"
+rust-version = "1.89"
+license = "AGPL-3.0-only"
+description = "MCP core service — JSON-RPC 2.0 protocol, tool registry, audit integration, and TypeScript bridge"
+homepage = "https://github.com/MacCracken/bote"
+repository = "https://github.com/MacCracken/bote"
+readme = "README.md"
+keywords = ["mcp", "json-rpc", "tools", "protocol", "agent"]
+categories = ["web-programming"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio-test = "0.4"
+
+[[bench]]
+name = "dispatch"
+harness = false
