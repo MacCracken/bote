@@ -34,6 +34,7 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: ToolDef) {
+        tracing::debug!(tool = %tool.name, "tool registered");
         self.tools.insert(tool.name.clone(), tool);
     }
 

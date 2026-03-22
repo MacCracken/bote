@@ -94,15 +94,32 @@ pub struct StreamContext {
 pub type StreamingToolHandler =
     Arc<dyn Fn(serde_json::Value, StreamContext) -> serde_json::Value + Send + Sync>;
 
-/// Create a connected `(StreamContext, mpsc::Receiver<ProgressUpdate>, CancellationToken)`.
-pub(crate) fn make_stream_context() -> (StreamContext, mpsc::Receiver<ProgressUpdate>, CancellationToken) {
+/// Build a JSON-RPC notification for a progress update.
+pub fn progress_notification(
+    request_id: &serde_json::Value,
+    update: &ProgressUpdate,
+) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {
+            "progressToken": request_id,
+            "progress": update.progress,
+            "total": update.total,
+            "message": update.message,
+        }
+    })
+}
+
+/// Create a connected `(StreamContext, mpsc::Receiver<ProgressUpdate>)`.
+pub(crate) fn make_stream_context() -> (StreamContext, mpsc::Receiver<ProgressUpdate>) {
     let (tx, rx) = mpsc::channel();
     let token = CancellationToken::new();
     let ctx = StreamContext {
         progress: ProgressSender::new(tx),
-        cancellation: token.clone(),
+        cancellation: token,
     };
-    (ctx, rx, token)
+    (ctx, rx)
 }
 
 #[cfg(test)]
@@ -163,14 +180,14 @@ mod tests {
 
     #[test]
     fn make_stream_context_connected() {
-        let (ctx, rx, token) = make_stream_context();
+        let (ctx, rx) = make_stream_context();
 
         ctx.progress.report(1, 5);
         let update = rx.recv().unwrap();
         assert_eq!(update.progress, 1);
 
         assert!(!ctx.cancellation.is_cancelled());
-        token.cancel();
+        ctx.cancellation.cancel();
         assert!(ctx.cancellation.is_cancelled());
     }
 
@@ -197,5 +214,51 @@ mod tests {
         let json = serde_json::to_string(&update).unwrap();
         assert!(!json.contains("message"));
         assert!(!json.contains("total"));
+    }
+
+    #[test]
+    fn cancellation_token_concurrent() {
+        let token = CancellationToken::new();
+        let clone1 = token.clone();
+        let clone2 = token.clone();
+
+        let t1 = std::thread::spawn(move || {
+            clone1.cancel();
+        });
+        t1.join().unwrap();
+
+        let t2 = std::thread::spawn(move || {
+            assert!(clone2.is_cancelled());
+        });
+        t2.join().unwrap();
+
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn progress_notification_builds_correctly() {
+        let update = ProgressUpdate {
+            progress: 3,
+            total: Some(10),
+            message: Some("working".into()),
+        };
+        let notif = progress_notification(&serde_json::json!(42), &update);
+        assert_eq!(notif["jsonrpc"], "2.0");
+        assert_eq!(notif["method"], "notifications/progress");
+        assert_eq!(notif["params"]["progressToken"], 42);
+        assert_eq!(notif["params"]["progress"], 3);
+        assert_eq!(notif["params"]["total"], 10);
+        assert_eq!(notif["params"]["message"], "working");
+    }
+
+    #[test]
+    fn progress_sender_report_sets_total() {
+        let (tx, rx) = mpsc::channel();
+        let sender = ProgressSender::new(tx);
+        sender.report(5, 10);
+        let u = rx.recv().unwrap();
+        assert_eq!(u.progress, 5);
+        assert_eq!(u.total, Some(10));
+        assert!(u.message.is_none());
     }
 }

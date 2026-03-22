@@ -18,12 +18,28 @@ bote is the **MCP protocol layer** — it handles the JSON-RPC 2.0 wire format, 
 
 | Capability | Details |
 |------------|---------|
-| **JSON-RPC 2.0** | Full request/response types with proper error codes |
+| **JSON-RPC 2.0** | Requests, responses, notifications, batch arrays |
 | **Tool registry** | Register tools with schemas, discover, validate params |
 | **Dispatch** | Route `tools/call` to registered handler functions |
-| **Schema validation** | Required field checks (full JSON Schema in v0.24) |
-| **Stdio transport** | Read requests from stdin, write responses to stdout |
-| **Error mapping** | BoteError → JSON-RPC error codes (-32700 to -32000) |
+| **Streaming** | Progress notifications and cancellation for long-running tools |
+| **Transports** | Stdio, HTTP (axum + SSE), WebSocket, Unix socket |
+| **Audit** | Tool call logging via libro hash-linked chain |
+| **Events** | Tool events published via majra pub/sub |
+| **Protocol** | Version negotiation, batch requests, notifications |
+
+## Feature Flags
+
+| Flag | Description |
+|------|-------------|
+| `http` | HTTP transport via axum (POST + SSE streaming) |
+| `ws` | WebSocket transport via tokio-tungstenite |
+| `unix` | Unix domain socket transport |
+| `all-transports` | Enables `http`, `ws`, and `unix` |
+| `audit` | Audit logging via libro hash-linked chain |
+| `events` | Event publishing via majra pub/sub |
+| `full` | All transports + audit + events |
+
+None are enabled by default — enable only what you need.
 
 ---
 
@@ -31,7 +47,7 @@ bote is the **MCP protocol layer** — it handles the JSON-RPC 2.0 wire format, 
 
 ```toml
 [dependencies]
-bote = "0.21"
+bote = "0.22"
 ```
 
 ```rust
@@ -67,25 +83,33 @@ let request = JsonRpcRequest::new(1, "tools/call")
         "arguments": { "input": "hello" }
     }));
 
-let response = dispatcher.dispatch(&request);
+let response = dispatcher.dispatch(&request).unwrap();
 // response.result = {"content": [{"type": "text", "text": "result: hello"}]}
 ```
 
 ### MCP server (stdio)
 
 ```rust
-use bote::transport;
+use bote::transport::stdio;
 
-// Read from stdin
-let line = /* read line from stdin */;
-let request = transport::parse_request(&line)?;
+// Runs a blocking loop: reads JSON-RPC from stdin, dispatches, writes to stdout.
+stdio::run(&dispatcher)?;
+```
 
-// Dispatch
-let response = dispatcher.dispatch(&request);
+### HTTP transport
 
-// Write to stdout
-let output = transport::serialize_response(&response)?;
-println!("{output}");
+```toml
+[dependencies]
+bote = { version = "0.22", features = ["http"] }
+```
+
+```rust
+use bote::transport::http::{serve, HttpConfig};
+use std::sync::Arc;
+
+let config = HttpConfig { addr: "127.0.0.1:3000".parse().unwrap() };
+serve(Arc::new(dispatcher), config, shutdown_signal).await?;
+// POST / for JSON-RPC, GET /health for liveness
 ```
 
 ---
@@ -96,19 +120,22 @@ bote implements the [Model Context Protocol](https://modelcontextprotocol.io/) o
 
 | Method | Description | Response |
 |--------|-------------|----------|
-| `initialize` | Handshake | Server info, capabilities, protocol version |
+| `initialize` | Handshake | Server info, capabilities, negotiated protocol version |
 | `tools/list` | Discovery | Array of tool definitions with schemas |
 | `tools/call` | Execution | Tool result or JSON-RPC error |
+| `$/cancelRequest` | Cancellation | Cancels an in-progress streaming call |
 
 ### Error codes
 
 | Code | Meaning | When |
 |------|---------|------|
 | -32700 | Parse error | Malformed JSON |
-| -32600 | Invalid request | Missing jsonrpc/id/method |
+| -32600 | Invalid request | Bad jsonrpc version, empty batch |
 | -32601 | Method not found | Unknown method or tool name |
-| -32602 | Invalid params | Missing required fields |
+| -32602 | Invalid params | Missing required fields, empty tool name |
 | -32000 | Execution error | Handler returned an error |
+| -32603 | Internal error | Handler panicked |
+| -32800 | Request cancelled | Streaming call cancelled by client |
 
 ---
 
@@ -126,7 +153,7 @@ rasa/src/mcp.rs     (200 lines)       rasa: bote::Dispatcher + 9 handlers
 ... × 23 apps       (~4000 lines)     ... × 23 apps (0 protocol code)
 ```
 
-4000 lines of duplicated JSON-RPC parsing replaced by `bote = "0.21"` in Cargo.toml.
+4000 lines of duplicated JSON-RPC parsing replaced by `bote = "0.22"` in Cargo.toml.
 
 ---
 
@@ -146,10 +173,10 @@ rasa/src/mcp.rs     (200 lines)       rasa: bote::Dispatcher + 9 handlers
 
 | Version | Milestone | Key features |
 |---------|-----------|--------------|
-| **0.21.3** | Foundation | JSON-RPC 2.0, registry, dispatch, stdio, 20+ tests |
-| **0.22.3** | Transport | HTTP, WebSocket, Unix socket, streaming, cancellation |
-| **0.23.3** | Integration | TypeScript bridge, libro audit, majra pub/sub |
-| **0.24.3** | Registry | Full JSON Schema, versioning, hot-reload, namespacing |
+| **0.21.3** | Foundation | JSON-RPC 2.0, registry, dispatch, stdio |
+| **0.22.3** | Transport & Streaming | HTTP, WebSocket, Unix, SSE, batch, audit, events |
+| **0.23.3** | TypeScript Bridge | SY bridge, cross-node discovery |
+| **0.24.3** | Advanced Registry | Full JSON Schema, versioning, hot-reload |
 | **0.25.3** | Adoption | daimon, 23 apps, SY, agnoshi integration |
 | **1.0.0** | Stable | Full compliance, < 500ns dispatch, all transports |
 
@@ -162,9 +189,10 @@ Full details: [docs/development/roadmap.md](docs/development/roadmap.md)
 ```bash
 git clone https://github.com/MacCracken/bote.git
 cd bote
-cargo build
-cargo test
-make check
+make check          # fmt + clippy + test + audit
+make test-all       # test every feature flag
+make bench          # run benchmarks + log history
+make coverage       # HTML coverage report
 ```
 
 ---

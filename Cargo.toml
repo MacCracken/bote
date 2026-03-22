@@ -1,15 +1,17 @@
 [package]
 name = "bote"
-version = "0.21.3"
+version = "0.22.3"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only"
 description = "MCP core service — JSON-RPC 2.0 protocol, tool registry, audit integration, and TypeScript bridge"
+documentation = "https://docs.rs/bote"
 homepage = "https://github.com/MacCracken/bote"
 repository = "https://github.com/MacCracken/bote"
 readme = "README.md"
 keywords = ["mcp", "json-rpc", "tools", "protocol", "agent"]
 categories = ["web-programming"]
+exclude = [".claude/", ".github/", "target/", "benches/history.log"]
 
 [features]
 default = []
@@ -17,6 +19,9 @@ http = ["dep:axum", "dep:tokio", "dep:futures-util"]
 ws = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
 unix = ["dep:tokio"]
 all-transports = ["http", "ws", "unix"]
+audit = ["dep:libro"]
+events = ["dep:majra"]
+full = ["all-transports", "audit", "events"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -30,12 +35,18 @@ axum = { version = "0.8", optional = true }
 tokio-tungstenite = { version = "0.26", optional = true }
 futures-util = { version = "0.3", optional = true }
 
+# Observability dependencies (all optional)
+libro = { path = "../libro", optional = true }
+majra = { path = "../majra", optional = true }
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
+libro = { path = "../libro" }
+majra = { path = "../majra" }
 
 [[bench]]
 name = "dispatch"

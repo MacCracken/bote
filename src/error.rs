@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum BoteError {
     #[error("tool not found: {0}")]
     ToolNotFound(String),

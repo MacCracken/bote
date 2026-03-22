@@ -57,8 +57,6 @@ fn dispatch_streaming(
     request: &JsonRpcRequest,
     writer: &mut impl Write,
 ) -> crate::Result<()> {
-    let request_id = request.id.clone().unwrap_or(serde_json::Value::Null);
-
     match dispatcher.dispatch_streaming(request) {
         DispatchOutcome::Streaming {
             request_id: req_id,
@@ -72,23 +70,21 @@ fn dispatch_streaming(
 
             // Drain progress, writing notifications as JSON lines.
             while let Ok(update) = progress_rx.recv() {
-                let notification = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "notifications/progress",
-                    "params": {
-                        "progressToken": req_id,
-                        "progress": update.progress,
-                        "total": update.total,
-                        "message": update.message,
-                    }
-                });
-                writeln!(writer, "{}", serde_json::to_string(&notification).expect("serialize progress"))?;
+                let notification = crate::stream::progress_notification(&req_id, &update);
+                if let Ok(json) = serde_json::to_string(&notification) {
+                    writeln!(writer, "{json}")?;
+                }
             }
 
             // Write final result.
-            let result = handle.join().expect("handler thread panicked");
-            let response = JsonRpcResponse::success(req_id, result);
-            writeln!(writer, "{}", codec::serialize_response(&response)?)?;
+            let result = match handle.join() {
+                Ok(v) => JsonRpcResponse::success(req_id, v),
+                Err(_) => {
+                    tracing::error!("streaming handler panicked");
+                    JsonRpcResponse::error(req_id, -32603, "internal error: handler panicked")
+                }
+            };
+            writeln!(writer, "{}", codec::serialize_response(&result)?)?;
         }
         DispatchOutcome::Immediate(Some(resp)) => {
             writeln!(writer, "{}", codec::serialize_response(&resp)?)?;
@@ -96,7 +92,6 @@ fn dispatch_streaming(
         DispatchOutcome::Immediate(None) => {}
     }
 
-    let _ = request_id; // used for the match above via req_id
     Ok(())
 }
 

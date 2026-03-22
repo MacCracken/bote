@@ -1,0 +1,10 @@
+
+## 2026-03-22T08:59:19Z  v0.22.3 (d6be510)
+dispatch_call_100_tools time:   [195.19 ns 196.11 ns 197.32 ns]
+dispatch_list_100_tools time:   [98.741 µs 99.136 µs 99.547 µs]
+dispatch_initialize     time:   [238.68 ns 239.50 ns 240.36 ns]
+dispatch_notification   time:   [166.98 ns 167.90 ns 168.96 ns]
+process_message_single  time:   [925.29 ns 931.19 ns 938.65 ns]
+process_message_batch_10  time:   [11.453 µs 11.600 µs 11.797 µs]
+dispatch_streaming_setup  time:   [168.74 ns 169.34 ns 169.99 ns]
+validate_params_2_required  time:   [27.349 ns 27.513 ns 27.714 ns]

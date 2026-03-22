@@ -73,7 +73,7 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
         // Check for cancellation request.
         if req.method == "$/cancelRequest" {
             if let Some(target_id) = req.params.get("id").and_then(|v| v.as_str())
-                && let Some(token) = state.active.lock().unwrap().get(target_id)
+                && let Some(token) = state.active.lock().unwrap_or_else(|e| e.into_inner()).get(target_id)
             {
                 token.cancel();
             }
@@ -166,16 +166,7 @@ fn make_sse_stream(
 
                 match recv_result {
                     RecvResult::Progress(update, rx) => {
-                        let notification = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "method": "notifications/progress",
-                            "params": {
-                                "progressToken": request_id,
-                                "progress": update.progress,
-                                "total": update.total,
-                                "message": update.message,
-                            }
-                        });
+                        let notification = crate::stream::progress_notification(&request_id, &update);
                         let event = Event::default()
                             .event("progress")
                             .data(serde_json::to_string(&notification).unwrap());
@@ -191,12 +182,21 @@ fn make_sse_stream(
                         ))
                     }
                     RecvResult::Done => {
-                        let result = handler_handle.await.expect("handler panicked");
-                        let response = JsonRpcResponse::success(request_id, result);
+                        let response = match handler_handle.await {
+                            Ok(result) => JsonRpcResponse::success(request_id, result),
+                            Err(e) if e.is_cancelled() => {
+                                tracing::info!("streaming handler cancelled");
+                                JsonRpcResponse::error(request_id, -32800, "request cancelled")
+                            }
+                            Err(_) => {
+                                tracing::error!("streaming handler panicked");
+                                JsonRpcResponse::error(request_id, -32603, "internal error: handler panicked")
+                            }
+                        };
                         let event = Event::default()
                             .event("result")
-                            .data(serde_json::to_string(&response).unwrap());
-                        active.lock().unwrap().remove(&id_str);
+                            .data(serde_json::to_string(&response).expect("BUG: response serialization"));
+                        active.lock().unwrap_or_else(|e| e.into_inner()).remove(&id_str);
                         Some((Ok(event), SseState::Done))
                     }
                 }

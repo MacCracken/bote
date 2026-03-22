@@ -3,6 +3,12 @@
 use crate::dispatch::Dispatcher;
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 
+/// Serialize a value to JSON. Our protocol types are guaranteed to serialize
+/// successfully, so this uses expect — a failure here indicates a bug.
+fn to_json(value: &impl serde::Serialize) -> String {
+    serde_json::to_string(value).expect("BUG: failed to serialize protocol type")
+}
+
 /// Parse a JSON-RPC request from a line of input.
 pub fn parse_request(line: &str) -> crate::Result<JsonRpcRequest> {
     Ok(serde_json::from_str(line)?)
@@ -22,12 +28,13 @@ pub fn process_message(input: &str, dispatcher: &Dispatcher) -> Option<String> {
     let value: serde_json::Value = match serde_json::from_str(input) {
         Ok(v) => v,
         Err(e) => {
+            tracing::warn!(error = %e, "JSON-RPC parse error");
             let resp = JsonRpcResponse::error(
                 serde_json::json!(null),
                 -32700,
                 format!("parse error: {e}"),
             );
-            return Some(serde_json::to_string(&resp).expect("serialize error response"));
+            return Some(to_json(&resp));
         }
     };
 
@@ -35,12 +42,13 @@ pub fn process_message(input: &str, dispatcher: &Dispatcher) -> Option<String> {
         serde_json::Value::Array(items) => process_batch(items, dispatcher),
         serde_json::Value::Object(_) => process_single(value, dispatcher),
         _ => {
+            tracing::warn!("invalid request: not an object or array");
             let resp = JsonRpcResponse::error(
                 serde_json::json!(null),
                 -32600,
                 "invalid request: expected object or array",
             );
-            Some(serde_json::to_string(&resp).expect("serialize error response"))
+            Some(to_json(&resp))
         }
     }
 }
@@ -54,13 +62,23 @@ fn process_single(value: serde_json::Value, dispatcher: &Dispatcher) -> Option<S
                 -32600,
                 format!("invalid request: {e}"),
             );
-            return Some(serde_json::to_string(&resp).expect("serialize error response"));
+            return Some(to_json(&resp));
         }
     };
 
+    if request.jsonrpc != "2.0" {
+        tracing::warn!(version = %request.jsonrpc, "unsupported jsonrpc version");
+        let resp = JsonRpcResponse::error(
+            request.id.clone().unwrap_or(serde_json::Value::Null),
+            -32600,
+            format!("invalid request: unsupported jsonrpc version '{}'", request.jsonrpc),
+        );
+        return Some(to_json(&resp));
+    }
+
     dispatcher
         .dispatch(&request)
-        .map(|resp| serde_json::to_string(&resp).expect("serialize response"))
+        .map(|resp| to_json(&resp))
 }
 
 fn process_batch(items: Vec<serde_json::Value>, dispatcher: &Dispatcher) -> Option<String> {
@@ -70,7 +88,7 @@ fn process_batch(items: Vec<serde_json::Value>, dispatcher: &Dispatcher) -> Opti
             -32600,
             "invalid request: empty batch",
         );
-        return Some(serde_json::to_string(&resp).expect("serialize error response"));
+        return Some(to_json(&resp));
     }
 
     let responses: Vec<JsonRpcResponse> = items
@@ -103,7 +121,7 @@ fn process_batch(items: Vec<serde_json::Value>, dispatcher: &Dispatcher) -> Opti
     if responses.is_empty() {
         None
     } else {
-        Some(serde_json::to_string(&responses).expect("serialize batch response"))
+        Some(to_json(&responses))
     }
 }
 
@@ -273,6 +291,26 @@ mod tests {
             let resp: JsonRpcResponse = serde_json::from_str(&out).unwrap();
             assert_eq!(resp.error.unwrap().code, -32600);
         }
+    }
+
+    #[test]
+    fn process_wrong_jsonrpc_version() {
+        let d = make_dispatcher();
+        let input = r#"{"jsonrpc":"1.0","id":1,"method":"initialize"}"#;
+        let out = process_message(input, &d).unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&out).unwrap();
+        assert_eq!(resp.error.as_ref().unwrap().code, -32600);
+        assert!(resp.error.unwrap().message.contains("unsupported jsonrpc version"));
+    }
+
+    #[test]
+    fn process_missing_jsonrpc_field() {
+        let d = make_dispatcher();
+        // Missing jsonrpc field — fails deserialization
+        let input = r#"{"id":1,"method":"initialize"}"#;
+        let out = process_message(input, &d).unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&out).unwrap();
+        assert_eq!(resp.error.as_ref().unwrap().code, -32600);
     }
 
     #[test]

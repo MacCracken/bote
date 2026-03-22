@@ -91,7 +91,7 @@ async fn handle_connection(
             // Check for cancellation.
             if req.method == "$/cancelRequest" {
                 if let Some(target_id) = req.params.get("id").and_then(|v| v.as_str())
-                    && let Some(token) = active.lock().unwrap().get(target_id)
+                    && let Some(token) = active.lock().unwrap_or_else(|e| e.into_inner()).get(target_id)
                 {
                     token.cancel();
                 }
@@ -118,8 +118,10 @@ async fn handle_connection(
         let d = Arc::clone(&dispatcher);
         let tx = out_tx.clone();
         tokio::task::spawn_blocking(move || {
-            if let Some(out) = codec::process_message(&line, &d) {
-                let _ = tx.send(out);
+            if let Some(out) = codec::process_message(&line, &d)
+                && tx.send(out).is_err()
+            {
+                tracing::trace!("outbound channel closed, client disconnected");
             }
         });
     }
@@ -146,7 +148,7 @@ async fn handle_streaming_call(
             handler,
             arguments,
         } => {
-            active.lock().unwrap().insert(id_str.clone(), ctx.cancellation.clone());
+            active.lock().unwrap_or_else(|e| e.into_inner()).insert(id_str.clone(), ctx.cancellation.clone());
 
             let handler_handle = tokio::task::spawn_blocking(move || handler(arguments, ctx));
 
@@ -154,30 +156,31 @@ async fn handle_streaming_call(
             let progress_req_id = req_id.clone();
             let progress_handle = tokio::task::spawn_blocking(move || {
                 while let Ok(update) = progress_rx.recv() {
-                    let notification = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "method": "notifications/progress",
-                        "params": {
-                            "progressToken": progress_req_id,
-                            "progress": update.progress,
-                            "total": update.total,
-                            "message": update.message,
-                        }
-                    });
-                    let _ = progress_tx.send(serde_json::to_string(&notification).unwrap());
+                    let notification = crate::stream::progress_notification(&progress_req_id, &update);
+                    if let Ok(json) = serde_json::to_string(&notification) {
+                        let _ = progress_tx.send(json);
+                    }
                 }
             });
 
-            let result = handler_handle.await.expect("handler panicked");
             let _ = progress_handle.await;
+            let response = match handler_handle.await {
+                Ok(result) => JsonRpcResponse::success(req_id, result),
+                Err(e) if e.is_cancelled() => {
+                    tracing::info!("streaming handler cancelled");
+                    JsonRpcResponse::error(req_id, -32800, "request cancelled")
+                }
+                Err(_) => {
+                    tracing::error!("streaming handler panicked");
+                    JsonRpcResponse::error(req_id, -32603, "internal error: handler panicked")
+                }
+            };
+            let _ = out_tx.send(serde_json::to_string(&response).expect("BUG: response serialization"));
 
-            let response = JsonRpcResponse::success(req_id, result);
-            let _ = out_tx.send(serde_json::to_string(&response).unwrap());
-
-            active.lock().unwrap().remove(&id_str);
+            active.lock().unwrap_or_else(|e| e.into_inner()).remove(&id_str);
         }
         DispatchOutcome::Immediate(Some(resp)) => {
-            let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+            let _ = out_tx.send(serde_json::to_string(&resp).expect("BUG: response serialization"));
         }
         DispatchOutcome::Immediate(None) => {}
     }

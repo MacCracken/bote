@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::audit::{AuditSink, ToolCallEvent};
 use crate::error::BoteError;
+use crate::events::{self, EventSink};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 use crate::registry::ToolRegistry;
 use crate::stream::{self, ProgressUpdate, StreamContext, StreamingToolHandler};
@@ -39,6 +41,8 @@ pub struct Dispatcher {
     registry: ToolRegistry,
     handlers: HashMap<String, ToolHandler>,
     streaming_handlers: HashMap<String, StreamingToolHandler>,
+    audit: Option<Arc<dyn AuditSink>>,
+    events: Option<Arc<dyn EventSink>>,
 }
 
 impl Dispatcher {
@@ -47,22 +51,72 @@ impl Dispatcher {
             registry,
             handlers: HashMap::new(),
             streaming_handlers: HashMap::new(),
+            audit: None,
+            events: None,
+        }
+    }
+
+    /// Set the audit sink for logging tool calls.
+    pub fn set_audit(&mut self, sink: Arc<dyn AuditSink>) {
+        self.audit = Some(sink);
+    }
+
+    /// Set the event sink for publishing tool events.
+    pub fn set_events(&mut self, sink: Arc<dyn EventSink>) {
+        self.events = Some(sink);
+    }
+
+    /// Log a tool call event to the audit and event sinks.
+    /// Called automatically for sync dispatch; transports call this
+    /// after streaming handlers complete.
+    pub fn log_tool_call(&self, event: &ToolCallEvent) {
+        if let Some(audit) = &self.audit {
+            audit.log(event);
+        }
+        if let Some(events) = &self.events {
+            let topic = if event.success {
+                events::TOPIC_TOOL_COMPLETED
+            } else {
+                events::TOPIC_TOOL_FAILED
+            };
+            events.publish(topic, serde_json::to_value(event).unwrap_or_default());
         }
     }
 
     /// Register a handler for a tool.
     pub fn handle(&mut self, tool_name: impl Into<String>, handler: ToolHandler) {
-        self.handlers.insert(tool_name.into(), handler);
+        let name = tool_name.into();
+        if let Some(events) = &self.events {
+            events.publish(events::TOPIC_TOOL_REGISTERED, serde_json::json!({"tool_name": &name}));
+        }
+        self.handlers.insert(name, handler);
     }
 
     /// Register a streaming handler for a tool.
     pub fn handle_streaming(&mut self, tool_name: impl Into<String>, handler: StreamingToolHandler) {
-        self.streaming_handlers.insert(tool_name.into(), handler);
+        let name = tool_name.into();
+        if let Some(events) = &self.events {
+            events.publish(events::TOPIC_TOOL_REGISTERED, serde_json::json!({"tool_name": &name}));
+        }
+        self.streaming_handlers.insert(name, handler);
     }
 
     /// Returns `true` if the tool has a streaming handler registered.
     pub fn is_streaming_tool(&self, name: &str) -> bool {
         self.streaming_handlers.contains_key(name)
+    }
+
+    /// Extract and validate the tool name from a tools/call request.
+    fn extract_tool_name(request: &JsonRpcRequest) -> Result<&str, BoteError> {
+        request
+            .params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| BoteError::InvalidParams {
+                tool: String::new(),
+                reason: "missing or empty 'name' field".into(),
+            })
     }
 
     /// Dispatch a JSON-RPC request. Returns `None` for notifications.
@@ -103,11 +157,10 @@ impl Dispatcher {
                 JsonRpcResponse::success(id, serde_json::json!({ "tools": tools }))
             }
             "tools/call" => {
-                let tool_name = request
-                    .params
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let tool_name = match Self::extract_tool_name(request) {
+                    Ok(name) => name,
+                    Err(e) => return Some(JsonRpcResponse::error(id, e.rpc_code(), e.to_string())),
+                };
                 let arguments = request
                     .params
                     .get("arguments")
@@ -116,15 +169,37 @@ impl Dispatcher {
 
                 // Validate
                 if let Err(e) = self.registry.validate_params(tool_name, &arguments) {
+                    tracing::warn!(tool = tool_name, error = %e, "param validation failed");
                     return Some(JsonRpcResponse::error(id, e.rpc_code(), e.to_string()));
                 }
 
-                // Dispatch
+                // Dispatch with timing
                 if let Some(handler) = self.handlers.get(tool_name) {
+                    tracing::debug!(tool = tool_name, "dispatching tool call");
+                    let start = std::time::Instant::now();
                     let result = handler(arguments);
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    tracing::info!(tool = tool_name, duration_ms, "tool call completed");
+
+                    self.log_tool_call(&ToolCallEvent {
+                        tool_name: tool_name.into(),
+                        duration_ms,
+                        success: true,
+                        error: None,
+                        caller_id: None,
+                    });
+
                     JsonRpcResponse::success(id, result)
                 } else {
+                    tracing::warn!(tool = tool_name, "tool not found");
                     let err = BoteError::ToolNotFound(tool_name.into());
+                    self.log_tool_call(&ToolCallEvent {
+                        tool_name: tool_name.into(),
+                        duration_ms: 0,
+                        success: false,
+                        error: Some(err.to_string()),
+                        caller_id: None,
+                    });
                     JsonRpcResponse::error(id, err.rpc_code(), err.to_string())
                 }
             }
@@ -150,11 +225,16 @@ impl Dispatcher {
         }
 
         let id = request.id.clone().unwrap_or(serde_json::Value::Null);
-        let tool_name = request
-            .params
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let tool_name = match Self::extract_tool_name(request) {
+            Ok(name) => name,
+            Err(e) => {
+                return DispatchOutcome::Immediate(Some(JsonRpcResponse::error(
+                    id,
+                    e.rpc_code(),
+                    e.to_string(),
+                )));
+            }
+        };
         let arguments = request
             .params
             .get("arguments")
@@ -176,7 +256,7 @@ impl Dispatcher {
                 return DispatchOutcome::Immediate(None);
             }
 
-            let (ctx, progress_rx, _cancel_token) = stream::make_stream_context();
+            let (ctx, progress_rx) = stream::make_stream_context();
             return DispatchOutcome::Streaming {
                 request_id: id,
                 progress_rx,
@@ -317,7 +397,30 @@ mod tests {
         let req = JsonRpcRequest::new(1, "tools/call")
             .with_params(serde_json::json!({"arguments": {}}));
         let resp = d.dispatch(&req).unwrap();
-        assert!(resp.error.is_some());
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("missing or empty 'name'"));
+    }
+
+    #[test]
+    fn dispatch_call_empty_name() {
+        let d = make_dispatcher();
+        let req = JsonRpcRequest::new(1, "tools/call")
+            .with_params(serde_json::json!({"name": "", "arguments": {}}));
+        let resp = d.dispatch(&req).unwrap();
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("missing or empty 'name'"));
+    }
+
+    #[test]
+    fn dispatch_call_name_is_number() {
+        let d = make_dispatcher();
+        let req = JsonRpcRequest::new(1, "tools/call")
+            .with_params(serde_json::json!({"name": 42, "arguments": {}}));
+        let resp = d.dispatch(&req).unwrap();
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32602);
     }
 
     #[test]
