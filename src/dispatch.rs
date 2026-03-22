@@ -87,16 +87,26 @@ impl Dispatcher {
     pub fn handle(&mut self, tool_name: impl Into<String>, handler: ToolHandler) {
         let name = tool_name.into();
         if let Some(events) = &self.events {
-            events.publish(events::TOPIC_TOOL_REGISTERED, serde_json::json!({"tool_name": &name}));
+            events.publish(
+                events::TOPIC_TOOL_REGISTERED,
+                serde_json::json!({"tool_name": &name}),
+            );
         }
         self.handlers.insert(name, handler);
     }
 
     /// Register a streaming handler for a tool.
-    pub fn handle_streaming(&mut self, tool_name: impl Into<String>, handler: StreamingToolHandler) {
+    pub fn handle_streaming(
+        &mut self,
+        tool_name: impl Into<String>,
+        handler: StreamingToolHandler,
+    ) {
         let name = tool_name.into();
         if let Some(events) = &self.events {
-            events.publish(events::TOPIC_TOOL_REGISTERED, serde_json::json!({"tool_name": &name}));
+            events.publish(
+                events::TOPIC_TOOL_REGISTERED,
+                serde_json::json!({"tool_name": &name}),
+            );
         }
         self.streaming_handlers.insert(name, handler);
     }
@@ -394,8 +404,8 @@ mod tests {
     #[test]
     fn dispatch_call_missing_name() {
         let d = make_dispatcher();
-        let req = JsonRpcRequest::new(1, "tools/call")
-            .with_params(serde_json::json!({"arguments": {}}));
+        let req =
+            JsonRpcRequest::new(1, "tools/call").with_params(serde_json::json!({"arguments": {}}));
         let resp = d.dispatch(&req).unwrap();
         let err = resp.error.unwrap();
         assert_eq!(err.code, -32602);
@@ -438,8 +448,8 @@ mod tests {
         let mut d = Dispatcher::new(reg);
         d.handle("noop", Arc::new(|_| serde_json::json!({"ok": true})));
 
-        let req = JsonRpcRequest::new(1, "tools/call")
-            .with_params(serde_json::json!({"name": "noop"}));
+        let req =
+            JsonRpcRequest::new(1, "tools/call").with_params(serde_json::json!({"name": "noop"}));
         let resp = d.dispatch(&req).unwrap();
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
@@ -500,16 +510,20 @@ mod tests {
         });
         let mut d = Dispatcher::new(reg);
         // Sync handler for echo.
-        d.handle("echo", Arc::new(|params| {
-            serde_json::json!({ "echoed": params })
-        }));
+        d.handle(
+            "echo",
+            Arc::new(|params| serde_json::json!({ "echoed": params })),
+        );
         // Streaming handler for slow.
-        d.handle_streaming("slow", Arc::new(|_params, ctx| {
-            ctx.progress.report(1, 3);
-            ctx.progress.report(2, 3);
-            ctx.progress.report(3, 3);
-            serde_json::json!({"content": [{"type": "text", "text": "done"}]})
-        }));
+        d.handle_streaming(
+            "slow",
+            Arc::new(|_params, ctx| {
+                ctx.progress.report(1, 3);
+                ctx.progress.report(2, 3);
+                ctx.progress.report(3, 3);
+                serde_json::json!({"content": [{"type": "text", "text": "done"}]})
+            }),
+        );
         d
     }
 
@@ -527,7 +541,13 @@ mod tests {
         let req = JsonRpcRequest::new(1, "tools/call")
             .with_params(serde_json::json!({"name": "slow", "arguments": {}}));
         match d.dispatch_streaming(&req) {
-            DispatchOutcome::Streaming { request_id, handler, arguments, ctx, progress_rx } => {
+            DispatchOutcome::Streaming {
+                request_id,
+                handler,
+                arguments,
+                ctx,
+                progress_rx,
+            } => {
                 assert_eq!(request_id, serde_json::json!(1));
                 // Execute the handler and verify progress.
                 let result = handler(arguments, ctx);
@@ -594,15 +614,18 @@ mod tests {
                 },
             });
             let mut d = Dispatcher::new(reg);
-            d.handle_streaming("cancelable", Arc::new(|_params, ctx| {
-                for i in 0..100 {
-                    if ctx.cancellation.is_cancelled() {
-                        return serde_json::json!({"cancelled_at": i});
+            d.handle_streaming(
+                "cancelable",
+                Arc::new(|_params, ctx| {
+                    for i in 0..100 {
+                        if ctx.cancellation.is_cancelled() {
+                            return serde_json::json!({"cancelled_at": i});
+                        }
+                        ctx.progress.report(i, 100);
                     }
-                    ctx.progress.report(i, 100);
-                }
-                serde_json::json!({"completed": true})
-            }));
+                    serde_json::json!({"completed": true})
+                }),
+            );
             d
         };
 
@@ -610,7 +633,12 @@ mod tests {
             .with_params(serde_json::json!({"name": "cancelable", "arguments": {}}));
 
         match d.dispatch_streaming(&req) {
-            DispatchOutcome::Streaming { ctx, handler, arguments, .. } => {
+            DispatchOutcome::Streaming {
+                ctx,
+                handler,
+                arguments,
+                ..
+            } => {
                 // Cancel immediately.
                 ctx.cancellation.cancel();
                 let result = handler(arguments, ctx);

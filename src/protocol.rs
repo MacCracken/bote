@@ -161,8 +161,8 @@ mod tests {
 
     #[test]
     fn request_with_params_overrides() {
-        let req = JsonRpcRequest::new(1, "tools/call")
-            .with_params(serde_json::json!({"name": "echo"}));
+        let req =
+            JsonRpcRequest::new(1, "tools/call").with_params(serde_json::json!({"name": "echo"}));
         assert_eq!(req.params["name"], "echo");
     }
 
@@ -198,7 +198,11 @@ mod tests {
 
     #[test]
     fn error_object_data_skipped_when_none() {
-        let err = JsonRpcError { code: -32600, message: "bad".into(), data: None };
+        let err = JsonRpcError {
+            code: -32600,
+            message: "bad".into(),
+            data: None,
+        };
         let json = serde_json::to_string(&err).unwrap();
         assert!(!json.contains("\"data\""));
     }

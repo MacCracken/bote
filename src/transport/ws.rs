@@ -95,7 +95,10 @@ async fn handle_connection(
             // Check for cancellation request.
             if req.method == "$/cancelRequest" {
                 if let Some(target_id) = req.params.get("id").and_then(|v| v.as_str())
-                    && let Some(token) = active.lock().unwrap_or_else(|e| e.into_inner()).get(target_id)
+                    && let Some(token) = active
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(target_id)
                 {
                     token.cancel();
                 }
@@ -154,7 +157,10 @@ async fn handle_streaming_call(
             arguments,
         } => {
             // Track for cancellation.
-            active.lock().unwrap_or_else(|e| e.into_inner()).insert(id_str.clone(), ctx.cancellation.clone());
+            active
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id_str.clone(), ctx.cancellation.clone());
 
             // Spawn handler on blocking thread.
             let handler_handle = tokio::task::spawn_blocking(move || handler(arguments, ctx));
@@ -164,7 +170,8 @@ async fn handle_streaming_call(
             let progress_req_id = req_id.clone();
             let progress_handle = tokio::task::spawn_blocking(move || {
                 while let Ok(update) = progress_rx.recv() {
-                    let notification = crate::stream::progress_notification(&progress_req_id, &update);
+                    let notification =
+                        crate::stream::progress_notification(&progress_req_id, &update);
                     if let Ok(json) = serde_json::to_string(&notification) {
                         let _ = progress_tx.send(json);
                     }
@@ -184,10 +191,14 @@ async fn handle_streaming_call(
                     JsonRpcResponse::error(req_id, -32603, "internal error: handler panicked")
                 }
             };
-            let _ = out_tx.send(serde_json::to_string(&response).expect("BUG: response serialization"));
+            let _ =
+                out_tx.send(serde_json::to_string(&response).expect("BUG: response serialization"));
 
             // Remove from active.
-            active.lock().unwrap_or_else(|e| e.into_inner()).remove(&id_str);
+            active
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id_str);
         }
         DispatchOutcome::Immediate(Some(resp)) => {
             let _ = out_tx.send(serde_json::to_string(&resp).expect("BUG: response serialization"));
@@ -246,27 +257,34 @@ mod tests {
         });
         let mut d = Dispatcher::new(reg);
         d.handle("echo", Arc::new(|p| serde_json::json!({"echoed": p})));
-        d.handle_streaming("slow", Arc::new(|_params, ctx| {
-            for i in 1..=3 {
-                if ctx.cancellation.is_cancelled() {
-                    return serde_json::json!({"cancelled": true});
+        d.handle_streaming(
+            "slow",
+            Arc::new(|_params, ctx| {
+                for i in 1..=3 {
+                    if ctx.cancellation.is_cancelled() {
+                        return serde_json::json!({"cancelled": true});
+                    }
+                    ctx.progress.report(i, 3);
+                    std::thread::sleep(Duration::from_millis(5));
                 }
-                ctx.progress.report(i, 3);
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            serde_json::json!({"content": [{"type": "text", "text": "done"}]})
-        }));
+                serde_json::json!({"content": [{"type": "text", "text": "done"}]})
+            }),
+        );
         Arc::new(d)
     }
 
-    async fn start_server(dispatcher: Arc<Dispatcher>) -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
+    async fn start_server(
+        dispatcher: Arc<Dispatcher>,
+    ) -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
 
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let config = WsConfig { addr };
-        tokio::spawn(serve(dispatcher, config, async { rx.await.ok(); }));
+        tokio::spawn(serve(dispatcher, config, async {
+            rx.await.ok();
+        }));
 
         for _ in 0..200 {
             if tokio::net::TcpStream::connect(addr).await.is_ok() {
@@ -349,9 +367,11 @@ mod tests {
 
         let url = format!("ws://{addr}");
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-        ws.send(Message::Text(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#.into()))
-            .await
-            .unwrap();
+        ws.send(Message::Text(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#.into(),
+        ))
+        .await
+        .unwrap();
         let _ = ws.next().await.unwrap().unwrap();
 
         tx.send(()).unwrap();

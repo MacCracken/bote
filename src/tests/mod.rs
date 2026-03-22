@@ -22,22 +22,24 @@ fn full_mcp_flow() {
     }));
 
     // Initialize
-    let init = dispatcher.dispatch(&protocol::JsonRpcRequest::new(1, "initialize")).unwrap();
+    let init = dispatcher
+        .dispatch(&protocol::JsonRpcRequest::new(1, "initialize"))
+        .unwrap();
     assert!(init.result.is_some());
 
     // List tools
-    let list = dispatcher.dispatch(&protocol::JsonRpcRequest::new(2, "tools/list")).unwrap();
+    let list = dispatcher
+        .dispatch(&protocol::JsonRpcRequest::new(2, "tools/list"))
+        .unwrap();
     let result = list.result.unwrap();
     let tools = result["tools"].as_array().unwrap().len();
     assert_eq!(tools, 1);
 
     // Call tool
     let call = dispatcher
-        .dispatch(
-            &protocol::JsonRpcRequest::new(3, "tools/call").with_params(
-                serde_json::json!({"name": "test_action", "arguments": {"input": "hello"}}),
-            ),
-        )
+        .dispatch(&protocol::JsonRpcRequest::new(3, "tools/call").with_params(
+            serde_json::json!({"name": "test_action", "arguments": {"input": "hello"}}),
+        ))
         .unwrap();
     let text = call.result.unwrap()["content"][0]["text"]
         .as_str()
@@ -86,10 +88,7 @@ fn flow_validation_failure() {
     });
 
     let mut dispatcher = dispatch::Dispatcher::new(reg);
-    dispatcher.handle(
-        "strict_tool",
-        Arc::new(|_| serde_json::json!({"ok": true})),
-    );
+    dispatcher.handle("strict_tool", Arc::new(|_| serde_json::json!({"ok": true})));
 
     let resp = dispatcher
         .dispatch(
@@ -158,7 +157,9 @@ fn flow_notification_no_response() {
     let reg = registry::ToolRegistry::new();
     let dispatcher = dispatch::Dispatcher::new(reg);
 
-    let resp = dispatcher.dispatch(&protocol::JsonRpcRequest::notification("notifications/initialized"));
+    let resp = dispatcher.dispatch(&protocol::JsonRpcRequest::notification(
+        "notifications/initialized",
+    ));
     assert!(resp.is_none());
 }
 

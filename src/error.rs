@@ -53,16 +53,30 @@ mod tests {
         assert_eq!(BoteError::Protocol("bad".into()).rpc_code(), -32600);
         assert_eq!(BoteError::ToolNotFound("x".into()).rpc_code(), -32601);
         assert_eq!(
-            BoteError::InvalidParams { tool: "x".into(), reason: "y".into() }.rpc_code(),
+            BoteError::InvalidParams {
+                tool: "x".into(),
+                reason: "y".into()
+            }
+            .rpc_code(),
             -32602
         );
         assert_eq!(
-            BoteError::ExecFailed { tool: "x".into(), reason: "y".into() }.rpc_code(),
+            BoteError::ExecFailed {
+                tool: "x".into(),
+                reason: "y".into()
+            }
+            .rpc_code(),
             -32000
         );
         assert_eq!(BoteError::TransportClosed.rpc_code(), -32003);
-        assert_eq!(BoteError::BindFailed("port in use".into()).rpc_code(), -32003);
-        assert_eq!(BoteError::RequestCancelled("req-1".into()).rpc_code(), -32800);
+        assert_eq!(
+            BoteError::BindFailed("port in use".into()).rpc_code(),
+            -32003
+        );
+        assert_eq!(
+            BoteError::RequestCancelled("req-1".into()).rpc_code(),
+            -32800
+        );
 
         let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken");
         assert_eq!(BoteError::Io(io_err).rpc_code(), -32603);
@@ -70,17 +84,34 @@ mod tests {
 
     #[test]
     fn display_messages() {
-        assert_eq!(BoteError::ToolNotFound("foo".into()).to_string(), "tool not found: foo");
         assert_eq!(
-            BoteError::InvalidParams { tool: "t".into(), reason: "r".into() }.to_string(),
+            BoteError::ToolNotFound("foo".into()).to_string(),
+            "tool not found: foo"
+        );
+        assert_eq!(
+            BoteError::InvalidParams {
+                tool: "t".into(),
+                reason: "r".into()
+            }
+            .to_string(),
             "invalid params for tool 't': r"
         );
         assert_eq!(
-            BoteError::ExecFailed { tool: "t".into(), reason: "r".into() }.to_string(),
+            BoteError::ExecFailed {
+                tool: "t".into(),
+                reason: "r".into()
+            }
+            .to_string(),
             "tool execution failed: t — r"
         );
-        assert_eq!(BoteError::Protocol("bad".into()).to_string(), "protocol error: bad");
-        assert_eq!(BoteError::Parse("bad".into()).to_string(), "parse error: bad");
+        assert_eq!(
+            BoteError::Protocol("bad".into()).to_string(),
+            "protocol error: bad"
+        );
+        assert_eq!(
+            BoteError::Parse("bad".into()).to_string(),
+            "parse error: bad"
+        );
         assert_eq!(BoteError::TransportClosed.to_string(), "transport closed");
         assert_eq!(
             BoteError::BindFailed("port in use".into()).to_string(),
@@ -94,7 +125,9 @@ mod tests {
 
     #[test]
     fn json_error_from_serde() {
-        let err: BoteError = serde_json::from_str::<serde_json::Value>("not json").unwrap_err().into();
+        let err: BoteError = serde_json::from_str::<serde_json::Value>("not json")
+            .unwrap_err()
+            .into();
         assert_eq!(err.rpc_code(), -32700);
         assert!(!err.to_string().is_empty());
     }

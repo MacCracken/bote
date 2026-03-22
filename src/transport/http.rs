@@ -13,11 +13,11 @@ use axum::response::{IntoResponse, Response};
 use axum::{Router, routing};
 use futures_util::stream::Stream;
 
+use crate::BoteError;
 use crate::dispatch::{DispatchOutcome, Dispatcher};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 use crate::stream::CancellationToken;
 use crate::transport::codec;
-use crate::BoteError;
 
 /// Configuration for the HTTP transport.
 pub struct HttpConfig {
@@ -73,7 +73,11 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
         // Check for cancellation request.
         if req.method == "$/cancelRequest" {
             if let Some(target_id) = req.params.get("id").and_then(|v| v.as_str())
-                && let Some(token) = state.active.lock().unwrap_or_else(|e| e.into_inner()).get(target_id)
+                && let Some(token) = state
+                    .active
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(target_id)
             {
                 token.cancel();
             }
@@ -91,23 +95,22 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
 
     // Non-streaming: use process_message.
     let dispatcher = Arc::clone(&state.dispatcher);
-    let result =
-        tokio::task::spawn_blocking(move || codec::process_message(&body, &dispatcher))
-            .await
-            .expect("dispatch task panicked");
+    let result = tokio::task::spawn_blocking(move || codec::process_message(&body, &dispatcher))
+        .await
+        .expect("dispatch task panicked");
 
     match result {
-        Some(json) => (
-            StatusCode::OK,
-            [("content-type", "application/json")],
-            json,
-        )
-            .into_response(),
+        Some(json) => {
+            (StatusCode::OK, [("content-type", "application/json")], json).into_response()
+        }
         None => StatusCode::NO_CONTENT.into_response(),
     }
 }
 
-fn handle_streaming(state: AppState, request: JsonRpcRequest) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+fn handle_streaming(
+    state: AppState,
+    request: JsonRpcRequest,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = make_sse_stream(state, request);
     Sse::new(stream)
 }
@@ -132,8 +135,7 @@ fn make_sse_stream(
                 .unwrap()
                 .insert(id_str.clone(), ctx.cancellation.clone());
 
-            let handler_handle =
-                tokio::task::spawn_blocking(move || handler(arguments, ctx));
+            let handler_handle = tokio::task::spawn_blocking(move || handler(arguments, ctx));
 
             SseState::Running {
                 progress_rx,
@@ -155,18 +157,17 @@ fn make_sse_stream(
                 id_str,
                 active,
             } => {
-                let recv_result = tokio::task::spawn_blocking(move || {
-                    match progress_rx.recv() {
-                        Ok(update) => RecvResult::Progress(update, progress_rx),
-                        Err(_) => RecvResult::Done,
-                    }
+                let recv_result = tokio::task::spawn_blocking(move || match progress_rx.recv() {
+                    Ok(update) => RecvResult::Progress(update, progress_rx),
+                    Err(_) => RecvResult::Done,
                 })
                 .await
                 .expect("recv task panicked");
 
                 match recv_result {
                     RecvResult::Progress(update, rx) => {
-                        let notification = crate::stream::progress_notification(&request_id, &update);
+                        let notification =
+                            crate::stream::progress_notification(&request_id, &update);
                         let event = Event::default()
                             .event("progress")
                             .data(serde_json::to_string(&notification).unwrap());
@@ -190,13 +191,20 @@ fn make_sse_stream(
                             }
                             Err(_) => {
                                 tracing::error!("streaming handler panicked");
-                                JsonRpcResponse::error(request_id, -32603, "internal error: handler panicked")
+                                JsonRpcResponse::error(
+                                    request_id,
+                                    -32603,
+                                    "internal error: handler panicked",
+                                )
                             }
                         };
-                        let event = Event::default()
-                            .event("result")
-                            .data(serde_json::to_string(&response).expect("BUG: response serialization"));
-                        active.lock().unwrap_or_else(|e| e.into_inner()).remove(&id_str);
+                        let event = Event::default().event("result").data(
+                            serde_json::to_string(&response).expect("BUG: response serialization"),
+                        );
+                        active
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&id_str);
                         Some((Ok(event), SseState::Done))
                     }
                 }
@@ -218,7 +226,10 @@ enum SseState {
 }
 
 enum RecvResult {
-    Progress(crate::stream::ProgressUpdate, std::sync::mpsc::Receiver<crate::stream::ProgressUpdate>),
+    Progress(
+        crate::stream::ProgressUpdate,
+        std::sync::mpsc::Receiver<crate::stream::ProgressUpdate>,
+    ),
     Done,
 }
 
@@ -229,9 +240,9 @@ async fn handle_health() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::{ToolDef, ToolRegistry, ToolSchema};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use crate::registry::{ToolDef, ToolRegistry, ToolSchema};
     use std::collections::HashMap;
     use tower::util::ServiceExt;
 
@@ -288,7 +299,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let rpc_resp: JsonRpcResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(rpc_resp.result.is_some());
         assert!(rpc_resp.error.is_none());
@@ -310,7 +323,9 @@ mod tests {
             .await
             .unwrap();
 
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let rpc_resp: JsonRpcResponse = serde_json::from_slice(&bytes).unwrap();
         let tools = rpc_resp.result.unwrap()["tools"].as_array().unwrap().len();
         assert_eq!(tools, 1);
@@ -335,7 +350,9 @@ mod tests {
             .await
             .unwrap();
 
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let rpc_resp: JsonRpcResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(rpc_resp.result.is_some());
         assert!(rpc_resp.error.is_none());
@@ -357,7 +374,9 @@ mod tests {
             .await
             .unwrap();
 
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let rpc_resp: JsonRpcResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(rpc_resp.error.is_some());
         assert_eq!(rpc_resp.error.unwrap().code, -32600);
@@ -379,7 +398,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let rpc_resp: JsonRpcResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(rpc_resp.error.is_some());
         assert_eq!(rpc_resp.error.unwrap().code, -32700);
@@ -423,7 +444,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let responses: Vec<JsonRpcResponse> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(responses.len(), 2);
     }
@@ -440,11 +463,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
 
-        let handle = tokio::spawn(serve(
-            dispatcher,
-            HttpConfig { addr },
-            async { rx.await.ok(); },
-        ));
+        let handle = tokio::spawn(serve(dispatcher, HttpConfig { addr }, async {
+            rx.await.ok();
+        }));
 
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         tx.send(()).unwrap();

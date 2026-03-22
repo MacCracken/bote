@@ -145,13 +145,19 @@ mod tests {
             },
         });
         let mut d = Dispatcher::new(reg);
-        d.handle("echo", Arc::new(|params| serde_json::json!({"echoed": params})));
-        d.handle_streaming("slow", Arc::new(|_params, ctx| {
-            ctx.progress.report(1, 3);
-            ctx.progress.report(2, 3);
-            ctx.progress.report(3, 3);
-            serde_json::json!({"content": [{"type": "text", "text": "done"}]})
-        }));
+        d.handle(
+            "echo",
+            Arc::new(|params| serde_json::json!({"echoed": params})),
+        );
+        d.handle_streaming(
+            "slow",
+            Arc::new(|_params, ctx| {
+                ctx.progress.report(1, 3);
+                ctx.progress.report(2, 3);
+                ctx.progress.report(3, 3);
+                serde_json::json!({"content": [{"type": "text", "text": "done"}]})
+            }),
+        );
         d
     }
 
@@ -258,7 +264,8 @@ mod tests {
     #[test]
     fn stdio_batch_all_notifications_no_response() {
         let d = make_dispatcher();
-        let input = r#"[{"jsonrpc":"2.0","method":"notify1"},{"jsonrpc":"2.0","method":"notify2"}]"#;
+        let input =
+            r#"[{"jsonrpc":"2.0","method":"notify1"},{"jsonrpc":"2.0","method":"notify2"}]"#;
         let reader = Cursor::new(format!("{input}\n"));
         let mut output = Vec::new();
 

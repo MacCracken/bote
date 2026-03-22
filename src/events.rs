@@ -107,7 +107,10 @@ mod events_tests {
 
         events.publish("bote/tool/called", serde_json::json!({"tool_name": "a"}));
         events.publish("bote/tool/completed", serde_json::json!({"tool_name": "a"}));
-        events.publish("bote/tool/registered", serde_json::json!({"tool_name": "b"}));
+        events.publish(
+            "bote/tool/registered",
+            serde_json::json!({"tool_name": "b"}),
+        );
 
         let m1 = rx.try_recv().unwrap();
         let m2 = rx.try_recv().unwrap();

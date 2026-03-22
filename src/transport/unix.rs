@@ -75,7 +75,11 @@ async fn handle_connection(
     let writer_handle = tokio::spawn(async move {
         let mut writer = writer;
         while let Some(msg) = out_rx.recv().await {
-            if writer.write_all(format!("{msg}\n").as_bytes()).await.is_err() {
+            if writer
+                .write_all(format!("{msg}\n").as_bytes())
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -91,7 +95,10 @@ async fn handle_connection(
             // Check for cancellation.
             if req.method == "$/cancelRequest" {
                 if let Some(target_id) = req.params.get("id").and_then(|v| v.as_str())
-                    && let Some(token) = active.lock().unwrap_or_else(|e| e.into_inner()).get(target_id)
+                    && let Some(token) = active
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(target_id)
                 {
                     token.cancel();
                 }
@@ -148,7 +155,10 @@ async fn handle_streaming_call(
             handler,
             arguments,
         } => {
-            active.lock().unwrap_or_else(|e| e.into_inner()).insert(id_str.clone(), ctx.cancellation.clone());
+            active
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id_str.clone(), ctx.cancellation.clone());
 
             let handler_handle = tokio::task::spawn_blocking(move || handler(arguments, ctx));
 
@@ -156,7 +166,8 @@ async fn handle_streaming_call(
             let progress_req_id = req_id.clone();
             let progress_handle = tokio::task::spawn_blocking(move || {
                 while let Ok(update) = progress_rx.recv() {
-                    let notification = crate::stream::progress_notification(&progress_req_id, &update);
+                    let notification =
+                        crate::stream::progress_notification(&progress_req_id, &update);
                     if let Ok(json) = serde_json::to_string(&notification) {
                         let _ = progress_tx.send(json);
                     }
@@ -175,9 +186,13 @@ async fn handle_streaming_call(
                     JsonRpcResponse::error(req_id, -32603, "internal error: handler panicked")
                 }
             };
-            let _ = out_tx.send(serde_json::to_string(&response).expect("BUG: response serialization"));
+            let _ =
+                out_tx.send(serde_json::to_string(&response).expect("BUG: response serialization"));
 
-            active.lock().unwrap_or_else(|e| e.into_inner()).remove(&id_str);
+            active
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id_str);
         }
         DispatchOutcome::Immediate(Some(resp)) => {
             let _ = out_tx.send(serde_json::to_string(&resp).expect("BUG: response serialization"));
@@ -238,16 +253,19 @@ mod tests {
         });
         let mut d = Dispatcher::new(reg);
         d.handle("echo", Arc::new(|p| serde_json::json!({"echoed": p})));
-        d.handle_streaming("slow", Arc::new(|_params, ctx| {
-            for i in 1..=3 {
-                if ctx.cancellation.is_cancelled() {
-                    return serde_json::json!({"cancelled": true});
+        d.handle_streaming(
+            "slow",
+            Arc::new(|_params, ctx| {
+                for i in 1..=3 {
+                    if ctx.cancellation.is_cancelled() {
+                        return serde_json::json!({"cancelled": true});
+                    }
+                    ctx.progress.report(i, 3);
+                    std::thread::sleep(Duration::from_millis(5));
                 }
-                ctx.progress.report(i, 3);
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            serde_json::json!({"content": [{"type": "text", "text": "done"}]})
-        }));
+                serde_json::json!({"content": [{"type": "text", "text": "done"}]})
+            }),
+        );
         Arc::new(d)
     }
 
@@ -275,8 +293,12 @@ mod tests {
 
         tokio::spawn(serve(
             make_dispatcher(),
-            UnixConfig { path: sock_path.clone() },
-            async { rx.await.ok(); },
+            UnixConfig {
+                path: sock_path.clone(),
+            },
+            async {
+                rx.await.ok();
+            },
         ));
 
         let stream = connect_retry(&sock_path).await;
@@ -284,7 +306,10 @@ mod tests {
         let mut lines = BufReader::new(reader).lines();
 
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
-        writer.write_all(format!("{req}\n").as_bytes()).await.unwrap();
+        writer
+            .write_all(format!("{req}\n").as_bytes())
+            .await
+            .unwrap();
 
         let resp_line = lines.next_line().await.unwrap().unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&resp_line).unwrap();
@@ -301,8 +326,12 @@ mod tests {
 
         tokio::spawn(serve(
             make_dispatcher(),
-            UnixConfig { path: sock_path.clone() },
-            async { rx.await.ok(); },
+            UnixConfig {
+                path: sock_path.clone(),
+            },
+            async {
+                rx.await.ok();
+            },
         ));
 
         let stream = connect_retry(&sock_path).await;
@@ -311,7 +340,10 @@ mod tests {
 
         let req1 = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
         let req2 = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"msg":"hi"}}}"#;
-        writer.write_all(format!("{req1}\n{req2}\n").as_bytes()).await.unwrap();
+        writer
+            .write_all(format!("{req1}\n{req2}\n").as_bytes())
+            .await
+            .unwrap();
 
         let resp1: JsonRpcResponse =
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
@@ -334,8 +366,12 @@ mod tests {
 
         tokio::spawn(serve(
             make_dispatcher(),
-            UnixConfig { path: sock_path.clone() },
-            async { rx.await.ok(); },
+            UnixConfig {
+                path: sock_path.clone(),
+            },
+            async {
+                rx.await.ok();
+            },
         ));
 
         let stream = connect_retry(&sock_path).await;
@@ -360,8 +396,12 @@ mod tests {
 
         let handle = tokio::spawn(serve(
             make_dispatcher(),
-            UnixConfig { path: sock_path.clone() },
-            async { rx.await.ok(); },
+            UnixConfig {
+                path: sock_path.clone(),
+            },
+            async {
+                rx.await.ok();
+            },
         ));
 
         let _stream = connect_retry(&sock_path).await;
@@ -381,8 +421,12 @@ mod tests {
 
         tokio::spawn(serve(
             make_streaming_dispatcher(),
-            UnixConfig { path: sock_path.clone() },
-            async { rx.await.ok(); },
+            UnixConfig {
+                path: sock_path.clone(),
+            },
+            async {
+                rx.await.ok();
+            },
         ));
 
         let stream = connect_retry(&sock_path).await;
@@ -390,7 +434,10 @@ mod tests {
         let mut lines = BufReader::new(reader).lines();
 
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow","arguments":{}}}"#;
-        writer.write_all(format!("{req}\n").as_bytes()).await.unwrap();
+        writer
+            .write_all(format!("{req}\n").as_bytes())
+            .await
+            .unwrap();
 
         let mut progress_count = 0;
         let mut final_result = None;

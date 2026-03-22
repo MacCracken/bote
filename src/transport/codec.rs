@@ -71,14 +71,15 @@ fn process_single(value: serde_json::Value, dispatcher: &Dispatcher) -> Option<S
         let resp = JsonRpcResponse::error(
             request.id.clone().unwrap_or(serde_json::Value::Null),
             -32600,
-            format!("invalid request: unsupported jsonrpc version '{}'", request.jsonrpc),
+            format!(
+                "invalid request: unsupported jsonrpc version '{}'",
+                request.jsonrpc
+            ),
         );
         return Some(to_json(&resp));
     }
 
-    dispatcher
-        .dispatch(&request)
-        .map(|resp| to_json(&resp))
+    dispatcher.dispatch(&request).map(|resp| to_json(&resp))
 }
 
 fn process_batch(items: Vec<serde_json::Value>, dispatcher: &Dispatcher) -> Option<String> {
@@ -300,7 +301,12 @@ mod tests {
         let out = process_message(input, &d).unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&out).unwrap();
         assert_eq!(resp.error.as_ref().unwrap().code, -32600);
-        assert!(resp.error.unwrap().message.contains("unsupported jsonrpc version"));
+        assert!(
+            resp.error
+                .unwrap()
+                .message
+                .contains("unsupported jsonrpc version")
+        );
     }
 
     #[test]

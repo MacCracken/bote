@@ -149,11 +149,23 @@ mod tests {
     fn validate_rejects_non_object_params() {
         let mut reg = ToolRegistry::new();
         reg.register(make_tool("scan"));
-        assert!(reg.validate_params("scan", &serde_json::json!(null)).is_err());
-        assert!(reg.validate_params("scan", &serde_json::json!("string")).is_err());
-        assert!(reg.validate_params("scan", &serde_json::json!([1, 2])).is_err());
+        assert!(
+            reg.validate_params("scan", &serde_json::json!(null))
+                .is_err()
+        );
+        assert!(
+            reg.validate_params("scan", &serde_json::json!("string"))
+                .is_err()
+        );
+        assert!(
+            reg.validate_params("scan", &serde_json::json!([1, 2]))
+                .is_err()
+        );
         assert!(reg.validate_params("scan", &serde_json::json!(42)).is_err());
-        assert!(reg.validate_params("scan", &serde_json::json!(true)).is_err());
+        assert!(
+            reg.validate_params("scan", &serde_json::json!(true))
+                .is_err()
+        );
     }
 
     #[test]

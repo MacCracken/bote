@@ -37,7 +37,7 @@ futures-util = { version = "0.3", optional = true }
 
 # Observability dependencies (all optional)
 libro = { version = "0.22", optional = true }
-majra = { version = "0.21", optional = true }
+majra = { version = "0.22", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -46,7 +46,7 @@ tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
 libro = "0.22"
-majra = "0.21"
+majra = "0.22"
 
 [[bench]]
 name = "dispatch"
