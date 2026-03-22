@@ -35,3 +35,57 @@ impl BoteError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rpc_codes_all_variants() {
+        assert_eq!(BoteError::Parse("bad".into()).rpc_code(), -32700);
+        assert_eq!(BoteError::Protocol("bad".into()).rpc_code(), -32600);
+        assert_eq!(BoteError::ToolNotFound("x".into()).rpc_code(), -32601);
+        assert_eq!(
+            BoteError::InvalidParams { tool: "x".into(), reason: "y".into() }.rpc_code(),
+            -32602
+        );
+        assert_eq!(
+            BoteError::ExecFailed { tool: "x".into(), reason: "y".into() }.rpc_code(),
+            -32000
+        );
+        assert_eq!(BoteError::TransportClosed.rpc_code(), -32003);
+
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken");
+        assert_eq!(BoteError::Io(io_err).rpc_code(), -32603);
+    }
+
+    #[test]
+    fn display_messages() {
+        assert_eq!(BoteError::ToolNotFound("foo".into()).to_string(), "tool not found: foo");
+        assert_eq!(
+            BoteError::InvalidParams { tool: "t".into(), reason: "r".into() }.to_string(),
+            "invalid params for tool 't': r"
+        );
+        assert_eq!(
+            BoteError::ExecFailed { tool: "t".into(), reason: "r".into() }.to_string(),
+            "tool execution failed: t — r"
+        );
+        assert_eq!(BoteError::Protocol("bad".into()).to_string(), "protocol error: bad");
+        assert_eq!(BoteError::Parse("bad".into()).to_string(), "parse error: bad");
+        assert_eq!(BoteError::TransportClosed.to_string(), "transport closed");
+    }
+
+    #[test]
+    fn json_error_from_serde() {
+        let err: BoteError = serde_json::from_str::<serde_json::Value>("not json").unwrap_err().into();
+        assert_eq!(err.rpc_code(), -32700);
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn io_error_from_std() {
+        let err: BoteError = std::io::Error::new(std::io::ErrorKind::NotFound, "gone").into();
+        assert_eq!(err.rpc_code(), -32603);
+        assert!(err.to_string().contains("gone"));
+    }
+}

@@ -105,4 +105,58 @@ mod tests {
         let back: JsonRpcRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.method, "tools/call");
     }
+
+    #[test]
+    fn request_default_params_is_null() {
+        let req = JsonRpcRequest::new(1, "initialize");
+        assert!(req.params.is_null());
+    }
+
+    #[test]
+    fn request_with_params_overrides() {
+        let req = JsonRpcRequest::new(1, "tools/call")
+            .with_params(serde_json::json!({"name": "echo"}));
+        assert_eq!(req.params["name"], "echo");
+    }
+
+    #[test]
+    fn response_success_excludes_error() {
+        let resp = JsonRpcResponse::success(serde_json::json!(1), serde_json::json!("ok"));
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"result\""));
+        assert!(!json.contains("\"error\""));
+    }
+
+    #[test]
+    fn response_error_excludes_result() {
+        let resp = JsonRpcResponse::error(serde_json::json!(1), -32601, "not found");
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"error\""));
+        assert!(!json.contains("\"result\""));
+    }
+
+    #[test]
+    fn response_preserves_id() {
+        let resp = JsonRpcResponse::success(serde_json::json!("abc-123"), serde_json::json!({}));
+        assert_eq!(resp.id, serde_json::json!("abc-123"));
+    }
+
+    #[test]
+    fn error_object_data_skipped_when_none() {
+        let err = JsonRpcError { code: -32600, message: "bad".into(), data: None };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(!json.contains("\"data\""));
+    }
+
+    #[test]
+    fn error_object_data_included_when_present() {
+        let err = JsonRpcError {
+            code: -32600,
+            message: "bad".into(),
+            data: Some(serde_json::json!({"detail": "more info"})),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("\"data\""));
+        assert!(json.contains("more info"));
+    }
 }

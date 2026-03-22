@@ -156,6 +156,84 @@ mod tests {
         let req = JsonRpcRequest::new(1, "tools/call")
             .with_params(serde_json::json!({"name": "nope", "arguments": {}}));
         let resp = d.dispatch(&req);
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32601);
+        assert!(err.message.contains("nope"));
+    }
+
+    #[test]
+    fn initialize_response_structure() {
+        let d = make_dispatcher();
+        let req = JsonRpcRequest::new(1, "initialize");
+        let resp = d.dispatch(&req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["serverInfo"]["name"], "bote");
+        assert!(result["serverInfo"]["version"].is_string());
+        assert!(result["capabilities"]["tools"].is_object());
+    }
+
+    #[test]
+    fn dispatch_call_missing_name() {
+        let d = make_dispatcher();
+        let req = JsonRpcRequest::new(1, "tools/call")
+            .with_params(serde_json::json!({"arguments": {}}));
+        let resp = d.dispatch(&req);
+        // Empty tool name falls through to tool-not-found
         assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn dispatch_call_defaults_empty_arguments() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolDef {
+            name: "noop".into(),
+            description: "No args".into(),
+            input_schema: ToolSchema {
+                schema_type: "object".into(),
+                properties: HashMap::new(),
+                required: vec![],
+            },
+        });
+        let mut d = Dispatcher::new(reg);
+        d.handle("noop", Arc::new(|_| serde_json::json!({"ok": true})));
+
+        // Call without "arguments" key — should default to {}
+        let req = JsonRpcRequest::new(1, "tools/call")
+            .with_params(serde_json::json!({"name": "noop"}));
+        let resp = d.dispatch(&req);
+        assert!(resp.result.is_some());
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn dispatch_call_with_invalid_params() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolDef {
+            name: "strict".into(),
+            description: "Requires path".into(),
+            input_schema: ToolSchema {
+                schema_type: "object".into(),
+                properties: HashMap::new(),
+                required: vec!["path".into()],
+            },
+        });
+        let mut d = Dispatcher::new(reg);
+        d.handle("strict", Arc::new(|_| serde_json::json!({"ok": true})));
+
+        let req = JsonRpcRequest::new(1, "tools/call")
+            .with_params(serde_json::json!({"name": "strict", "arguments": {}}));
+        let resp = d.dispatch(&req);
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("path"));
+    }
+
+    #[test]
+    fn dispatch_preserves_request_id() {
+        let d = make_dispatcher();
+        let req = JsonRpcRequest::new("req-abc", "initialize");
+        let resp = d.dispatch(&req);
+        assert_eq!(resp.id, serde_json::json!("req-abc"));
     }
 }

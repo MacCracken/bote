@@ -143,4 +143,68 @@ mod tests {
         let reg = ToolRegistry::new();
         assert!(reg.validate_params("nope", &serde_json::json!({})).is_err());
     }
+
+    #[test]
+    fn validate_rejects_non_object_params() {
+        let mut reg = ToolRegistry::new();
+        reg.register(make_tool("scan"));
+        assert!(reg.validate_params("scan", &serde_json::json!(null)).is_err());
+        assert!(reg.validate_params("scan", &serde_json::json!("string")).is_err());
+        assert!(reg.validate_params("scan", &serde_json::json!([1, 2])).is_err());
+        assert!(reg.validate_params("scan", &serde_json::json!(42)).is_err());
+        assert!(reg.validate_params("scan", &serde_json::json!(true)).is_err());
+    }
+
+    #[test]
+    fn empty_registry() {
+        let reg = ToolRegistry::new();
+        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
+        assert!(reg.list().is_empty());
+        assert!(reg.get("anything").is_none());
+    }
+
+    #[test]
+    fn get_returns_correct_tool() {
+        let mut reg = ToolRegistry::new();
+        reg.register(make_tool("alpha"));
+        reg.register(make_tool("beta"));
+        let tool = reg.get("alpha").unwrap();
+        assert_eq!(tool.name, "alpha");
+        assert_eq!(tool.description, "alpha tool");
+    }
+
+    #[test]
+    fn register_overwrites_duplicate() {
+        let mut reg = ToolRegistry::new();
+        reg.register(make_tool("dup"));
+        reg.register(ToolDef {
+            name: "dup".into(),
+            description: "updated".into(),
+            input_schema: ToolSchema {
+                schema_type: "object".into(),
+                properties: HashMap::new(),
+                required: vec![],
+            },
+        });
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg.get("dup").unwrap().description, "updated");
+        // Overwrite also removed the required field
+        assert!(reg.validate_params("dup", &serde_json::json!({})).is_ok());
+    }
+
+    #[test]
+    fn validate_passes_with_no_required_fields() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolDef {
+            name: "open".into(),
+            description: "no required".into(),
+            input_schema: ToolSchema {
+                schema_type: "object".into(),
+                properties: HashMap::new(),
+                required: vec![],
+            },
+        });
+        assert!(reg.validate_params("open", &serde_json::json!({})).is_ok());
+    }
 }

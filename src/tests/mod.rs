@@ -68,3 +68,82 @@ fn error_codes() {
     );
     assert_eq!(BoteError::Parse("bad".into()).rpc_code(), -32700);
 }
+
+#[test]
+fn flow_validation_failure() {
+    let mut reg = registry::ToolRegistry::new();
+    reg.register(registry::ToolDef {
+        name: "strict_tool".into(),
+        description: "Needs input".into(),
+        input_schema: registry::ToolSchema {
+            schema_type: "object".into(),
+            properties: HashMap::new(),
+            required: vec!["input".into()],
+        },
+    });
+
+    let mut dispatcher = dispatch::Dispatcher::new(reg);
+    dispatcher.handle(
+        "strict_tool",
+        Arc::new(|_| serde_json::json!({"ok": true})),
+    );
+
+    // Call with missing required field
+    let resp = dispatcher.dispatch(
+        &protocol::JsonRpcRequest::new(1, "tools/call")
+            .with_params(serde_json::json!({"name": "strict_tool", "arguments": {}})),
+    );
+    let err = resp.error.unwrap();
+    assert_eq!(err.code, -32602);
+    assert!(err.message.contains("input"));
+}
+
+#[test]
+fn flow_unknown_tool_call() {
+    let reg = registry::ToolRegistry::new();
+    let dispatcher = dispatch::Dispatcher::new(reg);
+
+    let resp = dispatcher.dispatch(
+        &protocol::JsonRpcRequest::new(1, "tools/call")
+            .with_params(serde_json::json!({"name": "ghost", "arguments": {}})),
+    );
+    let err = resp.error.unwrap();
+    assert_eq!(err.code, -32601);
+    assert!(err.message.contains("ghost"));
+}
+
+#[test]
+fn flow_unknown_method() {
+    let reg = registry::ToolRegistry::new();
+    let dispatcher = dispatch::Dispatcher::new(reg);
+
+    let resp = dispatcher.dispatch(&protocol::JsonRpcRequest::new(1, "bogus/rpc"));
+    let err = resp.error.unwrap();
+    assert_eq!(err.code, -32600);
+    assert!(err.message.contains("bogus/rpc"));
+}
+
+#[test]
+fn transport_parse_dispatch_serialize() {
+    let mut reg = registry::ToolRegistry::new();
+    reg.register(registry::ToolDef {
+        name: "ping".into(),
+        description: "Ping".into(),
+        input_schema: registry::ToolSchema {
+            schema_type: "object".into(),
+            properties: HashMap::new(),
+            required: vec![],
+        },
+    });
+    let mut dispatcher = dispatch::Dispatcher::new(reg);
+    dispatcher.handle("ping", Arc::new(|_| serde_json::json!({"pong": true})));
+
+    // Full path: raw JSON → parse → dispatch → serialize
+    let raw = r#"{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"ping","arguments":{}}}"#;
+    let req = transport::parse_request(raw).unwrap();
+    let resp = dispatcher.dispatch(&req);
+    let out = transport::serialize_response(&resp).unwrap();
+
+    assert!(out.contains("\"pong\""));
+    assert!(out.contains("99"));
+}
