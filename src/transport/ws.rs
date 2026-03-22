@@ -1,8 +1,10 @@
 //! WebSocket transport — bidirectional JSON-RPC over WebSocket.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -16,58 +18,79 @@ pub struct WsConfig {
 
 /// Start a WebSocket server that accepts JSON-RPC messages.
 ///
-/// Spawns a task per connection. Each connection reads text messages,
-/// dispatches via the shared `Dispatcher`, and writes response messages back.
-pub async fn serve(dispatcher: Arc<Dispatcher>, config: WsConfig) -> crate::Result<()> {
+/// Spawns a task per connection. Runs until the `shutdown` future resolves,
+/// then stops accepting new connections and returns `Ok(())`.
+pub async fn serve(
+    dispatcher: Arc<Dispatcher>,
+    config: WsConfig,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> crate::Result<()> {
     let listener = TcpListener::bind(config.addr)
         .await
         .map_err(|e| crate::BoteError::BindFailed(e.to_string()))?;
 
+    tracing::info!(addr = %config.addr, "ws transport listening");
+
+    tokio::pin!(shutdown);
+
     loop {
-        let (stream, _) = listener.accept().await?;
-        let dispatcher = Arc::clone(&dispatcher);
+        tokio::select! {
+            result = listener.accept() => {
+                let (stream, peer) = result?;
+                let dispatcher = Arc::clone(&dispatcher);
 
-        tokio::spawn(async move {
-            let ws_stream = match tokio_tungstenite::accept_async(stream).await {
-                Ok(ws) => ws,
-                Err(_) => return,
-            };
-
-            use futures_util::{SinkExt, StreamExt};
-            let (mut write, mut read) = ws_stream.split();
-
-            while let Some(Ok(msg)) = read.next().await {
-                let text = match msg {
-                    Message::Text(t) => t,
-                    Message::Close(_) => break,
-                    _ => continue,
-                };
-
-                let response = match codec::parse_request(&text) {
-                    Ok(request) => {
-                        let d = Arc::clone(&dispatcher);
-                        tokio::task::spawn_blocking(move || d.dispatch(&request))
-                            .await
-                            .expect("dispatch task panicked")
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(dispatcher, stream).await {
+                        tracing::warn!(peer = %peer, error = %e, "ws connection error");
                     }
-                    Err(e) => crate::protocol::JsonRpcResponse::error(
-                        serde_json::json!(null),
-                        e.rpc_code(),
-                        e.to_string(),
-                    ),
-                };
-
-                let out = match codec::serialize_response(&response) {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
-
-                if write.send(Message::Text(out.into())).await.is_err() {
-                    break;
-                }
+                });
             }
-        });
+            _ = &mut shutdown => break,
+        }
     }
+
+    tracing::info!("ws transport shut down");
+    Ok(())
+}
+
+async fn handle_connection(
+    dispatcher: Arc<Dispatcher>,
+    stream: tokio::net::TcpStream,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ws_stream = tokio_tungstenite::accept_async(stream).await?;
+    let (mut write, mut read) = ws_stream.split();
+
+    while let Some(msg) = read.next().await {
+        let msg = msg?;
+
+        let text = match msg {
+            Message::Text(t) => t,
+            Message::Close(_) => break,
+            _ => continue,
+        };
+
+        let response = match codec::parse_request(&text) {
+            Ok(request) => {
+                let d = Arc::clone(&dispatcher);
+                tokio::task::spawn_blocking(move || d.dispatch(&request))
+                    .await
+                    .expect("dispatch task panicked")
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to parse JSON-RPC request");
+                crate::protocol::JsonRpcResponse::error(
+                    serde_json::json!(null),
+                    e.rpc_code(),
+                    e.to_string(),
+                )
+            }
+        };
+
+        let out = codec::serialize_response(&response)?;
+        write.send(Message::Text(out.into())).await?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -75,6 +98,7 @@ mod tests {
     use super::*;
     use crate::registry::{ToolDef, ToolRegistry, ToolSchema};
     use std::collections::HashMap;
+    use std::time::Duration;
 
     fn make_dispatcher() -> Arc<Dispatcher> {
         let mut reg = ToolRegistry::new();
@@ -97,65 +121,34 @@ mod tests {
         Arc::new(d)
     }
 
-    /// Start the WS server on an OS-assigned port, return the address.
-    async fn start_server(dispatcher: Arc<Dispatcher>) -> SocketAddr {
+    /// Start the WS server on an OS-assigned port via `serve()`, return the address.
+    /// Uses retry-connect instead of sleep for deterministic startup.
+    async fn start_server(dispatcher: Arc<Dispatcher>) -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        drop(listener);
 
-        tokio::spawn(async move {
-            loop {
-                let (stream, _) = listener.accept().await.unwrap();
-                let dispatcher = Arc::clone(&dispatcher);
-                tokio::spawn(async move {
-                    let ws_stream = tokio_tungstenite::accept_async(stream).await.unwrap();
-                    use futures_util::{SinkExt, StreamExt};
-                    let (mut write, mut read) = ws_stream.split();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let config = WsConfig { addr };
+        tokio::spawn(serve(dispatcher, config, async { rx.await.ok(); }));
 
-                    while let Some(Ok(msg)) = read.next().await {
-                        let text = match msg {
-                            Message::Text(t) => t,
-                            Message::Close(_) => break,
-                            _ => continue,
-                        };
-
-                        let response = match codec::parse_request(&text) {
-                            Ok(request) => {
-                                let d = Arc::clone(&dispatcher);
-                                tokio::task::spawn_blocking(move || d.dispatch(&request))
-                                    .await
-                                    .expect("dispatch task panicked")
-                            }
-                            Err(e) => crate::protocol::JsonRpcResponse::error(
-                                serde_json::json!(null),
-                                e.rpc_code(),
-                                e.to_string(),
-                            ),
-                        };
-
-                        let out = match codec::serialize_response(&response) {
-                            Ok(s) => s,
-                            Err(_) => break,
-                        };
-
-                        if write.send(Message::Text(out.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                });
+        // Retry-connect to confirm the server is up.
+        for _ in 0..200 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                return (addr, tx);
             }
-        });
-
-        addr
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("ws server failed to start on {addr}");
     }
 
     #[tokio::test]
     async fn ws_initialize() {
-        let addr = start_server(make_dispatcher()).await;
+        let (addr, _tx) = start_server(make_dispatcher()).await;
         let url = format!("ws://{addr}");
 
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
-        use futures_util::{SinkExt, StreamExt};
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
         ws.send(Message::Text(req.into())).await.unwrap();
 
@@ -168,12 +161,11 @@ mod tests {
 
     #[tokio::test]
     async fn ws_tool_call() {
-        let addr = start_server(make_dispatcher()).await;
+        let (addr, _tx) = start_server(make_dispatcher()).await;
         let url = format!("ws://{addr}");
 
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
-        use futures_util::{SinkExt, StreamExt};
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"msg":"hello"}}}"#;
         ws.send(Message::Text(req.into())).await.unwrap();
 
@@ -186,12 +178,10 @@ mod tests {
 
     #[tokio::test]
     async fn ws_multiple_messages() {
-        let addr = start_server(make_dispatcher()).await;
+        let (addr, _tx) = start_server(make_dispatcher()).await;
         let url = format!("ws://{addr}");
 
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-
-        use futures_util::{SinkExt, StreamExt};
 
         let req1 = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
         let req2 = r#"{"jsonrpc":"2.0","id":2,"method":"initialize"}"#;
@@ -211,12 +201,11 @@ mod tests {
 
     #[tokio::test]
     async fn ws_malformed_json() {
-        let addr = start_server(make_dispatcher()).await;
+        let (addr, _tx) = start_server(make_dispatcher()).await;
         let url = format!("ws://{addr}");
 
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
-        use futures_util::{SinkExt, StreamExt};
         ws.send(Message::Text("not json".into())).await.unwrap();
 
         let resp_msg = ws.next().await.unwrap().unwrap();
@@ -224,5 +213,21 @@ mod tests {
             serde_json::from_str(&resp_msg.into_text().unwrap()).unwrap();
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32700);
+    }
+
+    #[tokio::test]
+    async fn ws_graceful_shutdown() {
+        let (addr, tx) = start_server(make_dispatcher()).await;
+
+        // Verify the server is accepting connections.
+        let url = format!("ws://{addr}");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        ws.send(Message::Text(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#.into()))
+            .await
+            .unwrap();
+        let _ = ws.next().await.unwrap().unwrap();
+
+        // Signal shutdown.
+        tx.send(()).unwrap();
     }
 }

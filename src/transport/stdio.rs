@@ -28,6 +28,7 @@ fn run_io(
         let request = match codec::parse_request(&line) {
             Ok(req) => req,
             Err(e) => {
+                tracing::warn!(error = %e, "failed to parse JSON-RPC request");
                 let err_resp = crate::protocol::JsonRpcResponse::error(
                     serde_json::json!(null),
                     e.rpc_code(),

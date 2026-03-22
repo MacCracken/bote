@@ -1,5 +1,6 @@
 //! HTTP transport — axum-based JSON-RPC server.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use axum::{Json, Router, routing};
 
 use crate::dispatch::Dispatcher;
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+use crate::BoteError;
 
 /// Configuration for the HTTP transport.
 pub struct HttpConfig {
@@ -18,19 +20,27 @@ pub struct HttpConfig {
 
 /// Start an HTTP server that accepts JSON-RPC requests via `POST /`.
 ///
-/// Blocks until the server shuts down. The dispatcher is shared across
-/// all requests via `Arc`.
-pub async fn serve(dispatcher: Arc<Dispatcher>, config: HttpConfig) -> crate::Result<()> {
+/// Runs until the `shutdown` future resolves, then drains in-flight
+/// requests and returns `Ok(())`.
+pub async fn serve(
+    dispatcher: Arc<Dispatcher>,
+    config: HttpConfig,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> crate::Result<()> {
     let app = router(dispatcher);
 
     let listener = tokio::net::TcpListener::bind(config.addr)
         .await
-        .map_err(|e| crate::BoteError::BindFailed(e.to_string()))?;
+        .map_err(|e| BoteError::BindFailed(e.to_string()))?;
+
+    tracing::info!(addr = %config.addr, "http transport listening");
 
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
         .await
-        .map_err(crate::BoteError::Io)?;
+        .map_err(BoteError::Io)?;
 
+    tracing::info!("http transport shut down");
     Ok(())
 }
 
@@ -44,8 +54,21 @@ pub fn router(dispatcher: Arc<Dispatcher>) -> Router {
 
 async fn handle_rpc(
     State(dispatcher): State<Arc<Dispatcher>>,
-    Json(request): Json<JsonRpcRequest>,
+    body: String,
 ) -> Json<JsonRpcResponse> {
+    let request: JsonRpcRequest = match serde_json::from_str(&body) {
+        Ok(req) => req,
+        Err(e) => {
+            let err = BoteError::Parse(e.to_string());
+            tracing::warn!(error = %err, "failed to parse JSON-RPC request");
+            return Json(JsonRpcResponse::error(
+                serde_json::json!(null),
+                err.rpc_code(),
+                err.to_string(),
+            ));
+        }
+    };
+
     let response = tokio::task::spawn_blocking(move || dispatcher.dispatch(&request))
         .await
         .expect("dispatch task panicked");
@@ -191,5 +214,54 @@ mod tests {
         let rpc_resp: JsonRpcResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(rpc_resp.error.is_some());
         assert_eq!(rpc_resp.error.unwrap().code, -32600);
+    }
+
+    #[tokio::test]
+    async fn rpc_malformed_json() {
+        let app = make_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from("not valid json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let rpc_resp: JsonRpcResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(rpc_resp.error.is_some());
+        assert_eq!(rpc_resp.error.unwrap().code, -32700);
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown() {
+        let dispatcher = {
+            let reg = ToolRegistry::new();
+            Arc::new(Dispatcher::new(reg))
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let config = HttpConfig { addr: "127.0.0.1:0".parse().unwrap() };
+
+        let listener = tokio::net::TcpListener::bind(config.addr).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let handle = tokio::spawn(serve(
+            dispatcher,
+            HttpConfig { addr },
+            async { rx.await.ok(); },
+        ));
+
+        // Give it a moment to bind, then signal shutdown.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tx.send(()).unwrap();
+
+        let result = handle.await.unwrap();
+        assert!(result.is_ok());
     }
 }

@@ -9,7 +9,7 @@
 //!
 //! - [`protocol`] — JSON-RPC 2.0 types (Request, Response, Error)
 //! - [`registry`] — Tool registry with schema validation and discovery
-//! - [`transport`] — Stdio transport (read JSON-RPC from stdin, write to stdout)
+//! - [`transport`] — Transport layer (stdio, HTTP, WebSocket, Unix socket)
 //! - [`dispatch`] — Route tool calls to registered handlers
 
 pub mod dispatch;

@@ -22,6 +22,7 @@ all-transports = ["http", "ws", "unix"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tracing = "0.1"
 
 # Transport dependencies (all optional)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync"], optional = true }
@@ -33,7 +34,6 @@ futures-util = { version = "0.3", optional = true }
 criterion = { version = "0.5", features = ["html_reports"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
-reqwest = { version = "0.12", features = ["json"] }
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
 
