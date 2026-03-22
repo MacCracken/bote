@@ -715,7 +715,9 @@ checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 
 [[package]]
 name = "libro"
-version = "0.21.3"
+version = "0.22.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fe9f0704c7ee06420001b29ddc46b5445d9c26d2f416c22c3b6552732d16dc2"
 dependencies = [
  "chrono",
  "fs2",
@@ -744,7 +746,9 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "majra"
-version = "0.22.3"
+version = "0.21.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a79cee910545968d1f6d901552f985064abf89aa025b38bfc177e0a62ca0cc8d"
 dependencies = [
  "async-trait",
  "chrono",

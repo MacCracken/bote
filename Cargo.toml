@@ -36,8 +36,8 @@ tokio-tungstenite = { version = "0.26", optional = true }
 futures-util = { version = "0.3", optional = true }
 
 # Observability dependencies (all optional)
-libro = { path = "../libro", optional = true }
-majra = { path = "../majra", optional = true }
+libro = { version = "0.22", optional = true }
+majra = { version = "0.21", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -45,8 +45,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
-libro = { path = "../libro" }
-majra = { path = "../majra" }
+libro = "0.22"
+majra = "0.21"
 
 [[bench]]
 name = "dispatch"
