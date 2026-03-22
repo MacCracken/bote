@@ -66,14 +66,22 @@ impl ToolRegistry {
             .get(tool_name)
             .ok_or_else(|| crate::BoteError::ToolNotFound(tool_name.into()))?;
 
-        if let serde_json::Value::Object(map) = params {
-            for req in &tool.input_schema.required {
-                if !map.contains_key(req) {
-                    return Err(crate::BoteError::InvalidParams {
-                        tool: tool_name.into(),
-                        reason: format!("missing required field: {req}"),
-                    });
-                }
+        let map = match params {
+            serde_json::Value::Object(map) => map,
+            _ => {
+                return Err(crate::BoteError::InvalidParams {
+                    tool: tool_name.into(),
+                    reason: "params must be an object".into(),
+                });
+            }
+        };
+
+        for req in &tool.input_schema.required {
+            if !map.contains_key(req) {
+                return Err(crate::BoteError::InvalidParams {
+                    tool: tool_name.into(),
+                    reason: format!("missing required field: {req}"),
+                });
             }
         }
 

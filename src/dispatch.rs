@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::error::BoteError;
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 use crate::registry::ToolRegistry;
 
@@ -76,18 +77,14 @@ impl Dispatcher {
                     let result = handler(arguments);
                     JsonRpcResponse::success(request.id.clone(), result)
                 } else {
-                    JsonRpcResponse::error(
-                        request.id.clone(),
-                        -32601,
-                        format!("no handler for tool: {tool_name}"),
-                    )
+                    let err = BoteError::ToolNotFound(tool_name.into());
+                    JsonRpcResponse::error(request.id.clone(), err.rpc_code(), err.to_string())
                 }
             }
-            _ => JsonRpcResponse::error(
-                request.id.clone(),
-                -32601,
-                format!("unknown method: {}", request.method),
-            ),
+            _ => {
+                let err = BoteError::Protocol(format!("unknown method: {}", request.method));
+                JsonRpcResponse::error(request.id.clone(), err.rpc_code(), err.to_string())
+            }
         }
     }
 }
@@ -150,7 +147,7 @@ mod tests {
         let req = JsonRpcRequest::new(1, "bogus/method");
         let resp = d.dispatch(&req);
         assert!(resp.error.is_some());
-        assert_eq!(resp.error.unwrap().code, -32601);
+        assert_eq!(resp.error.unwrap().code, -32600);
     }
 
     #[test]

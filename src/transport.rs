@@ -4,7 +4,7 @@ use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 
 /// Parse a JSON-RPC request from a line of input.
 pub fn parse_request(line: &str) -> crate::Result<JsonRpcRequest> {
-    serde_json::from_str(line).map_err(|e| crate::BoteError::Parse(e.to_string()))
+    Ok(serde_json::from_str(line)?)
 }
 
 /// Serialize a JSON-RPC response to a line of output.
@@ -29,7 +29,7 @@ mod tests {
     }
 
     #[test]
-    fn serialize_response() {
+    fn serialize_roundtrip() {
         let resp = JsonRpcResponse::success(serde_json::json!(1), serde_json::json!({"ok": true}));
         let line = super::serialize_response(&resp).unwrap();
         assert!(line.contains("\"result\""));
