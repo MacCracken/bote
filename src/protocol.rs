@@ -3,10 +3,14 @@
 use serde::{Deserialize, Serialize};
 
 /// JSON-RPC 2.0 request.
+///
+/// For normal requests, `id` is `Some(...)`. For notifications (no response
+/// expected), `id` is `None` and the field is omitted during serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
-    pub id: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<serde_json::Value>,
     pub method: String,
     #[serde(default)]
     pub params: serde_json::Value,
@@ -16,10 +20,25 @@ impl JsonRpcRequest {
     pub fn new(id: impl Into<serde_json::Value>, method: impl Into<String>) -> Self {
         Self {
             jsonrpc: "2.0".into(),
-            id: id.into(),
+            id: Some(id.into()),
             method: method.into(),
             params: serde_json::Value::Null,
         }
+    }
+
+    /// Create a notification (a request with no `id` — the server must not reply).
+    pub fn notification(method: impl Into<String>) -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            id: None,
+            method: method.into(),
+            params: serde_json::Value::Null,
+        }
+    }
+
+    /// Returns `true` if this is a notification (no `id` field).
+    pub fn is_notification(&self) -> bool {
+        self.id.is_none()
     }
 
     pub fn with_params(mut self, params: serde_json::Value) -> Self {
@@ -80,7 +99,34 @@ mod tests {
     fn request_creation() {
         let req = JsonRpcRequest::new(1, "tools/list");
         assert_eq!(req.jsonrpc, "2.0");
+        assert_eq!(req.id, Some(serde_json::json!(1)));
         assert_eq!(req.method, "tools/list");
+        assert!(!req.is_notification());
+    }
+
+    #[test]
+    fn notification_creation() {
+        let req = JsonRpcRequest::notification("notifications/initialized");
+        assert_eq!(req.jsonrpc, "2.0");
+        assert!(req.id.is_none());
+        assert!(req.is_notification());
+        assert_eq!(req.method, "notifications/initialized");
+    }
+
+    #[test]
+    fn notification_serialization_omits_id() {
+        let req = JsonRpcRequest::notification("notify");
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("\"id\""));
+        assert!(json.contains("\"method\":\"notify\""));
+    }
+
+    #[test]
+    fn notification_deserialization_without_id() {
+        let json = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
+        assert!(req.is_notification());
+        assert!(req.id.is_none());
     }
 
     #[test]
@@ -104,6 +150,7 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let back: JsonRpcRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.method, "tools/call");
+        assert_eq!(back.id, Some(serde_json::json!(42)));
     }
 
     #[test]
@@ -117,6 +164,14 @@ mod tests {
         let req = JsonRpcRequest::new(1, "tools/call")
             .with_params(serde_json::json!({"name": "echo"}));
         assert_eq!(req.params["name"], "echo");
+    }
+
+    #[test]
+    fn notification_with_params() {
+        let req = JsonRpcRequest::notification("progress")
+            .with_params(serde_json::json!({"percent": 50}));
+        assert!(req.is_notification());
+        assert_eq!(req.params["percent"], 50);
     }
 
     #[test]

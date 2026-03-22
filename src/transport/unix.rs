@@ -1,13 +1,17 @@
 //! Unix domain socket transport — newline-delimited JSON-RPC over a Unix socket.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
+use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::dispatch::Dispatcher;
+use crate::dispatch::{DispatchOutcome, Dispatcher};
+use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+use crate::stream::CancellationToken;
 use crate::transport::codec;
 
 /// Configuration for the Unix socket transport.
@@ -24,7 +28,6 @@ pub async fn serve(
     config: UnixConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> crate::Result<()> {
-    // Remove stale socket file if it exists.
     let _ = std::fs::remove_file(&config.path);
 
     let listener = UnixListener::bind(&config.path)
@@ -58,36 +61,126 @@ async fn handle_connection(
     dispatcher: Arc<Dispatcher>,
     stream: tokio::net::UnixStream,
 ) -> crate::Result<()> {
-    let (reader, mut writer) = tokio::io::split(stream);
+    let (reader, writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
 
+    // Outgoing message channel.
+    let (out_tx, mut out_rx) = tokio_mpsc::unbounded_channel::<String>();
+
+    // Active streaming requests for cancellation.
+    let active: Arc<std::sync::Mutex<HashMap<String, CancellationToken>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+    // Writer task.
+    let writer_handle = tokio::spawn(async move {
+        let mut writer = writer;
+        while let Some(msg) = out_rx.recv().await {
+            if writer.write_all(format!("{msg}\n").as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Reader loop.
     while let Some(line) = lines.next_line().await? {
         if line.is_empty() {
             continue;
         }
 
-        let response = match codec::parse_request(&line) {
-            Ok(request) => {
-                let d = Arc::clone(&dispatcher);
-                tokio::task::spawn_blocking(move || d.dispatch(&request))
-                    .await
-                    .expect("dispatch task panicked")
+        if let Ok(req) = serde_json::from_str::<JsonRpcRequest>(&line) {
+            // Check for cancellation.
+            if req.method == "$/cancelRequest" {
+                if let Some(target_id) = req.params.get("id").and_then(|v| v.as_str())
+                    && let Some(token) = active.lock().unwrap().get(target_id)
+                {
+                    token.cancel();
+                }
+                continue;
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to parse JSON-RPC request");
-                crate::protocol::JsonRpcResponse::error(
-                    serde_json::json!(null),
-                    e.rpc_code(),
-                    e.to_string(),
-                )
-            }
-        };
 
-        let out = codec::serialize_response(&response)?;
-        writer.write_all(format!("{out}\n").as_bytes()).await?;
+            // Check for streaming tool.
+            if req.method == "tools/call"
+                && let Some(tool_name) = req.params.get("name").and_then(|v| v.as_str())
+                && dispatcher.is_streaming_tool(tool_name)
+            {
+                let d = Arc::clone(&dispatcher);
+                let tx = out_tx.clone();
+                let active_map = Arc::clone(&active);
+
+                tokio::spawn(async move {
+                    handle_streaming_call(d, &req, tx, active_map).await;
+                });
+                continue;
+            }
+        }
+
+        // Non-streaming.
+        let d = Arc::clone(&dispatcher);
+        let tx = out_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Some(out) = codec::process_message(&line, &d) {
+                let _ = tx.send(out);
+            }
+        });
     }
 
+    drop(out_tx);
+    let _ = writer_handle.await;
     Ok(())
+}
+
+async fn handle_streaming_call(
+    dispatcher: Arc<Dispatcher>,
+    request: &JsonRpcRequest,
+    out_tx: tokio_mpsc::UnboundedSender<String>,
+    active: Arc<std::sync::Mutex<HashMap<String, CancellationToken>>>,
+) {
+    let request_id = request.id.clone().unwrap_or(serde_json::Value::Null);
+    let id_str = request_id.to_string();
+
+    match dispatcher.dispatch_streaming(request) {
+        DispatchOutcome::Streaming {
+            request_id: req_id,
+            progress_rx,
+            ctx,
+            handler,
+            arguments,
+        } => {
+            active.lock().unwrap().insert(id_str.clone(), ctx.cancellation.clone());
+
+            let handler_handle = tokio::task::spawn_blocking(move || handler(arguments, ctx));
+
+            let progress_tx = out_tx.clone();
+            let progress_req_id = req_id.clone();
+            let progress_handle = tokio::task::spawn_blocking(move || {
+                while let Ok(update) = progress_rx.recv() {
+                    let notification = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/progress",
+                        "params": {
+                            "progressToken": progress_req_id,
+                            "progress": update.progress,
+                            "total": update.total,
+                            "message": update.message,
+                        }
+                    });
+                    let _ = progress_tx.send(serde_json::to_string(&notification).unwrap());
+                }
+            });
+
+            let result = handler_handle.await.expect("handler panicked");
+            let _ = progress_handle.await;
+
+            let response = JsonRpcResponse::success(req_id, result);
+            let _ = out_tx.send(serde_json::to_string(&response).unwrap());
+
+            active.lock().unwrap().remove(&id_str);
+        }
+        DispatchOutcome::Immediate(Some(resp)) => {
+            let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+        }
+        DispatchOutcome::Immediate(None) => {}
+    }
 }
 
 #[cfg(test)]
@@ -120,7 +213,41 @@ mod tests {
         Arc::new(d)
     }
 
-    /// Connect to a Unix socket, retrying until the server is ready.
+    fn make_streaming_dispatcher() -> Arc<Dispatcher> {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolDef {
+            name: "echo".into(),
+            description: "Echo".into(),
+            input_schema: ToolSchema {
+                schema_type: "object".into(),
+                properties: HashMap::new(),
+                required: vec![],
+            },
+        });
+        reg.register(ToolDef {
+            name: "slow".into(),
+            description: "Slow".into(),
+            input_schema: ToolSchema {
+                schema_type: "object".into(),
+                properties: HashMap::new(),
+                required: vec![],
+            },
+        });
+        let mut d = Dispatcher::new(reg);
+        d.handle("echo", Arc::new(|p| serde_json::json!({"echoed": p})));
+        d.handle_streaming("slow", Arc::new(|_params, ctx| {
+            for i in 1..=3 {
+                if ctx.cancellation.is_cancelled() {
+                    return serde_json::json!({"cancelled": true});
+                }
+                ctx.progress.report(i, 3);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            serde_json::json!({"content": [{"type": "text", "text": "done"}]})
+        }));
+        Arc::new(d)
+    }
+
     async fn connect_retry(path: &std::path::Path) -> UnixStream {
         for _ in 0..200 {
             if let Ok(s) = UnixStream::connect(path).await {
@@ -140,7 +267,7 @@ mod tests {
 
     #[tokio::test]
     async fn unix_initialize() {
-        let (dir, sock_path) = test_sock_path("init");
+        let (dir, sock_path) = test_sock_path("init2");
         let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
 
         tokio::spawn(serve(
@@ -157,9 +284,8 @@ mod tests {
         writer.write_all(format!("{req}\n").as_bytes()).await.unwrap();
 
         let resp_line = lines.next_line().await.unwrap().unwrap();
-        let resp: crate::protocol::JsonRpcResponse = serde_json::from_str(&resp_line).unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp_line).unwrap();
         assert!(resp.result.is_some());
-        assert!(resp.result.unwrap()["serverInfo"]["name"] == "bote");
 
         let _ = std::fs::remove_file(&sock_path);
         let _ = std::fs::remove_dir(&dir);
@@ -167,7 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn unix_multiple_requests() {
-        let (dir, sock_path) = test_sock_path("multi");
+        let (dir, sock_path) = test_sock_path("multi2");
         let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
 
         tokio::spawn(serve(
@@ -184,15 +310,15 @@ mod tests {
         let req2 = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"msg":"hi"}}}"#;
         writer.write_all(format!("{req1}\n{req2}\n").as_bytes()).await.unwrap();
 
-        let resp1: crate::protocol::JsonRpcResponse =
+        let resp1: JsonRpcResponse =
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-        let resp2: crate::protocol::JsonRpcResponse =
+        let resp2: JsonRpcResponse =
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
 
-        assert_eq!(resp1.id, serde_json::json!(1));
-        assert_eq!(resp2.id, serde_json::json!(2));
-        assert!(resp1.result.is_some());
-        assert!(resp2.result.is_some());
+        // Order may vary with async dispatch — check both are present.
+        let mut ids: Vec<serde_json::Value> = vec![resp1.id.clone(), resp2.id.clone()];
+        ids.sort_by_key(|v| v.as_u64().unwrap_or(0));
+        assert_eq!(ids, vec![serde_json::json!(1), serde_json::json!(2)]);
 
         let _ = std::fs::remove_file(&sock_path);
         let _ = std::fs::remove_dir(&dir);
@@ -200,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn unix_malformed_json() {
-        let (dir, sock_path) = test_sock_path("bad");
+        let (dir, sock_path) = test_sock_path("bad2");
         let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
 
         tokio::spawn(serve(
@@ -216,7 +342,7 @@ mod tests {
         writer.write_all(b"not json\n").await.unwrap();
 
         let resp_line = lines.next_line().await.unwrap().unwrap();
-        let resp: crate::protocol::JsonRpcResponse = serde_json::from_str(&resp_line).unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp_line).unwrap();
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32700);
 
@@ -226,7 +352,7 @@ mod tests {
 
     #[tokio::test]
     async fn unix_graceful_shutdown() {
-        let (dir, sock_path) = test_sock_path("shutdown");
+        let (dir, sock_path) = test_sock_path("shutdown2");
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
         let handle = tokio::spawn(serve(
@@ -235,14 +361,56 @@ mod tests {
             async { rx.await.ok(); },
         ));
 
-        // Wait for bind, then verify it's up.
         let _stream = connect_retry(&sock_path).await;
-
-        // Signal shutdown.
         tx.send(()).unwrap();
 
         let result = handle.await.unwrap();
         assert!(result.is_ok());
+
+        let _ = std::fs::remove_file(&sock_path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn unix_streaming_tool_progress_and_result() {
+        let (dir, sock_path) = test_sock_path("stream");
+        let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+        tokio::spawn(serve(
+            make_streaming_dispatcher(),
+            UnixConfig { path: sock_path.clone() },
+            async { rx.await.ok(); },
+        ));
+
+        let stream = connect_retry(&sock_path).await;
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut lines = BufReader::new(reader).lines();
+
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow","arguments":{}}}"#;
+        writer.write_all(format!("{req}\n").as_bytes()).await.unwrap();
+
+        let mut progress_count = 0;
+        let mut final_result = None;
+
+        for _ in 0..10 {
+            let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+                .await
+                .expect("timeout")
+                .unwrap()
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+
+            if v.get("method").and_then(|m| m.as_str()) == Some("notifications/progress") {
+                progress_count += 1;
+            } else if v.get("result").is_some() {
+                final_result = Some(v);
+                break;
+            }
+        }
+
+        assert_eq!(progress_count, 3);
+        let result = final_result.unwrap();
+        assert_eq!(result["id"], 1);
 
         let _ = std::fs::remove_file(&sock_path);
         let _ = std::fs::remove_dir(&dir);

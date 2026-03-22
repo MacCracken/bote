@@ -13,7 +13,7 @@ categories = ["web-programming"]
 
 [features]
 default = []
-http = ["dep:axum", "dep:tokio"]
+http = ["dep:axum", "dep:tokio", "dep:futures-util"]
 ws = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
 unix = ["dep:tokio"]
 all-transports = ["http", "ws", "unix"]

@@ -2,7 +2,8 @@
 
 use std::io::{BufRead, Write};
 
-use crate::dispatch::Dispatcher;
+use crate::dispatch::{DispatchOutcome, Dispatcher};
+use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 use crate::transport::codec;
 
 /// Run the stdio transport loop, reading JSON-RPC requests from stdin
@@ -25,26 +26,77 @@ fn run_io(
             continue;
         }
 
-        let request = match codec::parse_request(&line) {
-            Ok(req) => req,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to parse JSON-RPC request");
-                let err_resp = crate::protocol::JsonRpcResponse::error(
-                    serde_json::json!(null),
-                    e.rpc_code(),
-                    e.to_string(),
-                );
-                let out = codec::serialize_response(&err_resp)?;
-                writeln!(writer, "{out}")?;
-                continue;
-            }
-        };
+        // Try to parse as a single request to check for streaming.
+        if let Ok(request) = codec::parse_request(&line)
+            && let Some(tool_name) = extract_tool_name(&request)
+            && dispatcher.is_streaming_tool(tool_name)
+        {
+            dispatch_streaming(dispatcher, &request, &mut writer)?;
+            continue;
+        }
 
-        let response = dispatcher.dispatch(&request);
-        let out = codec::serialize_response(&response)?;
-        writeln!(writer, "{out}")?;
+        // Non-streaming: batch, notification, or sync tool.
+        if let Some(out) = codec::process_message(&line, dispatcher) {
+            writeln!(writer, "{out}")?;
+        }
     }
 
+    Ok(())
+}
+
+fn extract_tool_name(request: &JsonRpcRequest) -> Option<&str> {
+    if request.method == "tools/call" {
+        request.params.get("name").and_then(|v| v.as_str())
+    } else {
+        None
+    }
+}
+
+fn dispatch_streaming(
+    dispatcher: &Dispatcher,
+    request: &JsonRpcRequest,
+    writer: &mut impl Write,
+) -> crate::Result<()> {
+    let request_id = request.id.clone().unwrap_or(serde_json::Value::Null);
+
+    match dispatcher.dispatch_streaming(request) {
+        DispatchOutcome::Streaming {
+            request_id: req_id,
+            progress_rx,
+            ctx,
+            handler,
+            arguments,
+        } => {
+            // Spawn handler on a thread.
+            let handle = std::thread::spawn(move || handler(arguments, ctx));
+
+            // Drain progress, writing notifications as JSON lines.
+            while let Ok(update) = progress_rx.recv() {
+                let notification = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": {
+                        "progressToken": req_id,
+                        "progress": update.progress,
+                        "total": update.total,
+                        "message": update.message,
+                    }
+                });
+                writeln!(writer, "{}", serde_json::to_string(&notification).expect("serialize progress"))?;
+            }
+
+            // Write final result.
+            let result = handle.join().expect("handler thread panicked");
+            let response = JsonRpcResponse::success(req_id, result);
+            writeln!(writer, "{}", codec::serialize_response(&response)?)?;
+        }
+        DispatchOutcome::Immediate(Some(resp)) => {
+            writeln!(writer, "{}", codec::serialize_response(&resp)?)?;
+        }
+        DispatchOutcome::Immediate(None) => {}
+    }
+
+    let _ = request_id; // used for the match above via req_id
     Ok(())
 }
 
@@ -74,6 +126,37 @@ mod tests {
                 serde_json::json!({ "content": [{ "type": "text", "text": params.to_string() }] })
             }),
         );
+        d
+    }
+
+    fn make_streaming_dispatcher() -> Dispatcher {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolDef {
+            name: "slow".into(),
+            description: "Slow".into(),
+            input_schema: ToolSchema {
+                schema_type: "object".into(),
+                properties: HashMap::new(),
+                required: vec![],
+            },
+        });
+        reg.register(ToolDef {
+            name: "echo".into(),
+            description: "Echo".into(),
+            input_schema: ToolSchema {
+                schema_type: "object".into(),
+                properties: HashMap::new(),
+                required: vec![],
+            },
+        });
+        let mut d = Dispatcher::new(reg);
+        d.handle("echo", Arc::new(|params| serde_json::json!({"echoed": params})));
+        d.handle_streaming("slow", Arc::new(|_params, ctx| {
+            ctx.progress.report(1, 3);
+            ctx.progress.report(2, 3);
+            ctx.progress.report(3, 3);
+            serde_json::json!({"content": [{"type": "text", "text": "done"}]})
+        }));
         d
     }
 
@@ -147,5 +230,89 @@ mod tests {
 
         let out_str = String::from_utf8(output).unwrap();
         assert!(out_str.is_empty());
+    }
+
+    #[test]
+    fn stdio_notification_no_response() {
+        let d = make_dispatcher();
+        let input = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        let reader = Cursor::new(format!("{input}\n"));
+        let mut output = Vec::new();
+
+        run_io(&d, reader, &mut output).unwrap();
+
+        let out_str = String::from_utf8(output).unwrap();
+        assert!(out_str.is_empty());
+    }
+
+    #[test]
+    fn stdio_batch_request() {
+        let d = make_dispatcher();
+        let input = r#"[{"jsonrpc":"2.0","id":1,"method":"initialize"},{"jsonrpc":"2.0","id":2,"method":"tools/list"}]"#;
+        let reader = Cursor::new(format!("{input}\n"));
+        let mut output = Vec::new();
+
+        run_io(&d, reader, &mut output).unwrap();
+
+        let out_str = String::from_utf8(output).unwrap();
+        let responses: Vec<crate::protocol::JsonRpcResponse> =
+            serde_json::from_str(out_str.trim()).unwrap();
+        assert_eq!(responses.len(), 2);
+    }
+
+    #[test]
+    fn stdio_batch_all_notifications_no_response() {
+        let d = make_dispatcher();
+        let input = r#"[{"jsonrpc":"2.0","method":"notify1"},{"jsonrpc":"2.0","method":"notify2"}]"#;
+        let reader = Cursor::new(format!("{input}\n"));
+        let mut output = Vec::new();
+
+        run_io(&d, reader, &mut output).unwrap();
+
+        let out_str = String::from_utf8(output).unwrap();
+        assert!(out_str.is_empty());
+    }
+
+    #[test]
+    fn stdio_streaming_tool_emits_progress_and_result() {
+        let d = make_streaming_dispatcher();
+        let input = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow","arguments":{}}}"#;
+        let reader = Cursor::new(format!("{input}\n"));
+        let mut output = Vec::new();
+
+        run_io(&d, reader, &mut output).unwrap();
+
+        let out_str = String::from_utf8(output).unwrap();
+        let lines: Vec<&str> = out_str.lines().collect();
+        // 3 progress notifications + 1 final result = 4 lines.
+        assert_eq!(lines.len(), 4);
+
+        // First 3 are progress notifications.
+        for line in &lines[..3] {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(v["method"], "notifications/progress");
+        }
+
+        // Last is the final result.
+        let result: JsonRpcResponse = serde_json::from_str(lines[3]).unwrap();
+        assert!(result.result.is_some());
+        assert_eq!(result.id, serde_json::json!(1));
+    }
+
+    #[test]
+    fn stdio_sync_tool_still_works_with_streaming_dispatcher() {
+        let d = make_streaming_dispatcher();
+        let input = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"msg":"hi"}}}"#;
+        let reader = Cursor::new(format!("{input}\n"));
+        let mut output = Vec::new();
+
+        run_io(&d, reader, &mut output).unwrap();
+
+        let out_str = String::from_utf8(output).unwrap();
+        let lines: Vec<&str> = out_str.lines().collect();
+        // Single response, no progress.
+        assert_eq!(lines.len(), 1);
+        let resp: JsonRpcResponse = serde_json::from_str(lines[0]).unwrap();
+        assert!(resp.result.is_some());
     }
 }

@@ -1,14 +1,18 @@
 //! WebSocket transport — bidirectional JSON-RPC over WebSocket.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc as tokio_mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::dispatch::Dispatcher;
+use crate::dispatch::{DispatchOutcome, Dispatcher};
+use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+use crate::stream::CancellationToken;
 use crate::transport::codec;
 
 /// Configuration for the WebSocket transport.
@@ -58,9 +62,27 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ws_stream = tokio_tungstenite::accept_async(stream).await?;
-    let (mut write, mut read) = ws_stream.split();
+    let (ws_write, mut ws_read) = ws_stream.split();
 
-    while let Some(msg) = read.next().await {
+    // Outgoing message channel — all tasks send here, writer drains to WS.
+    let (out_tx, mut out_rx) = tokio_mpsc::unbounded_channel::<String>();
+
+    // Active streaming requests for cancellation.
+    let active: Arc<std::sync::Mutex<HashMap<String, CancellationToken>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+    // Writer task.
+    let writer_handle = tokio::spawn(async move {
+        let mut ws_write = ws_write;
+        while let Some(msg) = out_rx.recv().await {
+            if ws_write.send(Message::Text(msg.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Reader loop.
+    while let Some(msg) = ws_read.next().await {
         let msg = msg?;
 
         let text = match msg {
@@ -69,28 +91,107 @@ async fn handle_connection(
             _ => continue,
         };
 
-        let response = match codec::parse_request(&text) {
-            Ok(request) => {
-                let d = Arc::clone(&dispatcher);
-                tokio::task::spawn_blocking(move || d.dispatch(&request))
-                    .await
-                    .expect("dispatch task panicked")
+        if let Ok(req) = serde_json::from_str::<JsonRpcRequest>(&text) {
+            // Check for cancellation request.
+            if req.method == "$/cancelRequest" {
+                if let Some(target_id) = req.params.get("id").and_then(|v| v.as_str())
+                    && let Some(token) = active.lock().unwrap().get(target_id)
+                {
+                    token.cancel();
+                }
+                continue;
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to parse JSON-RPC request");
-                crate::protocol::JsonRpcResponse::error(
-                    serde_json::json!(null),
-                    e.rpc_code(),
-                    e.to_string(),
-                )
-            }
-        };
 
-        let out = codec::serialize_response(&response)?;
-        write.send(Message::Text(out.into())).await?;
+            // Check for streaming tool.
+            if req.method == "tools/call"
+                && let Some(tool_name) = req.params.get("name").and_then(|v| v.as_str())
+                && dispatcher.is_streaming_tool(tool_name)
+            {
+                let d = Arc::clone(&dispatcher);
+                let tx = out_tx.clone();
+                let active_map = Arc::clone(&active);
+
+                tokio::spawn(async move {
+                    handle_streaming_call(d, &req, tx, active_map).await;
+                });
+                continue;
+            }
+        }
+
+        // Non-streaming: use process_message.
+        let d = Arc::clone(&dispatcher);
+        let tx = out_tx.clone();
+        let text_owned = text.to_string();
+        tokio::task::spawn_blocking(move || {
+            if let Some(out) = codec::process_message(&text_owned, &d) {
+                let _ = tx.send(out);
+            }
+        });
     }
 
+    drop(out_tx);
+    let _ = writer_handle.await;
     Ok(())
+}
+
+async fn handle_streaming_call(
+    dispatcher: Arc<Dispatcher>,
+    request: &JsonRpcRequest,
+    out_tx: tokio_mpsc::UnboundedSender<String>,
+    active: Arc<std::sync::Mutex<HashMap<String, CancellationToken>>>,
+) {
+    let request_id = request.id.clone().unwrap_or(serde_json::Value::Null);
+    let id_str = request_id.to_string();
+
+    match dispatcher.dispatch_streaming(request) {
+        DispatchOutcome::Streaming {
+            request_id: req_id,
+            progress_rx,
+            ctx,
+            handler,
+            arguments,
+        } => {
+            // Track for cancellation.
+            active.lock().unwrap().insert(id_str.clone(), ctx.cancellation.clone());
+
+            // Spawn handler on blocking thread.
+            let handler_handle = tokio::task::spawn_blocking(move || handler(arguments, ctx));
+
+            // Drain progress in background.
+            let progress_tx = out_tx.clone();
+            let progress_req_id = req_id.clone();
+            let progress_handle = tokio::task::spawn_blocking(move || {
+                while let Ok(update) = progress_rx.recv() {
+                    let notification = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/progress",
+                        "params": {
+                            "progressToken": progress_req_id,
+                            "progress": update.progress,
+                            "total": update.total,
+                            "message": update.message,
+                        }
+                    });
+                    let _ = progress_tx.send(serde_json::to_string(&notification).unwrap());
+                }
+            });
+
+            // Wait for both to complete.
+            let result = handler_handle.await.expect("handler panicked");
+            let _ = progress_handle.await;
+
+            // Send final result.
+            let response = JsonRpcResponse::success(req_id, result);
+            let _ = out_tx.send(serde_json::to_string(&response).unwrap());
+
+            // Remove from active.
+            active.lock().unwrap().remove(&id_str);
+        }
+        DispatchOutcome::Immediate(Some(resp)) => {
+            let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+        }
+        DispatchOutcome::Immediate(None) => {}
+    }
 }
 
 #[cfg(test)]
@@ -121,8 +222,41 @@ mod tests {
         Arc::new(d)
     }
 
-    /// Start the WS server on an OS-assigned port via `serve()`, return the address.
-    /// Uses retry-connect instead of sleep for deterministic startup.
+    fn make_streaming_dispatcher() -> Arc<Dispatcher> {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolDef {
+            name: "echo".into(),
+            description: "Echo".into(),
+            input_schema: ToolSchema {
+                schema_type: "object".into(),
+                properties: HashMap::new(),
+                required: vec![],
+            },
+        });
+        reg.register(ToolDef {
+            name: "slow".into(),
+            description: "Slow streaming".into(),
+            input_schema: ToolSchema {
+                schema_type: "object".into(),
+                properties: HashMap::new(),
+                required: vec![],
+            },
+        });
+        let mut d = Dispatcher::new(reg);
+        d.handle("echo", Arc::new(|p| serde_json::json!({"echoed": p})));
+        d.handle_streaming("slow", Arc::new(|_params, ctx| {
+            for i in 1..=3 {
+                if ctx.cancellation.is_cancelled() {
+                    return serde_json::json!({"cancelled": true});
+                }
+                ctx.progress.report(i, 3);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            serde_json::json!({"content": [{"type": "text", "text": "done"}]})
+        }));
+        Arc::new(d)
+    }
+
     async fn start_server(dispatcher: Arc<Dispatcher>) -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -132,7 +266,6 @@ mod tests {
         let config = WsConfig { addr };
         tokio::spawn(serve(dispatcher, config, async { rx.await.ok(); }));
 
-        // Retry-connect to confirm the server is up.
         for _ in 0..200 {
             if tokio::net::TcpStream::connect(addr).await.is_ok() {
                 return (addr, tx);
@@ -146,15 +279,13 @@ mod tests {
     async fn ws_initialize() {
         let (addr, _tx) = start_server(make_dispatcher()).await;
         let url = format!("ws://{addr}");
-
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
         ws.send(Message::Text(req.into())).await.unwrap();
 
         let resp_msg = ws.next().await.unwrap().unwrap();
-        let resp_text = resp_msg.into_text().unwrap();
-        let resp: crate::protocol::JsonRpcResponse = serde_json::from_str(&resp_text).unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp_msg.into_text().unwrap()).unwrap();
         assert!(resp.result.is_some());
         assert!(resp.result.unwrap()["serverInfo"]["name"] == "bote");
     }
@@ -163,15 +294,13 @@ mod tests {
     async fn ws_tool_call() {
         let (addr, _tx) = start_server(make_dispatcher()).await;
         let url = format!("ws://{addr}");
-
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"msg":"hello"}}}"#;
         ws.send(Message::Text(req.into())).await.unwrap();
 
         let resp_msg = ws.next().await.unwrap().unwrap();
-        let resp: crate::protocol::JsonRpcResponse =
-            serde_json::from_str(&resp_msg.into_text().unwrap()).unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp_msg.into_text().unwrap()).unwrap();
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
     }
@@ -180,7 +309,6 @@ mod tests {
     async fn ws_multiple_messages() {
         let (addr, _tx) = start_server(make_dispatcher()).await;
         let url = format!("ws://{addr}");
-
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
         let req1 = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
@@ -188,9 +316,9 @@ mod tests {
         ws.send(Message::Text(req1.into())).await.unwrap();
         ws.send(Message::Text(req2.into())).await.unwrap();
 
-        let resp1: crate::protocol::JsonRpcResponse =
+        let resp1: JsonRpcResponse =
             serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
-        let resp2: crate::protocol::JsonRpcResponse =
+        let resp2: JsonRpcResponse =
             serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
 
         assert_eq!(resp1.id, serde_json::json!(1));
@@ -203,14 +331,12 @@ mod tests {
     async fn ws_malformed_json() {
         let (addr, _tx) = start_server(make_dispatcher()).await;
         let url = format!("ws://{addr}");
-
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
         ws.send(Message::Text("not json".into())).await.unwrap();
 
         let resp_msg = ws.next().await.unwrap().unwrap();
-        let resp: crate::protocol::JsonRpcResponse =
-            serde_json::from_str(&resp_msg.into_text().unwrap()).unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&resp_msg.into_text().unwrap()).unwrap();
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32700);
     }
@@ -219,7 +345,6 @@ mod tests {
     async fn ws_graceful_shutdown() {
         let (addr, tx) = start_server(make_dispatcher()).await;
 
-        // Verify the server is accepting connections.
         let url = format!("ws://{addr}");
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         ws.send(Message::Text(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#.into()))
@@ -227,7 +352,42 @@ mod tests {
             .unwrap();
         let _ = ws.next().await.unwrap().unwrap();
 
-        // Signal shutdown.
         tx.send(()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ws_streaming_tool_progress_and_result() {
+        let (addr, _tx) = start_server(make_streaming_dispatcher()).await;
+        let url = format!("ws://{addr}");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow","arguments":{}}}"#;
+        ws.send(Message::Text(req.into())).await.unwrap();
+
+        // Collect all messages until we get the final result.
+        let mut progress_count = 0;
+        let mut final_result = None;
+
+        for _ in 0..10 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                .await
+                .expect("timeout waiting for message")
+                .unwrap()
+                .unwrap();
+            let text = msg.into_text().unwrap();
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+            if v.get("method").and_then(|m| m.as_str()) == Some("notifications/progress") {
+                progress_count += 1;
+            } else if v.get("result").is_some() {
+                final_result = Some(v);
+                break;
+            }
+        }
+
+        assert_eq!(progress_count, 3);
+        let result = final_result.unwrap();
+        assert_eq!(result["id"], 1);
+        assert_eq!(result["result"]["content"][0]["text"], "done");
     }
 }

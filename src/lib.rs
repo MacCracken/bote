@@ -15,14 +15,16 @@
 pub mod dispatch;
 pub mod protocol;
 pub mod registry;
+pub mod stream;
 pub mod transport;
 
 mod error;
 pub use error::BoteError;
 
-pub use dispatch::Dispatcher;
+pub use dispatch::{DispatchOutcome, Dispatcher};
 pub use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 pub use registry::{ToolDef, ToolRegistry, ToolSchema};
+pub use stream::{CancellationToken, ProgressSender, ProgressUpdate, StreamContext, StreamingToolHandler};
 
 pub type Result<T> = std::result::Result<T, BoteError>;
 

@@ -1,21 +1,33 @@
-//! HTTP transport — axum-based JSON-RPC server.
+//! HTTP transport — axum-based JSON-RPC server with SSE streaming.
 
+use std::collections::HashMap;
+use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::{Json, Router, routing};
+use axum::response::sse::{Event, Sse};
+use axum::response::{IntoResponse, Response};
+use axum::{Router, routing};
+use futures_util::stream::Stream;
 
-use crate::dispatch::Dispatcher;
+use crate::dispatch::{DispatchOutcome, Dispatcher};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+use crate::stream::CancellationToken;
+use crate::transport::codec;
 use crate::BoteError;
 
 /// Configuration for the HTTP transport.
 pub struct HttpConfig {
     pub addr: SocketAddr,
+}
+
+#[derive(Clone)]
+struct AppState {
+    dispatcher: Arc<Dispatcher>,
+    active: Arc<std::sync::Mutex<HashMap<String, CancellationToken>>>,
 }
 
 /// Start an HTTP server that accepts JSON-RPC requests via `POST /`.
@@ -46,33 +58,168 @@ pub async fn serve(
 
 /// Build the axum router. Exposed for testing without binding a port.
 pub fn router(dispatcher: Arc<Dispatcher>) -> Router {
+    let state = AppState {
+        dispatcher,
+        active: Arc::new(std::sync::Mutex::new(HashMap::new())),
+    };
     Router::new()
         .route("/", routing::post(handle_rpc))
         .route("/health", routing::get(handle_health))
-        .with_state(dispatcher)
+        .with_state(state)
 }
 
-async fn handle_rpc(
-    State(dispatcher): State<Arc<Dispatcher>>,
-    body: String,
-) -> Json<JsonRpcResponse> {
-    let request: JsonRpcRequest = match serde_json::from_str(&body) {
-        Ok(req) => req,
-        Err(e) => {
-            let err = BoteError::Parse(e.to_string());
-            tracing::warn!(error = %err, "failed to parse JSON-RPC request");
-            return Json(JsonRpcResponse::error(
-                serde_json::json!(null),
-                err.rpc_code(),
-                err.to_string(),
-            ));
+async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
+    if let Ok(req) = serde_json::from_str::<JsonRpcRequest>(&body) {
+        // Check for cancellation request.
+        if req.method == "$/cancelRequest" {
+            if let Some(target_id) = req.params.get("id").and_then(|v| v.as_str())
+                && let Some(token) = state.active.lock().unwrap().get(target_id)
+            {
+                token.cancel();
+            }
+            return StatusCode::NO_CONTENT.into_response();
         }
+
+        // Check for streaming tool.
+        if req.method == "tools/call"
+            && let Some(tool_name) = req.params.get("name").and_then(|v| v.as_str())
+            && state.dispatcher.is_streaming_tool(tool_name)
+        {
+            return handle_streaming(state, req).into_response();
+        }
+    }
+
+    // Non-streaming: use process_message.
+    let dispatcher = Arc::clone(&state.dispatcher);
+    let result =
+        tokio::task::spawn_blocking(move || codec::process_message(&body, &dispatcher))
+            .await
+            .expect("dispatch task panicked");
+
+    match result {
+        Some(json) => (
+            StatusCode::OK,
+            [("content-type", "application/json")],
+            json,
+        )
+            .into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+fn handle_streaming(state: AppState, request: JsonRpcRequest) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream = make_sse_stream(state, request);
+    Sse::new(stream)
+}
+
+fn make_sse_stream(
+    state: AppState,
+    request: JsonRpcRequest,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    // Set up the streaming handler eagerly so we have a single unfold type.
+    let init = match state.dispatcher.dispatch_streaming(&request) {
+        DispatchOutcome::Streaming {
+            request_id,
+            progress_rx,
+            ctx,
+            handler,
+            arguments,
+        } => {
+            let id_str = request_id.to_string();
+            state
+                .active
+                .lock()
+                .unwrap()
+                .insert(id_str.clone(), ctx.cancellation.clone());
+
+            let handler_handle =
+                tokio::task::spawn_blocking(move || handler(arguments, ctx));
+
+            SseState::Running {
+                progress_rx,
+                handler_handle,
+                request_id,
+                id_str,
+                active: state.active,
+            }
+        }
+        _ => SseState::Done,
     };
 
-    let response = tokio::task::spawn_blocking(move || dispatcher.dispatch(&request))
-        .await
-        .expect("dispatch task panicked");
-    Json(response)
+    futures_util::stream::unfold(init, |s| async move {
+        match s {
+            SseState::Running {
+                progress_rx,
+                handler_handle,
+                request_id,
+                id_str,
+                active,
+            } => {
+                let recv_result = tokio::task::spawn_blocking(move || {
+                    match progress_rx.recv() {
+                        Ok(update) => RecvResult::Progress(update, progress_rx),
+                        Err(_) => RecvResult::Done,
+                    }
+                })
+                .await
+                .expect("recv task panicked");
+
+                match recv_result {
+                    RecvResult::Progress(update, rx) => {
+                        let notification = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/progress",
+                            "params": {
+                                "progressToken": request_id,
+                                "progress": update.progress,
+                                "total": update.total,
+                                "message": update.message,
+                            }
+                        });
+                        let event = Event::default()
+                            .event("progress")
+                            .data(serde_json::to_string(&notification).unwrap());
+                        Some((
+                            Ok(event),
+                            SseState::Running {
+                                progress_rx: rx,
+                                handler_handle,
+                                request_id,
+                                id_str,
+                                active,
+                            },
+                        ))
+                    }
+                    RecvResult::Done => {
+                        let result = handler_handle.await.expect("handler panicked");
+                        let response = JsonRpcResponse::success(request_id, result);
+                        let event = Event::default()
+                            .event("result")
+                            .data(serde_json::to_string(&response).unwrap());
+                        active.lock().unwrap().remove(&id_str);
+                        Some((Ok(event), SseState::Done))
+                    }
+                }
+            }
+            SseState::Done => None,
+        }
+    })
+}
+
+enum SseState {
+    Running {
+        progress_rx: std::sync::mpsc::Receiver<crate::stream::ProgressUpdate>,
+        handler_handle: tokio::task::JoinHandle<serde_json::Value>,
+        request_id: serde_json::Value,
+        id_str: String,
+        active: Arc<std::sync::Mutex<HashMap<String, CancellationToken>>>,
+    },
+    Done,
+}
+
+enum RecvResult {
+    Progress(crate::stream::ProgressUpdate, std::sync::mpsc::Receiver<crate::stream::ProgressUpdate>),
+    Done,
 }
 
 async fn handle_health() -> impl IntoResponse {
@@ -239,15 +386,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rpc_notification_returns_204() {
+        let app = make_app();
+        let body = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn rpc_batch() {
+        let app = make_app();
+        let body = r#"[
+            {"jsonrpc":"2.0","id":1,"method":"initialize"},
+            {"jsonrpc":"2.0","id":2,"method":"tools/list"}
+        ]"#;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let responses: Vec<JsonRpcResponse> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(responses.len(), 2);
+    }
+
+    #[tokio::test]
     async fn graceful_shutdown() {
         let dispatcher = {
             let reg = ToolRegistry::new();
             Arc::new(Dispatcher::new(reg))
         };
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let config = HttpConfig { addr: "127.0.0.1:0".parse().unwrap() };
 
-        let listener = tokio::net::TcpListener::bind(config.addr).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
 
@@ -257,7 +446,6 @@ mod tests {
             async { rx.await.ok(); },
         ));
 
-        // Give it a moment to bind, then signal shutdown.
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         tx.send(()).unwrap();
 

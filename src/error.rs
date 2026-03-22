@@ -16,6 +16,8 @@ pub enum BoteError {
     TransportClosed,
     #[error("transport bind failed: {0}")]
     BindFailed(String),
+    #[error("request cancelled: {0}")]
+    RequestCancelled(String),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -33,6 +35,7 @@ impl BoteError {
             Self::ExecFailed { .. } => -32000,
             Self::TransportClosed => -32003,
             Self::BindFailed(_) => -32003,
+            Self::RequestCancelled(_) => -32800,
             Self::Json(_) => -32700,
             Self::Io(_) => -32603,
         }
@@ -58,6 +61,7 @@ mod tests {
         );
         assert_eq!(BoteError::TransportClosed.rpc_code(), -32003);
         assert_eq!(BoteError::BindFailed("port in use".into()).rpc_code(), -32003);
+        assert_eq!(BoteError::RequestCancelled("req-1".into()).rpc_code(), -32800);
 
         let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken");
         assert_eq!(BoteError::Io(io_err).rpc_code(), -32603);
@@ -80,6 +84,10 @@ mod tests {
         assert_eq!(
             BoteError::BindFailed("port in use".into()).to_string(),
             "transport bind failed: port in use"
+        );
+        assert_eq!(
+            BoteError::RequestCancelled("req-1".into()).to_string(),
+            "request cancelled: req-1"
         );
     }
 
