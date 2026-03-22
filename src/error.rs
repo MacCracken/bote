@@ -14,6 +14,8 @@ pub enum BoteError {
     Parse(String),
     #[error("transport closed")]
     TransportClosed,
+    #[error("transport bind failed: {0}")]
+    BindFailed(String),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -30,6 +32,7 @@ impl BoteError {
             Self::InvalidParams { .. } => -32602,
             Self::ExecFailed { .. } => -32000,
             Self::TransportClosed => -32003,
+            Self::BindFailed(_) => -32003,
             Self::Json(_) => -32700,
             Self::Io(_) => -32603,
         }
@@ -54,6 +57,7 @@ mod tests {
             -32000
         );
         assert_eq!(BoteError::TransportClosed.rpc_code(), -32003);
+        assert_eq!(BoteError::BindFailed("port in use".into()).rpc_code(), -32003);
 
         let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken");
         assert_eq!(BoteError::Io(io_err).rpc_code(), -32603);
@@ -73,6 +77,10 @@ mod tests {
         assert_eq!(BoteError::Protocol("bad".into()).to_string(), "protocol error: bad");
         assert_eq!(BoteError::Parse("bad".into()).to_string(), "parse error: bad");
         assert_eq!(BoteError::TransportClosed.to_string(), "transport closed");
+        assert_eq!(
+            BoteError::BindFailed("port in use".into()).to_string(),
+            "transport bind failed: port in use"
+        );
     }
 
     #[test]

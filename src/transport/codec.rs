@@ -1,4 +1,4 @@
-//! Stdio transport — read/write JSON-RPC over stdin/stdout.
+//! JSON-RPC codec — parse requests, serialize responses.
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 
@@ -31,7 +31,7 @@ mod tests {
     #[test]
     fn serialize_roundtrip() {
         let resp = JsonRpcResponse::success(serde_json::json!(1), serde_json::json!({"ok": true}));
-        let line = super::serialize_response(&resp).unwrap();
+        let line = serialize_response(&resp).unwrap();
         assert!(line.contains("\"result\""));
         assert!(!line.contains("\"error\""));
     }
@@ -52,7 +52,7 @@ mod tests {
     #[test]
     fn serialize_error_response() {
         let resp = JsonRpcResponse::error(serde_json::json!(1), -32601, "not found");
-        let line = super::serialize_response(&resp).unwrap();
+        let line = serialize_response(&resp).unwrap();
         assert!(line.contains("\"error\""));
         assert!(line.contains("-32601"));
         assert!(!line.contains("\"result\""));
