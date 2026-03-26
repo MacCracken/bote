@@ -265,6 +265,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec![],
             },
+            version: None,
+            deprecated: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle(

@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::schema::CompiledSchema;
+
 /// Tool input schema (JSON Schema subset).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -22,6 +24,10 @@ pub struct ToolDef {
     pub name: String,
     pub description: String,
     pub input_schema: ToolSchema,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<String>,
 }
 
 impl ToolSchema {
@@ -50,7 +56,21 @@ impl ToolDef {
             name: name.into(),
             description: description.into(),
             input_schema,
+            version: None,
+            deprecated: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_deprecated(mut self, message: impl Into<String>) -> Self {
+        self.deprecated = Some(message.into());
+        self
     }
 }
 
@@ -58,6 +78,8 @@ impl ToolDef {
 #[derive(Debug, Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, ToolDef>,
+    compiled: HashMap<String, CompiledSchema>,
+    versions: HashMap<String, Vec<ToolDef>>,
 }
 
 impl ToolRegistry {
@@ -67,7 +89,22 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: ToolDef) {
-        tracing::debug!(tool = %tool.name, "tool registered");
+        tracing::debug!(tool = %tool.name, version = ?tool.version, "tool registered");
+        match CompiledSchema::compile(&tool.input_schema) {
+            Ok(compiled) => {
+                self.compiled.insert(tool.name.clone(), compiled);
+            }
+            Err(e) => {
+                tracing::warn!(tool = %tool.name, error = %e, "failed to compile schema, using fallback");
+            }
+        }
+        // Track versioned tools.
+        if tool.version.is_some() {
+            self.versions
+                .entry(tool.name.clone())
+                .or_default()
+                .push(tool.clone());
+        }
         self.tools.insert(tool.name.clone(), tool);
     }
 
@@ -99,16 +136,71 @@ impl ToolRegistry {
         self.tools.contains_key(name)
     }
 
-    /// Validate params against a tool's schema (basic required-field check).
+    /// Look up a specific version of a tool.
+    #[must_use]
+    pub fn get_versioned(&self, name: &str, version: &str) -> Option<&ToolDef> {
+        self.versions
+            .get(name)?
+            .iter()
+            .find(|t| t.version.as_deref() == Some(version))
+    }
+
+    /// List all registered versions of a tool.
+    #[must_use]
+    pub fn list_versions(&self, name: &str) -> Vec<&ToolDef> {
+        self.versions
+            .get(name)
+            .map(|v| v.iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// Remove a tool from the registry.
+    pub fn deregister(&mut self, name: &str) -> Option<ToolDef> {
+        self.compiled.remove(name);
+        self.versions.remove(name);
+        let removed = self.tools.remove(name);
+        if removed.is_some() {
+            tracing::debug!(tool = name, "tool deregistered");
+        }
+        removed
+    }
+
+    /// Mark a tool as deprecated with a message.
+    pub fn deprecate(&mut self, name: &str, message: impl Into<String>) {
+        if let Some(tool) = self.tools.get_mut(name) {
+            let msg = message.into();
+            tracing::info!(tool = name, message = %msg, "tool deprecated");
+            tool.deprecated = Some(msg);
+        }
+    }
+
+    /// Validate params against a tool's compiled schema.
+    ///
+    /// Performs full type checking, enum validation, and bounds checking
+    /// when property schemas are defined. Falls back to required-field-only
+    /// validation when no compiled schema is available.
     pub fn validate_params(
         &self,
         tool_name: &str,
         params: &serde_json::Value,
     ) -> crate::Result<()> {
-        let tool = self
-            .get(tool_name)
-            .ok_or_else(|| crate::BoteError::ToolNotFound(tool_name.into()))?;
+        if !self.tools.contains_key(tool_name) {
+            return Err(crate::BoteError::ToolNotFound(tool_name.into()));
+        }
 
+        // Use compiled schema if available.
+        if let Some(compiled) = self.compiled.get(tool_name) {
+            if let Err(violations) = compiled.validate(params) {
+                return Err(crate::BoteError::SchemaViolation {
+                    tool: tool_name.into(),
+                    violations,
+                });
+            }
+            return Ok(());
+        }
+
+        // Fallback: basic required-field check.
+        let tool = &self.tools[tool_name];
         let map = match params {
             serde_json::Value::Object(map) => map,
             _ => {
@@ -145,6 +237,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec!["path".into()],
             },
+            version: None,
+            deprecated: None,
         }
     }
 
@@ -241,6 +335,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec![],
             },
+            version: None,
+            deprecated: None,
         });
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.get("dup").unwrap().description, "updated");
@@ -259,6 +355,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec![],
             },
+            version: None,
+            deprecated: None,
         });
         assert!(reg.validate_params("open", &serde_json::json!({})).is_ok());
     }

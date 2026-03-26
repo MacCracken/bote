@@ -6,35 +6,35 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## v0.23.3 — TypeScript Bridge (current)
+## v0.23.3 — TypeScript Bridge (done)
 
 ### TypeScript bridge
-- [ ] HTTP bridge server — Rust bote core exposes tools via HTTP, SY's TypeScript calls it
-- [ ] Tool result serialization compatible with SY's MCP format
-- [ ] Health endpoint for bridge liveness
+- [x] HTTP bridge server — Rust bote core exposes tools via HTTP, SY's TypeScript calls it
+- [x] Tool result serialization compatible with SY's MCP format
+- [x] Health endpoint for bridge liveness
 
 ### Cross-node discovery
-- [ ] Cross-node tool discovery via majra
+- [x] Cross-node tool discovery via majra
 
 ---
 
-## v0.24.3 — Advanced Registry
+## v0.24.3 — Advanced Registry (done)
 
 ### Schema validation
-- [ ] Full JSON Schema validation (not just required fields)
-- [ ] Type checking (string, number, boolean, array, object)
-- [ ] Enum constraints
-- [ ] Default values
+- [x] Full JSON Schema validation (not just required fields)
+- [x] Type checking (string, number, boolean, array, object)
+- [x] Enum constraints
+- [x] Default values
 
 ### Tool versioning
-- [ ] Version field in ToolDef
-- [ ] Capability negotiation — client requests version, server matches
-- [ ] Deprecation warnings for old tool versions
+- [x] Version field in ToolDef
+- [x] Capability negotiation — client requests version, server matches
+- [x] Deprecation warnings for old tool versions
 
 ### Dynamic registration
-- [ ] Runtime tool registration/deregistration
-- [ ] Hot-reload tool handlers without restart
-- [ ] Tool namespacing (project_tool format enforcement)
+- [x] Runtime tool registration/deregistration
+- [x] Hot-reload tool handlers without restart
+- [x] Tool namespacing (project_tool format enforcement)
 
 ---
 

@@ -1,6 +1,6 @@
 [package]
 name = "bote"
-version = "0.22.3"
+version = "0.24.3"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only"
@@ -21,7 +21,9 @@ unix = ["dep:tokio"]
 all-transports = ["http", "ws", "unix"]
 audit = ["dep:libro"]
 events = ["dep:majra"]
-full = ["all-transports", "audit", "events"]
+bridge = ["http"]
+discovery = ["events"]
+full = ["all-transports", "audit", "events", "bridge", "discovery"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

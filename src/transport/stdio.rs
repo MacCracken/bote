@@ -113,6 +113,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec![],
             },
+            version: None,
+            deprecated: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle(
@@ -134,6 +136,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec![],
             },
+            version: None,
+            deprecated: None,
         });
         reg.register(ToolDef {
             name: "echo".into(),
@@ -143,6 +147,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec![],
             },
+            version: None,
+            deprecated: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle(

@@ -228,6 +228,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec![],
             },
+            version: None,
+            deprecated: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle(
@@ -249,6 +251,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec![],
             },
+            version: None,
+            deprecated: None,
         });
         reg.register(ToolDef {
             name: "slow".into(),
@@ -258,6 +262,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec![],
             },
+            version: None,
+            deprecated: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle("echo", Arc::new(|p| serde_json::json!({"echoed": p})));

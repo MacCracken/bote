@@ -15,27 +15,39 @@
 //! | `all-transports` | Enables `http`, `ws`, and `unix` |
 //! | `audit` | Audit logging via libro hash-linked chain |
 //! | `events` | Event publishing via majra pub/sub |
-//! | `full` | All transports + audit + events |
+//! | `bridge` | TypeScript bridge with CORS and MCP result formatting |
+//! | `discovery` | Cross-node tool discovery via majra pub/sub |
+//! | `full` | All transports + audit + events + bridge + discovery |
 //!
 //! None are enabled by default — enable only what you need.
 //!
 //! ## Modules
 //!
 //! - [`protocol`] — JSON-RPC 2.0 types (Request, Response, Error)
-//! - [`registry`] — Tool registry with schema validation and discovery
-//! - [`dispatch`] — Route tool calls to registered handlers
+//! - [`registry`] — Tool registry with schema validation, versioning, and discovery
+//! - [`schema`] — JSON Schema compilation and typed validation
+//! - [`dispatch`] — Route tool calls to registered handlers (with dynamic registration)
 //! - [`stream`] — Streaming primitives (progress, cancellation)
 //! - [`transport`] — Transport layer (stdio, HTTP, WebSocket, Unix socket)
 //! - [`audit`] — Audit logging trait and libro integration
 //! - [`events`] — Event publishing trait and majra integration
+//! - [`bridge`] — TypeScript bridge with CORS and MCP result formatting
+//! - [`discovery`] — Cross-node tool discovery via majra pub/sub
 
 pub mod audit;
 pub mod dispatch;
 pub mod events;
 pub mod protocol;
 pub mod registry;
+pub mod schema;
 pub mod stream;
 pub mod transport;
+
+#[cfg(feature = "bridge")]
+pub mod bridge;
+
+#[cfg(feature = "discovery")]
+pub mod discovery;
 
 mod error;
 pub use error::BoteError;
@@ -45,6 +57,7 @@ pub use dispatch::{DispatchOutcome, Dispatcher};
 pub use events::EventSink;
 pub use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 pub use registry::{ToolDef, ToolRegistry, ToolSchema};
+pub use schema::{CompiledSchema, PropertyDef, SchemaType};
 pub use stream::{
     CancellationToken, ProgressSender, ProgressUpdate, StreamContext, StreamingToolHandler,
 };

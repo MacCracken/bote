@@ -2,6 +2,46 @@
 
 All notable changes to bote are documented here.
 
+## [0.24.3] — 2026-03-26
+
+### Added
+- Full JSON Schema validation: type checking (string, number, integer, boolean, array, object), enum constraints, numeric bounds, nested object/array validation
+- `CompiledSchema` — compile `ToolSchema` into typed representation for fast validation
+- Default value injection via `CompiledSchema::apply_defaults()`
+- `SchemaType`, `PropertyDef` types in new `schema` module
+- `BoteError::SchemaViolation` variant with multiple violation reporting
+- Tool versioning: `version` and `deprecated` fields on `ToolDef`
+- `ToolDef::with_version()` and `ToolDef::with_deprecated()` builder methods
+- `ToolRegistry::get_versioned()`, `list_versions()`, `deprecate()`, `deregister()`
+- Version negotiation in `tools/call` dispatch
+- Deprecation warnings via tracing + event publishing
+- Dynamic tool registration/deregistration via `Dispatcher::register_tool()`, `deregister_tool()`
+- Hot-reload: re-registering a tool atomically replaces its handler
+- Tool namespacing: `project_tool` format enforcement on dynamic registration
+- `TOPIC_TOOL_DEPRECATED` and `TOPIC_TOOL_DEREGISTERED` event topics
+- Schema validation, versioning, and dynamic registration benchmarks
+
+### Changed
+- `Dispatcher` internals migrated to `RwLock` for thread-safe dynamic registration
+- `ToolRegistry::validate_params()` now uses compiled schema for full type validation
+- `tools/list` response includes `version` and `deprecated` fields when present
+
+## [0.23.3] — 2026-03-26
+
+### Added
+- TypeScript bridge module with CORS and MCP result formatting (feature `bridge`)
+- `wrap_tool_result` adapter — converts raw results to SY's `{ content: [{ type, text }] }` envelope
+- Bridge CORS preflight handling for cross-origin TypeScript clients
+- Cross-node tool discovery via majra pub/sub (feature `discovery`)
+- `DiscoveryService` for announcing and subscribing to tool announcements
+- `ToolAnnouncement` type for cross-node tool broadcast
+- New event topics: `bote/tool/announce`, `bote/tool/discovered`
+- Bridge benchmark (`wrap_tool_result` overhead)
+
+### Changed
+- `full` feature now includes `bridge` and `discovery`
+- Transport codec module visibility changed to `pub(crate)` for bridge reuse
+
 ## [0.22.3] — 2026-03-22
 
 ### Added

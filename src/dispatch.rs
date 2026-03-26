@@ -1,7 +1,7 @@
 //! Tool call dispatcher — route JSON-RPC calls to registered handlers.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::audit::{AuditSink, ToolCallEvent};
 use crate::error::BoteError;
@@ -38,10 +38,13 @@ pub enum DispatchOutcome {
 }
 
 /// Dispatcher: routes tool calls to handlers via the registry.
+///
+/// Interior mutability via `RwLock` enables dynamic tool registration
+/// and deregistration without requiring `&mut self`.
 pub struct Dispatcher {
-    registry: ToolRegistry,
-    handlers: HashMap<String, ToolHandler>,
-    streaming_handlers: HashMap<String, StreamingToolHandler>,
+    registry: RwLock<ToolRegistry>,
+    handlers: RwLock<HashMap<String, ToolHandler>>,
+    streaming_handlers: RwLock<HashMap<String, StreamingToolHandler>>,
     audit: Option<Arc<dyn AuditSink>>,
     events: Option<Arc<dyn EventSink>>,
 }
@@ -50,9 +53,9 @@ impl Dispatcher {
     #[must_use]
     pub fn new(registry: ToolRegistry) -> Self {
         Self {
-            registry,
-            handlers: HashMap::new(),
-            streaming_handlers: HashMap::new(),
+            registry: RwLock::new(registry),
+            handlers: RwLock::new(HashMap::new()),
+            streaming_handlers: RwLock::new(HashMap::new()),
             audit: None,
             events: None,
         }
@@ -94,7 +97,10 @@ impl Dispatcher {
                 serde_json::json!({"tool_name": &name}),
             );
         }
-        self.handlers.insert(name, handler);
+        self.handlers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name, handler);
     }
 
     /// Register a streaming handler for a tool.
@@ -110,14 +116,20 @@ impl Dispatcher {
                 serde_json::json!({"tool_name": &name}),
             );
         }
-        self.streaming_handlers.insert(name, handler);
+        self.streaming_handlers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name, handler);
     }
 
     /// Returns `true` if the tool has a streaming handler registered.
     #[inline]
     #[must_use]
     pub fn is_streaming_tool(&self, name: &str) -> bool {
-        self.streaming_handlers.contains_key(name)
+        self.streaming_handlers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(name)
     }
 
     /// Extract and validate the tool name from a tools/call request.
@@ -137,6 +149,8 @@ impl Dispatcher {
     #[must_use]
     pub fn dispatch(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
         let id = request.id.clone().unwrap_or(serde_json::Value::Null);
+        let registry = self.registry.read().unwrap_or_else(|e| e.into_inner());
+        let handlers = self.handlers.read().unwrap_or_else(|e| e.into_inner());
 
         let response = match request.method.as_str() {
             "initialize" => {
@@ -157,16 +171,22 @@ impl Dispatcher {
                 )
             }
             "tools/list" => {
-                let tools: Vec<serde_json::Value> = self
-                    .registry
+                let tools: Vec<serde_json::Value> = registry
                     .list()
                     .iter()
                     .map(|t| {
-                        serde_json::json!({
+                        let mut entry = serde_json::json!({
                             "name": t.name,
                             "description": t.description,
                             "inputSchema": t.input_schema,
-                        })
+                        });
+                        if let Some(version) = &t.version {
+                            entry["version"] = serde_json::json!(version);
+                        }
+                        if let Some(deprecated) = &t.deprecated {
+                            entry["deprecated"] = serde_json::json!(deprecated);
+                        }
+                        entry
                     })
                     .collect();
                 JsonRpcResponse::success(id, serde_json::json!({ "tools": tools }))
@@ -176,6 +196,32 @@ impl Dispatcher {
                     Ok(name) => name,
                     Err(e) => return Some(JsonRpcResponse::error(id, e.rpc_code(), e.to_string())),
                 };
+
+                // Version negotiation: if client requests a specific version, resolve it.
+                let requested_version = request.params.get("version").and_then(|v| v.as_str());
+                if let Some(version) = requested_version
+                    && registry.get_versioned(tool_name, version).is_none()
+                {
+                    let err = BoteError::InvalidParams {
+                        tool: tool_name.into(),
+                        reason: format!("version '{version}' not found"),
+                    };
+                    return Some(JsonRpcResponse::error(id, err.rpc_code(), err.to_string()));
+                }
+
+                // Deprecation warning.
+                if let Some(tool) = registry.get(tool_name)
+                    && let Some(msg) = &tool.deprecated
+                {
+                    tracing::warn!(tool = tool_name, message = %msg, "calling deprecated tool");
+                    if let Some(events) = &self.events {
+                        events.publish(
+                            events::TOPIC_TOOL_DEPRECATED,
+                            serde_json::json!({"tool_name": tool_name, "message": msg}),
+                        );
+                    }
+                }
+
                 let arguments = request
                     .params
                     .get("arguments")
@@ -183,13 +229,13 @@ impl Dispatcher {
                     .unwrap_or(serde_json::json!({}));
 
                 // Validate
-                if let Err(e) = self.registry.validate_params(tool_name, &arguments) {
+                if let Err(e) = registry.validate_params(tool_name, &arguments) {
                     tracing::warn!(tool = tool_name, error = %e, "param validation failed");
                     return Some(JsonRpcResponse::error(id, e.rpc_code(), e.to_string()));
                 }
 
                 // Dispatch with timing
-                if let Some(handler) = self.handlers.get(tool_name) {
+                if let Some(handler) = handlers.get(tool_name) {
                     tracing::debug!(tool = tool_name, "dispatching tool call");
                     let start = std::time::Instant::now();
                     let result = handler(arguments);
@@ -258,33 +304,167 @@ impl Dispatcher {
             .unwrap_or(serde_json::json!({}));
 
         // Validate params.
-        if let Err(e) = self.registry.validate_params(tool_name, &arguments) {
-            return DispatchOutcome::Immediate(Some(JsonRpcResponse::error(
-                id,
-                e.rpc_code(),
-                e.to_string(),
-            )));
+        {
+            let registry = self.registry.read().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = registry.validate_params(tool_name, &arguments) {
+                return DispatchOutcome::Immediate(Some(JsonRpcResponse::error(
+                    id,
+                    e.rpc_code(),
+                    e.to_string(),
+                )));
+            }
         }
 
         // Streaming handler takes priority.
-        if let Some(handler) = self.streaming_handlers.get(tool_name) {
-            if request.is_notification() {
-                return DispatchOutcome::Immediate(None);
-            }
+        {
+            let streaming = self
+                .streaming_handlers
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(handler) = streaming.get(tool_name) {
+                if request.is_notification() {
+                    return DispatchOutcome::Immediate(None);
+                }
 
-            let (ctx, progress_rx) = stream::make_stream_context();
-            return DispatchOutcome::Streaming {
-                request_id: id,
-                progress_rx,
-                ctx,
-                handler: Arc::clone(handler),
-                arguments,
-            };
+                let (ctx, progress_rx) = stream::make_stream_context();
+                return DispatchOutcome::Streaming {
+                    request_id: id,
+                    progress_rx,
+                    ctx,
+                    handler: Arc::clone(handler),
+                    arguments,
+                };
+            }
         }
 
         // Fall back to sync dispatch.
         DispatchOutcome::Immediate(self.dispatch(request))
     }
+
+    // --- Dynamic registration API (takes &self) ---
+
+    /// Dynamically register a tool and its handler at runtime.
+    ///
+    /// Tool names must follow the `project_tool` naming convention
+    /// (alphanumeric + underscore, at least one underscore).
+    /// If a tool with the same name exists, its handler is hot-reloaded.
+    pub fn register_tool(
+        &self,
+        tool: crate::registry::ToolDef,
+        handler: ToolHandler,
+    ) -> crate::Result<()> {
+        validate_tool_name(&tool.name)?;
+        let name = tool.name.clone();
+
+        let is_reload = self
+            .handlers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&name);
+
+        self.registry
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(tool);
+        self.handlers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.clone(), handler);
+
+        if is_reload {
+            tracing::info!(tool = %name, "tool handler hot-reloaded");
+        } else if let Some(events) = &self.events {
+            events.publish(
+                events::TOPIC_TOOL_REGISTERED,
+                serde_json::json!({"tool_name": &name}),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Dynamically register a streaming tool and its handler at runtime.
+    pub fn register_streaming_tool(
+        &self,
+        tool: crate::registry::ToolDef,
+        handler: StreamingToolHandler,
+    ) -> crate::Result<()> {
+        validate_tool_name(&tool.name)?;
+        let name = tool.name.clone();
+
+        self.registry
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(tool);
+        self.streaming_handlers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.clone(), handler);
+
+        if let Some(events) = &self.events {
+            events.publish(
+                events::TOPIC_TOOL_REGISTERED,
+                serde_json::json!({"tool_name": &name}),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Remove a tool and its handler at runtime.
+    pub fn deregister_tool(&self, name: &str) -> crate::Result<()> {
+        let removed = self
+            .registry
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .deregister(name);
+        self.handlers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+        self.streaming_handlers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+
+        if removed.is_some() {
+            tracing::info!(tool = name, "tool deregistered");
+            if let Some(events) = &self.events {
+                events.publish(
+                    events::TOPIC_TOOL_DEREGISTERED,
+                    serde_json::json!({"tool_name": name}),
+                );
+            }
+            Ok(())
+        } else {
+            Err(BoteError::ToolNotFound(name.into()))
+        }
+    }
+}
+
+/// Validate a tool name follows the `project_tool` convention.
+///
+/// Must be alphanumeric + underscore, with at least one underscore.
+fn validate_tool_name(name: &str) -> crate::Result<()> {
+    if name.is_empty() {
+        return Err(BoteError::InvalidParams {
+            tool: String::new(),
+            reason: "tool name must not be empty".into(),
+        });
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(BoteError::InvalidParams {
+            tool: name.into(),
+            reason: "tool name must be alphanumeric + underscore".into(),
+        });
+    }
+    if !name.contains('_') {
+        return Err(BoteError::InvalidParams {
+            tool: name.into(),
+            reason: "tool name must contain at least one underscore (project_tool format)".into(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -302,6 +482,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec![],
             },
+            version: None,
+            deprecated: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle("echo", Arc::new(|params| {
@@ -450,6 +632,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec![],
             },
+            version: None,
+            deprecated: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle("noop", Arc::new(|_| serde_json::json!({"ok": true})));
@@ -472,6 +656,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec!["path".into()],
             },
+            version: None,
+            deprecated: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle("strict", Arc::new(|_| serde_json::json!({"ok": true})));
@@ -504,6 +690,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec![],
             },
+            version: None,
+            deprecated: None,
         });
         reg.register(ToolDef {
             name: "echo".into(),
@@ -513,6 +701,8 @@ mod tests {
                 properties: HashMap::new(),
                 required: vec![],
             },
+            version: None,
+            deprecated: None,
         });
         let mut d = Dispatcher::new(reg);
         // Sync handler for echo.
@@ -618,6 +808,8 @@ mod tests {
                     properties: HashMap::new(),
                     required: vec![],
                 },
+                version: None,
+                deprecated: None,
             });
             let mut d = Dispatcher::new(reg);
             d.handle_streaming(
@@ -652,5 +844,224 @@ mod tests {
             }
             _ => panic!("expected Streaming"),
         }
+    }
+
+    // --- Versioning tests ---
+
+    #[test]
+    fn version_negotiation_resolves() {
+        let mut reg = ToolRegistry::new();
+        let tool_v1 = ToolDef::new(
+            "echo",
+            "Echo v1",
+            ToolSchema::new("object", HashMap::new(), vec![]),
+        )
+        .with_version("1.0.0");
+        let tool_v2 = ToolDef::new(
+            "echo",
+            "Echo v2",
+            ToolSchema::new("object", HashMap::new(), vec![]),
+        )
+        .with_version("2.0.0");
+        reg.register(tool_v1);
+        reg.register(tool_v2);
+
+        assert!(reg.get_versioned("echo", "1.0.0").is_some());
+        assert!(reg.get_versioned("echo", "2.0.0").is_some());
+        assert!(reg.get_versioned("echo", "3.0.0").is_none());
+        assert_eq!(reg.list_versions("echo").len(), 2);
+    }
+
+    #[test]
+    fn dispatch_rejects_unknown_version() {
+        let d = make_dispatcher();
+        let req = JsonRpcRequest::new(1, "tools/call")
+            .with_params(serde_json::json!({"name": "echo", "version": "9.9.9", "arguments": {}}));
+        let resp = d.dispatch(&req).unwrap();
+        assert_eq!(resp.error.unwrap().code, -32602);
+    }
+
+    #[test]
+    fn deprecation_warning_still_dispatches() {
+        let mut reg = ToolRegistry::new();
+        reg.register(
+            ToolDef::new(
+                "old_tool",
+                "Old",
+                ToolSchema::new("object", HashMap::new(), vec![]),
+            )
+            .with_deprecated("use new_tool instead"),
+        );
+        let mut d = Dispatcher::new(reg);
+        d.handle("old_tool", Arc::new(|_| serde_json::json!({"ok": true})));
+
+        let req = JsonRpcRequest::new(1, "tools/call")
+            .with_params(serde_json::json!({"name": "old_tool", "arguments": {}}));
+        let resp = d.dispatch(&req).unwrap();
+        assert!(resp.result.is_some()); // Still works despite deprecation.
+    }
+
+    #[test]
+    fn tools_list_includes_version_info() {
+        let mut reg = ToolRegistry::new();
+        reg.register(
+            ToolDef::new(
+                "versioned",
+                "Versioned tool",
+                ToolSchema::new("object", HashMap::new(), vec![]),
+            )
+            .with_version("1.0.0")
+            .with_deprecated("use v2"),
+        );
+        let d = Dispatcher::new(reg);
+        let req = JsonRpcRequest::new(1, "tools/list");
+        let resp = d.dispatch(&req).unwrap();
+        let result = resp.result.unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["version"], "1.0.0");
+        assert_eq!(tools[0]["deprecated"], "use v2");
+    }
+
+    // --- Dynamic registration tests ---
+
+    #[test]
+    fn register_tool_dynamic() {
+        let reg = ToolRegistry::new();
+        let d = Dispatcher::new(reg);
+        let tool = ToolDef::new(
+            "my_echo",
+            "Echo",
+            ToolSchema::new("object", HashMap::new(), vec![]),
+        );
+        d.register_tool(tool, Arc::new(|p| serde_json::json!({"echoed": p})))
+            .unwrap();
+
+        let req = JsonRpcRequest::new(1, "tools/call")
+            .with_params(serde_json::json!({"name": "my_echo", "arguments": {"msg": "hi"}}));
+        let resp = d.dispatch(&req).unwrap();
+        assert!(resp.result.is_some());
+    }
+
+    #[test]
+    fn deregister_tool_removes_it() {
+        let reg = ToolRegistry::new();
+        let d = Dispatcher::new(reg);
+        let tool = ToolDef::new(
+            "temp_tool",
+            "Temp",
+            ToolSchema::new("object", HashMap::new(), vec![]),
+        );
+        d.register_tool(tool, Arc::new(|_| serde_json::json!({"ok": true})))
+            .unwrap();
+        d.deregister_tool("temp_tool").unwrap();
+
+        let req = JsonRpcRequest::new(1, "tools/call")
+            .with_params(serde_json::json!({"name": "temp_tool", "arguments": {}}));
+        let resp = d.dispatch(&req).unwrap();
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn deregister_nonexistent_returns_error() {
+        let d = Dispatcher::new(ToolRegistry::new());
+        assert!(d.deregister_tool("nope").is_err());
+    }
+
+    #[test]
+    fn hot_reload_replaces_handler() {
+        let reg = ToolRegistry::new();
+        let d = Dispatcher::new(reg);
+        let tool = ToolDef::new(
+            "reload_tool",
+            "V1",
+            ToolSchema::new("object", HashMap::new(), vec![]),
+        );
+        d.register_tool(tool, Arc::new(|_| serde_json::json!({"version": 1})))
+            .unwrap();
+
+        // Hot-reload with new handler.
+        let tool2 = ToolDef::new(
+            "reload_tool",
+            "V2",
+            ToolSchema::new("object", HashMap::new(), vec![]),
+        );
+        d.register_tool(tool2, Arc::new(|_| serde_json::json!({"version": 2})))
+            .unwrap();
+
+        let req = JsonRpcRequest::new(1, "tools/call")
+            .with_params(serde_json::json!({"name": "reload_tool", "arguments": {}}));
+        let resp = d.dispatch(&req).unwrap();
+        assert_eq!(resp.result.unwrap()["version"], 2);
+    }
+
+    #[test]
+    fn namespace_validation_accepts_valid() {
+        let d = Dispatcher::new(ToolRegistry::new());
+        let tool = ToolDef::new(
+            "project_scan",
+            "Scan",
+            ToolSchema::new("object", HashMap::new(), vec![]),
+        );
+        assert!(
+            d.register_tool(tool, Arc::new(|_| serde_json::json!({})))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn namespace_validation_rejects_no_underscore() {
+        let d = Dispatcher::new(ToolRegistry::new());
+        let tool = ToolDef::new(
+            "badname",
+            "Bad",
+            ToolSchema::new("object", HashMap::new(), vec![]),
+        );
+        assert!(
+            d.register_tool(tool, Arc::new(|_| serde_json::json!({})))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn namespace_validation_rejects_special_chars() {
+        let d = Dispatcher::new(ToolRegistry::new());
+        let tool = ToolDef::new(
+            "my-tool",
+            "Bad",
+            ToolSchema::new("object", HashMap::new(), vec![]),
+        );
+        assert!(
+            d.register_tool(tool, Arc::new(|_| serde_json::json!({})))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn concurrent_dynamic_registration() {
+        let d = Arc::new(Dispatcher::new(ToolRegistry::new()));
+        let mut handles = vec![];
+
+        for i in 0..10 {
+            let d = Arc::clone(&d);
+            handles.push(std::thread::spawn(move || {
+                let tool = ToolDef::new(
+                    format!("thread_{i}_tool"),
+                    format!("Tool {i}"),
+                    ToolSchema::new("object", HashMap::new(), vec![]),
+                );
+                d.register_tool(tool, Arc::new(move |_| serde_json::json!({"thread": i})))
+                    .unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All 10 tools should be registered.
+        let req = JsonRpcRequest::new(1, "tools/list");
+        let resp = d.dispatch(&req).unwrap();
+        let tools = resp.result.unwrap()["tools"].as_array().unwrap().len();
+        assert_eq!(tools, 10);
     }
 }

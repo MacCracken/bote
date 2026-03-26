@@ -9,6 +9,14 @@ pub const TOPIC_TOOL_COMPLETED: &str = "bote/tool/completed";
 pub const TOPIC_TOOL_FAILED: &str = "bote/tool/failed";
 /// Event topic for tool registration.
 pub const TOPIC_TOOL_REGISTERED: &str = "bote/tool/registered";
+/// Event topic for tool announcements (cross-node discovery).
+pub const TOPIC_TOOL_ANNOUNCE: &str = "bote/tool/announce";
+/// Event topic for discovered tools from other nodes.
+pub const TOPIC_TOOL_DISCOVERED: &str = "bote/tool/discovered";
+/// Event topic for tool deprecation warnings.
+pub const TOPIC_TOOL_DEPRECATED: &str = "bote/tool/deprecated";
+/// Event topic for tool deregistration.
+pub const TOPIC_TOOL_DEREGISTERED: &str = "bote/tool/deregistered";
 
 /// Trait for event publishing backends.
 pub trait EventSink: Send + Sync {

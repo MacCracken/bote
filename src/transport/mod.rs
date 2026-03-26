@@ -1,6 +1,6 @@
 //! Transport layer — codec, stdio, and feature-gated network transports.
 
-mod codec;
+pub(crate) mod codec;
 pub use codec::{parse_request, process_message, serialize_response};
 
 pub mod stdio;
