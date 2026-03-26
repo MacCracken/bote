@@ -16,8 +16,16 @@ use crate::stream::CancellationToken;
 use crate::transport::codec;
 
 /// Configuration for the WebSocket transport.
+#[non_exhaustive]
 pub struct WsConfig {
     pub addr: SocketAddr,
+}
+
+impl WsConfig {
+    #[must_use]
+    pub fn new(addr: SocketAddr) -> Self {
+        Self { addr }
+    }
 }
 
 /// Start a WebSocket server that accepts JSON-RPC messages.

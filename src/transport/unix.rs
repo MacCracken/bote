@@ -15,8 +15,16 @@ use crate::stream::CancellationToken;
 use crate::transport::codec;
 
 /// Configuration for the Unix socket transport.
+#[non_exhaustive]
 pub struct UnixConfig {
     pub path: PathBuf,
+}
+
+impl UnixConfig {
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
 }
 
 /// Start a Unix domain socket server that accepts newline-delimited JSON-RPC.

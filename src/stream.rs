@@ -11,6 +11,7 @@ pub struct CancellationToken {
 }
 
 impl CancellationToken {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -18,11 +19,14 @@ impl CancellationToken {
     }
 
     /// Signal cancellation.
+    #[inline]
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
 
     /// Check whether cancellation has been requested.
+    #[inline]
+    #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
@@ -36,12 +40,24 @@ impl Default for CancellationToken {
 
 /// A progress update emitted by a streaming handler.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct ProgressUpdate {
     pub progress: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+impl ProgressUpdate {
+    #[must_use]
+    pub fn new(progress: u64, total: Option<u64>, message: Option<String>) -> Self {
+        Self {
+            progress,
+            total,
+            message,
+        }
+    }
 }
 
 /// Sender half for emitting progress updates from a streaming handler.
@@ -56,6 +72,7 @@ impl ProgressSender {
     }
 
     /// Send a progress update. Silently ignores disconnected receivers.
+    #[inline]
     pub fn send(&self, update: ProgressUpdate) {
         let _ = self.tx.send(update);
     }
@@ -95,6 +112,7 @@ pub type StreamingToolHandler =
     Arc<dyn Fn(serde_json::Value, StreamContext) -> serde_json::Value + Send + Sync>;
 
 /// Build a JSON-RPC notification for a progress update.
+#[must_use]
 pub fn progress_notification(
     request_id: &serde_json::Value,
     update: &ProgressUpdate,

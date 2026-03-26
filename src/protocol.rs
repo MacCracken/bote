@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 /// For normal requests, `id` is `Some(...)`. For notifications (no response
 /// expected), `id` is `None` and the field is omitted during serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -17,6 +18,7 @@ pub struct JsonRpcRequest {
 }
 
 impl JsonRpcRequest {
+    #[must_use]
     pub fn new(id: impl Into<serde_json::Value>, method: impl Into<String>) -> Self {
         Self {
             jsonrpc: "2.0".into(),
@@ -27,6 +29,7 @@ impl JsonRpcRequest {
     }
 
     /// Create a notification (a request with no `id` — the server must not reply).
+    #[must_use]
     pub fn notification(method: impl Into<String>) -> Self {
         Self {
             jsonrpc: "2.0".into(),
@@ -37,10 +40,13 @@ impl JsonRpcRequest {
     }
 
     /// Returns `true` if this is a notification (no `id` field).
+    #[inline]
+    #[must_use]
     pub fn is_notification(&self) -> bool {
         self.id.is_none()
     }
 
+    #[must_use]
     pub fn with_params(mut self, params: serde_json::Value) -> Self {
         self.params = params;
         self
@@ -49,6 +55,7 @@ impl JsonRpcRequest {
 
 /// JSON-RPC 2.0 response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
     pub id: serde_json::Value,
@@ -59,6 +66,7 @@ pub struct JsonRpcResponse {
 }
 
 impl JsonRpcResponse {
+    #[must_use]
     pub fn success(id: serde_json::Value, result: serde_json::Value) -> Self {
         Self {
             jsonrpc: "2.0".into(),
@@ -68,6 +76,7 @@ impl JsonRpcResponse {
         }
     }
 
+    #[must_use]
     pub fn error(id: serde_json::Value, code: i32, message: impl Into<String>) -> Self {
         Self {
             jsonrpc: "2.0".into(),
@@ -84,11 +93,23 @@ impl JsonRpcResponse {
 
 /// JSON-RPC 2.0 error object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct JsonRpcError {
     pub code: i32,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+}
+
+impl JsonRpcError {
+    #[must_use]
+    pub fn new(code: i32, message: impl Into<String>, data: Option<serde_json::Value>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data,
+        }
+    }
 }
 
 #[cfg(test)]

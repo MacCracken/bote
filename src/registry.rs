@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 /// Tool input schema (JSON Schema subset).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ToolSchema {
     #[serde(rename = "type")]
     pub schema_type: String,
@@ -16,10 +17,41 @@ pub struct ToolSchema {
 
 /// Definition of a registered MCP tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ToolDef {
     pub name: String,
     pub description: String,
     pub input_schema: ToolSchema,
+}
+
+impl ToolSchema {
+    #[must_use]
+    pub fn new(
+        schema_type: impl Into<String>,
+        properties: HashMap<String, serde_json::Value>,
+        required: Vec<String>,
+    ) -> Self {
+        Self {
+            schema_type: schema_type.into(),
+            properties,
+            required,
+        }
+    }
+}
+
+impl ToolDef {
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: ToolSchema,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+        }
+    }
 }
 
 /// Registry of MCP tools.
@@ -29,6 +61,7 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -38,21 +71,30 @@ impl ToolRegistry {
         self.tools.insert(tool.name.clone(), tool);
     }
 
+    #[inline]
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&ToolDef> {
         self.tools.get(name)
     }
 
+    #[must_use]
     pub fn list(&self) -> Vec<&ToolDef> {
         self.tools.values().collect()
     }
 
+    #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.tools.len()
     }
+    #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
 
+    #[inline]
+    #[must_use]
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)
     }

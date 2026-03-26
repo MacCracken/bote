@@ -21,6 +21,7 @@ pub type ToolHandler = Arc<dyn Fn(serde_json::Value) -> serde_json::Value + Send
 
 /// Outcome of `dispatch_streaming` — either an immediate response or a
 /// streaming context that the transport drives.
+#[non_exhaustive]
 pub enum DispatchOutcome {
     /// Immediate response (or `None` for notifications).
     Immediate(Option<JsonRpcResponse>),
@@ -46,6 +47,7 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
+    #[must_use]
     pub fn new(registry: ToolRegistry) -> Self {
         Self {
             registry,
@@ -112,6 +114,8 @@ impl Dispatcher {
     }
 
     /// Returns `true` if the tool has a streaming handler registered.
+    #[inline]
+    #[must_use]
     pub fn is_streaming_tool(&self, name: &str) -> bool {
         self.streaming_handlers.contains_key(name)
     }
@@ -130,6 +134,7 @@ impl Dispatcher {
     }
 
     /// Dispatch a JSON-RPC request. Returns `None` for notifications.
+    #[must_use]
     pub fn dispatch(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
         let id = request.id.clone().unwrap_or(serde_json::Value::Null);
 
@@ -228,6 +233,7 @@ impl Dispatcher {
 
     /// Dispatch with streaming support. Returns `DispatchOutcome::Streaming` for
     /// tools with streaming handlers, `DispatchOutcome::Immediate` otherwise.
+    #[must_use]
     pub fn dispatch_streaming(&self, request: &JsonRpcRequest) -> DispatchOutcome {
         // Only tools/call can be streaming.
         if request.method != "tools/call" {

@@ -7,6 +7,7 @@ use serde::Serialize;
 
 /// A tool call event to be logged.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct ToolCallEvent {
     pub tool_name: String,
     pub duration_ms: u64,
@@ -15,6 +16,25 @@ pub struct ToolCallEvent {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caller_id: Option<String>,
+}
+
+impl ToolCallEvent {
+    #[must_use]
+    pub fn new(
+        tool_name: impl Into<String>,
+        duration_ms: u64,
+        success: bool,
+        error: Option<String>,
+        caller_id: Option<String>,
+    ) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            duration_ms,
+            success,
+            error,
+            caller_id,
+        }
+    }
 }
 
 /// Trait for audit logging backends.
@@ -43,6 +63,7 @@ mod libro_impl {
     }
 
     impl LibroAudit {
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 chain: Mutex::new(AuditChain::new()),
@@ -50,6 +71,7 @@ mod libro_impl {
         }
 
         /// Create from an existing audit chain.
+        #[must_use]
         pub fn with_chain(chain: AuditChain) -> Self {
             Self {
                 chain: Mutex::new(chain),
@@ -57,6 +79,7 @@ mod libro_impl {
         }
 
         /// Access the underlying chain (e.g. for verification or export).
+        #[must_use = "access the underlying audit chain"]
         pub fn chain(&self) -> std::sync::MutexGuard<'_, AuditChain> {
             self.chain.lock().unwrap_or_else(|e| e.into_inner())
         }

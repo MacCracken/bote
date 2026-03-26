@@ -34,6 +34,7 @@ mod majra_impl {
     }
 
     impl MajraEvents {
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 pubsub: PubSub::new(),
@@ -41,11 +42,13 @@ mod majra_impl {
         }
 
         /// Create from an existing PubSub instance.
+        #[must_use]
         pub fn with_pubsub(pubsub: PubSub) -> Self {
             Self { pubsub }
         }
 
         /// Access the underlying PubSub (e.g. for subscribing).
+        #[must_use]
         pub fn pubsub(&self) -> &PubSub {
             &self.pubsub
         }

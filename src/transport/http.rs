@@ -20,8 +20,16 @@ use crate::stream::CancellationToken;
 use crate::transport::codec;
 
 /// Configuration for the HTTP transport.
+#[non_exhaustive]
 pub struct HttpConfig {
     pub addr: SocketAddr,
+}
+
+impl HttpConfig {
+    #[must_use]
+    pub fn new(addr: SocketAddr) -> Self {
+        Self { addr }
+    }
 }
 
 #[derive(Clone)]
@@ -57,6 +65,7 @@ pub async fn serve(
 }
 
 /// Build the axum router. Exposed for testing without binding a port.
+#[must_use = "build the axum router for the HTTP transport"]
 pub fn router(dispatcher: Arc<Dispatcher>) -> Router {
     let state = AppState {
         dispatcher,

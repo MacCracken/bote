@@ -10,15 +10,18 @@ fn to_json(value: &impl serde::Serialize) -> String {
 }
 
 /// Parse a JSON-RPC request from a line of input.
+#[inline]
 pub fn parse_request(line: &str) -> crate::Result<JsonRpcRequest> {
     Ok(serde_json::from_str(line)?)
 }
 
 /// Serialize a JSON-RPC response to a line of output.
+#[inline]
 pub fn serialize_response(response: &JsonRpcResponse) -> crate::Result<String> {
     Ok(serde_json::to_string(response)?)
 }
 
+#[must_use]
 /// Process a raw JSON-RPC message (single request, batch, or notification).
 ///
 /// Returns `Some(json_string)` for responses, or `None` if no response is

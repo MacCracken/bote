@@ -9,15 +9,11 @@ use std::sync::Arc;
 fn make_dispatcher(n_tools: usize) -> Dispatcher {
     let mut reg = ToolRegistry::new();
     for i in 0..n_tools {
-        reg.register(ToolDef {
-            name: format!("tool_{i}"),
-            description: format!("Tool {i}"),
-            input_schema: ToolSchema {
-                schema_type: "object".into(),
-                properties: HashMap::new(),
-                required: vec![],
-            },
-        });
+        reg.register(ToolDef::new(
+            format!("tool_{i}"),
+            format!("Tool {i}"),
+            ToolSchema::new("object", HashMap::new(), vec![]),
+        ));
     }
     let mut d = Dispatcher::new(reg);
     for i in 0..n_tools {
@@ -86,15 +82,11 @@ fn bench_process_message_batch(c: &mut Criterion) {
 
 fn bench_dispatch_streaming_setup(c: &mut Criterion) {
     let mut reg = ToolRegistry::new();
-    reg.register(ToolDef {
-        name: "stream_tool".into(),
-        description: "Streaming".into(),
-        input_schema: ToolSchema {
-            schema_type: "object".into(),
-            properties: HashMap::new(),
-            required: vec![],
-        },
-    });
+    reg.register(ToolDef::new(
+        "stream_tool",
+        "Streaming",
+        ToolSchema::new("object", HashMap::new(), vec![]),
+    ));
     let mut d = Dispatcher::new(reg);
     d.handle_streaming(
         "stream_tool",
@@ -110,15 +102,11 @@ fn bench_dispatch_streaming_setup(c: &mut Criterion) {
 
 fn bench_validate_params(c: &mut Criterion) {
     let mut reg = ToolRegistry::new();
-    reg.register(ToolDef {
-        name: "strict".into(),
-        description: "Strict".into(),
-        input_schema: ToolSchema {
-            schema_type: "object".into(),
-            properties: HashMap::new(),
-            required: vec!["path".into(), "mode".into()],
-        },
-    });
+    reg.register(ToolDef::new(
+        "strict",
+        "Strict",
+        ToolSchema::new("object", HashMap::new(), vec!["path".into(), "mode".into()]),
+    ));
     let params = serde_json::json!({"path": "/tmp/foo", "mode": "read"});
 
     c.bench_function("validate_params_2_required", |b| {

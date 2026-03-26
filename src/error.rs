@@ -27,6 +27,8 @@ pub enum BoteError {
 
 impl BoteError {
     /// Convert to a JSON-RPC error code.
+    #[inline]
+    #[must_use]
     pub fn rpc_code(&self) -> i32 {
         match self {
             Self::Parse(_) => -32700,
