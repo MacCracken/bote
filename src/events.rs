@@ -17,6 +17,15 @@ pub const TOPIC_TOOL_DISCOVERED: &str = "bote/tool/discovered";
 pub const TOPIC_TOOL_DEPRECATED: &str = "bote/tool/deprecated";
 /// Event topic for tool deregistration.
 pub const TOPIC_TOOL_DEREGISTERED: &str = "bote/tool/deregistered";
+/// Event topic for sandbox creation.
+#[cfg(feature = "sandbox")]
+pub const TOPIC_SANDBOX_CREATED: &str = "bote/sandbox/created";
+/// Event topic for sandbox destruction.
+#[cfg(feature = "sandbox")]
+pub const TOPIC_SANDBOX_DESTROYED: &str = "bote/sandbox/destroyed";
+/// Event topic for sandbox errors.
+#[cfg(feature = "sandbox")]
+pub const TOPIC_SANDBOX_ERROR: &str = "bote/sandbox/error";
 
 /// Trait for event publishing backends.
 pub trait EventSink: Send + Sync {

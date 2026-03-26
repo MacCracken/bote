@@ -1,6 +1,6 @@
 [package]
 name = "bote"
-version = "0.24.3"
+version = "0.25.3"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only"
@@ -23,7 +23,8 @@ audit = ["dep:libro"]
 events = ["dep:majra"]
 bridge = ["http"]
 discovery = ["events"]
-full = ["all-transports", "audit", "events", "bridge", "discovery"]
+sandbox = ["dep:kavach", "dep:tokio"]
+full = ["all-transports", "audit", "events", "bridge", "discovery", "sandbox"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -41,6 +42,9 @@ futures-util = { version = "0.3", optional = true }
 libro = { version = "0.22", optional = true }
 majra = { version = "0.22", optional = true }
 
+# Sandbox (optional)
+kavach = { version = "1.0", optional = true, default-features = false }
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "test-util"] }
@@ -49,6 +53,7 @@ tokio-tungstenite = "0.26"
 futures-util = "0.3"
 libro = "0.22"
 majra = "0.22"
+kavach = { version = "1.0", default-features = false }
 
 [[bench]]
 name = "dispatch"

@@ -24,6 +24,8 @@ pub enum BoteError {
         tool: String,
         violations: Vec<String>,
     },
+    #[error("sandbox error for tool '{tool}': {reason}")]
+    SandboxError { tool: String, reason: String },
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -45,6 +47,7 @@ impl BoteError {
             Self::BindFailed(_) => -32003,
             Self::RequestCancelled(_) => -32800,
             Self::SchemaViolation { .. } => -32602,
+            Self::SandboxError { .. } => -32000,
             Self::Json(_) => -32700,
             Self::Io(_) => -32603,
         }

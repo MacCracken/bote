@@ -17,7 +17,8 @@
 //! | `events` | Event publishing via majra pub/sub |
 //! | `bridge` | TypeScript bridge with CORS and MCP result formatting |
 //! | `discovery` | Cross-node tool discovery via majra pub/sub |
-//! | `full` | All transports + audit + events + bridge + discovery |
+//! | `sandbox` | Tool sandboxing via kavach isolation backends |
+//! | `full` | All transports + audit + events + bridge + discovery + sandbox |
 //!
 //! None are enabled by default — enable only what you need.
 //!
@@ -33,6 +34,7 @@
 //! - [`events`] — Event publishing trait and majra integration
 //! - [`bridge`] — TypeScript bridge with CORS and MCP result formatting
 //! - [`discovery`] — Cross-node tool discovery via majra pub/sub
+//! - [`sandbox`] — Tool sandboxing via kavach isolation backends
 
 pub mod audit;
 pub mod dispatch;
@@ -48,6 +50,9 @@ pub mod bridge;
 
 #[cfg(feature = "discovery")]
 pub mod discovery;
+
+#[cfg(feature = "sandbox")]
+pub mod sandbox;
 
 mod error;
 pub use error::BoteError;

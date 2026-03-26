@@ -71,7 +71,7 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ### Advanced
 - [ ] gRPC transport (proto definitions for MCP)
-- [ ] Tool sandboxing via kavach (execute untrusted tool handlers in isolation)
+- [x] Tool sandboxing via kavach (execute untrusted tool handlers in isolation)
 - [ ] Tool marketplace — discover and install tools from mela
 - [ ] AI-powered tool selection — hoosh suggests which tool to call based on intent
 - [ ] Tool composition — chain multiple tools into a workflow via szál

@@ -2,6 +2,18 @@
 
 All notable changes to bote are documented here.
 
+## [0.25.3] — 2026-03-26
+
+### Added
+- Tool sandboxing via kavach (feature `sandbox`)
+- `ToolSandboxConfig` with presets: `basic()`, `strict()`, `noop()`
+- `SandboxExecutor` for running commands in kavach sandboxes
+- `wrap_command()` and `wrap_streaming_command()` handler wrappers
+- `Dispatcher::register_sandboxed_tool()` and `register_sandboxed_streaming_tool()` convenience methods
+- `BoteError::SandboxError` variant for sandbox execution failures
+- Sandbox lifecycle event topics: `bote/sandbox/created`, `bote/sandbox/destroyed`, `bote/sandbox/error`
+- Async-sync bridge with `OnceLock<Runtime>` fallback for non-tokio contexts
+
 ## [0.24.3] — 2026-03-26
 
 ### Added
