@@ -456,10 +456,9 @@ fn full_mcp_flow() {
     let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
     assert!(!tools.is_empty());
 
-    // Call a tool.
-    let tool_name = tools[0]["name"].as_str().unwrap();
+    // Call a tool (use test_echo which has no required params).
     let req = JsonRpcRequest::new(3, "tools/call")
-        .with_params(serde_json::json!({"name": tool_name, "arguments": {}}));
+        .with_params(serde_json::json!({"name": "test_echo", "arguments": {}}));
     let resp = d.dispatch(&req).unwrap();
     assert!(resp.result.is_some());
 }
