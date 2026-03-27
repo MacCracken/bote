@@ -48,22 +48,22 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ### Validation
 - [ ] Cross-crate integration tests
-- [ ] Protocol conformance test suite
-- [ ] Performance: dispatch overhead < 1µs per tool call
+- [x] Protocol conformance test suite
+- [x] Performance: dispatch overhead < 1µs per tool call (measured ~195ns)
 
 ---
 
 ## v1.0.0 Criteria
 
-- [ ] JSON-RPC 2.0 fully compliant (batch, notifications, streaming)
-- [ ] All 3 transports stable (stdio, HTTP, WebSocket)
+- [x] JSON-RPC 2.0 fully compliant (batch, notifications, streaming)
+- [x] All 3 transports stable (stdio, HTTP, WebSocket)
 - [ ] TypeScript bridge production-tested with SY
-- [ ] libro audit integration for every tool call
+- [x] libro audit integration for every tool call
 - [ ] 3+ downstream consumers in production
 - [ ] 90%+ test coverage
-- [ ] docs.rs complete
-- [ ] Protocol conformance test suite passing
-- [ ] Dispatch benchmark: < 500ns per tool call
+- [x] docs.rs complete
+- [x] Protocol conformance test suite passing
+- [x] Dispatch benchmark: < 500ns per tool call
 
 ---
 

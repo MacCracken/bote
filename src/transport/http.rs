@@ -144,6 +144,13 @@ fn make_sse_stream(
                 .unwrap()
                 .insert(id_str.clone(), ctx.cancellation.clone());
 
+            let tool_name = request
+                .params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let start = std::time::Instant::now();
             let handler_handle = tokio::task::spawn_blocking(move || handler(arguments, ctx));
 
             SseState::Running {
@@ -152,6 +159,9 @@ fn make_sse_stream(
                 request_id,
                 id_str,
                 active: state.active,
+                dispatcher: state.dispatcher,
+                tool_name,
+                start,
             }
         }
         _ => SseState::Done,
@@ -165,6 +175,9 @@ fn make_sse_stream(
                 request_id,
                 id_str,
                 active,
+                dispatcher,
+                tool_name,
+                start,
             } => {
                 let recv_result = tokio::task::spawn_blocking(move || match progress_rx.recv() {
                     Ok(update) => RecvResult::Progress(update, progress_rx),
@@ -188,25 +201,48 @@ fn make_sse_stream(
                                 request_id,
                                 id_str,
                                 active,
+                                dispatcher,
+                                tool_name,
+                                start,
                             },
                         ))
                     }
                     RecvResult::Done => {
-                        let response = match handler_handle.await {
-                            Ok(result) => JsonRpcResponse::success(request_id, result),
+                        let (response, success, error) = match handler_handle.await {
+                            Ok(result) => {
+                                (JsonRpcResponse::success(request_id, result), true, None)
+                            }
                             Err(e) if e.is_cancelled() => {
                                 tracing::info!("streaming handler cancelled");
-                                JsonRpcResponse::error(request_id, -32800, "request cancelled")
+                                (
+                                    JsonRpcResponse::error(request_id, -32800, "request cancelled"),
+                                    false,
+                                    Some("request cancelled".to_string()),
+                                )
                             }
                             Err(_) => {
                                 tracing::error!("streaming handler panicked");
-                                JsonRpcResponse::error(
-                                    request_id,
-                                    -32603,
-                                    "internal error: handler panicked",
+                                (
+                                    JsonRpcResponse::error(
+                                        request_id,
+                                        -32603,
+                                        "internal error: handler panicked",
+                                    ),
+                                    false,
+                                    Some("handler panicked".to_string()),
                                 )
                             }
                         };
+
+                        let duration_ms = start.elapsed().as_millis() as u64;
+                        dispatcher.log_tool_call(&crate::audit::ToolCallEvent {
+                            tool_name,
+                            duration_ms,
+                            success,
+                            error,
+                            caller_id: None,
+                        });
+
                         let event = Event::default().event("result").data(
                             serde_json::to_string(&response).expect("BUG: response serialization"),
                         );
@@ -230,6 +266,9 @@ enum SseState {
         request_id: serde_json::Value,
         id_str: String,
         active: Arc<std::sync::Mutex<HashMap<String, CancellationToken>>>,
+        dispatcher: Arc<Dispatcher>,
+        tool_name: String,
+        start: std::time::Instant,
     },
     Done,
 }

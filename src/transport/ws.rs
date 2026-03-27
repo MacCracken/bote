@@ -155,6 +155,12 @@ async fn handle_streaming_call(
 ) {
     let request_id = request.id.clone().unwrap_or(serde_json::Value::Null);
     let id_str = request_id.to_string();
+    let tool_name = request
+        .params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     match dispatcher.dispatch_streaming(request) {
         DispatchOutcome::Streaming {
@@ -164,6 +170,8 @@ async fn handle_streaming_call(
             handler,
             arguments,
         } => {
+            let start = std::time::Instant::now();
+
             // Track for cancellation.
             active
                 .lock()
@@ -188,17 +196,35 @@ async fn handle_streaming_call(
 
             // Wait for both to complete.
             let _ = progress_handle.await;
-            let response = match handler_handle.await {
-                Ok(result) => JsonRpcResponse::success(req_id, result),
+            let (response, success, error) = match handler_handle.await {
+                Ok(result) => (JsonRpcResponse::success(req_id, result), true, None),
                 Err(e) if e.is_cancelled() => {
                     tracing::info!("streaming handler cancelled");
-                    JsonRpcResponse::error(req_id, -32800, "request cancelled")
+                    (
+                        JsonRpcResponse::error(req_id, -32800, "request cancelled"),
+                        false,
+                        Some("request cancelled".to_string()),
+                    )
                 }
                 Err(_) => {
                     tracing::error!("streaming handler panicked");
-                    JsonRpcResponse::error(req_id, -32603, "internal error: handler panicked")
+                    (
+                        JsonRpcResponse::error(req_id, -32603, "internal error: handler panicked"),
+                        false,
+                        Some("handler panicked".to_string()),
+                    )
                 }
             };
+
+            let duration_ms = start.elapsed().as_millis() as u64;
+            dispatcher.log_tool_call(&crate::audit::ToolCallEvent {
+                tool_name,
+                duration_ms,
+                success,
+                error,
+                caller_id: None,
+            });
+
             let _ =
                 out_tx.send(serde_json::to_string(&response).expect("BUG: response serialization"));
 

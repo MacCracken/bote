@@ -50,6 +50,12 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
+    /// Create a new dispatcher backed by the given tool registry.
+    ///
+    /// The dispatcher starts with no handlers. Use [`handle`](Self::handle) or
+    /// [`handle_streaming`](Self::handle_streaming) to wire up tool implementations
+    /// at build time, or [`register_tool`](Self::register_tool) for dynamic
+    /// registration at runtime.
     #[must_use]
     pub fn new(registry: ToolRegistry) -> Self {
         Self {

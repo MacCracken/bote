@@ -2,6 +2,7 @@
 
 use std::io::{BufRead, Write};
 
+use crate::audit::ToolCallEvent;
 use crate::dispatch::{DispatchOutcome, Dispatcher};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 use crate::transport::codec;
@@ -65,6 +66,14 @@ fn dispatch_streaming(
             handler,
             arguments,
         } => {
+            let tool_name = request
+                .params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let start = std::time::Instant::now();
+
             // Spawn handler on a thread.
             let handle = std::thread::spawn(move || handler(arguments, ctx));
 
@@ -77,13 +86,27 @@ fn dispatch_streaming(
             }
 
             // Write final result.
-            let result = match handle.join() {
-                Ok(v) => JsonRpcResponse::success(req_id, v),
+            let (result, success, error) = match handle.join() {
+                Ok(v) => (JsonRpcResponse::success(req_id, v), true, None),
                 Err(_) => {
                     tracing::error!("streaming handler panicked");
-                    JsonRpcResponse::error(req_id, -32603, "internal error: handler panicked")
+                    (
+                        JsonRpcResponse::error(req_id, -32603, "internal error: handler panicked"),
+                        false,
+                        Some("handler panicked".to_string()),
+                    )
                 }
             };
+
+            let duration_ms = start.elapsed().as_millis() as u64;
+            dispatcher.log_tool_call(&ToolCallEvent {
+                tool_name,
+                duration_ms,
+                success,
+                error,
+                caller_id: None,
+            });
+
             writeln!(writer, "{}", codec::serialize_response(&result)?)?;
         }
         DispatchOutcome::Immediate(Some(resp)) => {

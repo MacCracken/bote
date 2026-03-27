@@ -2,6 +2,17 @@
 
 All notable changes to bote are documented here.
 
+## [0.26.3] — 2026-03-26
+
+### Added
+- Protocol conformance test suite (41 tests in `tests/conformance.rs`)
+- Streaming audit logging — all transports now call `log_tool_call()` after streaming handler completion with timing and success/error status
+- `BoteError::SandboxError` variant for sandbox execution failures
+
+### Fixed
+- Streaming tool calls in HTTP/SSE, WebSocket, Unix, and stdio transports now correctly produce audit events via `log_tool_call()`
+- Added missing doc comment on `Dispatcher::new()`
+
 ## [0.25.3] — 2026-03-26
 
 ### Added
