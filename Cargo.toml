@@ -58,3 +58,4 @@ kavach = { version = "1.0", default-features = false }
 [[bench]]
 name = "dispatch"
 harness = false
+required-features = ["bridge"]
