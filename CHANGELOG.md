@@ -2,7 +2,7 @@
 
 All notable changes to bote are documented here.
 
-## [0.5.0] — 2026-03-26
+## [0.50.0] — 2026-03-26
 
 ### Added
 - Protocol conformance test suite (41 tests in `tests/conformance.rs`)
