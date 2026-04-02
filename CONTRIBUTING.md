@@ -58,6 +58,6 @@ Before opening a PR, run `make check` to verify everything passes.
 
 ## License
 
-bote is licensed under **AGPL-3.0-only**. All contributions must be compatible
+bote is licensed under **GPL-3.0-only**. All contributions must be compatible
 with this license. By submitting a pull request, you agree that your
 contribution is licensed under the same terms.

@@ -3,7 +3,7 @@ name = "bote"
 version = "0.90.0"
 edition = "2024"
 rust-version = "1.89"
-license = "AGPL-3.0-only"
+license = "GPL-3.0-only"
 description = "MCP core service — JSON-RPC 2.0 protocol, tool registry, audit integration, and TypeScript bridge"
 documentation = "https://docs.rs/bote"
 homepage = "https://github.com/MacCracken/bote"
@@ -40,8 +40,8 @@ tokio-tungstenite = { version = "0.29", optional = true }
 futures-util = { version = "0.3", optional = true }
 
 # Observability dependencies (all optional)
-libro = { version = "0.22", optional = true }
-majra = { version = "0.22", optional = true }
+libro = { version = "0.25", optional = true }
+majra = { version = "1.0", optional = true }
 
 # URL validation (optional — for host SSRF checks)
 url = { version = "2", optional = true }
@@ -55,8 +55,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
-libro = "0.22"
-majra = "0.22"
+libro = "0.25"
+majra = "1.0"
 kavach = { version = "1.0", default-features = false }
 url = "2"
 

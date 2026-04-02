@@ -8,7 +8,7 @@ JSON-RPC 2.0 protocol, tool registry, schema validation, and dispatch — in a s
 
 [![Crates.io](https://img.shields.io/crates/v/bote.svg)](https://crates.io/crates/bote)
 [![CI](https://github.com/MacCracken/bote/actions/workflows/ci.yml/badge.svg)](https://github.com/MacCracken/bote/actions/workflows/ci.yml)
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 
 ---
 
@@ -205,4 +205,4 @@ Pre-1.0: `0.D.M` SemVer (day.month). Post-1.0: standard SemVer.
 
 ## License
 
-AGPL-3.0-only. See [LICENSE](LICENSE) for details.
+GPL-3.0-only. See [LICENSE](LICENSE) for details.
