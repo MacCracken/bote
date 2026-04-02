@@ -475,6 +475,7 @@ fn error_codes_comply_with_spec() {
     assert_eq!(resp.error.unwrap().code, -32602);
 }
 
+#[cfg(feature = "bridge")]
 #[test]
 fn bridge_error_response_is_spec_compliant() {
     // Bridge error wrapping must not set both result AND error (JSON-RPC 2.0 violation).
