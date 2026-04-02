@@ -2,6 +2,26 @@
 
 All notable changes to bote are documented here.
 
+## [0.90.0] — 2026-04-01
+
+### Fixed
+- **JSON-RPC 2.0 spec compliance**: Unknown methods now return `-32601` (Method not found) instead of `-32600` (Invalid Request)
+- **Bridge spec compliance**: Error wrapping no longer sets both `result` and `error` on the response (JSON-RPC 2.0 violation)
+- `scripts/bench-log.sh`: Added missing `--features bridge` flag
+
+### Performance
+- **Notification dispatch 17x faster** (170ns → 10ns): Early-return before lock acquisition when request is a notification
+- **Parameter validation 26% faster** (47ns → 35ns): Merged `tools` + `compiled` HashMaps into single `entries` map, eliminating key duplication
+- **Schema validation 8% faster** (107ns → 99ns): Same registry merge reduces lookup overhead
+
+### Changed
+- `ToolRegistry` internal structure: merged separate `tools` and `compiled` maps into unified `entries` map
+- CLAUDE.md: Added task sizing, refactoring guidelines, testing section, documentation structure, CHANGELOG format, module table, stack table
+
+### Added
+- 3 new conformance tests: `error_codes_comply_with_spec`, `bridge_error_response_is_spec_compliant`, `registry_deregister_cleans_up_compiled_schema`
+- 18 downstream consumers integrated (daimon, agnoshi, t-ron, jalwa, nein, stiva, itihas, varna, selah, hoosh, vidya, rasayan, szal, tarang, vidhana, nazar, mneme, tazama)
+
 ## [0.50.0] — 2026-03-26
 
 ### Added
