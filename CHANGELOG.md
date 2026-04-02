@@ -26,7 +26,7 @@ All notable changes to bote are documented here.
 - Periodic session pruning via tokio interval in both `http::serve()` and `streamable::serve()`
 - `streamable::streamable_router()` — build router without binding a port (for testing)
 - 35 new transport middleware tests (origin, protocol version, session enforcement in both transports)
-- `cargo vet` supply chain auditing: 112 crates audited via trusted imports (mozilla, google, bytecode-alliance, isrg, zcash, ariel-os, embark-studios), 8 trusted publishers, CI integration
+- `cargo vet` supply chain auditing: 156 crates fully audited via trusted imports (mozilla, google, bytecode-alliance, isrg, zcash, ariel-os, embark-studios) and 27 trusted publishers (dtolnay, seanmonstar, Manishearth, epage, fitzgen, kennykerr, Amanieu, BurntSushi, Thomasdezeeuw, cuviper, alexcrichton, carllerche, Darksonn, rust-lang-owner), 66 exempted, CI integration
 
 ### Changed
 - Upgraded libro dependency from 0.25 to 0.91 (BLAKE3 hashing, serde on all types, key rotation support)
