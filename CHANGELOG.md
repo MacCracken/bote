@@ -5,13 +5,18 @@ All notable changes to bote are documented here.
 ## [0.91.0] — 2026-04-02
 
 ### Added
-- `libro_tools` module (feature: `audit`) — 3 built-in MCP tools for libro audit chain operations:
+- `libro_tools` module (feature: `audit`) — 5 built-in MCP tools for libro audit chain operations:
   - `libro_query` — query audit entries by source, severity, action, agent, min_severity, with limit
-  - `libro_verify` — verify chain integrity and return structured review
+  - `libro_verify` — verify chain integrity and return structured `ChainReview` JSON with integrity status, entry count, time range, source/severity/agent distributions (was text-only)
   - `libro_export` — export chain as JSON Lines or CSV
-- `libro_tools::register()` — convenience function to register all libro tools on a dispatcher
-- All libro tools annotated as read-only (MCP 2025-11-25 `ToolAnnotations`)
-- 8 new tests for libro tools
+  - `libro_proof` — generate Merkle inclusion proof for an entry by index, returns structured proof JSON with verification status
+  - `libro_retention` — apply retention policies (PCI-DSS, HIPAA, SOX, keep_count) and report archived entries (destructive, not read-only)
+- `libro_tools::register()` — convenience function to register all 5 libro tools on a dispatcher
+- Read-only tools annotated with `ToolAnnotations::read_only()` (MCP 2025-11-25); `libro_retention` is destructive (no annotation)
+- `LibroAudit::with_source()` — custom source tag for audit entries (default: `"bote"`)
+- `LibroAudit::with_agent_id()` — server agent identity on all entries; `caller_id` from events takes precedence
+- `LibroAudit` now uses `append_with_agent()` when caller_id or agent_id is present, populating libro's agent tracking
+- 17 libro_tools tests + 8 audit tests (was 8 + 3)
 - **HTTP transport middleware**: Origin validation (403), `MCP-Protocol-Version` enforcement (400), `MCP-Session-Id` session lifecycle (404), bearer token extraction with 401/403 responses (feature `auth`)
 - **Streamable HTTP transport router**: axum router with POST (JSON-RPC) and GET (SSE stream) on configurable endpoint path, same middleware stack as HTTP, SSE event IDs via `EventIdGenerator`, `Last-Event-ID` resumption via `ResumptionBuffer` replay, `retry:` hint before close, priming event on connect
 - `HttpConfig` builder: `with_allowed_origins()`, `with_session_timeout()`, `with_token_validator()` (feature `auth`)
@@ -21,6 +26,7 @@ All notable changes to bote are documented here.
 - Periodic session pruning via tokio interval in both `http::serve()` and `streamable::serve()`
 - `streamable::streamable_router()` — build router without binding a port (for testing)
 - 35 new transport middleware tests (origin, protocol version, session enforcement in both transports)
+- `cargo vet` supply chain auditing: 112 crates audited via trusted imports (mozilla, google, bytecode-alliance, isrg, zcash, ariel-os, embark-studios), 8 trusted publishers, CI integration
 
 ### Changed
 - Upgraded libro dependency from 0.25 to 0.91 (BLAKE3 hashing, serde on all types, key rotation support)

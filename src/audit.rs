@@ -58,8 +58,18 @@ mod libro_impl {
     use std::sync::Mutex;
 
     /// Audit sink backed by libro's hash-linked audit chain.
+    ///
+    /// Logs every tool call as an audit entry with:
+    /// - Severity: `Info` for success, `Error` for failure
+    /// - Source: `"bote"` (or custom via [`with_source`](Self::with_source))
+    /// - Agent ID: populated from `caller_id` when available
+    /// - Details: structured JSON with tool name, duration, success/error
     pub struct LibroAudit {
         chain: Mutex<AuditChain>,
+        /// Source tag for audit entries (default: "bote").
+        source: String,
+        /// Server agent ID for entries (optional).
+        agent_id: Option<String>,
     }
 
     impl LibroAudit {
@@ -67,6 +77,8 @@ mod libro_impl {
         pub fn new() -> Self {
             Self {
                 chain: Mutex::new(AuditChain::new()),
+                source: "bote".into(),
+                agent_id: None,
             }
         }
 
@@ -75,7 +87,27 @@ mod libro_impl {
         pub fn with_chain(chain: AuditChain) -> Self {
             Self {
                 chain: Mutex::new(chain),
+                source: "bote".into(),
+                agent_id: None,
             }
+        }
+
+        /// Set a custom source tag for audit entries.
+        #[must_use]
+        pub fn with_source(mut self, source: impl Into<String>) -> Self {
+            self.source = source.into();
+            self
+        }
+
+        /// Set the server agent ID for all entries.
+        ///
+        /// When set, all entries are tagged with this agent ID via
+        /// libro's `append_with_agent`. When a `caller_id` is also
+        /// present on the event, it takes precedence.
+        #[must_use]
+        pub fn with_agent_id(mut self, agent_id: impl Into<String>) -> Self {
+            self.agent_id = Some(agent_id.into());
+            self
         }
 
         /// Access the underlying chain (e.g. for verification or export).
@@ -114,7 +146,15 @@ mod libro_impl {
             });
 
             let mut chain = self.chain.lock().unwrap_or_else(|e| e.into_inner());
-            chain.append(severity, "bote", action, details);
+
+            // Use caller_id if present, fall back to configured agent_id.
+            let agent = event.caller_id.as_deref().or(self.agent_id.as_deref());
+
+            if let Some(agent) = agent {
+                chain.append_with_agent(severity, &self.source, action, details, agent);
+            } else {
+                chain.append(severity, &self.source, action, details);
+            }
         }
     }
 }
@@ -228,7 +268,86 @@ mod audit_tests {
 
         let chain = audit.chain();
         assert_eq!(chain.len(), 3);
-        // Verify chain integrity.
         assert!(chain.verify().is_ok());
+    }
+
+    #[test]
+    fn libro_audit_caller_id_becomes_agent() {
+        let audit = LibroAudit::new();
+        audit.log(&ToolCallEvent {
+            tool_name: "echo".into(),
+            duration_ms: 1,
+            success: true,
+            error: None,
+            caller_id: Some("user-42".into()),
+        });
+
+        let chain = audit.chain();
+        let entry = &chain.entries()[0];
+        assert_eq!(entry.agent_id(), Some("user-42"));
+    }
+
+    #[test]
+    fn libro_audit_configured_agent_id() {
+        let audit = LibroAudit::new().with_agent_id("mcp-server-1");
+        audit.log(&ToolCallEvent {
+            tool_name: "echo".into(),
+            duration_ms: 1,
+            success: true,
+            error: None,
+            caller_id: None, // no caller_id, falls back to configured agent
+        });
+
+        let chain = audit.chain();
+        let entry = &chain.entries()[0];
+        assert_eq!(entry.agent_id(), Some("mcp-server-1"));
+    }
+
+    #[test]
+    fn libro_audit_caller_id_overrides_configured_agent() {
+        let audit = LibroAudit::new().with_agent_id("mcp-server-1");
+        audit.log(&ToolCallEvent {
+            tool_name: "echo".into(),
+            duration_ms: 1,
+            success: true,
+            error: None,
+            caller_id: Some("user-42".into()), // takes precedence
+        });
+
+        let chain = audit.chain();
+        let entry = &chain.entries()[0];
+        assert_eq!(entry.agent_id(), Some("user-42"));
+    }
+
+    #[test]
+    fn libro_audit_custom_source() {
+        let audit = LibroAudit::new().with_source("my-mcp-server");
+        audit.log(&ToolCallEvent {
+            tool_name: "echo".into(),
+            duration_ms: 1,
+            success: true,
+            error: None,
+            caller_id: None,
+        });
+
+        let chain = audit.chain();
+        let entry = &chain.entries()[0];
+        assert_eq!(entry.source(), "my-mcp-server");
+    }
+
+    #[test]
+    fn libro_audit_no_agent_when_none() {
+        let audit = LibroAudit::new(); // no agent_id configured
+        audit.log(&ToolCallEvent {
+            tool_name: "echo".into(),
+            duration_ms: 1,
+            success: true,
+            error: None,
+            caller_id: None, // no caller_id either
+        });
+
+        let chain = audit.chain();
+        let entry = &chain.entries()[0];
+        assert_eq!(entry.agent_id(), None);
     }
 }

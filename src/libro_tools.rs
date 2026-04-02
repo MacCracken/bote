@@ -10,6 +10,8 @@
 //! | `libro_query` | Query audit entries by source, severity, action, agent, or time range | read-only |
 //! | `libro_verify` | Verify the audit chain's cryptographic integrity | read-only |
 //! | `libro_export` | Export the audit chain as JSON Lines or CSV | read-only |
+//! | `libro_proof` | Generate a Merkle inclusion proof for an entry | read-only |
+//! | `libro_retention` | Apply a retention policy and report pruned entries | destructive |
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,7 +33,24 @@ use crate::registry::{ToolAnnotations, ToolDef, ToolRegistry, ToolSchema};
 pub fn register(registry: &mut ToolRegistry, audit: Arc<LibroAudit>) -> Vec<(String, ToolHandler)> {
     let mut handlers = Vec::new();
 
-    // --- libro_query ---
+    register_query(registry, &audit, &mut handlers);
+    register_verify(registry, &audit, &mut handlers);
+    register_export(registry, &audit, &mut handlers);
+    register_proof(registry, &audit, &mut handlers);
+    register_retention(registry, &audit, &mut handlers);
+
+    handlers
+}
+
+// ---------------------------------------------------------------------------
+// libro_query
+// ---------------------------------------------------------------------------
+
+fn register_query(
+    registry: &mut ToolRegistry,
+    audit: &Arc<LibroAudit>,
+    handlers: &mut Vec<(String, ToolHandler)>,
+) {
     registry.register(ToolDef {
         name: "libro_query".into(),
         description: "Query audit chain entries by source, severity, action, agent, or time range"
@@ -66,12 +85,12 @@ pub fn register(registry: &mut ToolRegistry, audit: Arc<LibroAudit>) -> Vec<(Str
             ]),
             required: vec![],
         },
-        version: Some("0.90.0".into()),
+        version: Some("0.91.0".into()),
         deprecated: None,
         annotations: Some(ToolAnnotations::read_only()),
     });
 
-    let audit_q = Arc::clone(&audit);
+    let audit_q = Arc::clone(audit);
     handlers.push((
         "libro_query".into(),
         Arc::new(move |params: serde_json::Value| {
@@ -112,39 +131,62 @@ pub fn register(registry: &mut ToolRegistry, audit: Arc<LibroAudit>) -> Vec<(Str
             })
         }) as ToolHandler,
     ));
+}
 
-    // --- libro_verify ---
+// ---------------------------------------------------------------------------
+// libro_verify — returns structured ChainReview JSON
+// ---------------------------------------------------------------------------
+
+fn register_verify(
+    registry: &mut ToolRegistry,
+    audit: &Arc<LibroAudit>,
+    handlers: &mut Vec<(String, ToolHandler)>,
+) {
     registry.register(ToolDef {
         name: "libro_verify".into(),
-        description: "Verify the audit chain's cryptographic integrity — checks hash linking and entry self-hashes".into(),
+        description: "Verify the audit chain's cryptographic integrity — returns structured review with integrity status, entry count, time range, and source/severity/agent distributions".into(),
         input_schema: ToolSchema {
             schema_type: "object".into(),
             properties: HashMap::new(),
             required: vec![],
         },
-        version: Some("0.90.0".into()),
+        version: Some("0.91.0".into()),
         deprecated: None,
         annotations: Some(ToolAnnotations::read_only()),
     });
 
-    let audit_v = Arc::clone(&audit);
+    let audit_v = Arc::clone(audit);
     handlers.push((
         "libro_verify".into(),
         Arc::new(move |_params: serde_json::Value| {
             let chain = audit_v.chain();
             let review = chain.review();
-            let text = format!("{review}");
+
+            // Return structured JSON — ChainReview is Serialize.
+            let review_json = serde_json::to_value(&review).unwrap_or_default();
 
             serde_json::json!({
                 "content": [{
                     "type": "text",
-                    "text": text
-                }]
+                    "text": serde_json::to_string_pretty(&review_json).unwrap_or_default()
+                }],
+                "_meta": {
+                    "review": review_json
+                }
             })
         }) as ToolHandler,
     ));
+}
 
-    // --- libro_export ---
+// ---------------------------------------------------------------------------
+// libro_export
+// ---------------------------------------------------------------------------
+
+fn register_export(
+    registry: &mut ToolRegistry,
+    audit: &Arc<LibroAudit>,
+    handlers: &mut Vec<(String, ToolHandler)>,
+) {
     registry.register(ToolDef {
         name: "libro_export".into(),
         description: "Export the audit chain as JSON Lines or CSV".into(),
@@ -156,12 +198,12 @@ pub fn register(registry: &mut ToolRegistry, audit: Arc<LibroAudit>) -> Vec<(Str
             )]),
             required: vec![],
         },
-        version: Some("0.90.0".into()),
+        version: Some("0.91.0".into()),
         deprecated: None,
         annotations: Some(ToolAnnotations::read_only()),
     });
 
-    let audit_e = Arc::clone(&audit);
+    let audit_e = Arc::clone(audit);
     handlers.push((
         "libro_export".into(),
         Arc::new(move |params: serde_json::Value| {
@@ -197,9 +239,174 @@ pub fn register(registry: &mut ToolRegistry, audit: Arc<LibroAudit>) -> Vec<(Str
             }
         }) as ToolHandler,
     ));
-
-    handlers
 }
+
+// ---------------------------------------------------------------------------
+// libro_proof — Merkle inclusion proof
+// ---------------------------------------------------------------------------
+
+fn register_proof(
+    registry: &mut ToolRegistry,
+    audit: &Arc<LibroAudit>,
+    handlers: &mut Vec<(String, ToolHandler)>,
+) {
+    registry.register(ToolDef {
+        name: "libro_proof".into(),
+        description: "Generate a Merkle inclusion proof for an audit entry by index — enables O(log N) verification without the full chain".into(),
+        input_schema: ToolSchema {
+            schema_type: "object".into(),
+            properties: HashMap::from([(
+                "index".into(),
+                serde_json::json!({"type": "integer", "description": "Entry index (0-based)"}),
+            )]),
+            required: vec!["index".into()],
+        },
+        version: Some("0.91.0".into()),
+        deprecated: None,
+        annotations: Some(ToolAnnotations::read_only()),
+    });
+
+    let audit_p = Arc::clone(audit);
+    handlers.push((
+        "libro_proof".into(),
+        Arc::new(move |params: serde_json::Value| {
+            let chain = audit_p.chain();
+            let entries = chain.entries();
+
+            let index = match params.get("index").and_then(|v| v.as_u64()) {
+                Some(i) => i as usize,
+                None => {
+                    return serde_json::json!({
+                        "content": [{"type": "text", "text": "missing required 'index' parameter"}],
+                        "isError": true
+                    });
+                }
+            };
+
+            if index >= entries.len() {
+                return serde_json::json!({
+                    "content": [{"type": "text", "text": format!("index {index} out of range (chain has {} entries)", entries.len())}],
+                    "isError": true
+                });
+            }
+
+            let tree = match libro::MerkleTree::build(entries) {
+                Some(t) => t,
+                None => {
+                    return serde_json::json!({
+                        "content": [{"type": "text", "text": "chain is empty — no Merkle tree"}],
+                        "isError": true
+                    });
+                }
+            };
+
+            match tree.proof(index) {
+                Some(proof) => {
+                    let verified = libro::merkle::verify_proof(&proof);
+                    let proof_json = serde_json::to_value(&proof).unwrap_or_default();
+                    serde_json::json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "Merkle proof for entry {index}:\n  Leaf: {}\n  Root: {}\n  Path length: {}\n  Verified: {verified}",
+                                proof.leaf_hash, proof.root, proof.path.len()
+                            )
+                        }],
+                        "_meta": {
+                            "proof": proof_json,
+                            "verified": verified
+                        }
+                    })
+                }
+                None => serde_json::json!({
+                    "content": [{"type": "text", "text": format!("failed to generate proof for index {index}")}],
+                    "isError": true
+                }),
+            }
+        }) as ToolHandler,
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// libro_retention — apply compliance retention policies
+// ---------------------------------------------------------------------------
+
+fn register_retention(
+    registry: &mut ToolRegistry,
+    audit: &Arc<LibroAudit>,
+    handlers: &mut Vec<(String, ToolHandler)>,
+) {
+    registry.register(ToolDef {
+        name: "libro_retention".into(),
+        description: "Apply a retention policy to the audit chain — archives entries outside the retention window. Supports PCI-DSS (1yr), HIPAA (6yr), SOX (7yr), or custom count/duration policies.".into(),
+        input_schema: ToolSchema {
+            schema_type: "object".into(),
+            properties: HashMap::from([
+                (
+                    "policy".into(),
+                    serde_json::json!({"type": "string", "enum": ["pci_dss", "hipaa", "sox", "keep_count"], "description": "Retention policy preset"}),
+                ),
+                (
+                    "count".into(),
+                    serde_json::json!({"type": "integer", "description": "Number of entries to keep (for keep_count policy)"}),
+                ),
+            ]),
+            required: vec!["policy".into()],
+        },
+        version: Some("0.91.0".into()),
+        deprecated: None,
+        annotations: None, // destructive — not read-only
+    });
+
+    let audit_r = Arc::clone(audit);
+    handlers.push((
+        "libro_retention".into(),
+        Arc::new(move |params: serde_json::Value| {
+            let policy_name = params.get("policy").and_then(|v| v.as_str()).unwrap_or("");
+
+            let policy = match policy_name {
+                "pci_dss" => libro::RetentionPolicy::pci_dss(),
+                "hipaa" => libro::RetentionPolicy::hipaa(),
+                "sox" => libro::RetentionPolicy::sox(),
+                "keep_count" => {
+                    let count = params.get("count").and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
+                    libro::RetentionPolicy::KeepCount(count)
+                }
+                _ => {
+                    return serde_json::json!({
+                        "content": [{"type": "text", "text": format!("unknown policy: {policy_name}. Use: pci_dss, hipaa, sox, keep_count")}],
+                        "isError": true
+                    });
+                }
+            };
+
+            let mut chain = audit_r.chain();
+            let before = chain.len();
+            let archive = chain.apply_retention(&policy);
+            let after = chain.len();
+            let archived_count = archive.map(|a| a.entries.len()).unwrap_or(0);
+
+            serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "Retention policy '{policy_name}' applied:\n  Before: {before} entries\n  After: {after} entries\n  Archived: {archived_count} entries"
+                    )
+                }],
+                "_meta": {
+                    "policy": policy_name,
+                    "before": before,
+                    "after": after,
+                    "archived": archived_count
+                }
+            })
+        }) as ToolHandler,
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 fn parse_severity(s: &str) -> Option<libro::EventSeverity> {
     match s {
@@ -237,6 +444,8 @@ mod tests {
         audit
     }
 
+    // --- libro_query ---
+
     #[test]
     fn libro_query_no_filter() {
         let audit = make_audit_with_entries(5);
@@ -258,7 +467,7 @@ mod tests {
 
         let result = handler(serde_json::json!({"source": "bote"}));
         let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("5 entries matched")); // all from "bote"
+        assert!(text.contains("5 entries matched"));
     }
 
     #[test]
@@ -270,7 +479,7 @@ mod tests {
 
         let result = handler(serde_json::json!({"severity": "Error"}));
         let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("2 entries matched")); // i=0,3 fail
+        assert!(text.contains("2 entries matched"));
     }
 
     #[test]
@@ -285,18 +494,42 @@ mod tests {
         assert!(text.starts_with("3 entries matched"));
     }
 
+    // --- libro_verify ---
+
     #[test]
-    fn libro_verify_returns_review() {
+    fn libro_verify_returns_structured_review() {
         let audit = make_audit_with_entries(3);
         let mut registry = ToolRegistry::new();
         let handlers = register(&mut registry, Arc::clone(&audit));
         let handler = &handlers[1].1;
 
         let result = handler(serde_json::json!({}));
+        // Text output contains structured JSON
         let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("VALID"));
-        assert!(text.contains("Entries:"));
+        assert!(text.contains("\"integrity\""));
+        assert!(text.contains("\"entry_count\""));
+
+        // _meta contains structured review
+        let meta = &result["_meta"]["review"];
+        assert_eq!(meta["entry_count"], 3);
+        assert_eq!(meta["integrity"], "Valid");
+        assert!(meta["head_hash"].is_string());
     }
+
+    #[test]
+    fn libro_verify_empty_chain() {
+        let audit = make_audit_with_entries(0);
+        let mut registry = ToolRegistry::new();
+        let handlers = register(&mut registry, Arc::clone(&audit));
+        let handler = &handlers[1].1;
+
+        let result = handler(serde_json::json!({}));
+        let meta = &result["_meta"]["review"];
+        assert_eq!(meta["entry_count"], 0);
+        assert_eq!(meta["integrity"], "Empty");
+    }
+
+    // --- libro_export ---
 
     #[test]
     fn libro_export_jsonl() {
@@ -325,19 +558,142 @@ mod tests {
         assert_eq!(lines.len(), 4); // header + 3 entries
     }
 
+    // --- libro_proof ---
+
     #[test]
-    fn tools_registered_with_annotations() {
+    fn libro_proof_generates_valid_proof() {
+        let audit = make_audit_with_entries(5);
+        let mut registry = ToolRegistry::new();
+        let handlers = register(&mut registry, Arc::clone(&audit));
+        let handler = &handlers[3].1;
+
+        let result = handler(serde_json::json!({"index": 2}));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Merkle proof for entry 2"));
+        assert!(text.contains("Verified: true"));
+
+        // _meta contains structured proof
+        let meta = &result["_meta"];
+        assert_eq!(meta["verified"], true);
+        assert!(meta["proof"]["leaf_hash"].is_string());
+        assert!(meta["proof"]["root"].is_string());
+        assert!(meta["proof"]["path"].is_array());
+    }
+
+    #[test]
+    fn libro_proof_index_out_of_range() {
+        let audit = make_audit_with_entries(3);
+        let mut registry = ToolRegistry::new();
+        let handlers = register(&mut registry, Arc::clone(&audit));
+        let handler = &handlers[3].1;
+
+        let result = handler(serde_json::json!({"index": 10}));
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("out of range"));
+    }
+
+    #[test]
+    fn libro_proof_empty_chain() {
+        let audit = make_audit_with_entries(0);
+        let mut registry = ToolRegistry::new();
+        let handlers = register(&mut registry, Arc::clone(&audit));
+        let handler = &handlers[3].1;
+
+        let result = handler(serde_json::json!({"index": 0}));
+        assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn libro_proof_missing_index() {
+        let audit = make_audit_with_entries(3);
+        let mut registry = ToolRegistry::new();
+        let handlers = register(&mut registry, Arc::clone(&audit));
+        let handler = &handlers[3].1;
+
+        let result = handler(serde_json::json!({}));
+        assert_eq!(result["isError"], true);
+    }
+
+    // --- libro_retention ---
+
+    #[test]
+    fn libro_retention_keep_count() {
+        let audit = make_audit_with_entries(10);
+        let mut registry = ToolRegistry::new();
+        let handlers = register(&mut registry, Arc::clone(&audit));
+        let handler = &handlers[4].1;
+
+        let result = handler(serde_json::json!({"policy": "keep_count", "count": 3}));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Before: 10"));
+        assert!(text.contains("After: 3"));
+        assert!(text.contains("Archived: 7"));
+
+        let meta = &result["_meta"];
+        assert_eq!(meta["before"], 10);
+        assert_eq!(meta["after"], 3);
+        assert_eq!(meta["archived"], 7);
+    }
+
+    #[test]
+    fn libro_retention_unknown_policy() {
+        let audit = make_audit_with_entries(3);
+        let mut registry = ToolRegistry::new();
+        let handlers = register(&mut registry, Arc::clone(&audit));
+        let handler = &handlers[4].1;
+
+        let result = handler(serde_json::json!({"policy": "nonsense"}));
+        assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn libro_retention_pci_dss_on_fresh_chain() {
+        // Fresh chain — all entries are recent, nothing to prune
+        let audit = make_audit_with_entries(5);
+        let mut registry = ToolRegistry::new();
+        let handlers = register(&mut registry, Arc::clone(&audit));
+        let handler = &handlers[4].1;
+
+        let result = handler(serde_json::json!({"policy": "pci_dss"}));
+        let meta = &result["_meta"];
+        assert_eq!(meta["before"], 5);
+        assert_eq!(meta["after"], 5); // nothing pruned, all recent
+        assert_eq!(meta["archived"], 0);
+    }
+
+    // --- registration ---
+
+    #[test]
+    fn all_tools_registered() {
         let audit = make_audit_with_entries(0);
         let mut registry = ToolRegistry::new();
         let _ = register(&mut registry, audit);
 
-        // All 3 tools should be registered
         assert!(registry.get("libro_query").is_some());
         assert!(registry.get("libro_verify").is_some());
         assert!(registry.get("libro_export").is_some());
+        assert!(registry.get("libro_proof").is_some());
+        assert!(registry.get("libro_retention").is_some());
+    }
 
-        // All should be read-only
-        let def = registry.get("libro_query").unwrap();
-        assert_eq!(def.annotations.as_ref().unwrap().read_only_hint, Some(true));
+    #[test]
+    fn read_only_tools_annotated() {
+        let audit = make_audit_with_entries(0);
+        let mut registry = ToolRegistry::new();
+        let _ = register(&mut registry, audit);
+
+        for name in ["libro_query", "libro_verify", "libro_export", "libro_proof"] {
+            let def = registry.get(name).unwrap();
+            assert_eq!(
+                def.annotations.as_ref().unwrap().read_only_hint,
+                Some(true),
+                "{name} should be read-only"
+            );
+        }
+
+        // libro_retention is NOT read-only (destructive)
+        let ret_def = registry.get("libro_retention").unwrap();
+        assert!(ret_def.annotations.is_none());
     }
 }

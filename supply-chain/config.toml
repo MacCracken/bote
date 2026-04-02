@@ -216,7 +216,7 @@ version = "0.4.14"
 criteria = "safe-to-deploy"
 
 [[exemptions.majra]]
-version = "1.0.3"
+version = "1.0.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.matchit]]
