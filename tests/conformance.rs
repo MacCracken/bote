@@ -234,7 +234,7 @@ fn error_method_not_found() {
     let resp = d
         .dispatch(&JsonRpcRequest::new(1, "nonexistent/method"))
         .unwrap();
-    assert_eq!(resp.error.unwrap().code, -32600); // protocol error for unknown method
+    assert_eq!(resp.error.unwrap().code, -32601); // method not found per JSON-RPC 2.0 spec
 }
 
 #[test]
@@ -437,6 +437,134 @@ fn tools_call_defaults_empty_arguments() {
         JsonRpcRequest::new(1, "tools/call").with_params(serde_json::json!({"name": "test_echo"}));
     let resp = d.dispatch(&req).unwrap();
     assert!(resp.result.is_some());
+}
+
+// ===========================================================================
+// JSON-RPC 2.0 error code compliance
+// ===========================================================================
+
+#[test]
+fn error_codes_comply_with_spec() {
+    let d = make_dispatcher();
+
+    // -32700: Parse error
+    let out = transport::process_message("not json", &d).unwrap();
+    let resp: JsonRpcResponse = serde_json::from_str(&out).unwrap();
+    assert_eq!(resp.error.unwrap().code, -32700);
+
+    // -32600: Invalid Request (wrong jsonrpc version)
+    let out = transport::process_message(r#"{"jsonrpc":"1.0","id":1,"method":"initialize"}"#, &d)
+        .unwrap();
+    let resp: JsonRpcResponse = serde_json::from_str(&out).unwrap();
+    assert_eq!(resp.error.unwrap().code, -32600);
+
+    // -32601: Method not found
+    let resp = d.dispatch(&JsonRpcRequest::new(1, "bogus/method")).unwrap();
+    assert_eq!(resp.error.unwrap().code, -32601);
+
+    // -32601: Tool not found (tools/call with nonexistent tool)
+    let req = JsonRpcRequest::new(1, "tools/call")
+        .with_params(serde_json::json!({"name": "nope", "arguments": {}}));
+    let resp = d.dispatch(&req).unwrap();
+    assert_eq!(resp.error.unwrap().code, -32601);
+
+    // -32602: Invalid params
+    let req = JsonRpcRequest::new(1, "tools/call")
+        .with_params(serde_json::json!({"name": "test_strict", "arguments": {}}));
+    let resp = d.dispatch(&req).unwrap();
+    assert_eq!(resp.error.unwrap().code, -32602);
+}
+
+#[test]
+fn bridge_error_response_is_spec_compliant() {
+    // Bridge error wrapping must not set both result AND error (JSON-RPC 2.0 violation).
+    let mut reg = ToolRegistry::new();
+    reg.register(ToolDef::new("test_missing", "Missing", {
+        let mut props = HashMap::new();
+        props.insert("path".into(), serde_json::json!({"type": "string"}));
+        ToolSchema::new("object", props, vec!["path".into()])
+    }));
+    let mut d = Dispatcher::new(reg);
+    d.handle(
+        "test_missing",
+        Arc::new(|_| serde_json::json!({"ok": true})),
+    );
+    let d = Arc::new(d);
+    let app = bote::bridge::router(d, vec!["*".into()]);
+
+    // Call with missing required param — triggers error path in bridge.
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "test_missing", "arguments": {}}
+    });
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::util::ServiceExt;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let rpc_resp: JsonRpcResponse = serde_json::from_slice(&bytes).unwrap();
+
+        // Must have result (MCP envelope) but NOT also error.
+        assert!(rpc_resp.result.is_some());
+        assert!(
+            rpc_resp.error.is_none(),
+            "JSON-RPC 2.0 forbids setting both result and error"
+        );
+        // Result should have isError flag in the MCP envelope.
+        let result = rpc_resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+    });
+}
+
+// ===========================================================================
+// Registry merge (audit: entries map covers both tool def and compiled schema)
+// ===========================================================================
+
+#[test]
+fn registry_deregister_cleans_up_compiled_schema() {
+    let mut reg = ToolRegistry::new();
+    let mut props = HashMap::new();
+    props.insert("path".into(), serde_json::json!({"type": "string"}));
+    reg.register(ToolDef::new(
+        "typed_tool",
+        "Typed",
+        ToolSchema::new("object", props, vec!["path".into()]),
+    ));
+
+    // Tool with compiled schema validates types.
+    assert!(
+        reg.validate_params("typed_tool", &serde_json::json!({"path": 42}))
+            .is_err()
+    );
+    assert!(
+        reg.validate_params("typed_tool", &serde_json::json!({"path": "/tmp"}))
+            .is_ok()
+    );
+
+    // After deregister, tool no longer exists.
+    reg.deregister("typed_tool");
+    assert!(
+        reg.validate_params("typed_tool", &serde_json::json!({"path": "/tmp"}))
+            .is_err()
+    );
+    assert!(!reg.contains("typed_tool"));
 }
 
 // ===========================================================================

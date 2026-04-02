@@ -74,11 +74,17 @@ impl ToolDef {
     }
 }
 
+/// A registered tool entry with optional compiled schema.
+#[derive(Debug)]
+struct ToolEntry {
+    def: ToolDef,
+    compiled: Option<CompiledSchema>,
+}
+
 /// Registry of MCP tools.
 #[derive(Debug, Default)]
 pub struct ToolRegistry {
-    tools: HashMap<String, ToolDef>,
-    compiled: HashMap<String, CompiledSchema>,
+    entries: HashMap<String, ToolEntry>,
     versions: HashMap<String, Vec<ToolDef>>,
 }
 
@@ -90,14 +96,13 @@ impl ToolRegistry {
 
     pub fn register(&mut self, tool: ToolDef) {
         tracing::debug!(tool = %tool.name, version = ?tool.version, "tool registered");
-        match CompiledSchema::compile(&tool.input_schema) {
-            Ok(compiled) => {
-                self.compiled.insert(tool.name.clone(), compiled);
-            }
+        let compiled = match CompiledSchema::compile(&tool.input_schema) {
+            Ok(compiled) => Some(compiled),
             Err(e) => {
                 tracing::warn!(tool = %tool.name, error = %e, "failed to compile schema, using fallback");
+                None
             }
-        }
+        };
         // Track versioned tools.
         if tool.version.is_some() {
             self.versions
@@ -105,35 +110,41 @@ impl ToolRegistry {
                 .or_default()
                 .push(tool.clone());
         }
-        self.tools.insert(tool.name.clone(), tool);
+        self.entries.insert(
+            tool.name.clone(),
+            ToolEntry {
+                def: tool,
+                compiled,
+            },
+        );
     }
 
     #[inline]
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&ToolDef> {
-        self.tools.get(name)
+        self.entries.get(name).map(|e| &e.def)
     }
 
     #[must_use]
     pub fn list(&self) -> Vec<&ToolDef> {
-        self.tools.values().collect()
+        self.entries.values().map(|e| &e.def).collect()
     }
 
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
-        self.tools.len()
+        self.entries.len()
     }
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
+        self.entries.is_empty()
     }
 
     #[inline]
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
-        self.tools.contains_key(name)
+        self.entries.contains_key(name)
     }
 
     /// Look up a specific version of a tool.
@@ -156,9 +167,8 @@ impl ToolRegistry {
 
     /// Remove a tool from the registry.
     pub fn deregister(&mut self, name: &str) -> Option<ToolDef> {
-        self.compiled.remove(name);
         self.versions.remove(name);
-        let removed = self.tools.remove(name);
+        let removed = self.entries.remove(name).map(|e| e.def);
         if removed.is_some() {
             tracing::debug!(tool = name, "tool deregistered");
         }
@@ -167,10 +177,10 @@ impl ToolRegistry {
 
     /// Mark a tool as deprecated with a message.
     pub fn deprecate(&mut self, name: &str, message: impl Into<String>) {
-        if let Some(tool) = self.tools.get_mut(name) {
+        if let Some(entry) = self.entries.get_mut(name) {
             let msg = message.into();
             tracing::info!(tool = name, message = %msg, "tool deprecated");
-            tool.deprecated = Some(msg);
+            entry.def.deprecated = Some(msg);
         }
     }
 
@@ -184,12 +194,13 @@ impl ToolRegistry {
         tool_name: &str,
         params: &serde_json::Value,
     ) -> crate::Result<()> {
-        if !self.tools.contains_key(tool_name) {
-            return Err(crate::BoteError::ToolNotFound(tool_name.into()));
-        }
+        let entry = self
+            .entries
+            .get(tool_name)
+            .ok_or_else(|| crate::BoteError::ToolNotFound(tool_name.into()))?;
 
         // Use compiled schema if available.
-        if let Some(compiled) = self.compiled.get(tool_name) {
+        if let Some(compiled) = &entry.compiled {
             if let Err(violations) = compiled.validate(params) {
                 return Err(crate::BoteError::SchemaViolation {
                     tool: tool_name.into(),
@@ -200,7 +211,6 @@ impl ToolRegistry {
         }
 
         // Fallback: basic required-field check.
-        let tool = &self.tools[tool_name];
         let map = match params {
             serde_json::Value::Object(map) => map,
             _ => {
@@ -211,7 +221,7 @@ impl ToolRegistry {
             }
         };
 
-        for req in &tool.input_schema.required {
+        for req in &entry.def.input_schema.required {
             if !map.contains_key(req) {
                 return Err(crate::BoteError::InvalidParams {
                     tool: tool_name.into(),

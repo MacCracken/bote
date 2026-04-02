@@ -236,8 +236,7 @@ pub fn validate_callback_url(url: &str) -> std::result::Result<(), String> {
                 if v4.is_link_local()
                     || v4.is_broadcast()
                     || (v4.octets()[0] == 10)
-                    || (v4.octets()[0] == 172
-                        && (16..=31).contains(&v4.octets()[1]))
+                    || (v4.octets()[0] == 172 && (16..=31).contains(&v4.octets()[1]))
                     || (v4.octets()[0] == 192 && v4.octets()[1] == 168)
                 {
                     // Allow localhost (127.x) for local development
@@ -500,9 +499,10 @@ mod tests {
     fn register_external_conflict_with_builtin() {
         let mut reg = McpHostRegistry::new();
         reg.register_builtin(test_tool("overlap"));
-        assert!(reg
-            .register_external(test_register_req("overlap"), false)
-            .is_err());
+        assert!(
+            reg.register_external(test_register_req("overlap"), false)
+                .is_err()
+        );
     }
 
     #[test]
@@ -538,9 +538,10 @@ mod tests {
         let mut reg = McpHostRegistry::new();
         reg.register_builtin(test_tool("scan"));
         // External with same name is blocked
-        assert!(reg
-            .register_external(test_register_req("scan"), false)
-            .is_err());
+        assert!(
+            reg.register_external(test_register_req("scan"), false)
+                .is_err()
+        );
     }
 
     #[test]

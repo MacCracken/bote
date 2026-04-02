@@ -13,7 +13,7 @@ echo "Running benchmarks..."
 # Criterion outputs either "name  time: [...]" on one line or
 # "name\n                        time: [...]" on two lines (for long names).
 # This awk script joins them into "name  time: [...]" consistently.
-OUTPUT=$(cargo bench --bench dispatch 2>&1 | awk '
+OUTPUT=$(cargo bench --bench dispatch --features bridge 2>&1 | awk '
     /time:/ {
         if (prev != "" && $0 ~ /^[[:space:]]+time:/) {
             sub(/^[[:space:]]+/, "", $0)

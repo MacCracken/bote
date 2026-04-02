@@ -130,7 +130,7 @@ fn flow_unknown_method() {
         .dispatch(&protocol::JsonRpcRequest::new(1, "bogus/rpc"))
         .unwrap();
     let err = resp.error.unwrap();
-    assert_eq!(err.code, -32600);
+    assert_eq!(err.code, -32601);
     assert!(err.message.contains("bogus/rpc"));
 }
 

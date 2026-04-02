@@ -429,7 +429,7 @@ mod tests {
             .unwrap();
         let rpc_resp: JsonRpcResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(rpc_resp.error.is_some());
-        assert_eq!(rpc_resp.error.unwrap().code, -32600);
+        assert_eq!(rpc_resp.error.unwrap().code, -32601);
     }
 
     #[tokio::test]

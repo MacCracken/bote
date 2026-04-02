@@ -225,13 +225,9 @@ fn process_bridge_message(input: &str, dispatcher: &Dispatcher) -> Option<String
         if let Some(result) = &resp.result {
             JsonRpcResponse::success(resp.id.clone(), wrap_tool_result(result))
         } else if let Some(err) = &resp.error {
-            // Wrap error into MCP envelope.
-            let mut wrapped_resp =
-                JsonRpcResponse::success(resp.id.clone(), wrap_error_result(&err.message));
-            // Keep the original error too for JSON-RPC compliance.
-            wrapped_resp.error = resp.error.clone();
-            wrapped_resp.result = Some(wrap_error_result(&err.message));
-            wrapped_resp
+            // Tool call failed — return the error in MCP envelope as the result.
+            // JSON-RPC 2.0 spec forbids setting both result and error.
+            JsonRpcResponse::success(resp.id.clone(), wrap_error_result(&err.message))
         } else {
             resp
         }

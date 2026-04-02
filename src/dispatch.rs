@@ -154,6 +154,11 @@ impl Dispatcher {
     /// Dispatch a JSON-RPC request. Returns `None` for notifications.
     #[must_use]
     pub fn dispatch(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
+        // Fast path: notifications never produce a response.
+        if request.is_notification() {
+            return None;
+        }
+
         let id = request.id.clone().unwrap_or(serde_json::Value::Null);
         let registry = self.registry.read().unwrap_or_else(|e| e.into_inner());
         let handlers = self.handlers.read().unwrap_or_else(|e| e.into_inner());
@@ -271,16 +276,12 @@ impl Dispatcher {
                 }
             }
             _ => {
-                let err = BoteError::Protocol(format!("unknown method: {}", request.method));
-                JsonRpcResponse::error(id, err.rpc_code(), err.to_string())
+                // JSON-RPC 2.0 §5.1: "Method not found" = -32601
+                JsonRpcResponse::error(id, -32601, format!("method not found: {}", request.method))
             }
         };
 
-        if request.is_notification() {
-            None
-        } else {
-            Some(response)
-        }
+        Some(response)
     }
 
     /// Dispatch with streaming support. Returns `DispatchOutcome::Streaming` for
@@ -533,7 +534,7 @@ mod tests {
         let req = JsonRpcRequest::new(1, "bogus/method");
         let resp = d.dispatch(&req).unwrap();
         assert!(resp.error.is_some());
-        assert_eq!(resp.error.unwrap().code, -32600);
+        assert_eq!(resp.error.unwrap().code, -32601);
     }
 
     #[test]
