@@ -76,6 +76,9 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 - [ ] AI-powered tool selection — hoosh suggests which tool to call based on intent
 - [ ] Tool composition — chain multiple tools into a workflow via szál
 
+### Ecosystem
+- [ ] jnana knowledge tools — `jnana_search`, `jnana_lookup`, `jnana_budget` registered as bote tools for MCP-accessible knowledge queries
+
 ### Platform
 - [ ] WASM tool handlers (run tool logic in wasmtime)
 - [ ] Python tool handlers (PyO3 bridge)

@@ -15,6 +15,7 @@ exclude = [".claude/", ".github/", "target/", "benches/history.log"]
 
 [features]
 default = []
+host = ["dep:url"]
 http = ["dep:axum", "dep:tokio", "dep:futures-util"]
 ws = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
 unix = ["dep:tokio"]
@@ -24,7 +25,7 @@ events = ["dep:majra"]
 bridge = ["http"]
 discovery = ["events"]
 sandbox = ["dep:kavach", "dep:tokio"]
-full = ["all-transports", "audit", "events", "bridge", "discovery", "sandbox"]
+full = ["all-transports", "audit", "events", "bridge", "discovery", "sandbox", "host"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -42,6 +43,9 @@ futures-util = { version = "0.3", optional = true }
 libro = { version = "0.22", optional = true }
 majra = { version = "0.22", optional = true }
 
+# URL validation (optional — for host SSRF checks)
+url = { version = "2", optional = true }
+
 # Sandbox (optional)
 kavach = { version = "1.0", optional = true, default-features = false }
 
@@ -54,6 +58,7 @@ futures-util = "0.3"
 libro = "0.22"
 majra = "0.22"
 kavach = { version = "1.0", default-features = false }
+url = "2"
 
 [[bench]]
 name = "dispatch"

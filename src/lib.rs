@@ -48,6 +48,9 @@ pub mod transport;
 #[cfg(feature = "bridge")]
 pub mod bridge;
 
+#[cfg(feature = "host")]
+pub mod host;
+
 #[cfg(feature = "discovery")]
 pub mod discovery;
 
