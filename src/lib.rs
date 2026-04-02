@@ -42,8 +42,12 @@ pub mod events;
 pub mod protocol;
 pub mod registry;
 pub mod schema;
+pub mod session;
 pub mod stream;
 pub mod transport;
+
+#[cfg(feature = "auth")]
+pub mod auth;
 
 #[cfg(feature = "bridge")]
 pub mod bridge;
@@ -64,7 +68,7 @@ pub use audit::{AuditSink, ToolCallEvent};
 pub use dispatch::{DispatchOutcome, Dispatcher};
 pub use events::EventSink;
 pub use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
-pub use registry::{ToolDef, ToolRegistry, ToolSchema};
+pub use registry::{ToolAnnotations, ToolDef, ToolRegistry, ToolSchema};
 pub use schema::{CompiledSchema, PropertyDef, SchemaType};
 pub use stream::{
     CancellationToken, ProgressSender, ProgressUpdate, StreamContext, StreamingToolHandler,

@@ -14,7 +14,7 @@ fn full_mcp_flow() {
             required: vec!["input".into()],
         },
         version: None,
-        deprecated: None,
+        deprecated: None, annotations: None,
     });
 
     let mut dispatcher = dispatch::Dispatcher::new(reg);
@@ -88,7 +88,7 @@ fn flow_validation_failure() {
             required: vec!["input".into()],
         },
         version: None,
-        deprecated: None,
+        deprecated: None, annotations: None,
     });
 
     let mut dispatcher = dispatch::Dispatcher::new(reg);
@@ -146,7 +146,7 @@ fn transport_parse_dispatch_serialize() {
             required: vec![],
         },
         version: None,
-        deprecated: None,
+        deprecated: None, annotations: None,
     });
     let mut dispatcher = dispatch::Dispatcher::new(reg);
     dispatcher.handle("ping", Arc::new(|_| serde_json::json!({"pong": true})));
@@ -181,7 +181,7 @@ fn flow_batch_via_process_message() {
             required: vec![],
         },
         version: None,
-        deprecated: None,
+        deprecated: None, annotations: None,
     });
     let mut dispatcher = dispatch::Dispatcher::new(reg);
     dispatcher.handle("ping", Arc::new(|_| serde_json::json!({"pong": true})));

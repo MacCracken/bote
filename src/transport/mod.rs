@@ -13,3 +13,8 @@ pub mod ws;
 
 #[cfg(feature = "unix")]
 pub mod unix;
+
+/// Streamable HTTP transport (MCP 2025-11-25) — single endpoint, SSE + POST,
+/// session tracking, event ID resumption.
+#[cfg(feature = "http")]
+pub mod streamable;

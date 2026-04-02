@@ -124,7 +124,7 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         }
     }
 

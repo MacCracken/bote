@@ -137,7 +137,7 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle(
@@ -160,7 +160,7 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         });
         reg.register(ToolDef {
             name: "echo".into(),
@@ -171,7 +171,7 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle(

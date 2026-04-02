@@ -307,14 +307,14 @@ fn initialize_falls_back_for_unsupported_version() {
     let req = JsonRpcRequest::new(1, "initialize")
         .with_params(serde_json::json!({"protocolVersion": "2099-01-01"}));
     let resp = d.dispatch(&req).unwrap();
-    assert_eq!(resp.result.unwrap()["protocolVersion"], "2025-03-26");
+    assert_eq!(resp.result.unwrap()["protocolVersion"], "2025-11-25");
 }
 
 #[test]
 fn initialize_uses_latest_when_version_missing() {
     let d = make_dispatcher();
     let resp = d.dispatch(&JsonRpcRequest::new(1, "initialize")).unwrap();
-    assert_eq!(resp.result.unwrap()["protocolVersion"], "2025-03-26");
+    assert_eq!(resp.result.unwrap()["protocolVersion"], "2025-11-25");
 }
 
 // ===========================================================================

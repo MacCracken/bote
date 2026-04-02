@@ -11,10 +11,10 @@ use crate::registry::ToolRegistry;
 use crate::stream::{self, ProgressUpdate, StreamContext, StreamingToolHandler};
 
 /// Supported MCP protocol versions.
-const SUPPORTED_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26"];
+const SUPPORTED_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-11-25"];
 
 /// Default protocol version when the client doesn't specify one.
-const LATEST_VERSION: &str = "2025-03-26";
+const LATEST_VERSION: &str = "2025-11-25";
 
 /// A tool handler function.
 pub type ToolHandler = Arc<dyn Fn(serde_json::Value) -> serde_json::Value + Send + Sync>;
@@ -490,7 +490,7 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle("echo", Arc::new(|params| {
@@ -640,7 +640,7 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle("noop", Arc::new(|_| serde_json::json!({"ok": true})));
@@ -664,7 +664,7 @@ mod tests {
                 required: vec!["path".into()],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle("strict", Arc::new(|_| serde_json::json!({"ok": true})));
@@ -698,7 +698,7 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         });
         reg.register(ToolDef {
             name: "echo".into(),
@@ -709,7 +709,7 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         });
         let mut d = Dispatcher::new(reg);
         // Sync handler for echo.
@@ -816,7 +816,7 @@ mod tests {
                     required: vec![],
                 },
                 version: None,
-                deprecated: None,
+                deprecated: None, annotations: None,
             });
             let mut d = Dispatcher::new(reg);
             d.handle_streaming(

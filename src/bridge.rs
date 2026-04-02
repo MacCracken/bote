@@ -259,7 +259,7 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle(
@@ -277,7 +277,7 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         });
         reg2.register(ToolDef {
             name: "mcp_tool".into(),
@@ -288,7 +288,7 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         });
         let mut d = Dispatcher::new(reg2);
         d.handle(

@@ -83,14 +83,60 @@ impl McpToolCall {
 }
 
 /// A content block in a tool result.
+///
+/// MCP supports text, image, audio, and resource content types.
+/// Use the constructors (`text_block`, `audio_block`, `image_block`)
+/// rather than building directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct McpContentBlock {
-    /// Content type (e.g. "text/plain").
+    /// Content type: "text", "image", "audio", or "resource".
     #[serde(rename = "type")]
     pub content_type: String,
-    /// Text content.
-    pub text: String,
+    /// Text content (for type "text").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Base64-encoded binary data (for type "image" or "audio").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// MIME type (for type "image" or "audio", e.g. "audio/wav", "image/png").
+    #[serde(default, rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+impl McpContentBlock {
+    /// Create a text content block.
+    #[must_use]
+    pub fn text_block(text: impl Into<String>) -> Self {
+        Self {
+            content_type: "text".into(),
+            text: Some(text.into()),
+            data: None,
+            mime_type: None,
+        }
+    }
+
+    /// Create an audio content block (MCP 2025-11-25).
+    #[must_use]
+    pub fn audio_block(base64_data: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        Self {
+            content_type: "audio".into(),
+            text: None,
+            data: Some(base64_data.into()),
+            mime_type: Some(mime_type.into()),
+        }
+    }
+
+    /// Create an image content block.
+    #[must_use]
+    pub fn image_block(base64_data: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        Self {
+            content_type: "image".into(),
+            text: None,
+            data: Some(base64_data.into()),
+            mime_type: Some(mime_type.into()),
+        }
+    }
 }
 
 /// Result of a tool call.
@@ -109,10 +155,7 @@ impl McpToolResult {
     #[must_use]
     pub fn text(text: impl Into<String>) -> Self {
         Self {
-            content: vec![McpContentBlock {
-                content_type: "text/plain".into(),
-                text: text.into(),
-            }],
+            content: vec![McpContentBlock::text_block(text)],
             is_error: false,
         }
     }
@@ -121,11 +164,17 @@ impl McpToolResult {
     #[must_use]
     pub fn error(message: impl Into<String>) -> Self {
         Self {
-            content: vec![McpContentBlock {
-                content_type: "text/plain".into(),
-                text: message.into(),
-            }],
+            content: vec![McpContentBlock::text_block(message)],
             is_error: true,
+        }
+    }
+
+    /// Create a success result with audio content (MCP 2025-11-25).
+    #[must_use]
+    pub fn audio(base64_data: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        Self {
+            content: vec![McpContentBlock::audio_block(base64_data, mime_type)],
+            is_error: false,
         }
     }
 
@@ -133,10 +182,9 @@ impl McpToolResult {
     #[must_use]
     pub fn json(value: &serde_json::Value) -> Self {
         Self {
-            content: vec![McpContentBlock {
-                content_type: "text/plain".into(),
-                text: serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".into()),
-            }],
+            content: vec![McpContentBlock::text_block(
+                serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".into()),
+            )],
             is_error: false,
         }
     }
@@ -438,15 +486,15 @@ mod tests {
         let r = McpToolResult::text("hello");
         assert!(!r.is_error);
         assert_eq!(r.content.len(), 1);
-        assert_eq!(r.content[0].text, "hello");
-        assert_eq!(r.content[0].content_type, "text/plain");
+        assert_eq!(r.content[0].text.as_deref(), Some("hello"));
+        assert_eq!(r.content[0].content_type, "text");
     }
 
     #[test]
     fn tool_result_error() {
         let r = McpToolResult::error("boom");
         assert!(r.is_error);
-        assert_eq!(r.content[0].text, "boom");
+        assert_eq!(r.content[0].text.as_deref(), Some("boom"));
     }
 
     #[test]
@@ -454,7 +502,25 @@ mod tests {
         let val = json!({"status": "ok"});
         let r = McpToolResult::json(&val);
         assert!(!r.is_error);
-        assert!(r.content[0].text.contains("ok"));
+        assert!(r.content[0].text.as_deref().unwrap().contains("ok"));
+    }
+
+    #[test]
+    fn tool_result_audio() {
+        let r = McpToolResult::audio("AAAA", "audio/wav");
+        assert!(!r.is_error);
+        assert_eq!(r.content[0].content_type, "audio");
+        assert_eq!(r.content[0].data.as_deref(), Some("AAAA"));
+        assert_eq!(r.content[0].mime_type.as_deref(), Some("audio/wav"));
+        assert!(r.content[0].text.is_none());
+    }
+
+    #[test]
+    fn content_block_image() {
+        let b = McpContentBlock::image_block("iVBOR", "image/png");
+        assert_eq!(b.content_type, "image");
+        assert_eq!(b.data.as_deref(), Some("iVBOR"));
+        assert_eq!(b.mime_type.as_deref(), Some("image/png"));
     }
 
     // -- McpHostRegistry --

@@ -17,6 +17,51 @@ pub struct ToolSchema {
     pub required: Vec<String>,
 }
 
+/// Behavioral hints for a tool (MCP 2025-11-25).
+///
+/// These are **hints, not guarantees** — clients should treat them as
+/// untrusted unless the server is trusted.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ToolAnnotations {
+    /// Tool does not modify any state (default: false).
+    #[serde(default, rename = "readOnlyHint", skip_serializing_if = "Option::is_none")]
+    pub read_only_hint: Option<bool>,
+    /// Tool makes changes that cannot be reversed (default: true).
+    #[serde(default, rename = "destructiveHint", skip_serializing_if = "Option::is_none")]
+    pub destructive_hint: Option<bool>,
+    /// Tool can be called repeatedly with the same result (default: false).
+    #[serde(default, rename = "idempotentHint", skip_serializing_if = "Option::is_none")]
+    pub idempotent_hint: Option<bool>,
+    /// Tool interacts with entities outside its local domain (default: true).
+    #[serde(default, rename = "openWorldHint", skip_serializing_if = "Option::is_none")]
+    pub open_world_hint: Option<bool>,
+}
+
+impl ToolAnnotations {
+    /// Create annotations for a read-only tool.
+    #[must_use]
+    pub fn read_only() -> Self {
+        Self {
+            read_only_hint: Some(true),
+            destructive_hint: Some(false),
+            idempotent_hint: Some(true),
+            open_world_hint: Some(false),
+        }
+    }
+
+    /// Create annotations for a destructive tool.
+    #[must_use]
+    pub fn destructive() -> Self {
+        Self {
+            read_only_hint: Some(false),
+            destructive_hint: Some(true),
+            idempotent_hint: Some(false),
+            open_world_hint: Some(true),
+        }
+    }
+}
+
 /// Definition of a registered MCP tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -28,6 +73,9 @@ pub struct ToolDef {
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deprecated: Option<String>,
+    /// Behavioral hints (MCP 2025-11-25).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<ToolAnnotations>,
 }
 
 impl ToolSchema {
@@ -58,6 +106,7 @@ impl ToolDef {
             input_schema,
             version: None,
             deprecated: None,
+            annotations: None,
         }
     }
 
@@ -70,6 +119,13 @@ impl ToolDef {
     #[must_use]
     pub fn with_deprecated(mut self, message: impl Into<String>) -> Self {
         self.deprecated = Some(message.into());
+        self
+    }
+
+    /// Add behavioral annotations (MCP 2025-11-25).
+    #[must_use]
+    pub fn with_annotations(mut self, annotations: ToolAnnotations) -> Self {
+        self.annotations = Some(annotations);
         self
     }
 }
@@ -248,7 +304,7 @@ mod tests {
                 required: vec!["path".into()],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         }
     }
 
@@ -346,7 +402,7 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         });
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.get("dup").unwrap().description, "updated");
@@ -366,7 +422,7 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None,
+            deprecated: None, annotations: None,
         });
         assert!(reg.validate_params("open", &serde_json::json!({})).is_ok());
     }
