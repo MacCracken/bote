@@ -25,16 +25,32 @@ pub struct ToolSchema {
 #[non_exhaustive]
 pub struct ToolAnnotations {
     /// Tool does not modify any state (default: false).
-    #[serde(default, rename = "readOnlyHint", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "readOnlyHint",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub read_only_hint: Option<bool>,
     /// Tool makes changes that cannot be reversed (default: true).
-    #[serde(default, rename = "destructiveHint", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "destructiveHint",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub destructive_hint: Option<bool>,
     /// Tool can be called repeatedly with the same result (default: false).
-    #[serde(default, rename = "idempotentHint", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "idempotentHint",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub idempotent_hint: Option<bool>,
     /// Tool interacts with entities outside its local domain (default: true).
-    #[serde(default, rename = "openWorldHint", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "openWorldHint",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub open_world_hint: Option<bool>,
 }
 
@@ -304,7 +320,8 @@ mod tests {
                 required: vec!["path".into()],
             },
             version: None,
-            deprecated: None, annotations: None,
+            deprecated: None,
+            annotations: None,
         }
     }
 
@@ -402,7 +419,8 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None, annotations: None,
+            deprecated: None,
+            annotations: None,
         });
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.get("dup").unwrap().description, "updated");
@@ -422,7 +440,8 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None, annotations: None,
+            deprecated: None,
+            annotations: None,
         });
         assert!(reg.validate_params("open", &serde_json::json!({})).is_ok());
     }

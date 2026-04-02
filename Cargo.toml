@@ -42,7 +42,7 @@ tokio-tungstenite = { version = "0.29", optional = true }
 futures-util = { version = "0.3", optional = true }
 
 # Observability dependencies (all optional)
-libro = { version = "0.25", optional = true }
+libro = { path = "../libro", version = "0.91", optional = true }
 majra = { version = "1.0", optional = true }
 
 # Auth dependencies (optional)
@@ -62,7 +62,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
-libro = "0.25"
+libro = { path = "../libro", version = "0.91" }
 majra = "1.0"
 kavach = { version = "1.0", default-features = false }
 url = "2"

@@ -7,32 +7,7 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## v0.92.0 — Transport Middleware Integration
-
-Wire the session, origin, and auth types (added in 0.91.0) into the HTTP and streamable transport handlers as axum middleware layers.
-
-### Session enforcement
-- [ ] HTTP transport: extract `MCP-Session-Id` header, validate via `SessionStore`, return 404 if invalid
-- [ ] HTTP transport: return `MCP-Session-Id` header on `initialize` response
-- [ ] Streamable transport: same session lifecycle via middleware
-- [ ] Session prune on periodic timer (tokio interval)
-
-### Origin enforcement
-- [ ] HTTP/streamable middleware: extract `Origin` header, call `validate_origin`, return 403 on failure
-- [ ] Configurable allowed origins per transport config
-
-### Protocol version enforcement
-- [ ] HTTP/streamable middleware: extract `MCP-Protocol-Version` header, validate, return 400 on mismatch
-
-### Bearer token extraction
-- [ ] HTTP/streamable middleware: extract `Authorization: Bearer <token>` header
-- [ ] Pass `TokenClaims` into dispatch context so handlers can check scopes
-- [ ] Return 401 with `WWW-Authenticate` header when token missing/invalid
-- [ ] Return 403 with `insufficient_scope` header when scope insufficient
-
----
-
-## v0.93.0 — OAuth 2.1 Client Flow
+## v0.92.0 — OAuth 2.1 Client Flow
 
 Complete the OAuth 2.1 authorization flow with HTTP client integration.
 
@@ -51,7 +26,7 @@ Complete the OAuth 2.1 authorization flow with HTTP client integration.
 
 ---
 
-## v0.94.0 — Resource Content & Completions
+## v0.93.0 — Resource Content & Completions
 
 ### Resource content type
 - [ ] `McpContentBlock::resource_block` with URI + text/blob content
@@ -63,18 +38,10 @@ Complete the OAuth 2.1 authorization flow with HTTP client integration.
 
 ---
 
-## v0.95.0 — Streamable HTTP Full Implementation
+## v0.94.0 — Streamable Transport Hardening
 
-Wire the streamable transport types (0.91.0) into a working axum router.
-
-### Single endpoint router
-- [ ] POST to `/mcp` — JSON-RPC request → response (or SSE stream)
-- [ ] GET to `/mcp` — open SSE stream for server-initiated messages
-- [ ] `Last-Event-ID` header → replay from `ResumptionBuffer`
-- [ ] `retry:` field sent before closing SSE connection
-- [ ] Priming event on stream open (empty data)
-
-### Integration
+### Remaining
+- [ ] `StreamableConfig` auth builder (`with_token_validator()`) — parity with `HttpConfig`
 - [ ] Streamable transport passes full conformance suite
 - [ ] Benchmark: streamable vs plain HTTP latency overhead
 
@@ -83,7 +50,6 @@ Wire the streamable transport types (0.91.0) into a working axum router.
 ## v1.0.0 Criteria
 
 - [ ] MCP 2025-11-25 fully compliant (all features, not just types)
-- [ ] Session, origin, auth middleware wired and tested
 - [ ] OAuth 2.1 flow end-to-end (with test auth server)
 - [ ] Streamable HTTP transport passes conformance
 - [ ] Resource content type complete

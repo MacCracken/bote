@@ -18,14 +18,13 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
 /// OAuth 2.1 configuration for an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct OAuthConfig {
     /// Resource URI for this MCP server (RFC 8707).
@@ -38,17 +37,6 @@ pub struct OAuthConfig {
     pub scopes_supported: Vec<String>,
     /// Whether to require authentication on all endpoints.
     pub require_auth: bool,
-}
-
-impl Default for OAuthConfig {
-    fn default() -> Self {
-        Self {
-            resource_uri: String::new(),
-            authorization_server: String::new(),
-            scopes_supported: Vec::new(),
-            require_auth: false,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +184,21 @@ pub fn www_authenticate_header(metadata_url: &str) -> String {
 #[must_use]
 pub fn insufficient_scope_header(required_scope: &str) -> String {
     format!(r#"Bearer error="insufficient_scope", scope="{required_scope}""#)
+}
+
+// ---------------------------------------------------------------------------
+// Token validator trait
+// ---------------------------------------------------------------------------
+
+/// Trait for validating bearer tokens.
+///
+/// Consumers implement this to integrate with their auth server (JWT
+/// validation, token introspection, etc.). Bote's transport middleware
+/// calls [`validate_token`](Self::validate_token) on every authenticated
+/// request.
+pub trait TokenValidator: Send + Sync {
+    /// Validate a bearer token string and return the result.
+    fn validate_token(&self, token: &str) -> TokenValidation;
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +352,8 @@ mod tests {
 
     #[test]
     fn www_authenticate_header_format() {
-        let header = www_authenticate_header("https://mcp.example.com/.well-known/oauth-protected-resource");
+        let header =
+            www_authenticate_header("https://mcp.example.com/.well-known/oauth-protected-resource");
         assert!(header.starts_with("Bearer resource_metadata="));
     }
 

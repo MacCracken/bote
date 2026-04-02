@@ -6,6 +6,9 @@ pub use codec::{parse_request, process_message, serialize_response};
 pub mod stdio;
 
 #[cfg(feature = "http")]
+pub(crate) mod middleware;
+
+#[cfg(feature = "http")]
 pub mod http;
 
 #[cfg(feature = "ws")]

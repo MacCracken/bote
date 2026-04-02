@@ -490,7 +490,8 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None, annotations: None,
+            deprecated: None,
+            annotations: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle("echo", Arc::new(|params| {
@@ -640,7 +641,8 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None, annotations: None,
+            deprecated: None,
+            annotations: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle("noop", Arc::new(|_| serde_json::json!({"ok": true})));
@@ -664,7 +666,8 @@ mod tests {
                 required: vec!["path".into()],
             },
             version: None,
-            deprecated: None, annotations: None,
+            deprecated: None,
+            annotations: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle("strict", Arc::new(|_| serde_json::json!({"ok": true})));
@@ -698,7 +701,8 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None, annotations: None,
+            deprecated: None,
+            annotations: None,
         });
         reg.register(ToolDef {
             name: "echo".into(),
@@ -709,7 +713,8 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None, annotations: None,
+            deprecated: None,
+            annotations: None,
         });
         let mut d = Dispatcher::new(reg);
         // Sync handler for echo.
@@ -816,7 +821,8 @@ mod tests {
                     required: vec![],
                 },
                 version: None,
-                deprecated: None, annotations: None,
+                deprecated: None,
+                annotations: None,
             });
             let mut d = Dispatcher::new(reg);
             d.handle_streaming(

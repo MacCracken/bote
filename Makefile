@@ -1,7 +1,7 @@
 # Run all CI checks locally: make check
-.PHONY: check fmt clippy test test-all audit deny build doc coverage bench clean
+.PHONY: check fmt clippy test test-all audit deny vet build doc coverage bench clean
 
-check: fmt clippy test audit
+check: fmt clippy test audit vet
 
 fmt:
 	cargo fmt --all -- --check
@@ -28,6 +28,9 @@ audit:
 
 deny:
 	cargo deny check
+
+vet:
+	cargo vet
 
 build:
 	cargo build --release

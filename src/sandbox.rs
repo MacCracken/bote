@@ -351,7 +351,8 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None, annotations: None,
+            deprecated: None,
+            annotations: None,
         }
     }
 

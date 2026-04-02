@@ -105,8 +105,8 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 
 | Category | Count |
 |----------|-------|
-| Library unit tests | 214 |
-| Conformance tests | 41 |
+| Library unit tests | 274 |
+| Conformance tests | 44 |
 | Doc-tests | 1 |
 | Criterion benchmarks | 13 |
 

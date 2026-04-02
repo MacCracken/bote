@@ -55,6 +55,9 @@ pub mod bridge;
 #[cfg(feature = "host")]
 pub mod host;
 
+#[cfg(feature = "audit")]
+pub mod libro_tools;
+
 #[cfg(feature = "discovery")]
 pub mod discovery;
 

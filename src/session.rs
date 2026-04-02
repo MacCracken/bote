@@ -119,10 +119,7 @@ impl SessionStore {
     /// Number of active sessions.
     #[must_use]
     pub fn active_count(&self) -> usize {
-        self.sessions
-            .read()
-            .expect("session lock poisoned")
-            .len()
+        self.sessions.read().expect("session lock poisoned").len()
     }
 }
 
@@ -215,7 +212,7 @@ mod tests {
     #[test]
     fn prune_expired() {
         let store = SessionStore::new(Duration::from_millis(1));
-        store.create("2025-11-25".into());
+        let _ = store.create("2025-11-25".into());
         std::thread::sleep(Duration::from_millis(10));
         let pruned = store.prune_expired();
         assert_eq!(pruned, 1);

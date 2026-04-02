@@ -147,7 +147,8 @@ mod tests {
                 required: vec![],
             },
             version: None,
-            deprecated: None, annotations: None,
+            deprecated: None,
+            annotations: None,
         });
         let mut d = Dispatcher::new(reg);
         d.handle(
