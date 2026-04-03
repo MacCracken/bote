@@ -1,10 +1,6 @@
 
 # cargo-vet imports lock
 
-[[unpublished.bote]]
-version = "0.91.0"
-audited_as = "0.90.0"
-
 [[publisher.anstream]]
 version = "1.0.0"
 when = "2026-02-11"
