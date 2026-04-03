@@ -52,15 +52,18 @@ pub enum CodeChallengeMethod {
 }
 
 /// Generate a PKCE code verifier (43-128 characters, URL-safe).
-#[must_use]
-pub fn generate_code_verifier() -> String {
+///
+/// # Errors
+///
+/// Returns an error if the OS random number generator fails.
+pub fn generate_code_verifier() -> crate::Result<String> {
     use std::fmt::Write;
-    let bytes: [u8; 32] = rand_bytes();
-    let mut verifier = String::with_capacity(43);
+    let bytes: [u8; 32] = rand_bytes()?;
+    let mut verifier = String::with_capacity(64);
     for b in &bytes {
         let _ = write!(verifier, "{:02x}", b);
     }
-    verifier
+    Ok(verifier)
 }
 
 /// Compute the S256 code challenge from a verifier.
@@ -100,12 +103,14 @@ pub struct TokenClaims {
 impl TokenClaims {
     /// Check if the token has a specific scope.
     #[must_use]
+    #[inline]
     pub fn has_scope(&self, scope: &str) -> bool {
         self.scopes.contains(scope)
     }
 
     /// Check if the token is expired.
     #[must_use]
+    #[inline]
     pub fn is_expired(&self) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -116,6 +121,7 @@ impl TokenClaims {
 
     /// Check if the token is valid for the given resource URI.
     #[must_use]
+    #[inline]
     pub fn valid_for_resource(&self, resource_uri: &str) -> bool {
         self.resource
             .as_ref()
@@ -232,11 +238,13 @@ pub struct ClientMetadata {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn rand_bytes<const N: usize>() -> [u8; N] {
+fn rand_bytes<const N: usize>() -> crate::Result<[u8; N]> {
     let mut buf = [0u8; N];
-    // Use getrandom for cryptographic randomness
-    getrandom::getrandom(&mut buf).expect("getrandom failed");
-    buf
+    getrandom::getrandom(&mut buf).map_err(|e| crate::error::BoteError::ExecFailed {
+        tool: "auth".into(),
+        reason: format!("getrandom failed: {e}"),
+    })?;
+    Ok(buf)
 }
 
 fn base64_url_encode(data: &[u8]) -> String {
@@ -265,7 +273,7 @@ mod tests {
 
     #[test]
     fn pkce_roundtrip() {
-        let verifier = generate_code_verifier();
+        let verifier = generate_code_verifier().unwrap();
         assert!(verifier.len() >= 43);
         let challenge = compute_code_challenge(&verifier);
         assert!(verify_pkce(&verifier, &challenge));
@@ -273,7 +281,7 @@ mod tests {
 
     #[test]
     fn pkce_wrong_verifier_fails() {
-        let verifier = generate_code_verifier();
+        let verifier = generate_code_verifier().unwrap();
         let challenge = compute_code_challenge(&verifier);
         assert!(!verify_pkce("wrong-verifier", &challenge));
     }

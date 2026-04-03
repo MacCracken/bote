@@ -252,6 +252,7 @@ pub struct RegisterMcpToolRequest {
 ///
 /// Rejects: private IPs, non-http(s) schemes, credentials in URL,
 /// and link-local addresses.
+#[must_use = "validation result should be checked"]
 pub fn validate_callback_url(url: &str) -> std::result::Result<(), String> {
     // Must parse as a URL
     let parsed = url::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
@@ -403,6 +404,7 @@ impl McpHostRegistry {
 
     /// Look up a tool by name (built-in first, then external).
     #[must_use]
+    #[inline]
     pub fn find_tool(&self, name: &str) -> Option<&McpToolDescription> {
         self.builtin
             .get(name)
@@ -411,36 +413,42 @@ impl McpHostRegistry {
 
     /// Get the external tool entry (includes callback URL).
     #[must_use]
+    #[inline]
     pub fn get_external(&self, name: &str) -> Option<&ExternalMcpTool> {
         self.external.get(name)
     }
 
     /// Get callback URL for an external tool.
     #[must_use]
+    #[inline]
     pub fn external_callback(&self, name: &str) -> Option<&str> {
         self.external.get(name).map(|e| e.callback_url.as_str())
     }
 
     /// Number of registered tools (built-in + external).
     #[must_use]
+    #[inline]
     pub fn tool_count(&self) -> usize {
         self.builtin.len() + self.external.len()
     }
 
     /// Number of built-in tools.
     #[must_use]
+    #[inline]
     pub fn builtin_count(&self) -> usize {
         self.builtin.len()
     }
 
     /// Number of external tools.
     #[must_use]
+    #[inline]
     pub fn external_count(&self) -> usize {
         self.external.len()
     }
 
     /// Check if a tool name exists (built-in or external).
     #[must_use]
+    #[inline]
     pub fn contains(&self, name: &str) -> bool {
         self.builtin.contains_key(name) || self.external.contains_key(name)
     }

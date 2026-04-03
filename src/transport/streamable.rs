@@ -169,7 +169,7 @@ impl ResumptionBuffer {
 
     /// Push an event into the buffer. Evicts oldest if full.
     pub fn push(&self, event: StreamEvent) {
-        let mut events = self.events.write().expect("buffer lock poisoned");
+        let mut events = self.events.write().unwrap_or_else(|e| e.into_inner());
         if events.len() >= self.max_size {
             events.remove(0);
         }
@@ -180,7 +180,7 @@ impl ResumptionBuffer {
     /// Returns empty vec if the ID is not found (too old, evicted).
     #[must_use]
     pub fn events_after(&self, last_event_id: &str) -> Vec<StreamEvent> {
-        let events = self.events.read().expect("buffer lock poisoned");
+        let events = self.events.read().unwrap_or_else(|e| e.into_inner());
         let pos = events.iter().position(|e| e.id == last_event_id);
         match pos {
             Some(idx) => events[idx + 1..].to_vec(),
@@ -197,7 +197,7 @@ impl ResumptionBuffer {
     /// Number of buffered events.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.events.read().expect("buffer lock poisoned").len()
+        self.events.read().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Whether the buffer is empty.

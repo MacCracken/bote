@@ -83,10 +83,8 @@ async fn handle_connection(
     let writer_handle = tokio::spawn(async move {
         let mut writer = writer;
         while let Some(msg) = out_rx.recv().await {
-            if writer
-                .write_all(format!("{msg}\n").as_bytes())
-                .await
-                .is_err()
+            if writer.write_all(msg.as_bytes()).await.is_err()
+                || writer.write_all(b"\n").await.is_err()
             {
                 break;
             }

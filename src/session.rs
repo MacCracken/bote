@@ -66,14 +66,14 @@ impl SessionStore {
         info!(session_id = %session_id, "MCP session created");
         self.sessions
             .write()
-            .expect("session lock poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .insert(session_id.clone(), session);
         session_id
     }
 
     /// Validate and touch a session. Returns the session if valid.
     pub fn validate(&self, session_id: &str) -> Option<McpSession> {
-        let mut sessions = self.sessions.write().expect("session lock poisoned");
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         if let Some(session) = sessions.get_mut(session_id) {
             session.last_active = Some(Instant::now());
             Some(session.clone())
@@ -88,7 +88,7 @@ impl SessionStore {
         let removed = self
             .sessions
             .write()
-            .expect("session lock poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .remove(session_id)
             .is_some();
         if removed {
@@ -101,7 +101,7 @@ impl SessionStore {
     pub fn prune_expired(&self) -> usize {
         let now = Instant::now();
         let timeout = self.timeout;
-        let mut sessions = self.sessions.write().expect("session lock poisoned");
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         let before = sessions.len();
         sessions.retain(|id, s| {
             let alive = s
@@ -119,7 +119,10 @@ impl SessionStore {
     /// Number of active sessions.
     #[must_use]
     pub fn active_count(&self) -> usize {
-        self.sessions.read().expect("session lock poisoned").len()
+        self.sessions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 }
 
@@ -269,5 +272,27 @@ mod tests {
         ];
         assert!(validate_origin("http://localhost:3000", &allowed).is_ok());
         assert!(validate_origin("http://other.com", &allowed).is_err());
+    }
+
+    #[test]
+    fn session_store_survives_poisoned_lock() {
+        use std::sync::Arc;
+
+        let store = Arc::new(SessionStore::default());
+        let store2 = Arc::clone(&store);
+
+        // Poison the lock by panicking while holding a write guard.
+        let _ = std::thread::spawn(move || {
+            let _guard = store2.sessions.write().unwrap();
+            panic!("intentional panic to poison lock");
+        })
+        .join();
+
+        // Store should still work after poisoning.
+        let id = store.create("2025-11-25".into());
+        assert_eq!(store.active_count(), 1);
+        assert!(store.validate(&id).is_some());
+        assert!(store.remove(&id));
+        assert_eq!(store.active_count(), 0);
     }
 }

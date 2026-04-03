@@ -205,8 +205,8 @@ user-login = "fitzgen"
 user-name = "Nick Fitzgerald"
 
 [[publisher.indexmap]]
-version = "2.13.0"
-when = "2026-01-07"
+version = "2.13.1"
+when = "2026-04-02"
 user-id = 539
 user-login = "cuviper"
 user-name = "Josh Stone"
@@ -393,15 +393,15 @@ user-login = "Manishearth"
 user-name = "Manish Goregaokar"
 
 [[publisher.tokio]]
-version = "1.50.0"
-when = "2026-03-03"
+version = "1.51.0"
+when = "2026-04-03"
 user-id = 6741
 user-login = "Darksonn"
 user-name = "Alice Ryhl"
 
 [[publisher.tokio-macros]]
-version = "2.6.1"
-when = "2026-03-02"
+version = "2.7.0"
+when = "2026-04-03"
 user-id = 6741
 user-login = "Darksonn"
 user-name = "Alice Ryhl"
@@ -1575,20 +1575,6 @@ delta = "0.1.8 -> 0.1.9"
 notes = "The delta only changes Cargo.toml."
 aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
 
-[[audits.google.audits.writeable]]
-who = "Manish Goregaokar <manishearth@google.com>"
-criteria = "safe-to-deploy"
-version = "0.6.0"
-notes = "Contains three lines of unsafe, thoroughly commented: one is for from-UTF8 on ASCII, the other two are for from-UTF8 on a datastructure that keeps track of a buffer with partial UTF8 validation. Relatively straigtforward."
-aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
-
-[[audits.google.audits.writeable]]
-who = "Daniel Cheng <dcheng@chromium.org>"
-criteria = "safe-to-deploy"
-delta = "0.6.0 -> 0.6.1"
-notes = "Minor comment/documentation updates and switch to a non-panicking alternative to split_at()."
-aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
-
 [[audits.isrg.audits.alloca]]
 who = "David Cook <dcook@divviup.org>"
 criteria = "safe-to-run"
@@ -2082,12 +2068,6 @@ aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-ch
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "0.1.1 -> 0.2.0"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
-
-[[audits.mozilla.audits.writeable]]
-who = "Makoto Kato <m_kato@ga2.so-net.ne.jp>"
-criteria = "safe-to-deploy"
-delta = "0.6.1 -> 0.6.2"
 aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
 
 [[audits.zcash.audits.aho-corasick]]

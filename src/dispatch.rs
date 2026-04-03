@@ -449,14 +449,19 @@ impl Dispatcher {
     }
 }
 
+/// Maximum tool name length to prevent DoS via oversized names.
+const MAX_TOOL_NAME_LEN: usize = 256;
+
 /// Validate a tool name follows the `project_tool` convention.
 ///
-/// Must be alphanumeric + underscore, with at least one underscore.
+/// Must be alphanumeric + underscore, with at least one underscore,
+/// and at most 256 characters.
+#[inline]
 fn validate_tool_name(name: &str) -> crate::Result<()> {
-    if name.is_empty() {
+    if name.is_empty() || name.len() > MAX_TOOL_NAME_LEN {
         return Err(BoteError::InvalidParams {
             tool: String::new(),
-            reason: "tool name must not be empty".into(),
+            reason: format!("tool name must be 1-{MAX_TOOL_NAME_LEN} characters"),
         });
     }
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
@@ -1041,6 +1046,22 @@ mod tests {
         let tool = ToolDef::new(
             "my-tool",
             "Bad",
+            ToolSchema::new("object", HashMap::new(), vec![]),
+        );
+        assert!(
+            d.register_tool(tool, Arc::new(|_| serde_json::json!({})))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn namespace_validation_rejects_oversized_name() {
+        let d = Dispatcher::new(ToolRegistry::new());
+        // 257 chars with underscore
+        let long_name = format!("{}_b", "a".repeat(255));
+        let tool = ToolDef::new(
+            long_name,
+            "Too long",
             ToolSchema::new("object", HashMap::new(), vec![]),
         );
         assert!(

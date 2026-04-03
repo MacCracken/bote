@@ -176,9 +176,10 @@ impl SandboxExecutor {
                 reason: format!("failed to start sandbox: {e}"),
             })?;
 
-        // Pipe JSON args via stdin: echo '<json>' | <command>
+        // Pipe JSON args via stdin using a heredoc to prevent shell injection.
+        // The delimiter is chosen to be unlikely in JSON output.
         let json_args = serde_json::to_string(args).unwrap_or_default();
-        let full_command = format!("echo '{}' | {}", json_args.replace('\'', "'\\''"), command);
+        let full_command = format!("{command} <<'__BOTE_EOF__'\n{json_args}\n__BOTE_EOF__");
 
         let result: ExecResult =
             sandbox
