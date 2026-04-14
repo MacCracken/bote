@@ -2,6 +2,39 @@
 
 All notable changes to bote are documented here.
 
+## [1.9.1] — 2026-04-14 — IPv6 SSRF + binary-blob resource + env-driven bearer auth
+
+Closes three deferred items from earlier releases. A fourth (block annotations) was tried and reverted — it tipped the cyrius 4.6.2 identifier-buffer ceiling. Will land in 2.0 / when 4.7.0 frees up headroom.
+
+### Added
+- **IPv6 SSRF blocklist** (`src/host.cyr`):
+  - `_ssrf_classify_ipv6` covers `::1` (loopback), `::` (unspec), `fe80::/10` (link-local), `fc00::/7` ULA private (`fc` and `fd` prefixes), `ff00::/8` (multicast)
+  - `_ssrf_extract_host` now parses bracket form (`http://[::1]:8080/...`); malformed bracket → `SSRF_PARSE`
+  - `ssrf_check` routes hosts containing `:` (after IPv4 fallback) to the IPv6 classifier
+  - 9 new test assertions (`tests/bote_host.tcyr` 47 → 56)
+- **Binary resource (`blob`) variant** (`src/content.cyr`):
+  - `content_resource_blob(uri, mime, b64_data)` emits `{"type":"resource","resource":{"uri":"...","mimeType":"...","blob":"..."}}` — the spec-prescribed shape for non-UTF-8 resource bodies. Optional fields omitted from output when null, same as `content_resource`.
+  - 3 new test assertions (`tests/bote_content.tcyr` 15 → 18)
+- **CLI bearer-auth via `BOTE_BEARER_TOKENS` env var** (`src/main.cyr`):
+  - `_split_csv_tokens(csv)` parses comma-separated values into a vec of cstrs
+  - `_bote_bearer_from_env` reads `BOTE_BEARER_TOKENS`, builds the allowlist + validator, returns fp + ctx via out-params
+  - All four HTTP-family transports (`http` / `bridge` / `streamable` / `ws`) auto-wire `auth_validator_allowlist` when the env var is set
+  - Stdio + Unix-socket transports skip auth (they're local-only)
+  - Backward compatible: env var unset → no behaviour change
+
+### Verified (cyrius 4.6.2)
+- All five test files green: `bote.tcyr` 394 / `bote_libro_tools.tcyr` 22 / `bote_content.tcyr` 18 / `bote_host.tcyr` 56 / `bote_auth.tcyr` 29 = **519 total** (was 507).
+- `cyrius bench tests/bote.bcyr` → all 10 hot paths within noise of the 1.9.0 baseline.
+- `cyrlint src/*.cyr` → **0 warnings** across all sources.
+- Live HTTP smoke with `BOTE_BEARER_TOKENS=tok-a,tok-b`: `POST /mcp` with no header → 401, with `Authorization: Bearer wrong` → 401, with `Authorization: Bearer tok-a` → 200 + serverInfo `"version":"1.9.1"`. Empty/unset env var → unchanged 200 with no auth.
+
+### Reverted from 1.9.1 scope
+- **`content_with_annotations`** (audience + priority MCP annotations on any block). The pre-built-block-splice approach added enough symbols to push `src/main.cyr`'s compile unit past the cyrius 4.6.2 identifier-buffer ceiling. Reverted to keep the build green; will revisit when cyrius 4.7.0 lands.
+
+### Carried forward
+- cyrius 4.6.2 identifier-buffer ceiling — bote's full compile unit sits ~one feature away from the new cap. 4.7.0 expected to provide more room.
+- v1.2.1 libro-growth heisenbug: unchanged.
+
 ## [1.9.0] — 2026-04-14 — Bearer-token middleware (RFC 6750)
 
 First slice of the roadmap `auth` item. OAuth 2.1 + PKCE follow in

@@ -121,6 +121,20 @@ fn main() {
     assert_eq(ssrf_is_safe("https://api.github.com"), 1, "is_safe public");
     assert_eq(ssrf_is_safe("http://127.0.0.1"), 0, "is_safe loopback");
 
+    # ---------------- IPv6 (1.9.1) ----------------
+    # Bracket form parses + classifies
+    assert_eq(ssrf_check("http://[::1]/"), SSRF_LOOPBACK, "::1 loopback");
+    assert_eq(ssrf_check("http://[::1]:8080/x"), SSRF_LOOPBACK, "::1 with port");
+    assert_eq(ssrf_check("http://[::]/"), SSRF_UNSPEC, ":: unspec");
+    assert_eq(ssrf_check("http://[fe80::1]/"), SSRF_LINK_LOCAL, "fe80:: link-local");
+    assert_eq(ssrf_check("http://[fc00::1]/"), SSRF_PRIVATE, "fc00:: ULA private");
+    assert_eq(ssrf_check("http://[fd12:3456:789a::1]/"), SSRF_PRIVATE, "fd ULA private");
+    assert_eq(ssrf_check("http://[ff02::1]/"), SSRF_MULTICAST, "ff multicast");
+    # Public IPv6 passes
+    assert_eq(ssrf_check("http://[2606:4700:4700::1111]/"), SSRF_OK, "1.1.1.1 v6 OK");
+    # Malformed bracket
+    assert_eq(ssrf_check("http://[::1/"), SSRF_PARSE, "missing closing bracket");
+
     return assert_summary();
 }
 

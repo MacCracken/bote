@@ -212,6 +212,51 @@ fn _ssrf_classify_hostname(h) {
     return SSRF_OK;
 }
 
+# Classify an IPv6 literal (without surrounding brackets). Conservative
+# prefix-match — covers the cases real production traffic would use:
+#   ::1                loopback
+#   ::                 unspec
+#   fe80::/10          link-local (high 10 bits = 1111 1110 10)
+#   fc00::/7           ULA private (high 7 bits = 1111 110)
+#   ff00::/8           multicast
+# A full IPv6 parser would handle exotic forms; defer until a real
+# consumer asks for one.
+fn _ssrf_classify_ipv6(h, hlen) {
+    if (hlen < 2) { return SSRF_PARSE; }
+
+    # ::1 — loopback
+    if (hlen == 3 && load8(h) == 58 && load8(h + 1) == 58 && load8(h + 2) == 49) {
+        return SSRF_LOOPBACK;
+    }
+    # :: — unspec
+    if (hlen == 2 && load8(h) == 58 && load8(h + 1) == 58) { return SSRF_UNSPEC; }
+
+    # fe80::/10 — link-local. The high 10 bits encode 0xfe8X where X is
+    # 0/1/2/3 in the next nibble, but every link-local prefix in real use
+    # writes "fe80:" so accept that string form (case-insensitive — host
+    # is already lowered upstream).
+    if (hlen >= 5
+        && load8(h) == 102 && load8(h + 1) == 101         # 'fe'
+        && load8(h + 2) == 56 && load8(h + 3) == 48       # '80'
+        && load8(h + 4) == 58) {                          # ':'
+        return SSRF_LINK_LOCAL;
+    }
+
+    # fc00::/7 — ULA private. Matches "fc" or "fd" prefix.
+    if (hlen >= 2
+        && load8(h) == 102                                 # 'f'
+        && (load8(h + 1) == 99 || load8(h + 1) == 100)) { # 'c' or 'd'
+        return SSRF_PRIVATE;
+    }
+
+    # ff00::/8 — multicast. Matches "ff" prefix.
+    if (hlen >= 2 && load8(h) == 102 && load8(h + 1) == 102) {
+        return SSRF_MULTICAST;
+    }
+
+    return SSRF_OK;
+}
+
 # Extract the host component of a URL. Writes pointers to host start /
 # end into *out_start, *out_end. Returns SSRF_OK on parse success,
 # SSRF_PARSE on malformed input, SSRF_SCHEME if scheme isn't http/https.
@@ -238,8 +283,21 @@ fn _ssrf_extract_host(url, out_start, out_end) {
     }
     if (at >= 0) { host_start = at + 1; }
 
-    # Host ends at the first ':' (port), '/' (path), '?' (query),
-    # '#' (fragment), or end of string.
+    # IPv6 literal? URL form is `http://[::1]:8080/...`
+    if (host_start < n && load8(lower + host_start) == 91) {
+        var bracket_end = host_start + 1;
+        while (bracket_end < n && load8(lower + bracket_end) != 93) {
+            bracket_end = bracket_end + 1;
+        }
+        if (bracket_end >= n) { return SSRF_PARSE; }
+        # Inside brackets — exclude the [ and ]
+        store64(out_start, lower + host_start + 1);
+        store64(out_end,   lower + bracket_end);
+        return SSRF_OK;
+    }
+
+    # Hostname / IPv4 — host ends at first ':' (port), '/' (path),
+    # '?' (query), '#' (fragment), or end of string.
     var host_end = n;
     var j = host_start;
     while (j < host_end) {
@@ -275,6 +333,17 @@ fn ssrf_check(url) {
     # into the original lowered buffer; re-use our extracted copy.
     var v4 = _ssrf_classify_ipv4(host, 0, host_len);
     if (v4 != SSRF_PARSE) { return v4; }
+
+    # IPv6 literal? Detected by presence of any ':' in the host bytes
+    # (legal hostnames don't contain ':' once port is stripped, and
+    # _ssrf_extract_host already pulled the host out of any [...] brackets).
+    var has_colon = 0;
+    var ci = 0;
+    while (ci < host_len) {
+        if (load8(host + ci) == 58) { has_colon = 1; ci = host_len; }
+        ci = ci + 1;
+    }
+    if (has_colon == 1) { return _ssrf_classify_ipv6(host, host_len); }
 
     # Fall back to hostname blocklist (conservative; does NOT resolve DNS).
     return _ssrf_classify_hostname(host);

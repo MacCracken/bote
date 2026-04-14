@@ -109,6 +109,20 @@ fn main() {
     assert(streq(tr, "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}") == 1,
            "content_text_response matches content_single(content_text(...))");
 
+    # ---------------- Binary resource (blob) variant — 1.9.1 ----------------
+    var crb = content_resource_blob("file:///bin", "application/octet-stream", "AAA=");
+    assert(streq(crb,
+        "{\"type\":\"resource\",\"resource\":{\"uri\":\"file:///bin\",\"mimeType\":\"application/octet-stream\",\"blob\":\"AAA=\"}}") == 1,
+        "blob resource with uri+mime+blob");
+
+    var crb2 = content_resource_blob("x://only", 0, 0);
+    assert(streq(crb2, "{\"type\":\"resource\",\"resource\":{\"uri\":\"x://only\"}}") == 1,
+           "blob resource uri-only");
+
+    var crb3 = content_resource_blob("x://b", 0, "QkJC");
+    assert(streq(crb3, "{\"type\":\"resource\",\"resource\":{\"uri\":\"x://b\",\"blob\":\"QkJC\"}}") == 1,
+           "blob resource uri+blob (no mime)");
+
     return assert_summary();
 }
 

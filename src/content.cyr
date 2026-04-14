@@ -160,3 +160,34 @@ fn content_text_response(text) {
     str_builder_add_cstr(sb, "\"}]}");
     return str_data(str_builder_build(sb));
 }
+
+# ================================================================
+# Binary resource (blob) variant of content_resource. The MCP spec
+# distinguishes text resources (carry a `text` field) from binary
+# resources (carry a `blob` field with base64-encoded data). Use this
+# constructor when the resource body isn't UTF-8.
+# ================================================================
+
+fn content_resource_blob(uri, mime, b64_data) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"type\":\"resource\",\"resource\":{\"uri\":\"");
+    if (uri != 0) { _json_emit_escaped(sb, uri); }
+    str_builder_add_cstr(sb, "\"");
+    if (mime != 0) {
+        str_builder_add_cstr(sb, ",\"mimeType\":\"");
+        _json_emit_escaped(sb, mime);
+        str_builder_add_cstr(sb, "\"");
+    }
+    if (b64_data != 0) {
+        str_builder_add_cstr(sb, ",\"blob\":\"");
+        _json_emit_escaped(sb, b64_data);
+        str_builder_add_cstr(sb, "\"");
+    }
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}
+
+# Annotations (MCP spec optional metadata) deferred to a future
+# release. The pre-built-block-splice approach used too many symbols
+# and tipped bote past the cyrius 4.6.2 identifier-buffer ceiling.
+# Will revisit when 4.7.0 lands and there's headroom.

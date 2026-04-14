@@ -84,6 +84,48 @@ fn _parse_uint(s) {
     return n;
 }
 
+# Build a bearer-token allowlist vec from a comma-separated env value.
+# Returns a vec of cstr tokens (possibly empty), never null.
+fn _split_csv_tokens(csv) {
+    var out = vec_new();
+    if (csv == 0) { return out; }
+    var n = strlen(csv);
+    var start = 0;
+    var i = 0;
+    while (i <= n) {
+        var c = 0;
+        if (i < n) { c = load8(csv + i); }
+        if (i == n || c == 44) {
+            var len = i - start;
+            if (len > 0) {
+                var tok = alloc(len + 1);
+                memcpy(tok, csv + start, len);
+                store8(tok + len, 0);
+                vec_push(out, tok);
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# If BOTE_BEARER_TOKENS env var is set (comma-separated tokens), wire an
+# allowlist validator onto every config setter the caller owns. Returns
+# the validator fp + ctx (vec of allowed tokens) so the caller can apply
+# them to whichever transport configs they construct.
+# Returns 0/0 (via *out_fp / *out_ctx) when the env var is unset/empty —
+# caller should leave the config's bearer slots alone.
+fn _bote_bearer_from_env(out_fp, out_ctx) {
+    var csv = getenv("BOTE_BEARER_TOKENS");
+    if (csv == 0) { store64(out_fp, 0); store64(out_ctx, 0); return 0; }
+    var allowed = _split_csv_tokens(csv);
+    if (vec_len(allowed) == 0) { store64(out_fp, 0); store64(out_ctx, 0); return 0; }
+    store64(out_fp, &auth_validator_allowlist);
+    store64(out_ctx, allowed);
+    return 1;
+}
+
 fn main() {
     alloc_init();
     args_init();
@@ -102,6 +144,16 @@ fn main() {
     libro_tools_init(chain_new());
     libro_tools_register(dispatcher);
 
+    # Bearer-token auth wiring (opt-in via env var).
+    # Set BOTE_BEARER_TOKENS=tok-a,tok-b,tok-c to require any of those
+    # tokens on every HTTP-family transport (http / bridge / streamable
+    # / ws). Stdio + unix sockets are local-only and don't get the check.
+    var auth_fp_slot[8]; var auth_ctx_slot[8];
+    store64(&auth_fp_slot, 0); store64(&auth_ctx_slot, 0);
+    _bote_bearer_from_env(&auth_fp_slot, &auth_ctx_slot);
+    var bearer_fp = load64(&auth_fp_slot);
+    var bearer_ctx = load64(&auth_ctx_slot);
+
     # Mode selection:
     #   bote                     — stdio transport (default)
     #   bote http [port]         — HTTP transport (default 8390)
@@ -115,6 +167,7 @@ fn main() {
             if (argc() >= 3) { port = _parse_uint(argv(2)); }
             if (port == 0) { port = 8390; }
             var cfg = http_config_new("/mcp", INADDR_LOOPBACK(), port);
+            if (bearer_fp != 0) { http_config_with_bearer_validator(cfg, bearer_fp, bearer_ctx); }
             return transport_http_run(dispatcher, cfg);
         }
         if (streq(argv(1), "unix") == 1) {
@@ -129,6 +182,7 @@ fn main() {
             var origins = vec_new();
             vec_push(origins, "*");
             bridge_config_with_origins(bcfg, origins);
+            if (bearer_fp != 0) { bridge_config_with_bearer_validator(bcfg, bearer_fp, bearer_ctx); }
             return transport_bridge_run(dispatcher, bcfg);
         }
         if (streq(argv(1), "streamable") == 1) {
@@ -136,6 +190,7 @@ fn main() {
             if (argc() >= 3) { sport = _parse_uint(argv(2)); }
             if (sport == 0) { sport = 8392; }
             var scfg = streamable_config_new("/mcp", INADDR_LOOPBACK(), sport);
+            if (bearer_fp != 0) { streamable_config_with_bearer_validator(scfg, bearer_fp, bearer_ctx); }
             return transport_streamable_run(dispatcher, scfg);
         }
         if (streq(argv(1), "ws") == 1) {
@@ -143,6 +198,7 @@ fn main() {
             if (argc() >= 3) { wport = _parse_uint(argv(2)); }
             if (wport == 0) { wport = 8393; }
             var wcfg = ws_config_new("/mcp", INADDR_LOOPBACK(), wport);
+            if (bearer_fp != 0) { ws_config_with_bearer_validator(wcfg, bearer_fp, bearer_ctx); }
             return transport_ws_run(dispatcher, wcfg);
         }
     }
