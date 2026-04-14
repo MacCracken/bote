@@ -2,6 +2,40 @@
 
 All notable changes to bote are documented here.
 
+## [2.5.1] — 2026-04-14 — Restore audit_libro + events_majra tests (cyrius 4.8.4 retag)
+
+The cyrius lang-agent retagged 4.8.4 with the alpha2-that-actually-works
+binary (fix for the 2.5.0-era local-vs-CI binary skew reported in
+`docs/bugs/cyrius-4.8.4-ci-binary-skew.md`). Clean-installing the
+updated toolchain lets bote carry the full libro + majra + sigil
+dependency graph in `tests/bote.tcyr` again — no more workaround.
+
+### Restored
+- **`tests/bote.tcyr`** — re-added the full dep-graph includes dropped during the 2.5.0 CI workaround:
+  - `lib/sakshi.cyr`, `lib/bigint.cyr`, `lib/sigil.cyr`
+  - `lib/libro_*.cyr` (error / hasher / entry / verify / query / retention / chain)
+  - `lib/majra_*.cyr` (error / counter / envelope / namespace / queue / pubsub)
+  - `src/audit_libro.cyr`, `src/events_majra.cyr` — now usable again because `SEV_INFO` + friends resolve
+- **8 shape-only test assertions recovered**:
+  - `audit_libro` struct + accessors (7 asserts: chain handle, default source, custom source, agent_id)
+  - `audit_libro` AuditSink wire-up fp-addressability
+  - `events_majra` EventSink wire-up (fp addressable + ctx=0 call)
+
+### Verified (fresh cyrius 4.8.4 install)
+- All 8 test files green: `bote.tcyr` **394** (was 386 in 2.5.0) / `bote_libro_tools.tcyr` 22 / `bote_content.tcyr` 24 / `bote_host.tcyr` 67 / `bote_auth.tcyr` 38 / `bote_sandbox.tcyr` 13 / `bote_jwt.tcyr` 28 / `bote_pkce.tcyr` 17 = **603 total** (back to pre-trim count).
+- Production build: `src/main.cyr -> bote 370480 bytes 674ms [x86]`.
+- Local `cc3` rebuilt from the retagged cyrius repo.
+
+### Resolved
+- `docs/bugs/cyrius-4.8.4-ci-binary-skew.md` — closed by the retag. Roadmap "Open bugs" entry flipped to ✅.
+
+### Carried forward
+- v1.2.1 libro-growth heisenbug: unchanged.
+- Slowloris recv timeout (audit H5): still needs `sock_set_recv_timeout` stdlib helper.
+- WS handshake key-length validation (audit M4): upstream stdlib.
+- DNS for SSRF hostname classification: still needs `getaddrinfo` stub.
+- JWT RS256 / ES256: still waits on sigil RSA / ECDSA primitives.
+
 ## [2.5.0] — 2026-04-14 — Claims propagation + cyrius 4.8.4 pin
 
 Lands the claims-propagation refactor that 2.0's handler-ABI break

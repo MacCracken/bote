@@ -18,10 +18,22 @@ include "lib/base64.cyr"
 include "lib/http_server.cyr"
 include "lib/freelist.cyr"
 include "lib/thread.cyr"
-# NB: libro / majra / sigil / sakshi / bigint intentionally NOT here.
-# audit_libro + events_majra shape tests live in bote_libro_tools.tcyr
-# (which pulls those deps). Keeps bote.tcyr's compile unit lean and
-# matches what 4.8.4's release binary can handle on CI.
+include "lib/sakshi.cyr"
+include "lib/bigint.cyr"
+include "lib/sigil.cyr"
+include "lib/libro_error.cyr"
+include "lib/libro_hasher.cyr"
+include "lib/libro_entry.cyr"
+include "lib/libro_verify.cyr"
+include "lib/libro_query.cyr"
+include "lib/libro_retention.cyr"
+include "lib/libro_chain.cyr"
+include "lib/majra_error.cyr"
+include "lib/majra_counter.cyr"
+include "lib/majra_envelope.cyr"
+include "lib/majra_namespace.cyr"
+include "lib/majra_queue.cyr"
+include "lib/majra_pubsub.cyr"
 include "lib/assert.cyr"
 
 include "src/error.cyr"
@@ -30,6 +42,8 @@ include "src/jsonx.cyr"
 include "src/registry.cyr"
 include "src/events.cyr"
 include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
@@ -1060,6 +1074,24 @@ fn main() {
     # binary because libro+majra+full-test cross-product trips a heap
     # heisenbug — see programs/README in v1.2.1).
 
+    # ---------------- audit_libro: struct + accessors ----------------
+    var la = libro_audit_new(99);
+    assert_eq(libro_audit_chain(la), 99, "la chain stored");
+    assert(streq(libro_audit_source(la), "bote") == 1, "la default source");
+    assert_eq(libro_audit_agent_id(la), 0, "la default agent_id");
+    libro_audit_with_source(la, "my-server");
+    libro_audit_with_agent_id(la, "default-agent");
+    assert(streq(libro_audit_source(la), "my-server") == 1, "custom source");
+    assert(streq(libro_audit_agent_id(la), "default-agent") == 1, "configured agent_id");
+
+    # ---------------- audit_libro: AuditSink wire-up shape ----------------
+    var libro_sink = audit_sink_new(&libro_audit_log, la);
+    assert(audit_sink_log_fp(libro_sink) != 0, "libro audit fp wired");
+    assert_eq(audit_sink_ctx(libro_sink), la, "libro audit ctx is LibroAudit");
+    # NB: live chain growth still triggers the v1.2.1 heap heisenbug here
+    # despite the freed function-count budget — see CHANGELOG. Adapter
+    # itself is correct (proved in isolated probes).
+
     # ================================================================
     # v1.4.0: streamable HTTP transport — data layer
     # ================================================================
@@ -1130,6 +1162,12 @@ fn main() {
     # exercises the same stdlib helper but at our usage site.
     assert(streq(http_path_only("/mcp?lastEventId=evt-7"), "/mcp") == 1,
            "path strips query for routing");
+
+    # ---------------- events_majra: EventSink wire-up shape ----------------
+    var majra_fp = &majra_events_publish;
+    assert(majra_fp != 0, "majra events fp addressable");
+    var majra_sink = event_sink_new(majra_fp, 0);     # ctx=0 → adapter no-ops
+    event_sink_publish(majra_sink, "any/topic", "{}");  # safe with ctx=0
 
     # v1.5.0: WebSocket transport — config + handler wire-up
     var wcfg = ws_config_new("/mcp", 0x0100007F, 8393);
