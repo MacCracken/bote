@@ -130,9 +130,12 @@ fn _ssrf_lower(s) {
     return out;
 }
 
-# Parse a base-10 octet out of cstr `s` starting at offset `pos`; read
-# up to `end`. Writes the parsed value to *out_val and returns the new
-# offset (past the digits), or 0 - 1 on invalid input.
+# Parse a CANONICAL base-10 octet out of cstr `s[pos..end]`. Canonical
+# means: 1–3 digits, no leading zero on multi-digit octets, value 0-255.
+# Rejecting leading zeros closes the 1.9.5 audit's octal-IPv4 bypass —
+# `0177` would otherwise parse as decimal 177 here while glibc inet_aton
+# treats it as octal 127 and connects to loopback. Hex (`0x7f`) is
+# already rejected because it contains non-`[0-9]` bytes.
 fn _ssrf_parse_octet(s, pos, end, out_val) {
     if (pos >= end) { return 0 - 1; }
     var v = 0;
@@ -148,6 +151,9 @@ fn _ssrf_parse_octet(s, pos, end, out_val) {
         }
     }
     if (digits == 0 || digits > 3 || v > 255) { return 0 - 1; }
+    # Reject leading-zero multi-digit forms: "0", "10", "127" all OK,
+    # "00", "01", "010", "0177" all rejected (non-canonical / octal).
+    if (digits > 1 && load8(s + pos) == 48) { return 0 - 1; }
     store64(out_val, v);
     return pos + digits;
 }
@@ -178,10 +184,18 @@ fn _ssrf_classify_ipv4(s, start, end) {
     }
     if (dot3 < 0) { return SSRF_PARSE; }
 
-    if (_ssrf_parse_octet(s, start,    dot1, &a_slot) < 0) { return SSRF_PARSE; }
-    if (_ssrf_parse_octet(s, dot1 + 1, dot2, &b_slot) < 0) { return SSRF_PARSE; }
-    if (_ssrf_parse_octet(s, dot2 + 1, dot3, &c_slot) < 0) { return SSRF_PARSE; }
-    if (_ssrf_parse_octet(s, dot3 + 1, end,  &d_slot) < 0) { return SSRF_PARSE; }
+    # Each octet parse must consume EXACTLY the bytes between dots —
+    # `64:ff9b::1.2.3.4` would otherwise parse as `64.2.3.4` (the
+    # parser stops at ':' and returns 64) and bypass the IPv6 path.
+    # 1.9.5 audit C3 fix.
+    var ra = _ssrf_parse_octet(s, start, dot1, &a_slot);
+    if (ra != dot1) { return SSRF_PARSE; }
+    var rb = _ssrf_parse_octet(s, dot1 + 1, dot2, &b_slot);
+    if (rb != dot2) { return SSRF_PARSE; }
+    var rc = _ssrf_parse_octet(s, dot2 + 1, dot3, &c_slot);
+    if (rc != dot3) { return SSRF_PARSE; }
+    var rd = _ssrf_parse_octet(s, dot3 + 1, end, &d_slot);
+    if (rd != end) { return SSRF_PARSE; }
 
     var a = load64(&a_slot);
     var b = load64(&b_slot);
@@ -204,52 +218,121 @@ fn _ssrf_classify_ipv4(s, start, end) {
 }
 
 # Classify a hostname (non-IP string). Conservative blocklist.
+#
+# Also rejects all-`[0-9]` hostnames as SSRF_PARSE: `2130706433` is the
+# integer form of 127.0.0.1 — glibc's inet_aton accepts it, our IPv4
+# parser rejects it (no dots), and a naked-digit hostname is never
+# valid per RFC 952/1123. This closes the 1.9.5 audit's integer-IPv4
+# bypass (audit C1).
 fn _ssrf_classify_hostname(h) {
     if (streq(h, "localhost") == 1) { return SSRF_LOOPBACK; }
-    # Cloud metadata hostnames
     if (streq(h, "metadata.google.internal") == 1) { return SSRF_METADATA; }
     if (streq(h, "metadata") == 1) { return SSRF_METADATA; }
+    # All-digit hostname → reject. Also any short-form IPv4 (1, 2, or 3
+    # dots with all-digit segments) we might've missed elsewhere.
+    var hlen = strlen(h);
+    if (hlen > 0) {
+        var all_digits_or_dots = 1;
+        var has_digit = 0;
+        var i = 0;
+        while (i < hlen) {
+            var c = load8(h + i);
+            if (c >= 48 && c <= 57) { has_digit = 1; }
+            elif (c != 46) { all_digits_or_dots = 0; i = hlen; }
+            i = i + 1;
+        }
+        if (all_digits_or_dots == 1 && has_digit == 1) { return SSRF_PARSE; }
+    }
     return SSRF_OK;
 }
 
 # Classify an IPv6 literal (without surrounding brackets). Conservative
 # prefix-match — covers the cases real production traffic would use:
-#   ::1                loopback
-#   ::                 unspec
-#   fe80::/10          link-local (high 10 bits = 1111 1110 10)
-#   fc00::/7           ULA private (high 7 bits = 1111 110)
-#   ff00::/8           multicast
-# A full IPv6 parser would handle exotic forms; defer until a real
-# consumer asks for one.
+#   ::1                  loopback
+#   ::                   unspec
+#   ::ffff:a.b.c.d       IPv4-mapped (1.9.5 audit C3 bypass) — reject
+#                        outright; v4-classifier doesn't see this form
+#                        because the host extractor pulls IPv6 brackets
+#                        as a whole. Conservatively block all `::ffff:`
+#                        and `::` prefixes ahead of a v4-shaped tail.
+#   ::*.*.*.* (v4-compat) likewise rejected
+#   64:ff9b::a.b.c.d     NAT64 (well-known prefix) — reject
+#   fe80::/10            link-local (high 10 bits = 1111 1110 10)
+#   fc00::/7             ULA private (high 7 bits = 1111 110)
+#   ff00::/8             multicast
+# A full 16-byte IPv6 parser would extract the embedded v4 octets and
+# re-run `_ssrf_classify_ipv4` on them; for now we just refuse the
+# whole class — every consumer-facing host should be a hostname.
 fn _ssrf_classify_ipv6(h, hlen) {
     if (hlen < 2) { return SSRF_PARSE; }
 
-    # ::1 — loopback
+    # ::1 loopback (exact)
     if (hlen == 3 && load8(h) == 58 && load8(h + 1) == 58 && load8(h + 2) == 49) {
         return SSRF_LOOPBACK;
     }
-    # :: — unspec
+    # :: unspec (exact)
     if (hlen == 2 && load8(h) == 58 && load8(h + 1) == 58) { return SSRF_UNSPEC; }
 
-    # fe80::/10 — link-local. The high 10 bits encode 0xfe8X where X is
-    # 0/1/2/3 in the next nibble, but every link-local prefix in real use
-    # writes "fe80:" so accept that string form (case-insensitive — host
-    # is already lowered upstream).
-    if (hlen >= 5
-        && load8(h) == 102 && load8(h + 1) == 101         # 'fe'
-        && load8(h + 2) == 56 && load8(h + 3) == 48       # '80'
-        && load8(h + 4) == 58) {                          # ':'
-        return SSRF_LINK_LOCAL;
-    }
-
-    # fc00::/7 — ULA private. Matches "fc" or "fd" prefix.
-    if (hlen >= 2
-        && load8(h) == 102                                 # 'f'
-        && (load8(h + 1) == 99 || load8(h + 1) == 100)) { # 'c' or 'd'
+    # ::ffff:* — IPv4-mapped. Block as PRIVATE (worst case is loopback;
+    # a permissive bypass would let `::ffff:127.0.0.1` slip through).
+    if (hlen >= 7
+        && load8(h) == 58 && load8(h + 1) == 58
+        && load8(h + 2) == 102 && load8(h + 3) == 102
+        && load8(h + 4) == 102 && load8(h + 5) == 102
+        && load8(h + 6) == 58) {
         return SSRF_PRIVATE;
     }
 
-    # ff00::/8 — multicast. Matches "ff" prefix.
+    # `::` followed by a digit and a `.` somewhere → IPv4-compatible /
+    # mixed v6+v4 form. Reject conservatively.
+    if (hlen >= 4 && load8(h) == 58 && load8(h + 1) == 58) {
+        var has_dot = 0;
+        var i2 = 2;
+        while (i2 < hlen) {
+            if (load8(h + i2) == 46) { has_dot = 1; i2 = hlen; }
+            i2 = i2 + 1;
+        }
+        if (has_dot == 1) { return SSRF_PRIVATE; }
+    }
+
+    # 64:ff9b: — NAT64 well-known prefix (RFC 6052). Match byte-by-byte;
+    # nested ifs because cyrius's chained && through 8 terms is fragile.
+    if (hlen >= 8) {
+        if (load8(h) == 54) {
+            if (load8(h + 1) == 52) {
+                if (load8(h + 2) == 58) {
+                    if (load8(h + 3) == 102) {
+                        if (load8(h + 4) == 102) {
+                            if (load8(h + 5) == 57) {
+                                if (load8(h + 6) == 98) {
+                                    if (load8(h + 7) == 58) {
+                                        return SSRF_PRIVATE;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # fe80::/10 link-local
+    if (hlen >= 5
+        && load8(h) == 102 && load8(h + 1) == 101
+        && load8(h + 2) == 56 && load8(h + 3) == 48
+        && load8(h + 4) == 58) {
+        return SSRF_LINK_LOCAL;
+    }
+
+    # fc00::/7 ULA private (fc or fd)
+    if (hlen >= 2
+        && load8(h) == 102
+        && (load8(h + 1) == 99 || load8(h + 1) == 100)) {
+        return SSRF_PRIVATE;
+    }
+
+    # ff00::/8 multicast
     if (hlen >= 2 && load8(h) == 102 && load8(h + 1) == 102) {
         return SSRF_MULTICAST;
     }

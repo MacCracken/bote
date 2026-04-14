@@ -135,6 +135,27 @@ fn main() {
     # Malformed bracket
     assert_eq(ssrf_check("http://[::1/"), SSRF_PARSE, "missing closing bracket");
 
+    # ---------------- 1.9.5 audit fixes — SSRF bypasses ----------------
+    # C1: integer-form IPv4 (2130706433 == 127.0.0.1)
+    assert(ssrf_check("http://2130706433/") != SSRF_OK, "integer IPv4 blocked");
+    # C2: octal IPv4 — leading-zero multi-digit octets rejected
+    assert(ssrf_check("http://0177.0.0.1/") != SSRF_OK, "octal IPv4 blocked");
+    assert(ssrf_check("http://0010.0.0.1/") != SSRF_OK, "octal-looking IPv4 blocked");
+    # Canonical decimal still passes / blocks correctly
+    assert_eq(ssrf_check("http://10.0.0.1/"), SSRF_PRIVATE, "canonical 10.* private");
+    assert_eq(ssrf_check("http://1.2.3.4/"), SSRF_OK, "canonical public OK");
+    # Short-form IPv4 (e.g. `127.1`) — only 1 dot, classifier rejects
+    assert(ssrf_check("http://127.1/") != SSRF_OK, "short-form 127.1 blocked");
+    # All-digit hostname (no dots) — also blocked at hostname classifier
+    assert(ssrf_check("http://2130706433/") != SSRF_OK, "all-digit hostname blocked");
+    # C3: IPv4-mapped IPv6
+    assert(ssrf_check("http://[::ffff:127.0.0.1]/") != SSRF_OK, "::ffff:127.0.0.1 blocked");
+    assert(ssrf_check("http://[::ffff:7f00:1]/") != SSRF_OK, "::ffff hex form blocked");
+    # IPv4-compatible IPv6 (deprecated but defense in depth)
+    assert(ssrf_check("http://[::127.0.0.1]/") != SSRF_OK, "::127.0.0.1 blocked");
+    # NAT64 well-known prefix
+    assert(ssrf_check("http://[64:ff9b::1.2.3.4]/") != SSRF_OK, "NAT64 prefix blocked");
+
     return assert_summary();
 }
 

@@ -2,6 +2,65 @@
 
 All notable changes to bote are documented here.
 
+## [1.9.5] — 2026-04-14 — Security batch B: SSRF rewrite (3 critical bypasses)
+
+Closes the three Critical findings from the 2026-04-14 audit
+(`docs/audit/2026-04-14.md`). All three are SSRF bypasses that landed
+on cloud-metadata / loopback endpoints despite the 1.8.0+ blocklist.
+
+### Security
+- **C1 — integer-form IPv4 bypass.** `http://2130706433/` (the integer
+  encoding of 127.0.0.1) was reaching the hostname classifier as a
+  0-dot host and passing as `SSRF_OK` because the blocklist only knew
+  literal `localhost` / `metadata`. **Fix**: hostname classifier now
+  rejects all-`[0-9.]` hosts as `SSRF_PARSE`. Also catches short-form
+  IPv4 (`127.1`, `127.1.1`).
+- **C2 — octal IPv4 bypass.** `_ssrf_parse_octet` accepted leading-zero
+  multi-digit forms: `0177` parsed as decimal 177 (apparently public)
+  while glibc's `inet_aton` interprets the same bytes as octal 127 →
+  loopback. **Fix**: octet parser now rejects digits>1 starting with
+  zero (`00`, `01`, `0177`, `010` all invalid; `0`, `127`, `255`
+  still valid).
+- **C3 — IPv4-mapped IPv6 bypass.** `http://[::ffff:127.0.0.1]/` and
+  `http://[::ffff:7f00:1]/` were classified by the IPv6 prefix-blocklist
+  which only matched `::1`, `::`, `fe80:`, `fc/fd`, `ff` exact —
+  `::ffff:` v4-mapped fell through as `SSRF_OK`. Also: the IPv4
+  classifier's `_ssrf_parse_octet` didn't verify it consumed the full
+  byte range up to the next dot, so `64:ff9b::1.2.3.4` (NAT64 form)
+  parsed as `64.2.3.4` (public) and never reached the IPv6 path.
+  **Fix**: IPv6 classifier now blocks `::ffff:`, `::*.*.*.*` (v4-compat),
+  `64:ff9b:` (NAT64 well-known) outright; IPv4 classifier requires each
+  octet parse to consume exactly the dot-to-dot range.
+
+### Tests
+- **11 new host assertions** for the bypasses: integer IPv4, octal IPv4
+  (`0177.0.0.1`, `0010.0.0.1`), short-form IPv4 (`127.1`),
+  `::ffff:127.0.0.1`, `::ffff:7f00:1`, `::127.0.0.1`, NAT64
+  `64:ff9b::1.2.3.4`, plus regression checks for canonical decimal
+  IPv4 still passing (`10.0.0.1` → PRIVATE, `1.2.3.4` → OK).
+- **539 total** (was 528). Breakdown: `bote.tcyr` 394,
+  `bote_libro_tools.tcyr` 22, `bote_content.tcyr` 18,
+  `bote_host.tcyr` 67 (was 56), `bote_auth.tcyr` 38.
+
+### Audit report
+- **`docs/audit/2026-04-14.md`** — full findings list (3 critical,
+  5 high, 5 medium, 1 informational), audit-driven release map, and
+  follow-up notes for items deferred to 2.0.
+
+### Verified (cyrius 4.7.1)
+- All five test files green (539 total).
+- `cyrius bench tests/bote.bcyr` → 10 hot paths within noise of 1.9.4.
+- `cyrlint src/host.cyr tests/bote_host.tcyr` → 0 warnings.
+- `./bote` reports `"version":"1.9.5"`.
+
+### Audit findings still open (deferred to 2.0)
+- **High — Slowloris** (recv timeout — needs `sock_set_recv_timeout` stdlib helper)
+- **Medium — bridge CORS oracle**, **WS handshake key-length validation** (upstream stdlib), **bridge protocol-version gate**, **413 cap on oversized requests**
+- **Informational — Unix socket default umask** (chmod 0600 missing)
+
+See `docs/audit/2026-04-14.md` for the full list and audit-driven
+release map.
+
 ## [1.9.4] — 2026-04-14 — Security batch A (audit-driven)
 
 First slice of the 2.0-prep security pass. Closes 4 of the 5 audit
