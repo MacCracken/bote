@@ -19,7 +19,7 @@ fn _mcp_is_supported(v) {
 
 fn _mcp_latest_version() { return "2025-11-25"; }
 
-fn _bote_server_version() { return "1.9.6"; }
+fn _bote_server_version() { return "2.0.0"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -88,8 +88,8 @@ fn dispatcher_event_sink(d) { return load64(d + 32); }
 fn dispatcher_set_audit(d, sink) { store64(d + 24, sink); return d; }
 fn dispatcher_set_events(d, sink) { store64(d + 32, sink); return d; }
 
-# Register a sync tool handler. handler is a function pointer of signature
-#   fn handler(args_cstr) → result_cstr (raw JSON literal, e.g. "{\"ok\":true}")
+# Register a sync tool handler. **2.0 ABI**: handler signature is
+#   fn h(args_cstr, claims) → result_cstr (claims always 0 today)
 fn dispatcher_handle(d, name, handler_fp) {
     map_set(dispatcher_handlers(d), name, handler_fp);
     return 0;
@@ -377,7 +377,8 @@ fn dispatcher_dispatch(d, request) {
             return resp_error(id, bote_err_rpc_code(bote_err_tag(nf)), msg_nh);
         }
         var fp = map_get(handlers, name);
-        var result = fncall1(fp, args);
+        # 2.0 ABI: fncall2 with claims (always 0 in 2.0; populated in 2.x)
+        var result = fncall2(fp, args, 0);
         var dur_ms = (clock_now_ns() - t_start) / 1000000;
         if (result == 0) { result = "null"; }
         var ev_ok = tool_call_event_new(name, dur_ms, 1, 0, caller_id);

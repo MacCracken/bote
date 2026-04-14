@@ -62,12 +62,12 @@ include "src/transport_streamable.cyr"
 include "src/transport_ws.cyr"
 
 # Test handler: echoes its arguments verbatim.
-fn h_echo(args) {
+fn h_echo(args, claims) {
     return args;
 }
 
 # Test handler: returns a constant.
-fn h_const(args) {
+fn h_const(args, claims) {
     return "{\"answer\":42}";
 }
 

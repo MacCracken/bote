@@ -22,7 +22,7 @@ include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
 
-fn h_echo_f(args) { return args; }
+fn h_echo_f(args, claims) { return args; }
 
 alloc_init();
 

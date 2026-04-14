@@ -65,7 +65,7 @@ include "src/transport_ws.cyr"
 # DEFERRED: include "src/libro_tools.cyr"
 include "src/content.cyr"
 include "src/host.cyr"
-fn bote_echo_handler(args) {
+fn bote_echo_handler(args, claims) {
     return args;
 }
 

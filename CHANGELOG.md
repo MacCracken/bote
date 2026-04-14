@@ -2,6 +2,65 @@
 
 All notable changes to bote are documented here.
 
+## [2.0.0] — 2026-04-14 — Stable: handler-claims ABI + carry-forward of all 1.9.x security work
+
+The 1.x line ports bote from Rust to Cyrius and then iterates feature-by-feature; the 2.0 ship is the **first stable line** with a single deliberate ABI break (handler signature) so the auth → handler claims pipeline can land cleanly in 2.x without another major bump.
+
+### Breaking
+- **Handler signature**: `fn h(args_cstr) → result_cstr` → **`fn h(args_cstr, claims) → result_cstr`**. The new `claims` argument is opaque; in 2.0 it's always `0` (transports don't yet plumb the validator's return value down through `codec_process_message → dispatcher_dispatch → fncall2`). 2.x patch releases will populate it. Existing handlers must update their signature even if they ignore the second arg — `fn echo(args)` becomes `fn echo(args, claims)`. All bundled handlers (`bote_echo`, the five `libro_*` tools, all test/fuzz handlers) updated in this release.
+- **Migration cost**: a single argument added to every tool handler the consumer registers. ~5 minutes per app.
+
+### Carries forward (cumulative across 1.9.x — see per-release entries below)
+- **Bearer-token middleware** (1.9.0) — fn-pointer + ctx validator, opt-in per HTTP-family transport, RFC 6750 401 with `WWW-Authenticate`.
+- **Constant-time bearer compare + HTTP smuggling guard + batch cap + jsonx depth cap + `/dev/urandom`-or-fail** (1.9.4 audit batch A).
+- **SSRF rewrite** — integer/octal/hex-IPv4 bypasses + IPv4-mapped-IPv6 + dot-consume verification (1.9.5 audit batch B). All 3 audit Criticals closed.
+- **413 + bridge CORS oracle + Unix socket 0600** (1.9.6 audit polish).
+- **`content_with_annotations`** — typed-block `audience` + `priority` annotations (1.9.6).
+
+### Verified (cyrius 4.7.1)
+- All five test files green: `bote.tcyr` 394 / `bote_libro_tools.tcyr` 22 / `bote_content.tcyr` 24 / `bote_host.tcyr` 67 / `bote_auth.tcyr` 38 = **545 total**.
+- `cyrius bench tests/bote.bcyr` → 10 hot paths within noise of 1.9.x.
+- `cyrlint src/*.cyr` → **0 warnings** across all sources.
+- `cyrius fuzz fuzz/*.fcyr` → **4 passed, 0 failed**.
+- `./bote` reports `"version":"2.0.0"`.
+
+### Known carry-forward (deferred past 2.0)
+- **Slowloris recv timeout** (audit H5) — needs a `sock_set_recv_timeout` helper in cyrius `lib/net.cyr` that doesn't exist. Workaround: deploy behind nginx/caddy.
+- **WS handshake key-length validation** (audit M4) — lives in stdlib `lib/ws_server.cyr`; tracked upstream.
+- **DNS resolution for SSRF hostname classification** — needs a cyrius `getaddrinfo` stub. Production callers should pair with a network-policy egress block.
+- **Bridge optional protocol-version gate** (audit M5) — tried for 1.9.6, tipped the cyrius 4.7.1 cap; revisit when 4.8.0 raises room.
+- **`libro_tools` default registration** — turned opt-in via `BOTE_LIBRO=1` env var in 1.9.4 to free identifier-table headroom; restore default-on when 4.8.0 lands.
+- **Threaded streaming dispatch / WS arena allocator / `kavach` sandbox** — wait on cyrius primitives.
+- **OAuth 2.1 / PKCE / JWT verifier** — bearer substrate is the hook; flows + verifier are the next net-new feature work.
+- **Claims propagation through transports** — handler ABI is in place (this release); auth → dispatch plumbing follows in 2.1.
+- **v1.2.1 libro-growth heisenbug** — unchanged.
+
+### Carried-forward release map (1.x → 2.0)
+
+| Tag | Headline |
+|---|---|
+| 1.0.0 | Cyrius port — protocol core, registry, dispatch, schema, codec, sessions, four transports |
+| 1.1.0 | AuditSink + EventSink fn-ptr+ctx adapters |
+| 1.2.0 | LibroAudit + MajraEvents adapters via `[deps.libro]` + `[deps.majra]` |
+| 1.3.0 | Adopt cyrius 4.5.0 stdlib `lib/http_server.cyr` |
+| 1.4.0 | Streamable HTTP transport (MCP 2025-11-25) |
+| 1.5.0 | WebSocket transport (RFC 6455) on stdlib `lib/ws_server.cyr` |
+| 1.5.1 | P(-1) hardening — HTTP body clamp + null-guard sweep |
+| 1.6.0 | `libro_tools` — 5 built-in MCP audit tools |
+| 1.7.0 | Typed MCP content blocks |
+| 1.8.0 | `HostRegistry` + IPv4 `ssrf_check` |
+| 1.8.1 | Bump cyrius 4.6.2 |
+| 1.9.0 | Bearer-token middleware (RFC 6750) |
+| 1.9.1 | IPv6 SSRF + binary-blob resource + env-driven CLI bearer |
+| 1.9.2 | Bump cyrius 4.7.0 |
+| 1.9.3 | Bump cyrius 4.7.1 + 2.0-prep doc sweep |
+| 1.9.4 | Security batch A — 5 audit findings |
+| 1.9.5 | Security batch B — 3 SSRF criticals |
+| 1.9.6 | Final polish — 413, CORS oracle, Unix 0600, annotations |
+| **2.0.0** | **Handler-claims ABI** + the 1.9.x carry-forward |
+
+---
+
 ## [1.9.6] — 2026-04-14 — Final pre-2.0 polish: contained audit items + annotations
 
 Closes the audit items that didn't need a cyrius stdlib helper, plus

@@ -90,7 +90,7 @@ fn _lt_emit_entries_array(sb, entries) {
 # result: {"ok":true,"entries":[{...}]}
 # ================================================================
 
-fn libro_tool_query(args) {
+fn libro_tool_query(args, claims) {
     if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
 
     var q = query_new();
@@ -147,7 +147,7 @@ fn libro_tool_query(args) {
 # result: {"ok":true} | {"ok":false,"code":N,"message":"..."}
 # ================================================================
 
-fn libro_tool_verify(args) {
+fn libro_tool_verify(args, claims) {
     if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
     var err = chain_verify(_libro_tools_chain);
     if (err == 0) { return "{\"ok\":true}"; }
@@ -171,7 +171,7 @@ fn libro_tool_verify(args) {
 # result: {"ok":true,"count":N,"entries":[...]}
 # ================================================================
 
-fn libro_tool_export(args) {
+fn libro_tool_export(args, claims) {
     if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
     var entries = chain_entries(_libro_tools_chain);
     var sb = str_builder_new();
@@ -196,7 +196,7 @@ fn libro_tool_export(args) {
 # wire format is pinned.
 # ================================================================
 
-fn libro_tool_proof(args) {
+fn libro_tool_proof(args, claims) {
     if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
     if (jsonx_has(args, "index") == 0) { return _lt_error("missing 'index'"); }
     var idx = _lt_get_int(args, "index");
@@ -231,7 +231,7 @@ fn libro_tool_proof(args) {
 #         {"ok":false,"error":"..."}
 # ================================================================
 
-fn libro_tool_retention(args) {
+fn libro_tool_retention(args, claims) {
     if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
     var policy_name = jsonx_get_str(args, "policy");
     if (policy_name == 0) { return _lt_error("missing 'policy'"); }
