@@ -1,16 +1,12 @@
 # cyrius 4.5.1 — identifier buffer cap hit at ~64 KB
 
-> **For the cyrius lang-agent**: found while landing bote 1.5.0 (WebSocket
-> transport, which pulls in `lib/ws_server.cyr`). The bug is a hard
-> compile-time ceiling on the identifier/symbol table; real mid-size
-> projects hit it without anything unusual. A companion minimal
-> reproduction lives at `docs/bugs/cyrius-4.5.1-repro.cyr` in this repo.
+> **Status on cyrius 4.6.2** (2026-04-14):
+> - ✅ **Identifier buffer** raised — the original 64 KB cap now has ~60 KB headroom per the 4.6.2 CHANGELOG, and the original `docs/bugs/cyrius-4.5.1-repro.cyr` now trips the **function table** (2048 fns) instead, with a clean diagnostic (`error: function table full (2048/2048) — split into separate compilation units`).
+> - 🟡 **Diagnostic fix incomplete** — bote's full compile unit (`tests/bote.tcyr` + `lib/ws_server.cyr`) still reports the misleading `lib/assert.cyr:3: expected '=', got string` on 4.6.2, not the clean `function table full` message. Whatever path the 4.6.1 fix landed for, it doesn't cover this specific overflow point.
+> - 🟡 **Bote still hits the new cap** — per-module includes from `[deps.libro]` (9 modules) + `[deps.majra]` (6 modules) + `lib/sigil.cyr` alone (354 fns) + 15 stdlib modules + 15 bote source modules push the test compile unit to ~1800 of 2048 fns before `ws_server.cyr`'s 16 fns tip it over. Production `src/main.cyr` build stays under the cap.
+> - **Bote workaround**: per-module test files (`tests/bote_<module>.tcyr`) now the permanent layout — cleaner organization anyway. `lib/ws_server.cyr` stays out of the shared `bote.tcyr` compile unit.
 >
-> **Status in bote**: worked around by keeping `lib/ws_server.cyr` out of
-> `tests/bote.tcyr` (see CHANGELOG 1.5.0, "Known cyrius 4.5.1 artifact").
-> Runtime is unaffected — `cyrius build` of `src/main.cyr` (which does
-> include ws_server) succeeds because the bote test harness carries
-> additional symbols that the build unit doesn't.
+> **Original 4.5.1 context (preserved below)**: found while landing bote 1.5.0 (WebSocket transport, which pulls in `lib/ws_server.cyr`). The bug was a hard compile-time ceiling on the identifier/symbol table; real mid-size projects hit it without anything unusual. A companion minimal reproduction lives at `docs/bugs/cyrius-4.5.1-repro.cyr` in this repo.
 
 ---
 

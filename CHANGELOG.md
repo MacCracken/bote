@@ -2,6 +2,35 @@
 
 All notable changes to bote are documented here.
 
+## [1.8.1] — 2026-04-14 — Bump to cyrius 4.6.2
+
+Toolchain bump. No source changes beyond the pin + the test-file comment
+that describes why the per-module test split is now the permanent
+layout rather than a workaround.
+
+### Changed
+- **cyrius pin** `4.5.1` → `4.6.2` (`cyrius.toml` + `.cyrius-toolchain`).
+- **`src/dispatch.cyr`** — `_bote_server_version` → `"1.8.1"`.
+- **`tests/bote.tcyr`** comment updated to explain that per-module test files are the permanent layout. `lib/ws_server.cyr` stays out of the shared compile unit because bote's dep graph (`[deps.libro]` + `[deps.majra]` + `lib/sigil.cyr` alone at 354 fns + 15 stdlib modules + 15 bote sources) already lands near 4.6.2's 2048-fn function-table ceiling — ws_server's 16 fns tip it over.
+- **`docs/bugs/cyrius-4.5.1-identifier-buffer-cap.md`** — added a 4.6.2 status header: identifier buffer *was* raised, the original repro now trips the function-table cap with a clean diagnostic, but the 4.6.1 diagnostic fix doesn't cover the specific overflow path bote hits.
+
+### What we got from 4.6.1 / 4.6.2
+- ✅ Identifier buffer raised (~60 KB headroom) — resolves the 1.5.0-era class of error.
+- ✅ Clean `function table full (2048/2048)` diagnostic on the original repro.
+- 🟡 Diagnostic fix doesn't cover every overflow path — bote still sees the misleading `lib/assert.cyr:3: expected '=', got string` when its full test unit + ws_server is compiled. Documented for the cyrius agent to take another pass.
+
+### Verified (cyrius 4.6.2)
+- `cyrius test tests/bote.tcyr` → **394 passed, 0 failed**
+- `cyrius test tests/bote_libro_tools.tcyr` → **22 passed, 0 failed**
+- `cyrius test tests/bote_content.tcyr` → **15 passed, 0 failed**
+- `cyrius test tests/bote_host.tcyr` → **47 passed, 0 failed** (478 total, unchanged)
+- `cyrius build src/main.cyr bote` → OK; `./bote` reports `"version":"1.8.1"`.
+- `cyrlint src/*.cyr` → 0 warnings.
+
+### Carried forward
+- cyrius 4.6.2 function-table cap limits the shared test compile unit — addressed structurally via per-module test files; waiting on either another cyrius-side raise or a compile-unit-level DCE that prunes unreferenced fns from counted totals.
+- v1.2.1 libro-growth heisenbug: unchanged.
+
 ## [1.8.0] — 2026-04-14 — HostRegistry + SSRF guard
 
 Closes out the `host` module started in 1.7.0. The registry gives

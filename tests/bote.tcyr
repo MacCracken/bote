@@ -52,14 +52,12 @@ include "src/discovery.cyr"
 include "src/transport_http.cyr"
 include "src/bridge.cyr"
 include "src/transport_streamable.cyr"
-# NB: lib/ws_server.cyr intentionally NOT included here — its frame I/O isn't
-# exercised in these shape-only tests (live round-trip is covered by the
-# stdlib ws_server conformance tests). Keeping it out also avoids pushing
-# the cyrius 4.5.1 parser past its input-buffer cap. Same reason splits
-# libro_tools into tests/bote_libro_tools.tcyr.
+# NB: lib/ws_server.cyr stays out of this compile unit. On cyrius 4.6.2
+# bote's deps (libro + majra + sigil's 354 fns) already push the total
+# to ~1800 of the 2048-fn table, and ws_server's 16 fns tip it over.
+# The per-module tests/bote_<module>.tcyr split absorbs the overflow
+# and also reads better than one monofile.
 include "src/transport_ws.cyr"
-# NB: src/content.cyr tests live in tests/bote_content.tcyr — same
-# parser-cap reason as bote_libro_tools.tcyr.
 
 # Test handler: echoes its arguments verbatim.
 fn h_echo(args) {
