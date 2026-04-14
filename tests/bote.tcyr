@@ -1138,6 +1138,10 @@ fn main() {
     var after_missing = resumption_buffer_events_after(rb, "evt-99");
     assert_eq(vec_len(after_missing), 0, "missing id → empty");
 
+    # events_after — defensive guards (p(-1) hardening)
+    assert_eq(vec_len(resumption_buffer_events_after(rb, 0)), 0, "null id → empty (no segfault)");
+    assert_eq(vec_len(resumption_buffer_events_after(rb, "")), 0, "empty id → empty");
+
     # ---------------- StreamableConfig ----------------
     var scfg = streamable_config_new("/mcp", 0x0100007F, 8392);
     assert(streq(streamable_config_path(scfg), "/mcp") == 1, "scfg path");

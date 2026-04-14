@@ -169,7 +169,8 @@ fn _bridge_cors_headers(allowed_origins, request_origin) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "Access-Control-Allow-Origin: ");
     str_builder_add_cstr(sb, _bridge_cors_origin(allowed_origins, request_origin));
-    str_builder_add_cstr(sb, "\r\nAccess-Control-Allow-Methods: POST, GET, OPTIONS\r\nAccess-Control-Allow-Headers: content-type\r\n");
+    str_builder_add_cstr(sb, "\r\nAccess-Control-Allow-Methods: POST, GET, OPTIONS\r\n");
+    str_builder_add_cstr(sb, "Access-Control-Allow-Headers: content-type\r\n");
     return str_data(str_builder_build(sb));
 }
 
@@ -228,6 +229,7 @@ fn _bridge_handle(config, cfd, buf, n) {
     var clen = http_content_length(buf, n);
     if (clen <= 0) { clen = n - body_off; }
     if (clen < 0) { clen = 0; }
+    if (clen > n - body_off) { clen = n - body_off; }
     var body = alloc(clen + 1);
     memcpy(body, buf + body_off, clen);
     store8(body + clen, 0);

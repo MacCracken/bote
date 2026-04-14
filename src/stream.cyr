@@ -90,7 +90,8 @@ fn stream_context_cancellation(c) { return load64(c + 8); }
 # request_id is a raw JSON literal cstr (e.g. "1", "\"abc\"", "null").
 fn progress_notification(request_id, update) {
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":");
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",");
+    str_builder_add_cstr(sb, "\"params\":{\"progressToken\":");
     if (request_id == 0) { str_builder_add_cstr(sb, "null"); }
     else { str_builder_add_cstr(sb, request_id); }
     str_builder_add_cstr(sb, ",\"progress\":");

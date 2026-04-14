@@ -54,7 +54,8 @@ fn validate_tool_name(name) {
         i = i + 1;
     }
     if (has_under == 0) {
-        return bote_err_new(ERR_INVALID_PARAMS, name, "tool name must contain at least one underscore (project_tool format)");
+        return bote_err_new(ERR_INVALID_PARAMS, name,
+            "tool name must contain at least one underscore (project_tool format)");
     }
     return 0;
 }

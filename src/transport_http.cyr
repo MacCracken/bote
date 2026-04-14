@@ -125,6 +125,10 @@ fn _http_handle(config, cfd, buf, n) {
     var clen = http_content_length(buf, n);
     if (clen <= 0) { clen = n - bo; }
     if (clen < 0) { clen = 0; }
+    # Clamp to the bytes we actually received. Guards against a lying
+    # Content-Length header declaring more body than arrived on the wire —
+    # without this, memcpy would read past the request buffer.
+    if (clen > n - bo) { clen = n - bo; }
     var body = alloc(clen + 1);
     memcpy(body, buf + bo, clen);
     store8(body + clen, 0);

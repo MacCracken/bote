@@ -2,6 +2,38 @@
 
 All notable changes to bote are documented here.
 
+## [1.5.1] — 2026-04-14 — P(-1) scaffold hardening
+
+First hardening pass since 1.5.0. No new features; audit-driven fixes to
+defensive guards, a line-length lint cleanup across `src/`, and two new
+test assertions. All 394 tests / 10 benches / 4 fuzz harnesses green.
+
+### Security
+- **HTTP body-length clamp** — `src/transport_http.cyr`, `src/transport_streamable.cyr`, and `src/bridge.cyr` each copy the request body with `memcpy(body, buf + bo, clen)` after reading `Content-Length`. If a lying `Content-Length` header declared more bytes than actually arrived on the wire, `memcpy` would read past the request buffer into adjacent memory. All three paths now clamp `clen = min(clen, n - bo)` before the copy. Tested by manual audit; integration coverage by the existing transport tests still passes.
+
+### Fixed
+- **`resumption_buffer_events_after` null/empty guard** — Accepting `last_event_id == 0` previously would have segfaulted on the first `streq`; accepting `""` would have silently scanned the whole buffer for no matches. The caller in `_strm_handle_get` already guards null, but the helper is now defensive in its own right (returns empty vec in both cases). **Two new test assertions** cover these paths (394 total, was 392).
+
+### Changed
+- **Line-length cleanup** (`cyrlint`-clean): `src/bridge.cyr:172` (CORS header), `src/dispatch.cyr:57` (tool-name validation error message), `src/stream.cyr:93` (progress notification JSON). No behavior change — just wrapped the offending literals across two `str_builder_add_cstr` calls so lines stay under 120 chars. All `src/*.cyr` files now report `0 warnings` from `cyrlint`.
+
+### Verified (cyrius 4.5.1)
+- `cyrius test tests/bote.tcyr` → **394 passed, 0 failed**
+- `cyrius bench tests/bote.bcyr` → all 10 hot paths within noise of the 1.5.0 baseline (dispatch_* 1–3µs, jsonx_* 580–864ns, codec_* 763ns–6µs, validate_* 976ns–2µs)
+- `cyrius fuzz fuzz/*.fcyr` → **4 passed, 0 failed**
+- `cyrlint src/*.cyr` → all **0 warnings**
+
+### Audit findings deferred
+Captured during this pass but not actioned in 1.5.1:
+- **Bump-allocator leak on long-lived WS connections** — every inbound frame allocs a fresh payload buffer, and `codec_process_message` returns fresh alloc'd JSON. Short-lived HTTP requests don't notice; WebSocket connections that stay open for hours will accumulate. Proper fix needs either an arena-per-message lifetime or stdlib `fl_free` support. Tracked for v1.6.
+- **Global state in `transport_streamable.cyr` (`_strm_event_ids`, `_strm_resumption`) and `transport_stdio.cyr` (`_stdio_buf`, `_stdio_buf_len`)** — safe today because all transports are single-connection-at-a-time per the v1.0 design, but will need mutex-guarding when streaming dispatch (v1.5+ per roadmap) lets a server handle concurrent sessions.
+
+### Carried forward
+- v1.2.1 libro live-integration heisenbug: unchanged.
+- cyrius 4.5.1 identifier-buffer cap: unchanged (`docs/bugs/cyrius-4.5.1-identifier-buffer-cap.md`).
+
+---
+
 ## [1.5.0] — 2026-04-14 — WebSocket transport (RFC 6455)
 
 Adds a sixth MCP transport: **WebSocket**. Each TEXT frame is one JSON-RPC

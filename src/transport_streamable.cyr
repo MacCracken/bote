@@ -109,9 +109,13 @@ fn resumption_buffer_push(rb, event) {
 }
 
 # Return a vec of events whose IDs come after `last_event_id`.
-# Returns empty vec if last_event_id isn't found (client missed too much).
+# Returns empty vec if last_event_id isn't found (client missed too much),
+# or if last_event_id is null/empty (streq on null would segfault;
+# empty string never matches a real "evt-N" id).
 fn resumption_buffer_events_after(rb, last_event_id) {
     var out = vec_new();
+    if (last_event_id == 0) { return out; }
+    if (load8(last_event_id) == 0) { return out; }
     var events = resumption_buffer_events(rb);
     var n = vec_len(events);
     var found_at = 0 - 1;
@@ -254,6 +258,7 @@ fn _strm_handle_post(cfd, buf, n, config) {
     var clen = http_content_length(buf, n);
     if (clen <= 0) { clen = n - bo; }
     if (clen < 0) { clen = 0; }
+    if (clen > n - bo) { clen = n - bo; }
     var body = alloc(clen + 1);
     memcpy(body, buf + bo, clen);
     store8(body + clen, 0);
