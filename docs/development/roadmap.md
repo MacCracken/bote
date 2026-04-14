@@ -144,7 +144,7 @@ the full diagnostic + reproducer.
 |---|---|---|
 | [cyrius-4.5.1-identifier-buffer-cap.md](../bugs/cyrius-4.5.1-identifier-buffer-cap.md) | ✅ Resolved by 4.6.2 + 4.7.1 | No current impact |
 | [cyrius-4.8.3-regressions.md](../bugs/cyrius-4.8.3-regressions.md) — path traversal + include cap + PP_IFDEF | ✅ All three fixed in 4.8.4 | No current impact |
-| [cyrius-4.8.4-ci-binary-skew.md](../bugs/cyrius-4.8.4-ci-binary-skew.md) — release binary fails on bote's libro/majra compile unit while alpha2 passes | 🟡 **Open** | 2.5.0 shipped a lean `tests/bote.tcyr` (lost 8 shape-only assertions from audit_libro + events_majra tests); will restore when a `4.8.4` release rebuild or `4.8.5` resolves the divergence |
+| [cyrius-4.8.4-ci-binary-skew.md](../bugs/cyrius-4.8.4-ci-binary-skew.md) — release binary fails on bote's libro/majra compile unit while alpha2 passes | 🟡 **Triaged upstream** — cyrius agent is investigating on the `4.8.5` branch (wrapping alpha2 as of 2026-04-14). | 2.5.0 shipped a lean `tests/bote.tcyr` (lost 8 shape-only assertions from audit_libro + events_majra tests); will restore when 4.8.5 lands |
 
 All bote-side workarounds are documented inline; when an upstream
 fix lands, the recovery is a pin bump + minor test-file edit.
