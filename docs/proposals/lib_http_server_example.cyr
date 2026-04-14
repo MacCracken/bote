@@ -1,0 +1,97 @@
+# Example: a tiny HTTP server using lib/http_server.cyr
+#
+# Demonstrates routing GET / POST, query parameters, RESTful path segments,
+# JSON responses, and chunked / SSE responses.
+#
+# Build + run:
+#   cyrius build docs/proposals/lib_http_server_example.cyr build/example
+#   ./build/example &
+#   curl http://127.0.0.1:8080/health
+#   curl 'http://127.0.0.1:8080/echo?msg=hello%20world'
+#   curl http://127.0.0.1:8080/users/42
+#   curl -X POST http://127.0.0.1:8080/data -H 'Content-Type: application/json' -d '{"k":"v"}'
+#   curl -N http://127.0.0.1:8080/stream
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/fnptr.cyr"
+include "lib/http_server.cyr"
+
+# Per-route handler dispatch. ctx is unused in this demo.
+fn handle(ctx, cfd, buf, n) {
+    var method = http_get_method(buf, n);
+    var path   = http_get_path(buf, n);
+
+    # ---------- GET /health → "ok" ----------
+    if (streq(method, "GET") == 1) {
+        if (streq(http_path_only(path), "/health") == 1) {
+            http_send_response(cfd, HTTP_OK, "OK", "text/plain", "ok", 2, 0);
+            return 0;
+        }
+    }
+
+    # ---------- GET /echo?msg=... → JSON echo ----------
+    if (streq(method, "GET") == 1 && streq(http_path_only(path), "/echo") == 1) {
+        var msg = http_get_param(path, "msg");
+        if (msg == 0) { msg = ""; }
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "{\"echoed\":\"");
+        str_builder_add_cstr(sb, msg);
+        str_builder_add_cstr(sb, "\"}");
+        var body = str_data(str_builder_build(sb));
+        http_send_response(cfd, HTTP_OK, "OK", "application/json", body, strlen(body), 0);
+        return 0;
+    }
+
+    # ---------- GET /users/{id} → JSON user ----------
+    if (streq(method, "GET") == 1 && memeq(path, "/users/", 7) == 1) {
+        var id = http_path_segment(path, 1);
+        if (id == 0) { http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0; }
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "{\"id\":\"");
+        str_builder_add_cstr(sb, id);
+        str_builder_add_cstr(sb, "\"}");
+        var body = str_data(str_builder_build(sb));
+        http_send_response(cfd, HTTP_OK, "OK", "application/json", body, strlen(body), 0);
+        return 0;
+    }
+
+    # ---------- POST /data → echo the request body ----------
+    if (streq(method, "POST") == 1 && streq(http_path_only(path), "/data") == 1) {
+        var bo = http_body_offset(buf, n);
+        if (bo < 0) { http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0; }
+        var clen = http_content_length(buf, n);
+        if (clen <= 0) { clen = n - bo; }
+        http_send_response(cfd, HTTP_OK, "OK", "application/json",
+                           buf + bo, clen, 0);
+        return 0;
+    }
+
+    # ---------- GET /stream → chunked / SSE-style ----------
+    if (streq(method, "GET") == 1 && streq(http_path_only(path), "/stream") == 1) {
+        http_send_chunked_start(cfd, 200, "text/event-stream", 0);
+        http_send_chunk(cfd, "data: hello\n\n", 13);
+        http_send_chunk(cfd, "data: world\n\n", 13);
+        http_send_chunk(cfd, "data: done\n\n", 12);
+        http_send_chunked_end(cfd);
+        return 0;
+    }
+
+    # ---------- catch-all ----------
+    http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    syscall(1, 1, "http_server_example listening on 127.0.0.1:8080\n", 49);
+    return http_server_run(INADDR_LOOPBACK(), 8080, &handle, 0);
+}
+var rc = main();
+syscall(SYS_EXIT, rc);
