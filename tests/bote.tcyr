@@ -1,0 +1,108 @@
+# bote.tcyr — error + protocol unit tests
+# Run: cyrius test tests/bote.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/assert.cyr"
+
+include "src/error.cyr"
+include "src/protocol.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ---------------- error: rpc_code mapping ----------------
+    assert_eq(bote_err_rpc_code(ERR_PARSE), 0 - 32700, "rpc_code parse");
+    assert_eq(bote_err_rpc_code(ERR_PROTOCOL), 0 - 32600, "rpc_code protocol");
+    assert_eq(bote_err_rpc_code(ERR_TOOL_NOT_FOUND), 0 - 32601, "rpc_code tool_not_found");
+    assert_eq(bote_err_rpc_code(ERR_INVALID_PARAMS), 0 - 32602, "rpc_code invalid_params");
+    assert_eq(bote_err_rpc_code(ERR_SCHEMA_VIOLATION), 0 - 32602, "rpc_code schema_violation");
+    assert_eq(bote_err_rpc_code(ERR_EXEC_FAILED), 0 - 32000, "rpc_code exec_failed");
+    assert_eq(bote_err_rpc_code(ERR_SANDBOX), 0 - 32000, "rpc_code sandbox");
+    assert_eq(bote_err_rpc_code(ERR_TRANSPORT_CLOSED), 0 - 32003, "rpc_code transport_closed");
+    assert_eq(bote_err_rpc_code(ERR_BIND_FAILED), 0 - 32003, "rpc_code bind_failed");
+    assert_eq(bote_err_rpc_code(ERR_REQUEST_CANCELLED), 0 - 32800, "rpc_code cancelled");
+    assert_eq(bote_err_rpc_code(ERR_JSON), 0 - 32700, "rpc_code json");
+    assert_eq(bote_err_rpc_code(ERR_IO), 0 - 32603, "rpc_code io");
+
+    # ---------------- error: accessors ----------------
+    var e = bote_err_new(ERR_INVALID_PARAMS, "echo", "missing 'name'");
+    assert_eq(bote_err_tag(e), ERR_INVALID_PARAMS, "tag stored");
+    assert(streq(bote_err_tool(e), "echo") == 1, "tool stored");
+    assert(streq(bote_err_reason(e), "missing 'name'") == 1, "reason stored");
+    assert_eq(bote_err_violations(e), 0, "no violations on plain err");
+
+    # ---------------- error: format ----------------
+    var s1 = bote_err_format(bote_err_new(ERR_TOOL_NOT_FOUND, "foo", 0));
+    assert(str_eq(s1, str_from("tool not found: foo")) == 1, "fmt tool_not_found");
+
+    var s2 = bote_err_format(bote_err_new(ERR_INVALID_PARAMS, "t", "r"));
+    assert(str_eq(s2, str_from("invalid params for tool 't': r")) == 1, "fmt invalid_params");
+
+    var s3 = bote_err_format(bote_err_new(ERR_EXEC_FAILED, "t", "r"));
+    assert(str_eq(s3, str_from("tool execution failed: t - r")) == 1, "fmt exec_failed");
+
+    var s4 = bote_err_format(bote_err_new(ERR_TRANSPORT_CLOSED, 0, 0));
+    assert(str_eq(s4, str_from("transport closed")) == 1, "fmt transport_closed");
+
+    var s5 = bote_err_format(bote_err_new(ERR_BIND_FAILED, 0, "port in use"));
+    assert(str_eq(s5, str_from("transport bind failed: port in use")) == 1, "fmt bind_failed");
+
+    # ---------------- error: schema violations join ----------------
+    var vs = vec_new();
+    vec_push(vs, "name required");
+    vec_push(vs, "id must be int");
+    var sv = bote_err_with_violations(ERR_SCHEMA_VIOLATION, "tool_x", vs);
+    var s6 = bote_err_format(sv);
+    assert(str_eq(s6, str_from("schema violation for tool 'tool_x': name required; id must be int")) == 1, "fmt schema joins");
+
+    # ---------------- protocol: request creation ----------------
+    var req = req_new("1", "tools/list");
+    assert(streq(req_jsonrpc(req), "2.0") == 1, "req jsonrpc 2.0");
+    assert(streq(req_id(req), "1") == 1, "req id stored");
+    assert(streq(req_method(req), "tools/list") == 1, "req method stored");
+    assert_eq(req_is_notification(req), 0, "req not notification");
+
+    # ---------------- protocol: notification ----------------
+    var n = req_notification("notifications/initialized");
+    assert_eq(req_id(n), 0, "notif id is 0");
+    assert_eq(req_is_notification(n), 1, "notif flagged");
+    assert(streq(req_method(n), "notifications/initialized") == 1, "notif method");
+
+    # ---------------- protocol: with_params ----------------
+    var rp = req_with_params(req_new("42", "tools/call"), "{\"name\":\"echo\"}");
+    assert(streq(req_params(rp), "{\"name\":\"echo\"}") == 1, "params overridden");
+
+    # default params when not set
+    var rd = req_new("1", "initialize");
+    assert(streq(req_params(rd), "null") == 1, "default params null");
+
+    # ---------------- protocol: response success ----------------
+    var ok = resp_success("1", "{\"tools\":[]}");
+    assert(streq(resp_jsonrpc(ok), "2.0") == 1, "resp jsonrpc 2.0");
+    assert(streq(resp_id(ok), "1") == 1, "resp id");
+    assert(streq(resp_result(ok), "{\"tools\":[]}") == 1, "resp result");
+    assert_eq(resp_error_obj(ok), 0, "resp success no error obj");
+
+    # ---------------- protocol: response error ----------------
+    var er = resp_error("1", 0 - 32601, "tool not found");
+    assert_eq(resp_result(er), 0, "resp error no result");
+    var eobj = resp_error_obj(er);
+    assert(eobj != 0, "resp error has error obj");
+    assert_eq(rpc_err_code(eobj), 0 - 32601, "rpc err code");
+    assert(streq(rpc_err_message(eobj), "tool not found") == 1, "rpc err message");
+    assert_eq(rpc_err_data(eobj), 0, "rpc err data null");
+
+    # ---------------- protocol: response preserves arbitrary id ----------------
+    var rid = resp_success("\"abc-123\"", "{}");
+    assert(streq(resp_id(rid), "\"abc-123\"") == 1, "string id preserved");
+
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

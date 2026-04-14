@@ -1,5 +1,9 @@
-# bote — Cyrius port
-# Ported from 10877 lines of Rust
+# bote — MCP Core Service (Cyrius port)
+# Ported from 10877 lines of Rust.
+#
+# Modules:
+#   src/error.cyr     — BoteError tags + JSON-RPC code mapping
+#   src/protocol.cyr  — JsonRpcRequest / JsonRpcResponse / JsonRpcError
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -8,9 +12,12 @@ include "lib/vec.cyr"
 include "lib/str.cyr"
 include "lib/syscalls.cyr"
 
+include "src/error.cyr"
+include "src/protocol.cyr"
+
 fn main() {
     alloc_init();
-    println("bote ready");
+    println("bote - MCP core (cyrius port, scaffold)");
     return 0;
 }
 
