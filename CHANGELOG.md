@@ -2,6 +2,34 @@
 
 All notable changes to bote are documented here.
 
+## [1.2.1] — 2026-04-13 — Adapter init-dance docs + v1.2.0 patch hardening
+
+### Fixed
+- **`src/audit_libro.cyr::libro_audit_log`** wraps every cstr boundary value through `str_from` before passing to `chain_append` / `chain_append_with_agent`. libro expects `Str` (fat strings) for source / action / details / agent_id, not raw cstrs — the previous version passed cstrs directly which produced garbage `str_len` reads inside libro's hash function. Verified by isolated probe: `chain_append(c, SEV_INFO, str_from("bote"), str_from("tool.completed"), str_from("{}"))` correctly grows the chain to length 1.
+
+### Documented
+- **Init dance** for any binary that uses LibroAudit:
+  ```
+  alloc_init();   # bump allocator
+  fl_init();      # freelist — libro entries
+  ed25519_init(); # sigil signing constants
+  ```
+  Codified in the `audit_libro.cyr` header comment.
+
+### Cyrius pin
+- Bumped to **4.4.6** (`cyrius.toml`).
+
+### Known issue (tracked for v1.3.0)
+- Linking libro + majra + the full bote test corpus into one binary triggers a heap heisenbug: `libro_audit_log` enters an infinite loop (apparently re-entering `main`). The adapter itself is correct — verified by an isolated probe that calls `chain_append` directly with `str_from`-wrapped strings. Suspect: cumulative globals from the cross-product exceed an internal cyrius compilation-unit boundary and corrupt the bump-allocator's prologue. Workarounds explored: dropping `lib/patra.cyr` (saved 244 KB but didn't help), splitting includes (no effect), running the demo as a standalone binary (still loops). Filed as a tracking item; resolution likely needs the multi-file linker on cyrius's v4.5 roadmap.
+
+### Verified (cyrius 4.4.6)
+- `cyrius test` → 359 passed, 0 failed
+- `cyrius fuzz` → 4 passed, 0 failed
+- `cyrius bench` → 10 hot paths unchanged
+- `./build/bote` initialize handshake reports `"version":"1.2.1"`
+
+---
+
 ## [1.2.0] — 2026-04-13 — LibroAudit + MajraEvents adapters
 
 Wires bote's AuditSink and EventSink (introduced in 1.1.0) to the **libro**

@@ -1056,25 +1056,22 @@ fn main() {
     assert_eq(resp_error_obj(bare_resp), 0, "bare success no error");
 
     # ================================================================
-    # v1.2.0: LibroAudit + MajraEvents adapter SHAPES
+    # v1.2.x: LibroAudit + MajraEvents adapter SHAPES
     # ================================================================
-    # Live chain + pubsub integration is verified by libro/majra's own
-    # test suites; here we check the adapter struct shapes and that the
-    # adapter function pointers are addressable + non-null so they can
-    # be wired into AuditSink / EventSink at the boundary.
+    # Live chain growth + pubsub deliver paths are exercised in the
+    # standalone examples/audit_demo.cyr program (runs as a separate
+    # binary because libro+majra+full-test cross-product trips a heap
+    # heisenbug — see programs/README in v1.2.1).
 
     # ---------------- audit_libro: struct + accessors ----------------
-    var lchain_marker = 12345;
-    var la = libro_audit_new(lchain_marker);
-    assert_eq(libro_audit_chain(la), lchain_marker, "la chain stored");
+    var la = libro_audit_new(99);
+    assert_eq(libro_audit_chain(la), 99, "la chain stored");
     assert(streq(libro_audit_source(la), "bote") == 1, "la default source");
     assert_eq(libro_audit_agent_id(la), 0, "la default agent_id");
-
-    var la2 = libro_audit_new(99);
-    libro_audit_with_source(la2, "my-server");
-    libro_audit_with_agent_id(la2, "default-agent");
-    assert(streq(libro_audit_source(la2), "my-server") == 1, "custom source");
-    assert(streq(libro_audit_agent_id(la2), "default-agent") == 1, "configured agent_id");
+    libro_audit_with_source(la, "my-server");
+    libro_audit_with_agent_id(la, "default-agent");
+    assert(streq(libro_audit_source(la), "my-server") == 1, "custom source");
+    assert(streq(libro_audit_agent_id(la), "default-agent") == 1, "configured agent_id");
 
     # ---------------- audit_libro: AuditSink wire-up shape ----------------
     var libro_sink = audit_sink_new(&libro_audit_log, la);

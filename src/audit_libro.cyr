@@ -8,11 +8,27 @@
 #   - Agent:    caller_id from the event takes precedence over configured agent_id
 #   - Details:  serialized ToolCallEvent JSON
 #
+# REQUIRED INIT (caller's main, before any chain operations):
+#   alloc_init();   # bump allocator
+#   fl_init();      # freelist (libro entries live here)
+#   ed25519_init(); # sigil signing constants
+#
 # Wire-up:
 #   var chain = chain_new();
 #   var la = libro_audit_new(chain);
 #   var sink = audit_sink_new(&libro_audit_log, la);
 #   dispatcher_set_audit(d, sink);
+#
+# IMPORTANT: libro's chain_append* takes `Str` (fat strings), not raw cstrs.
+# This adapter wraps every cstr boundary value via str_from before calling
+# into libro. Callers should pass plain cstrs in ToolCallEvent — the wrap
+# happens here.
+#
+# Known issue (v1.2.1): when libro + majra + the full bote test/demo binary
+# are linked together, the libro_audit_log path triggers a heap heisenbug
+# (main re-entry / infinite loop). The adapter shape is correct (works in
+# isolated probes); live integration in a multi-include binary needs cyrius
+# investigation — tracked for v1.3.0.
 
 # LibroAudit (24 bytes):
 #   +0  chain     libro chain ptr
@@ -36,6 +52,10 @@ fn libro_audit_agent_id(la) { return load64(la + 16); }
 
 # AuditSink-compatible log function.
 # ctx is a LibroAudit ptr.
+#
+# IMPORTANT: libro's chain_append* expects `Str` (fat strings) for source /
+# action / details / agent, NOT raw cstrs. Bote stores tool names and
+# similar as cstrs, so we wrap them via str_from at the boundary.
 fn libro_audit_log(ctx, event) {
     if (ctx == 0 || event == 0) { return 0; }
     var chain = libro_audit_chain(ctx);
@@ -43,20 +63,22 @@ fn libro_audit_log(ctx, event) {
 
     var success = tool_call_event_success(event);
     var severity = SEV_INFO;
-    var action = "tool.completed";
-    if (success == 0) { severity = SEV_ERROR; action = "tool.failed"; }
+    var action_cstr = "tool.completed";
+    if (success == 0) { severity = SEV_ERROR; action_cstr = "tool.failed"; }
 
-    var source = libro_audit_source(ctx);
-    var details = tool_call_event_to_json(event);
+    var source_str  = str_from(libro_audit_source(ctx));
+    var action_str  = str_from(action_cstr);
+    var details_str = str_from(tool_call_event_to_json(event));
 
     # caller_id takes precedence over configured agent_id
-    var agent = tool_call_event_caller_id(event);
-    if (agent == 0) { agent = libro_audit_agent_id(ctx); }
+    var agent_cstr = tool_call_event_caller_id(event);
+    if (agent_cstr == 0) { agent_cstr = libro_audit_agent_id(ctx); }
 
-    if (agent != 0) {
-        chain_append_with_agent(chain, severity, source, action, details, agent);
+    if (agent_cstr != 0) {
+        chain_append_with_agent(chain, severity, source_str, action_str,
+                                details_str, str_from(agent_cstr));
     } else {
-        chain_append(chain, severity, source, action, details);
+        chain_append(chain, severity, source_str, action_str, details_str);
     }
     return 0;
 }
