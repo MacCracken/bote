@@ -2,6 +2,50 @@
 
 All notable changes to bote are documented here.
 
+## [2.3.0] — 2026-04-14 — RFC 7636 PKCE-S256 helpers
+
+OAuth 2.1 mandates PKCE on every authorization-code flow; this release
+ships the verifier + S256 challenge primitives so MCP clients running
+inside bote-hosted handlers can initiate the auth dance without
+reimplementing the (small but easy-to-mess-up) crypto. Pairs with the
+JWT verifier (2.2.0) and bearer middleware (1.9.0).
+
+### Added
+- **`src/pkce.cyr`** (~80 LOC, opt-in module):
+  - `pkce_code_verifier(out_buf, len) → 0|err` — writes `len` URL-safe random bytes from `/dev/urandom`. RFC 7636 §4.1 length [43..128]; `out_buf` must be `len + 1` bytes (NUL-terminated). Returns non-zero on out-of-range len or entropy failure.
+  - `pkce_code_challenge_s256(verifier) → cstr` — `base64url(sha256(verifier))`, no padding. Uses sigil's `sha256` one-shot. Returns a NUL-terminated 43-char cstr (32 bytes → 43 chars).
+
+### Notes
+- **S256 only.** OAuth 2.1 explicitly removes the `plain` method; we don't ship it.
+- **Mod-bias.** Verifier byte mapping is `urandom_byte % 66` over the unreserved-character set. Worst-case bias per char is ~0.4% (256/66 = 3 remainder); for 43+-char tokens this is negligible to any guessing attack.
+- **No SHA-256 reimplementation.** Calls sigil's existing `sha256(data, len, out)` one-shot — same approach as 2.2.0's HMAC use.
+
+### Tests
+- **`tests/bote_pkce.tcyr`** — 17 assertions:
+  - Verifier length 43 (RFC minimum) + 128 (RFC maximum) succeed
+  - Out-of-range (42, 129) rejected
+  - Verifier bytes are all in the RFC unreserved set (`[A-Za-z0-9._~-]`)
+  - Two consecutive verifiers differ (entropy sanity)
+  - **RFC 7636 Appendix B reference vector**: verifier `dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk` → challenge `E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM`
+  - Challenge is deterministic
+  - Out-of-range / null verifier rejected
+  - Fn-pointer addressability for plugging into auth flows
+- **603 total** (was 586). Breakdown: `bote.tcyr` 394, `bote_libro_tools.tcyr` 22, `bote_content.tcyr` 24, `bote_host.tcyr` 67, `bote_auth.tcyr` 38, `bote_sandbox.tcyr` 13, `bote_jwt.tcyr` 28, `bote_pkce.tcyr` 17.
+
+### Verified (cyrius 4.7.1)
+- All eight test files green.
+- `cyrius bench tests/bote.bcyr` → 10 hot paths within noise of 2.2.
+- `cyrlint src/pkce.cyr tests/bote_pkce.tcyr` → 0 warnings.
+- `./bote` reports `"version":"2.3.0"`.
+
+### Deferred from 2.3.0 to 2.4.0 — claims propagation through transports
+Started this release; reverted before tagging. The plumbing change (auth_bearer_check → codec_process_message → dispatcher_dispatch all gain a `claims` arg, transports capture and thread the validator's return) all compiles and `src/main.cyr` builds cleanly — but it tipped `tests/bote.tcyr`'s compile unit past the cyrius 4.7.1 identifier-buffer cap (the misleading `lib/assert.cyr:3` cascade). Production runtime is unaffected; the test file is the cap-pressured one. Will land cleanly when cyrius 4.8.0 raises the cap.
+
+### Roadmap
+- **Claims propagation** → 2.4.0 once 4.8.0 lands.
+- **OAuth 2.1 authorization-code endpoints** (Bote-as-AS rather than Bote-as-RS) — out of scope; bote is a resource server. Consumers wanting a full AS layer compose bote with their own authorization server.
+- **JWT RS256 / ES256** — waits on sigil's RSA / ECDSA primitives.
+
 ## [2.2.0] — 2026-04-14 — JWT HS256 verifier (auth roadmap)
 
 Lands the JWT bearer-token verifier from the 2.0 deferred list. Pairs

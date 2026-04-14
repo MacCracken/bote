@@ -1,0 +1,97 @@
+# bote::pkce — RFC 7636 PKCE helpers (Proof Key for Code Exchange).
+#
+# OAuth 2.1 / RFC 7636 require PKCE on every authorization-code flow.
+# Bote isn't an authorization server (we're a resource server), but
+# providing the verifier+challenge primitives lets MCP clients running
+# inside bote-hosted handlers initiate the auth dance without
+# reimplementing the (small but easy-to-mess-up) crypto.
+#
+# This module ships:
+#   pkce_code_verifier(out_buf, len)     — write `len` URL-safe random
+#                                          bytes [43..128] from urandom
+#   pkce_code_challenge_s256(verifier)   — challenge = base64url(sha256(verifier))
+#
+# The S256 method is the only one OAuth 2.1 mandates; "plain" is
+# explicitly removed in 2.1, so we don't ship it. Use sigil's
+# `hmac_sha256`-companion `sha256` one-shot for the digest, our
+# existing `jwt_b64u_*` helpers from src/jwt.cyr for base64url
+# encode (until cyrius lifts that to stdlib via the
+# cyrius-stdlib-base64url proposal).
+#
+# Requires: src/jwt.cyr to be included first (for jwt_b64u_decode's
+# alphabet table — we share `_b64u_alphabet` across the two helpers).
+
+# RFC 7636 §4.1: the unreserved characters allowed in code_verifier.
+# 66 chars: A-Z a-z 0-9 - . _ ~
+var _pkce_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+
+# Generate a random URL-safe code_verifier of length `len` (RFC 7636
+# allows 43-128). Writes to `out_buf` (must be `len + 1` bytes; gets
+# NUL-terminated). Returns 0 on success, non-zero on entropy failure.
+#
+# Reads `len` bytes from /dev/urandom and maps each into the 66-char
+# unreserved alphabet via mod 66. Mod-bias is negligible for 66 (the
+# 256/66 = 3 remainder gives a worst-case bias of ~0.4% per char,
+# well below practical guessing impact for 43+-char tokens).
+fn pkce_code_verifier(out_buf, len) {
+    if (len < 43) { return 1; }
+    if (len > 128) { return 1; }
+    var fd = syscall(SYS_OPEN, "/dev/urandom", 0, 0);
+    if (fd < 0) { return 1; }
+    var raw = alloc(len);
+    var got = 0;
+    while (got < len) {
+        var r = syscall(SYS_READ, fd, raw + got, len - got);
+        if (r <= 0) { syscall(SYS_CLOSE, fd); return 1; }
+        got = got + r;
+    }
+    syscall(SYS_CLOSE, fd);
+    var i = 0;
+    while (i < len) {
+        var b = load8(raw + i);
+        store8(out_buf + i, load8(_pkce_alphabet + (b % 66)));
+        i = i + 1;
+    }
+    store8(out_buf + len, 0);
+    return 0;
+}
+
+# Compute the S256 code_challenge for `verifier` (cstr).
+# challenge = base64url-no-padding(sha256(verifier))
+# Returns a NUL-terminated cstr (alloc'd; 43 chars + NUL).
+fn pkce_code_challenge_s256(verifier) {
+    if (verifier == 0) { return 0; }
+    var vlen = strlen(verifier);
+    if (vlen < 43 || vlen > 128) { return 0; }
+    var digest = alloc(32);
+    sha256(verifier, vlen, digest);
+    # Inline base64url-encode of the 32-byte digest. 32 bytes → 43
+    # base64url chars (no padding). Same alphabet as jwt_b64u (shared
+    # _pkce_alphabet here is *different* — JWT uses base64url over the
+    # 64-char alphabet, PKCE uses the 66-char unreserved set for the
+    # verifier; for the challenge we encode the digest in standard
+    # base64url, NOT the 66-char set).
+    var b64u = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    var out = alloc(44);
+    var di = 0;
+    var oi = 0;
+    while (di + 3 <= 32) {
+        var b0 = load8(digest + di);
+        var b1 = load8(digest + di + 1);
+        var b2 = load8(digest + di + 2);
+        store8(out + oi,     load8(b64u + (b0 >> 2)));
+        store8(out + oi + 1, load8(b64u + ((b0 & 3) << 4 | (b1 >> 4))));
+        store8(out + oi + 2, load8(b64u + ((b1 & 15) << 2 | (b2 >> 6))));
+        store8(out + oi + 3, load8(b64u + (b2 & 63)));
+        di = di + 3;
+        oi = oi + 4;
+    }
+    # 32 bytes = 30 + 2 → trailing 2-byte tail produces 3 chars (no padding)
+    var t0 = load8(digest + 30);
+    var t1 = load8(digest + 31);
+    store8(out + oi,     load8(b64u + (t0 >> 2)));
+    store8(out + oi + 1, load8(b64u + ((t0 & 3) << 4 | (t1 >> 4))));
+    store8(out + oi + 2, load8(b64u + ((t1 & 15) << 2)));
+    store8(out + 43, 0);
+    return out;
+}

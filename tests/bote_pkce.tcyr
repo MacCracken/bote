@@ -1,0 +1,90 @@
+# bote_pkce.tcyr — RFC 7636 PKCE helpers.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fnptr.cyr"
+include "lib/freelist.cyr"
+include "lib/sakshi.cyr"
+include "lib/bigint.cyr"
+include "lib/sigil.cyr"
+include "lib/assert.cyr"
+
+include "src/jwt.cyr"
+include "src/pkce.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ---------------- code_verifier ----------------
+    var v43 = alloc(44);
+    assert_eq(pkce_code_verifier(v43, 43), 0, "verifier 43 chars succeeds");
+    assert_eq(strlen(v43), 43, "verifier length 43");
+    # Every byte must be in the unreserved set
+    var i = 0;
+    var bad = 0;
+    while (i < 43) {
+        var c = load8(v43 + i);
+        var ok = 0;
+        if (c >= 65 && c <= 90)  { ok = 1; }   # A-Z
+        if (c >= 97 && c <= 122) { ok = 1; }   # a-z
+        if (c >= 48 && c <= 57)  { ok = 1; }   # 0-9
+        if (c == 45 || c == 46 || c == 95 || c == 126) { ok = 1; }  # - . _ ~
+        if (ok == 0) { bad = 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, "verifier bytes all in unreserved set");
+
+    var v128 = alloc(129);
+    assert_eq(pkce_code_verifier(v128, 128), 0, "verifier 128 chars succeeds");
+    assert_eq(strlen(v128), 128, "verifier length 128");
+
+    # Out-of-range lengths rejected
+    assert(pkce_code_verifier(v43, 42) != 0, "verifier 42 (too short) rejected");
+    assert(pkce_code_verifier(v43, 129) != 0, "verifier 129 (too long) rejected");
+
+    # Two consecutive verifiers should differ (entropy sanity)
+    var va = alloc(44); var vb = alloc(44);
+    pkce_code_verifier(va, 43);
+    pkce_code_verifier(vb, 43);
+    assert(streq(va, vb) == 0, "two verifiers differ (entropy ok)");
+
+    # ---------------- code_challenge_s256 ----------------
+    # RFC 7636 Appendix B test vector:
+    #   verifier  = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    #   challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+    var ref_v = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    var c = pkce_code_challenge_s256(ref_v);
+    assert(c != 0, "challenge returns non-null");
+    assert_eq(strlen(c), 43, "challenge length 43");
+    assert(streq(c, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM") == 1,
+           "RFC 7636 Appendix B challenge matches");
+
+    # Determinism — same input → same output
+    var c2 = pkce_code_challenge_s256(ref_v);
+    assert(streq(c, c2) == 1, "challenge deterministic");
+
+    # Real verifier round-trips deterministically too
+    var rv = alloc(44);
+    pkce_code_verifier(rv, 43);
+    var ch1 = pkce_code_challenge_s256(rv);
+    var ch2 = pkce_code_challenge_s256(rv);
+    assert(streq(ch1, ch2) == 1, "real verifier challenge deterministic");
+
+    # Out-of-range verifier rejected
+    assert_eq(pkce_code_challenge_s256("short"), 0, "challenge rejects short verifier");
+    assert_eq(pkce_code_challenge_s256(0), 0, "challenge rejects null");
+
+    # ---------------- Fn-pointer addressability ----------------
+    assert(&pkce_code_verifier != 0, "verifier fp addressable");
+    assert(&pkce_code_challenge_s256 != 0, "challenge fp addressable");
+
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);
