@@ -1,6 +1,6 @@
 # Bote Roadmap
 
-> **v0.1.0 (Cyrius port baseline)** — 12 modules, 3 transports, 251 tests, 10 benchmarks, 4 fuzz harnesses. Real MCP server in Cyrius.
+> **v1.0.0 (Stable)** — 13 modules, 4 transports (stdio + HTTP + Unix + bridge), 298 tests, 10 benchmarks, 4 fuzz harnesses. Built and tested against cyrius 4.4.0. Data shapes frozen for the 1.x line.
 >
 > **Spec**: MCP 2025-11-25 | **Compliance**: [spec-compliance.md](../spec-compliance.md)
 
@@ -8,71 +8,55 @@ For shipped detail: [CHANGELOG.md](../../CHANGELOG.md). For Rust history: `rust-
 
 ---
 
-## v0.2.0 — Bridge, Audit, Events
+## v1.1.0 — Audit + Events + Discovery wire-up + libro_tools
 
-The first three modules from `rust-old/` to bring forward.
-
-| Module | Effort | Notes |
-|---|---|---|
-| `src/bridge.cyr` | Medium | TypeScript-bridge MCP envelope + CORS preflight. Pure data layer + a small set of HTTP response shaping helpers; reuses `transport_http`. |
-| `src/audit.cyr` | Medium | `AuditSink` trait equivalent (cyrius has no traits — use a function-pointer + context struct). `LibroAudit` adapter waits for a cyrius `lib/libro.cyr` (the libro AGNOS port). |
-| `src/events.cyr` | Medium | `EventSink` analogue + topic constants (`bote/tool/completed`, `bote/tool/failed`, `bote/tool/registered`, `bote/tool/announce`). Adapter to `lib/majra.cyr` once that lands. |
-
----
-
-## v0.3.0 — Discovery, Sandbox, Host
+All four are now unblocked: **libro v1.0.3** and **majra v2.2.0** are sibling
+cyrius projects. Wire them into `cyrius.toml` via `[deps.libro] path = "../libro"`
+and `[deps.majra] path = "../majra"`.
 
 | Module | Effort | Notes |
 |---|---|---|
-| `src/discovery.cyr` | Low | `ToolAnnouncement`, `DiscoveryService`, subscribe-receiver. Trivial once `events` lands. |
-| `src/sandbox.cyr` | High | Kavach integration. Needs cyrius `lib/kavach.cyr`. |
-| `src/host.cyr` | High | MCP content blocks (text/image/audio/resource), host registry, SSRF check. |
+| `src/audit.cyr` + `LibroAudit` adapter | Medium | `AuditSink` analogue (function-pointer-based since cyrius has no traits). Wraps libro's `memstore_append` / hash chain. |
+| `src/events.cyr` + `MajraEvents` adapter | Medium | Topic constants + sink fn-pointer; calls majra's `pubsub_publish` with serialized `ToolCallEvent`. |
+| `src/discovery.cyr` wire-up | Low | Replace placeholder `publish_fp` with majra `pubsub_publish`; replace `DiscoveryReceiver` queue with majra `pubsub_subscribe`. |
+| `src/libro_tools.cyr` | Medium | 5 built-in MCP tools (`libro_query`, `libro_verify`, `libro_export`, `libro_proof`, `libro_retention`). Direct calls to libro's `memstore_*` / `verify_*` functions. |
 
 ---
 
-## v0.4.0 — Streamable HTTP + Auth
+## v1.2.0 — Host, Auth, Streamable HTTP
 
 | Module | Effort | Notes |
 |---|---|---|
-| `src/transport_streamable.cyr` | High | Single endpoint POST+GET, SSE event IDs, `Last-Event-ID` resumption, `retry:` hint. Needs cyrius SSE primitives. |
-| `src/auth.cyr` | High | OAuth 2.1 / PKCE-S256 / bearer-token claims + middleware. Token validator function pointer on `HttpConfig`. |
+| `src/host.cyr` | High | MCP content blocks (text/image/audio/resource), host registry, SSRF check. No AGNOS deps. |
+| `src/auth.cyr` | High | OAuth 2.1 / PKCE-S256 / bearer-token claims + middleware. Token-validator fn pointer on `HttpConfig`. No AGNOS deps. |
+| `src/transport_streamable.cyr` | High | Single endpoint POST+GET, SSE event IDs, `Last-Event-ID` resumption, `retry:` hint. Builds on `transport_http`. |
 
 ---
 
-## v0.5.0 — WebSocket, libro_tools
+## v1.3.0 — WebSocket + Sandbox + streaming dispatch
 
 | Module | Effort | Notes |
 |---|---|---|
-| `src/transport_ws.cyr` | High | Server-side WebSocket. Cyrius `lib/ws.cyr` is client-side only — needs server handshake (Sec-WebSocket-Accept hash) and incoming-frame unmask. |
-| `src/libro_tools.cyr` | Medium | 5 built-in MCP tools (`libro_query`, `libro_verify`, `libro_export`, `libro_proof`, `libro_retention`). Depends on audit + libro. |
+| `src/transport_ws.cyr` | High | Server-side WebSocket. Cyrius `lib/ws.cyr` is client-side only — needs server handshake (Sec-WebSocket-Accept hash) + incoming-frame unmask. |
+| `src/sandbox.cyr` + kavach integration | High | Waits for kavach v2-arch hardening to land at a stable release. |
+| `dispatcher_dispatch_streaming` | High | `lib/thread.cyr` MPSC + `lib/async.cyr` cancellation polling. |
+| Streaming over HTTP via SSE | Medium | Depends on streamable transport (1.2.0). |
+| `$/cancelRequest` handling | Low | Wires into `CancellationToken`. |
 
 ---
 
-## v0.6.0 — Streaming dispatch
+## Feature freeze
 
-The `stream` module currently has the data primitives (ProgressUpdate,
-CancellationToken, ProgressSender). Threaded streaming dispatch via
-`lib/thread.cyr` MPSC channels. Reach into `lib/async.cyr` for cancellation polling.
+The 1.x line preserves the data shapes frozen in 1.0.0:
+- `JsonRpcRequest` / `Response` / `Error`
+- `ToolDef` (with `compiled` slot — additions allowed at the tail)
+- `ToolSchema` / `ToolAnnotations`
+- `BoteError` (12 tag variants — additions allowed at the tail)
+- `HttpConfig` / `BridgeConfig` / `McpSession` / `SessionStore`
+- `CompiledSchema` / `PropertyDef`
 
-| Feature | Effort |
-|---|---|
-| `dispatcher_dispatch_streaming` | High |
-| Streaming over stdio (progress notifications interleaved with final result) | Medium |
-| Streaming over HTTP via SSE (waits on streamable transport) | Medium |
-| `$/cancelRequest` handling | Low |
-
----
-
-## v1.0.0 Criteria
-
-- [ ] All Rust modules ported (bridge, audit, events, discovery, sandbox, host, auth, libro_tools)
-- [ ] Streamable HTTP transport
-- [ ] WebSocket transport (server-side)
-- [ ] Streaming dispatch end-to-end
-- [ ] Tests ≥ 400 unit + ≥ 50 conformance
-- [ ] Benchmarks regression-tracked in CI
-- [ ] At least 5 downstream cyrius consumers integrated (jalwa, shruti, tazama, rasa, daimon equivalents — once those are also ported)
-- [ ] All cyrius-language pain points either fixed in cyrius or worked around with explicit comments
+Any change that requires removing a field, repurposing an offset, or changing
+a function signature triggers a 2.0 major bump.
 
 ---
 

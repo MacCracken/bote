@@ -1,11 +1,18 @@
 # Cyrius Language Feedback (from porting bote)
 
-> **Tested against**: the cyrius binary installed at `~/.cyrius/bin/cc3` at the
-> time of the bote port (2026-04-13). `cyrius version` reports `0.1.0`;
-> `cyrius --help` reports `0.92.0` — same toolchain, inconsistent self-report.
-> Cyrius main is at v4.3.2 per its roadmap, so **some or all of these may
-> already be fixed upstream** — the reproductions below are the easiest way to
-> verify against the live tree.
+> **Initially tested against**: a pre-4.x cyrius (`cyrius version` reported `0.1.0`).
+> **Re-verified against**: cyrius **4.4.0** (`cyriusly install 4.4.0 && cyriusly use 4.4.0`).
+>
+> Status as of 4.4.0:
+> - ✅ #1 (`\r` escape) — **FIXED**
+> - ✅ #3 (no per-block local scoping) — **FIXED**
+> - ❌ #2 (`&&`/`||` short-circuit) — still evaluates both operands
+> - 🟡 #4 (static `var buf[N]` size) — documented gotcha, unchanged
+> - 🟡 #5 (`is_err` vs `is_err_result` naming) — unchanged
+> - 🟢 #6 (cascading parse errors) — improved with DCE messages but root cause unchanged
+> - 🟢 #7 (`fmt_int` to stdout only) — unchanged
+>
+> **Two-thirds of the correctness bugs were fixed between the initial and re-verification install.** Reproductions kept below for regression tracking.
 
 This doc collects language-level issues encountered while porting ~10K lines of
 Rust to ~3K lines of Cyrius (12 modules + tests + benches + fuzz). Each item
@@ -23,7 +30,7 @@ Severity guide:
 
 ---
 
-## 🔴 1. `\r` escape in string literals emits byte `r` (114), not CR (13)
+## ✅ 1. `\r` escape in string literals emits byte `r` (114), not CR (13) — FIXED in 4.4.0
 
 ### Symptom
 HTTP responses contain literal `r` instead of carriage return:
@@ -150,7 +157,7 @@ introduce when porting code from any language with proper short-circuit.
 
 ---
 
-## 🔴 3. No per-block local variable scoping
+## ✅ 3. No per-block local variable scoping — FIXED in 4.4.0
 
 ### Symptom
 A `var` declared anywhere inside a `fn` body conflicts with any other `var` of

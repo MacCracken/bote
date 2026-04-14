@@ -106,27 +106,20 @@ fn http_find_header(buf, blen, name) {
         if (line_start + nlen + 1 <= line_end) {
             if (_http_iceq(buf + line_start, name, nlen) == 1) {
                 if (load8(buf + line_start + nlen) == 58) {
-                    # Found — skip leading spaces in value.
                     var vs = line_start + nlen + 1;
                     while (vs < line_end) {
-                        if (load8(buf + vs) == 32) { vs = vs + 1; }
-                        else { vs = vs - 0; line_start = headers_end; vs = vs - 0;
-                               # Trim trailing CR.
-                               var ve = line_end;
-                               if (ve > vs) {
-                                   if (load8(buf + ve - 1) == 13) { ve = ve - 1; }
-                               }
-                               var vlen = ve - vs;
-                               var out = alloc(vlen + 1);
-                               memcpy(out, buf + vs, vlen);
-                               store8(out + vlen, 0);
-                               return out;
-                        }
+                        if (load8(buf + vs) != 32) { break; }
+                        vs = vs + 1;
                     }
-                    # All whitespace value.
-                    var out2 = alloc(1);
-                    store8(out2, 0);
-                    return out2;
+                    var ve = line_end;
+                    if (ve > vs) {
+                        if (load8(buf + ve - 1) == 13) { ve = ve - 1; }
+                    }
+                    var vlen = ve - vs;
+                    var out = alloc(vlen + 1);
+                    memcpy(out, buf + vs, vlen);
+                    store8(out + vlen, 0);
+                    return out;
                 }
             }
         }
@@ -329,8 +322,13 @@ fn _http_handle_connection(cfd, dispatcher, config, req_buf, max_buf) {
         _http_send_status(cfd, 400, "Bad Request");
         return 0;
     }
+    if (body_off > n) {
+        _http_send_status(cfd, 400, "Bad Request");
+        return 0;
+    }
     var clen = http_content_length(req_buf, n);
     if (clen <= 0) { clen = n - body_off; }
+    if (clen < 0) { clen = 0; }
     var body = alloc(clen + 1);
     memcpy(body, req_buf + body_off, clen);
     store8(body + clen, 0);

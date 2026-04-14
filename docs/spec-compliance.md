@@ -1,6 +1,14 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 | **Bote Version**: 0.91.0 | **Last Audited**: 2026-04-02
+> **Spec Version**: 2025-11-25 | **Bote Version**: 1.0.0 (cyrius) | **Last Audited**: 2026-04-13
+>
+> **Note**: this file currently reflects the Rust implementation's compliance
+> matrix (lines that mention modules like `host::McpContentBlock` or
+> `auth::TokenClaims` describe the Rust archive in `rust-old/`, not the
+> shipped cyrius 1.0.0). The cyrius 1.0.0 surface is: protocol, registry,
+> dispatch, schema, codec, jsonx, sessions, discovery, stream primitives, and
+> four transports (stdio / HTTP / Unix / bridge). Modules ported in v1.1+
+> will be re-flagged as "Complete (cyrius)" here.
 
 ## Protocol Versions
 

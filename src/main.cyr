@@ -33,6 +33,7 @@ include "src/discovery.cyr"
 include "src/transport_stdio.cyr"
 include "src/transport_http.cyr"
 include "src/transport_unix.cyr"
+include "src/bridge.cyr"
 
 # Demo handler for the built-in `bote_echo` tool.
 fn bote_echo_handler(args) {
@@ -79,6 +80,16 @@ fn main() {
         if (streq(argv(1), "unix") == 1) {
             if (argc() < 3) { return 2; }
             return transport_unix_run(dispatcher, argv(2));
+        }
+        if (streq(argv(1), "bridge") == 1) {
+            var bport = 8391;
+            if (argc() >= 3) { bport = _parse_uint(argv(2)); }
+            if (bport == 0) { bport = 8391; }
+            var bcfg = bridge_config_new(INADDR_LOOPBACK(), bport);
+            var origins = vec_new();
+            vec_push(origins, "*");
+            bridge_config_with_origins(bcfg, origins);
+            return transport_bridge_run(dispatcher, bcfg);
         }
     }
     return transport_stdio_run(dispatcher);

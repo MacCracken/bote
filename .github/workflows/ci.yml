@@ -1,94 +1,86 @@
 name: CI
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
   workflow_call:
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
+
 jobs:
-  check:
-    name: Check & Lint
+  build:
+    name: Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Cyrius toolchain
+        run: |
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(cat .cyrius-toolchain 2>/dev/null | tr -d '[:space:]')}"
+          CYRIUS_VERSION="${CYRIUS_VERSION:-4.4.1}"
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
+          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
+          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
+          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+
+      - name: Resolve dependencies
+        run: cyrius deps
+
+      - name: Build bote binary
+        run: |
+          mkdir -p build
+          cyrius build src/main.cyr build/bote
+          echo "bote size: $(wc -c < build/bote) bytes"
+
+      - name: Run tests
+        run: |
+          if [ -f tests/bote.tcyr ]; then
+            cyrius test tests/bote.tcyr
+          fi
+
+      - name: Run benchmarks (non-fatal)
+        run: |
+          if [ -f tests/bote.bcyr ]; then
+            cyrius build tests/bote.bcyr build/bench || exit 0
+            ./build/bench | tee bench-results.txt || exit 0
+          fi
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo check
-  security:
-    name: Security Audit
+          name: bote-${{ github.sha }}
+          path: |
+            build/bote
+            bench-results.txt
+          if-no-files-found: warn
+
+  docs:
+    name: Documentation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install cargo-audit
-      - run: cargo audit
-  deny:
-    name: Supply Chain (deny)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-  vet:
-    name: Supply Chain (vet)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo generate-lockfile
-      - run: cargo install cargo-vet
-      - run: cargo vet
-  test:
-    name: Test (${{ matrix.os }})
-    needs: [check]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-          - os: macos-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test
-      - run: cargo test --doc
-  msrv:
-    name: MSRV (1.89)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.89"
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check
-      - run: cargo test
-  coverage:
-    name: Coverage
-    runs-on: ubuntu-latest
-    needs: [check]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-llvm-cov
-      - run: cargo llvm-cov --lcov --output-path lcov.info
-      - uses: codecov/codecov-action@v4
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        with:
-          files: lcov.info
-          fail_ci_if_error: false
+      - name: Check required docs
+        run: |
+          for doc in README.md CHANGELOG.md VERSION LICENSE cyrius.toml; do
+            test -f "$doc" && echo "OK: $doc" || { echo "MISSING: $doc"; exit 1; }
+          done
+
+      - name: Verify version consistency
+        run: |
+          V_FILE=$(cat VERSION | tr -d '[:space:]')
+          V_TOML=$(grep '^version' cyrius.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$V_FILE" != "$V_TOML" ]; then
+            echo "Version mismatch: VERSION=$V_FILE, cyrius.toml=$V_TOML"
+            exit 1
+          fi
+          echo "Version: $V_FILE"

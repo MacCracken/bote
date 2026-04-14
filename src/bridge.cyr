@@ -1,0 +1,293 @@
+# bote::bridge — TypeScript-bridge HTTP transport with CORS + MCP envelope wrap
+# Mirrors rust-old/src/bridge.rs.
+#
+# Reuses transport_http.cyr for socket/parsing/response plumbing. Adds:
+#   - POST /            — JSON-RPC dispatch, wraps tools/call results in MCP envelope
+#   - OPTIONS /         — CORS preflight (204 + headers)
+#   - GET /health       — liveness check ("ok")
+#   - CORS headers on every response
+#
+# An MCP envelope for a tool result looks like:
+#   { "content": [{"type":"text","text":"..."}] }
+# wrap_tool_result passes through if the value already has a "content" array.
+
+# ================================================================
+# BridgeConfig (24 bytes):
+#   +0  bind_addr        i64 (network-order IPv4)
+#   +8  port             i64
+#   +16 allowed_origins  vec of cstrs or 0 (0 / empty / contains "*" → wildcard)
+# ================================================================
+
+fn bridge_config_new(addr, port) {
+    var c = alloc(24);
+    store64(c, addr);
+    store64(c + 8, port);
+    store64(c + 16, 0);
+    return c;
+}
+
+fn bridge_config_with_origins(c, vec) { store64(c + 16, vec); return c; }
+fn bridge_config_addr(c) { return load64(c); }
+fn bridge_config_port(c) { return load64(c + 8); }
+fn bridge_config_origins(c) { return load64(c + 16); }
+
+# ================================================================
+# Envelope wrappers
+# ================================================================
+
+# Wrap a raw tool result cstr (raw JSON literal) into the MCP envelope
+# unless it already has a top-level `content` array.
+fn wrap_tool_result(result) {
+    if (result == 0) { result = "null"; }
+    # Pass through if result is an object with a "content" array.
+    if (jsonx_is_object(result) == 1) {
+        if (jsonx_has(result, "content") == 1) {
+            var c = jsonx_get_raw(result, "content");
+            if (c != 0) {
+                var ci = 0;
+                var clen = strlen(c);
+                while (ci < clen) {
+                    var cc = load8(c + ci);
+                    if (cc == 32 || cc == 9 || cc == 10 || cc == 13) { ci = ci + 1; }
+                    else {
+                        if (cc == 91) { return result; }
+                        ci = clen;
+                    }
+                }
+            }
+        }
+    }
+    # Else build an envelope. The text payload is the raw JSON, JSON-escaped.
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
+    _json_emit_escaped(sb, result);
+    str_builder_add_cstr(sb, "\"}]}");
+    return str_data(str_builder_build(sb));
+}
+
+# Wrap an error message into an MCP envelope with isError: true.
+fn wrap_error_result(message) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
+    if (message != 0) { _json_emit_escaped(sb, message); }
+    str_builder_add_cstr(sb, "\"}],\"isError\":true}");
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+# Bridge-aware message processor
+# ================================================================
+#
+# Like codec_process_message, but for tools/call responses:
+#   - success: wrap result in MCP envelope (passthrough if already shaped)
+#   - error:   convert to success(wrap_error_result(message)) per SY contract
+#              (JSON-RPC 2.0 forbids both result+error; SY wants the envelope)
+# Other methods (initialize, tools/list, batch elements) pass through unchanged.
+
+fn _bridge_process_single(line, dispatcher) {
+    var req = codec_parse_request(line);
+    if (req == 0) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "invalid request: malformed object");
+        return codec_serialize_response(resp_error("null", 0 - 32600, str_data(str_builder_build(sb))));
+    }
+    if (streq(req_jsonrpc(req), "2.0") == 0) {
+        var sb2 = str_builder_new();
+        str_builder_add_cstr(sb2, "unsupported jsonrpc version '");
+        str_builder_add_cstr(sb2, req_jsonrpc(req));
+        str_builder_add_cstr(sb2, "'");
+        var id_v = req_id(req);
+        if (id_v == 0) { id_v = "null"; }
+        return codec_serialize_response(resp_error(id_v, 0 - 32600, str_data(str_builder_build(sb2))));
+    }
+    var resp = dispatcher_dispatch(dispatcher, req);
+    if (resp == 0) { return 0; }
+
+    # Bridge wrapping only applies to tools/call.
+    if (streq(req_method(req), "tools/call") == 1) {
+        var success_result = resp_result(resp);
+        var err_obj = resp_error_obj(resp);
+        if (success_result != 0) {
+            var wrapped = wrap_tool_result(success_result);
+            return codec_serialize_response(resp_success(resp_id(resp), wrapped));
+        }
+        if (err_obj != 0) {
+            var wrapped_err = wrap_error_result(rpc_err_message(err_obj));
+            return codec_serialize_response(resp_success(resp_id(resp), wrapped_err));
+        }
+    }
+    return codec_serialize_response(resp);
+}
+
+fn bridge_process_message(input, dispatcher) {
+    if (input == 0) { return _cdc_parse_error("empty input"); }
+    var len = strlen(input);
+    var i = _cdc_skip_ws(input, len, 0);
+    if (i >= len) { return _cdc_parse_error("empty input"); }
+    var first = load8(input + i);
+
+    # Batch arrays defer to the codec (no per-element wrapping; the bridge
+    # contract is single-tool-call → MCP envelope).
+    if (first == 91) { return codec_process_message(input, dispatcher); }
+    if (first == 123) { return _bridge_process_single(input, dispatcher); }
+    return _cdc_invalid_request("expected object or array");
+}
+
+# ================================================================
+# CORS header builder
+# ================================================================
+#
+# Returns a cstr of CORS headers (each line ending in CRLF) ready to splice
+# into _http_send_* via the extra_headers slot. allowed_origins is a vec or 0.
+
+fn _bridge_cors_origin(allowed_origins, request_origin) {
+    if (allowed_origins == 0) { return "*"; }
+    var n = vec_len(allowed_origins);
+    var i = 0;
+    while (i < n) {
+        if (streq(vec_get(allowed_origins, i), "*") == 1) { return "*"; }
+        i = i + 1;
+    }
+    if (n == 0) { return "*"; }
+    if (request_origin != 0) {
+        var j = 0;
+        while (j < n) {
+            if (streq(vec_get(allowed_origins, j), request_origin) == 1) {
+                return request_origin;
+            }
+            j = j + 1;
+        }
+    }
+    return vec_get(allowed_origins, 0);
+}
+
+fn _bridge_cors_headers(allowed_origins, request_origin) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "Access-Control-Allow-Origin: ");
+    str_builder_add_cstr(sb, _bridge_cors_origin(allowed_origins, request_origin));
+    str_builder_add_cstr(sb, _crlf);
+    str_builder_add_cstr(sb, "Access-Control-Allow-Methods: POST, GET, OPTIONS");
+    str_builder_add_cstr(sb, _crlf);
+    str_builder_add_cstr(sb, "Access-Control-Allow-Headers: content-type");
+    str_builder_add_cstr(sb, _crlf);
+    return str_data(str_builder_build(sb));
+}
+
+fn _bridge_send_health(cfd, allowed_origins, request_origin) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "HTTP/1.1 200 OK");
+    str_builder_add_cstr(sb, _crlf);
+    str_builder_add_cstr(sb, "Content-Type: text/plain");
+    str_builder_add_cstr(sb, _crlf);
+    str_builder_add_cstr(sb, "Content-Length: 2");
+    str_builder_add_cstr(sb, _crlf);
+    str_builder_add_cstr(sb, _bridge_cors_headers(allowed_origins, request_origin));
+    str_builder_add_cstr(sb, "Connection: close");
+    str_builder_add_cstr(sb, _crlfcrlf);
+    str_builder_add_cstr(sb, "ok");
+    var s = str_data(str_builder_build(sb));
+    sock_send(cfd, s, strlen(s));
+    return 0;
+}
+
+# ================================================================
+# Per-connection handler
+# ================================================================
+
+fn _bridge_handle_connection(cfd, dispatcher, allowed_origins, req_buf, max_buf) {
+    _http_init_crlf();
+    var n_r = sock_recv(cfd, req_buf, max_buf - 1);
+    if (is_err_result(n_r) == 1) { return 0; }
+    var n = payload(n_r);
+    if (n <= 0) { return 0; }
+    store8(req_buf + n, 0);
+
+    var method = http_get_method(req_buf, n);
+    var path = http_get_path(req_buf, n);
+    var origin = http_find_header(req_buf, n, "Origin");
+    var cors = _bridge_cors_headers(allowed_origins, origin);
+
+    # OPTIONS preflight
+    if (streq(method, "OPTIONS") == 1) {
+        _http_send_204(cfd, cors);
+        return 0;
+    }
+    # GET /health
+    if (streq(method, "GET") == 1) {
+        if (streq(path, "/health") == 1) {
+            _bridge_send_health(cfd, allowed_origins, origin);
+            return 0;
+        }
+        _http_send_status(cfd, 404, "Not Found");
+        return 0;
+    }
+    # Anything other than POST is rejected.
+    if (streq(method, "POST") == 0) {
+        _http_send_status(cfd, 405, "Method Not Allowed");
+        return 0;
+    }
+    # Only "/" is the bridge endpoint.
+    if (streq(path, "/") == 0) {
+        _http_send_status(cfd, 404, "Not Found");
+        return 0;
+    }
+
+    # Body
+    var body_off = http_body_offset(req_buf, n);
+    if (body_off < 0) {
+        _http_send_status(cfd, 400, "Bad Request");
+        return 0;
+    }
+    if (body_off > n) {
+        _http_send_status(cfd, 400, "Bad Request");
+        return 0;
+    }
+    var clen = http_content_length(req_buf, n);
+    if (clen <= 0) { clen = n - body_off; }
+    if (clen < 0) { clen = 0; }
+    var body = alloc(clen + 1);
+    memcpy(body, req_buf + body_off, clen);
+    store8(body + clen, 0);
+
+    var resp = bridge_process_message(body, dispatcher);
+    if (resp == 0) {
+        _http_send_204(cfd, cors);
+        return 0;
+    }
+    _http_send_json_200(cfd, resp, strlen(resp), cors);
+    return 0;
+}
+
+# ================================================================
+# Server entry
+# ================================================================
+
+var BRIDGE_REQ_BUF_SIZE = 65536;
+var _bridge_req_buf = 0;
+
+fn transport_bridge_run(dispatcher, config) {
+    _http_init_crlf();
+    if (_bridge_req_buf == 0) { _bridge_req_buf = alloc(BRIDGE_REQ_BUF_SIZE); }
+
+    var sfd_r = tcp_socket();
+    if (is_err_result(sfd_r) == 1) { return 1; }
+    var sfd = payload(sfd_r);
+    sock_reuse(sfd);
+
+    var br = sock_bind(sfd, bridge_config_addr(config), bridge_config_port(config));
+    if (is_err_result(br) == 1) { return 1; }
+    var lr = sock_listen(sfd, 16);
+    if (is_err_result(lr) == 1) { return 1; }
+
+    var origins = bridge_config_origins(config);
+    while (1 == 1) {
+        var cr = sock_accept(sfd);
+        if (is_err_result(cr) == 1) { } # transient
+        else {
+            var cfd = payload(cr);
+            _bridge_handle_connection(cfd, dispatcher, origins, _bridge_req_buf, BRIDGE_REQ_BUF_SIZE);
+            sock_close(cfd);
+        }
+    }
+    return 0;
+}

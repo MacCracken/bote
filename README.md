@@ -197,7 +197,7 @@ The cyrius port lifts the same value into the cyrius ecosystem.
 
 ## Versioning
 
-Pre-1.0: `0.D.M` SemVer. Current: `0.1.0` (cyrius port baseline).
+**Current**: `1.0.0` — stable cyrius MCP core. Standard SemVer from here. See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 ---
 

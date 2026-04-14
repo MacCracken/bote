@@ -2,6 +2,96 @@
 
 All notable changes to bote are documented here.
 
+## [1.0.0] — 2026-04-13 — Stable cyrius MCP core
+
+Bote's cyrius implementation is **stable**. The MCP protocol surface, registry,
+dispatcher, schema validation, sessions, discovery, and four transports
+(stdio, HTTP, Unix socket, TS bridge) are feature-complete and verified:
+
+- **298 unit assertions** all passing
+- **10 hot-path benchmarks**, all sub-10µs on x86_64
+- **4 fuzz harnesses**, ~330 calls across malformed and edge-case inputs, no crashes
+- **End-to-end smoke tests** for stdio (pipe), HTTP (curl), Unix socket (Python AF_UNIX), bridge (curl + CORS)
+
+The data shapes for `JsonRpcRequest`, `JsonRpcResponse`, `ToolDef`, `ToolSchema`,
+`ToolAnnotations`, `CompiledSchema`, `BoteError`, `McpSession`, and the four
+`HttpConfig` / `BridgeConfig` flavours are **frozen** — additive changes only
+within the 1.x series.
+
+### What's in 1.0.0
+
+| Area | Status |
+|---|---|
+| JSON-RPC 2.0 (request, response, notification, batch) | ✅ |
+| MCP `initialize` / `tools/list` / `tools/call` | ✅ |
+| Tool registry with versioning + deprecation + annotations | ✅ |
+| Compiled schema (type/enum/bounds/nested object/array items, multi-violation) | ✅ |
+| `JsonRpcError` codes — full spec mapping | ✅ |
+| Session management (create/validate/prune, MCP-Session-Id header) | ✅ |
+| Origin allow-list + protocol-version header validation | ✅ |
+| stdio transport | ✅ |
+| HTTP/1.1 transport with middleware | ✅ |
+| Unix domain socket transport | ✅ |
+| TypeScript bridge (CORS + MCP envelope wrap) | ✅ |
+| Discovery (data layer + pluggable publish_fp) | ✅ |
+| Streaming primitives (ProgressUpdate, CancellationToken) | ✅ data layer |
+
+### Post-1.0 extensions (1.x minor bumps)
+
+These are additive — none change existing API shapes.
+
+| Module | Status |
+|---|---|
+| `src/audit.cyr` + `LibroAudit` adapter | **Ready to port** — libro v1.0.3 available via `[deps.libro] path = "../libro"` |
+| `src/events.cyr` + `MajraEvents` adapter | **Ready to port** — majra v2.2.0 available via `[deps.majra] path = "../majra"` |
+| `src/discovery.cyr` wire-up to majra pubsub | **Ready to port** — depends on events |
+| `src/libro_tools.cyr` (5 built-in audit tools) | **Ready to port** — depends on audit + libro |
+| `src/sandbox.cyr` + kavach integration | Wait — kavach v2-arch hardening in flight |
+| `src/host.cyr` (content blocks, host registry) | Ready (no AGNOS dep) |
+| `src/auth.cyr` (OAuth 2.1 / PKCE / bearer) | Ready (no AGNOS dep) |
+| `src/transport_streamable.cyr` (POST + SSE single endpoint) | Ready (rolls SSE on top of `transport_http`) |
+| `src/transport_ws.cyr` (server-side WebSocket) | Cyrius `lib/ws.cyr` is client-only; needs server handshake + frame unmasking written |
+| Threaded streaming dispatch | Needs `lib/thread.cyr` MPSC wired into `dispatcher_dispatch_streaming` |
+
+### Versioning policy from here
+
+Pre-1.0 used `0.D.M` (day.month). From 1.0.0 forward, **standard SemVer**:
+- **Major** — break a frozen data shape or remove a public function.
+- **Minor** — add a module / function / config option.
+- **Patch** — fix bugs, refactor internals, improve diagnostics.
+
+### Cyrius toolchain pin
+
+Built and tested against cyrius **4.4.0** (`cyriusly use 4.4.0`).
+
+---
+
+## [0.1.1] — 2026-04-13 — Bridge + cyrius 4.4.0 + review punch list
+
+### Added
+- **`src/bridge.cyr`** — TypeScript-bridge HTTP transport: CORS preflight (`OPTIONS /`), `GET /health`, `POST /` JSON-RPC dispatch with MCP-envelope wrapping for `tools/call` results. `wrap_tool_result` (passthrough if already shaped, else wraps text), `wrap_error_result` (adds `isError: true`).
+- **CLI**: `./build/bote bridge [port]` (default 8391).
+- 29 new unit assertions: bridge wrappers, CORS origin selection, `bridge_process_message` round-trips, schema bounds at exact `min` / `max`, codec pure-notification batch.
+
+### Fixed (review punch list)
+- **`src/jsonx.cyr`**: `key_len_actual == klen && memeq(...)` was unsafe because cyrius `&&` doesn't short-circuit — `memeq` was called on truncated input. Now nested as separate `if`s.
+- **`src/transport_http.cyr`**: when `Content-Length` was absent and `body_off > n` (malformed request), `clen = n - body_off` could be negative → `memcpy` UB. Now guarded.
+- **`src/schema.cyr`**: `_sch_parse_int` replaced `i = i + 999999` marker-hack with proper `break` (per-block scoping now works in cyrius 4.4.0).
+- **`src/transport_http.cyr`**: `http_find_header` similarly cleaned — replaced `vs = vs - 0; line_start = headers_end; vs = vs - 0;` marker hack with structured loops + `break`.
+
+### Verified against cyrius 4.4.0 (`cyriusly install 4.4.0 && cyriusly use 4.4.0`)
+- ✅ `\r` escape now emits CR (13) — fixed upstream
+- ✅ Per-block `var` shadowing now works — fixed upstream
+- ❌ `&&` / `||` short-circuit still missing — workarounds retained
+- ➕ DCE now available via `CYRIUS_DCE=1` at build time
+
+`docs/cyrius-feedback.md` updated with v4.4.0 verification status against each repro.
+
+### Performance
+Bench numbers unchanged from 0.1.0 — bridge adds a thin envelope-wrap layer with no measurable overhead on the hot dispatch path.
+
+---
+
 ## [0.1.0] — 2026-04-13 — Cyrius port baseline
 
 ### Breaking

@@ -27,6 +27,7 @@ include "src/stream.cyr"
 include "src/session.cyr"
 include "src/discovery.cyr"
 include "src/transport_http.cyr"
+include "src/bridge.cyr"
 
 # Test handler: echoes its arguments verbatim.
 fn h_echo(args) {
@@ -759,6 +760,96 @@ fn main() {
     assert(streq(discovery_receiver_try_recv(rx), "ann1") == 1, "fifo head ann1");
     assert(streq(discovery_receiver_try_recv(rx), "ann2") == 1, "fifo head ann2");
     assert_eq(discovery_receiver_try_recv(rx), 0, "drained -> 0");
+
+    # ---------------- bridge: wrap_tool_result ----------------
+    var wr_raw = wrap_tool_result("{\"answer\":42}");
+    assert_eq(jsonx_has(wr_raw, "content"), 1, "raw wrapped has content");
+    var wr_content = jsonx_get_raw(wr_raw, "content");
+    assert(wr_content != 0, "content present");
+    assert_eq(load8(wr_content), 91, "content is array");
+
+    var wr_str = wrap_tool_result("\"just a string\"");
+    assert_eq(jsonx_has(wr_str, "content"), 1, "string wrapped");
+
+    var wr_null = wrap_tool_result(0);
+    assert_eq(jsonx_has(wr_null, "content"), 1, "null wrapped to envelope");
+
+    # Already-shaped result with content array → pass through verbatim
+    var formatted = "{\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}";
+    var wr_pt = wrap_tool_result(formatted);
+    assert(streq(wr_pt, formatted) == 1, "passthrough preserves bytes");
+
+    # ---------------- bridge: wrap_error_result ----------------
+    var werr = wrap_error_result("something failed");
+    assert_eq(jsonx_has(werr, "content"), 1, "err has content");
+    assert_eq(jsonx_has(werr, "isError"), 1, "err has isError");
+    var is_err_v = jsonx_get_raw(werr, "isError");
+    assert(streq(is_err_v, "true") == 1, "isError true");
+
+    # ---------------- bridge: process_message wraps tools/call ----------------
+    var bdreg = registry_new();
+    var bs = schema_new("object", 0, vec_new());
+    registry_register(bdreg, tool_def_new("svc_echo", "echo", bs));
+    var bd = dispatcher_new(bdreg);
+    dispatcher_handle(bd, "svc_echo", &h_echo);
+
+    var bp_call = bridge_process_message(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"svc_echo\",\"arguments\":{\"k\":\"v\"}}}",
+        bd);
+    assert(bp_call != 0, "bridge tools/call returns json");
+    var bp_result = jsonx_get_raw(bp_call, "result");
+    assert(bp_result != 0, "result present");
+    assert_eq(jsonx_has(bp_result, "content"), 1, "result wrapped in MCP envelope");
+
+    # Non-tools-call methods pass through unchanged.
+    var bp_init = bridge_process_message(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}", bd);
+    assert(bp_init != 0, "init returns json");
+    var bp_init_result = jsonx_get_raw(bp_init, "result");
+    assert_eq(jsonx_has(bp_init_result, "protocolVersion"), 1, "init has protocolVersion (not wrapped)");
+    assert_eq(jsonx_has(bp_init_result, "content"), 0, "init not wrapped");
+
+    # Tool-call error → wrapped as success + isError.
+    var bp_unknown = bridge_process_message(
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"missing_tool\",\"arguments\":{}}}",
+        bd);
+    assert(bp_unknown != 0, "unknown returns json");
+    var bp_un_result = jsonx_get_raw(bp_unknown, "result");
+    assert(bp_un_result != 0, "error mapped to result");
+    assert_eq(jsonx_has(bp_un_result, "isError"), 1, "isError flag");
+    assert_eq(jsonx_has(bp_unknown, "error"), 0, "no top-level error obj");
+
+    # Notification still produces no response.
+    assert_eq(bridge_process_message("{\"jsonrpc\":\"2.0\",\"method\":\"notify\"}", bd), 0,
+              "bridge notif -> 0");
+
+    # ---------------- bridge: cors origin selection ----------------
+    var cors_a = vec_new();
+    vec_push(cors_a, "*");
+    assert(streq(_bridge_cors_origin(cors_a, "http://anything"), "*") == 1, "cors wildcard");
+
+    var cors_b = vec_new();
+    vec_push(cors_b, "http://localhost:3000");
+    vec_push(cors_b, "http://localhost:8080");
+    assert(streq(_bridge_cors_origin(cors_b, "http://localhost:8080"), "http://localhost:8080") == 1, "cors exact match returned");
+    # Unmatched origin → fall back to first allowed origin
+    assert(streq(_bridge_cors_origin(cors_b, "http://evil.com"), "http://localhost:3000") == 1, "cors unmatched -> first");
+    assert_eq(_bridge_cors_origin(0, "http://x"), "*", "cors null vec -> wildcard");
+
+    # ---------------- review punch: schema bounds at exact min/max ----------------
+    var ps_b1 = vec_new();
+    vec_push(ps_b1, schema_prop_new("age", "{\"type\":\"integer\",\"minimum\":0,\"maximum\":150}"));
+    var c_b1 = compiled_compile(schema_new("object", ps_b1, vec_new()));
+    assert_eq(vec_len(compiled_validate(c_b1, "{\"age\":0}")), 0, "exact min ok");
+    assert_eq(vec_len(compiled_validate(c_b1, "{\"age\":150}")), 0, "exact max ok");
+    assert_eq(vec_len(compiled_validate(c_b1, "{\"age\":-1}")), 1, "min - 1 fails");
+    assert_eq(vec_len(compiled_validate(c_b1, "{\"age\":151}")), 1, "max + 1 fails");
+
+    # ---------------- review punch: codec pure-notification batch -> 0 ----------------
+    var pure_notifs = codec_process_message(
+        "[{\"jsonrpc\":\"2.0\",\"method\":\"a\"},{\"jsonrpc\":\"2.0\",\"method\":\"b\"},{\"jsonrpc\":\"2.0\",\"method\":\"c\"}]",
+        bd);
+    assert_eq(pure_notifs, 0, "pure-notification batch returns 0");
 
     return assert_summary();
 }

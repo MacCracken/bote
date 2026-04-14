@@ -90,8 +90,11 @@ fn _jx_find_value_pos(buf, len, key) {
         var ke = _jx_skip_string(buf, len, i);
         var key_len_actual = ke - ks - 1;
         var key_match = 0;
-        if (key_len_actual == klen && memeq(buf + ks, key, klen) == 1) {
-            key_match = 1;
+        # Note: cyrius && does NOT short-circuit, so memeq must be guarded
+        # separately — otherwise memeq reads klen bytes from buf+ks even when
+        # key_len_actual is small/negative (truncated input).
+        if (key_len_actual == klen) {
+            if (memeq(buf + ks, key, klen) == 1) { key_match = 1; }
         }
         i = _jx_skip_ws(buf, len, ke);
         if (i >= len) { return 0 - 1; }
