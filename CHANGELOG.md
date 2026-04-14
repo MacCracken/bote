@@ -2,6 +2,48 @@
 
 All notable changes to bote are documented here.
 
+## [1.3.0] — 2026-04-14 — Adopt stdlib `lib/http_server.cyr` (cyrius 4.5.0)
+
+Cyrius **4.5.0** shipped `lib/http_server.cyr` — verbatim from the proposal
+in `docs/proposals/cyrius-stdlib-http-server.md`. Bote drops 236 lines of
+hand-rolled HTTP plumbing in favour of the shared stdlib.
+
+### Changed
+- **`cyrius.toml`** — added `"http_server"` to `[deps]` stdlib list. Cyrius pin → `4.5.0`.
+- **`src/transport_http.cyr`** — was 404 LOC, now **150 LOC** (-63%). Dropped: `_http_find`, `_http_to_lower`, `_http_iceq`, `_http_next_nl`, `http_find_header`, `http_get_method`, `http_get_path`, `http_body_offset`, `http_content_length`, `_http_send_status`, `_http_send_json_200`, `_http_send_204`, plus the bind/listen/accept ceremony. All come from stdlib now. Kept: `HttpConfig` struct + accessors, `_http_check_origin / _protocol / _session` middleware, `_http_handle` request handler, `transport_http_run` (now a 5-line wrapper around `http_server_run`).
+- **`src/bridge.cyr`** — was 280 LOC, now **170 LOC** (-39%). Dropped: `_bridge_handle_connection` (rewritten to handler-style), bind/listen/accept loop, response builders. Kept: `BridgeConfig` (added `dispatcher` slot), `wrap_tool_result` / `wrap_error_result` (MCP envelope contract, bote-specific), `_bridge_cors_*` headers, `bridge_process_message` (bridge-specific routing).
+- **`HttpConfig`** gained a `+48 dispatcher` slot (was 48 → now 56 bytes) so it can carry the dispatcher into the stdlib `http_server_run` ctx pointer.
+- **`BridgeConfig`** gained a `+24 dispatcher` slot (was 24 → now 32 bytes) for the same reason. New setter: `bridge_config_with_dispatcher(c, d)`.
+- **Status codes** now use `HTTP_OK`, `HTTP_NOT_FOUND`, etc. constants from stdlib (was hardcoded integers).
+- **Path matching** uses `http_path_only(path)` from stdlib so `/mcp?something` matches `/mcp` correctly. Same for bridge `/health` and `/`.
+
+### Performance / size
+- **bote ELF binary**: was 130 KB (1.2.1) → **127 KB** (1.3.0). The stdlib HTTP code is shared with any future cyrius project.
+- Function count freed up from bote's compilation unit: ~28 fns (the entire HTTP plumbing layer) now lives in stdlib and counts once across all consumers.
+- Hot-path benchmarks unchanged.
+
+### Spec impact
+- **Content-Length-aware request reading** now correct (stdlib `http_recv_request` reads until body is fully received). Previous bote behaviour did a single `sock_recv` and silently truncated requests larger than one TCP packet — fixed for free.
+- **Unblocks v1.4.0 streamable HTTP** — stdlib provides `http_send_chunked_start` / `http_send_chunk` / `http_send_chunked_end` for SSE.
+
+### Carried forward
+- v1.2.1 known issue (live libro chain integration heisenbug in tests/bote.tcyr) **persists** despite freed function-count budget. Adapter remains correct in isolated probes; in-test live integration test is still shape-only. Suggests the heisenbug is heap-layout / global-init related, not function-count related — needs deeper cyrius investigation.
+
+### Verified (cyrius 4.5.0)
+- `cyrius test` → **359 passed, 0 failed**
+- `cyrius fuzz` → 4 passed, 0 failed
+- `cyrius bench` → 10 hot paths unchanged
+- `./build/bote` initialize handshake reports `"version":"1.3.0"`
+- HTTP and bridge transports both verified end-to-end with `curl`
+
+### `docs/proposals/`
+The proposal docs (`cyrius-stdlib-http-server.md`, `lib_http_server.cyr`,
+`lib_http_server_example.cyr`) remain in the repo as the spec the lang-agent
+implemented from. Useful reference for any future stdlib proposals coming
+out of bote work.
+
+---
+
 ## [1.2.1] — 2026-04-13 — Adapter init-dance docs + v1.2.0 patch hardening
 
 ### Fixed

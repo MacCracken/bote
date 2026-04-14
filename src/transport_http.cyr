@@ -1,218 +1,50 @@
-# bote::transport::http — minimal HTTP/1.1 transport for JSON-RPC
-# Mirrors rust-old/src/transport/http.rs (sync, single-connection-at-a-time;
-# no SSE, no auth, no streamable HTTP yet).
+# bote::transport::http — HTTP/1.1 transport for JSON-RPC
+# Mirrors rust-old/src/transport/http.rs (sync, single-conn-at-a-time).
 #
-# Routes:
-#   POST <path> with JSON body  → codec_process_message → 200 application/json
-#   anything else               → 404
-#
-# Middleware (when configured on HttpConfig):
-#   - Origin allow-list (403 if rejected)
-#   - MCP-Protocol-Version header check (400 if invalid; if required, 400 if absent)
-#   - MCP-Session-Id header check (404 if unknown; sessions optional)
+# Built on cyrius stdlib `lib/http_server.cyr` (4.5.0+) — request reading,
+# parsing, and response builders all live there. This file just wires the
+# MCP middleware (origin / protocol-version / session) and routes
+# `POST <endpoint>` to codec_process_message.
 
 # ================================================================
-# HttpConfig (48 bytes):
+# HttpConfig (56 bytes):
 #   +0  endpoint_path     cstr (e.g. "/mcp")
-#   +8  bind_addr         i64 (network-order IPv4 — use INADDR_ANY/LOOPBACK)
+#   +8  bind_addr         i64 (network-order IPv4)
 #   +16 port              i64
-#   +24 allowed_origins   vec of cstrs or 0 (0 = allow all)
-#   +32 require_protocol  0/1 (1 = MCP-Protocol-Version header is required)
-#   +40 session_store     SessionStore ptr or 0 (0 = no session checking)
+#   +24 allowed_origins   vec of cstrs or 0
+#   +32 require_protocol  0/1
+#   +40 session_store     SessionStore ptr or 0
+#   +48 dispatcher        Dispatcher ptr (set by transport_http_run)
 # ================================================================
 
 fn http_config_new(path, addr, port) {
-    var c = alloc(48);
+    var c = alloc(56);
     store64(c, path);
     store64(c + 8, addr);
     store64(c + 16, port);
     store64(c + 24, 0);
     store64(c + 32, 0);
     store64(c + 40, 0);
+    store64(c + 48, 0);
     return c;
 }
 
 fn http_config_with_allowed_origins(c, vec) { store64(c + 24, vec); return c; }
-fn http_config_with_require_protocol(c, required) { store64(c + 32, required); return c; }
-fn http_config_with_session_store(c, st) { store64(c + 40, st); return c; }
+fn http_config_with_require_protocol(c, r)  { store64(c + 32, r);   return c; }
+fn http_config_with_session_store(c, st)    { store64(c + 40, st);  return c; }
 
-fn http_config_path(c) { return load64(c); }
-fn http_config_addr(c) { return load64(c + 8); }
-fn http_config_port(c) { return load64(c + 16); }
-fn http_config_allowed_origins(c) { return load64(c + 24); }
+fn http_config_path(c)             { return load64(c); }
+fn http_config_addr(c)             { return load64(c + 8); }
+fn http_config_port(c)             { return load64(c + 16); }
+fn http_config_allowed_origins(c)  { return load64(c + 24); }
 fn http_config_require_protocol(c) { return load64(c + 32); }
-fn http_config_session_store(c) { return load64(c + 40); }
+fn http_config_session_store(c)    { return load64(c + 40); }
+fn http_config_dispatcher(c)       { return load64(c + 48); }
 
 # ================================================================
-# HTTP request parsing
+# Middleware. Each returns 0 on pass, or the HTTP status code on rejection
+# (and writes the rejection response on cfd).
 # ================================================================
-
-# Find the index of the first occurrence of needle in haystack[0..hlen],
-# or 0 - 1 if not found.
-fn _http_find(haystack, hlen, needle, nlen) {
-    if (nlen == 0) { return 0; }
-    if (nlen > hlen) { return 0 - 1; }
-    var i = 0;
-    while (i <= hlen - nlen) {
-        if (memeq(haystack + i, needle, nlen) == 1) { return i; }
-        i = i + 1;
-    }
-    return 0 - 1;
-}
-
-# Lowercase a single ASCII byte.
-fn _http_to_lower(c) {
-    if (c >= 65) { if (c <= 90) { return c + 32; } }
-    return c;
-}
-
-# Case-insensitive byte compare across n bytes.
-fn _http_iceq(a, b, n) {
-    var i = 0;
-    while (i < n) {
-        if (_http_to_lower(load8(a + i)) != _http_to_lower(load8(b + i))) { return 0; }
-        i = i + 1;
-    }
-    return 1;
-}
-
-# Find the next \n in buf[start..end]; returns end if not found.
-fn _http_next_nl(buf, start, end) {
-    var i = start;
-    while (i < end) {
-        if (load8(buf + i) == 10) { return i; }
-        i = i + 1;
-    }
-    return end;
-}
-
-# Find a header value (case-insensitive name match) in an HTTP request buffer.
-# Returns alloc'd cstr (trimmed of leading/trailing SP and CR) or 0 if absent.
-fn http_find_header(buf, blen, name) {
-    var nlen = strlen(name);
-    var headers_end = _http_find(buf, blen, "\r\n\r\n", 4);
-    if (headers_end < 0) { headers_end = blen; }
-    # Skip the request line.
-    var line_start = _http_next_nl(buf, 0, headers_end);
-    if (line_start >= headers_end) { return 0; }
-    line_start = line_start + 1;
-    while (line_start < headers_end) {
-        var line_end = _http_next_nl(buf, line_start, headers_end);
-        # Match `name:` at line start.
-        if (line_start + nlen + 1 <= line_end) {
-            if (_http_iceq(buf + line_start, name, nlen) == 1) {
-                if (load8(buf + line_start + nlen) == 58) {
-                    var vs = line_start + nlen + 1;
-                    while (vs < line_end) {
-                        if (load8(buf + vs) != 32) { break; }
-                        vs = vs + 1;
-                    }
-                    var ve = line_end;
-                    if (ve > vs) {
-                        if (load8(buf + ve - 1) == 13) { ve = ve - 1; }
-                    }
-                    var vlen = ve - vs;
-                    var out = alloc(vlen + 1);
-                    memcpy(out, buf + vs, vlen);
-                    store8(out + vlen, 0);
-                    return out;
-                }
-            }
-        }
-        line_start = line_end + 1;
-    }
-    return 0;
-}
-
-# Get the request method (e.g. "POST", "GET"). Returns alloc'd cstr.
-fn http_get_method(buf, blen) {
-    var sp = _http_find(buf, blen, " ", 1);
-    if (sp < 0) { return ""; }
-    var out = alloc(sp + 1);
-    memcpy(out, buf, sp);
-    store8(out + sp, 0);
-    return out;
-}
-
-# Get the request path (between first SP and second SP). Returns alloc'd cstr.
-fn http_get_path(buf, blen) {
-    var sp1 = _http_find(buf, blen, " ", 1);
-    if (sp1 < 0) { return ""; }
-    var sp2 = _http_find(buf + sp1 + 1, blen - sp1 - 1, " ", 1);
-    if (sp2 < 0) { return ""; }
-    var out = alloc(sp2 + 1);
-    memcpy(out, buf + sp1 + 1, sp2);
-    store8(out + sp2, 0);
-    return out;
-}
-
-# Get pointer + length of the HTTP body (after \r\n\r\n).
-# Returns 0 / 0 length if no body section.
-fn http_body_offset(buf, blen) {
-    var off = _http_find(buf, blen, "\r\n\r\n", 4);
-    if (off < 0) { return 0 - 1; }
-    return off + 4;
-}
-
-# Get Content-Length header value as i64; returns 0 if absent or bad.
-fn http_content_length(buf, blen) {
-    var v = http_find_header(buf, blen, "Content-Length");
-    if (v == 0) { return 0; }
-    var n = 0;
-    var i = 0;
-    while (load8(v + i) != 0) {
-        var c = load8(v + i);
-        if (c >= 48) { if (c <= 57) { n = n * 10 + (c - 48); } }
-        i = i + 1;
-    }
-    return n;
-}
-
-# ================================================================
-# HTTP response builders
-# ================================================================
-
-fn _http_send_status(cfd, code, msg) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 ");
-    str_builder_add_int(sb, code);
-    str_builder_add_cstr(sb, " ");
-    str_builder_add_cstr(sb, msg);
-    str_builder_add_cstr(sb, "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-    var s = str_data(str_builder_build(sb));
-    sock_send(cfd, s, strlen(s));
-    return 0;
-}
-
-fn _http_send_json_200(cfd, body, body_len, extra_headers) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ");
-    str_builder_add_int(sb, body_len);
-    str_builder_add_cstr(sb, "\r\n");
-    if (extra_headers != 0) { str_builder_add_cstr(sb, extra_headers); }
-    str_builder_add_cstr(sb, "Connection: close\r\n\r\n");
-    var head = str_data(str_builder_build(sb));
-    sock_send(cfd, head, strlen(head));
-    if (body_len > 0) { sock_send(cfd, body, body_len); }
-    return 0;
-}
-
-fn _http_send_204(cfd, extra_headers) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 204 No Content\r\n");
-    if (extra_headers != 0) { str_builder_add_cstr(sb, extra_headers); }
-    str_builder_add_cstr(sb, "Content-Length: 0\r\nConnection: close\r\n\r\n");
-    var s = str_data(str_builder_build(sb));
-    sock_send(cfd, s, strlen(s));
-    return 0;
-}
-
-# ================================================================
-# Middleware
-# ================================================================
-#
-# Returns 0 on pass, or HTTP status code (>= 400) on rejection.
-# When rejected, also writes the status response on cfd.
 
 fn _http_check_origin(cfd, buf, blen, config) {
     var allowed = http_config_allowed_origins(config);
@@ -221,8 +53,8 @@ fn _http_check_origin(cfd, buf, blen, config) {
     var orig = origin;
     if (orig == 0) { orig = ""; }
     if (validate_origin(orig, allowed) != 0) {
-        _http_send_status(cfd, 403, "Forbidden");
-        return 403;
+        http_send_status(cfd, HTTP_FORBIDDEN, "Forbidden");
+        return HTTP_FORBIDDEN;
     }
     return 0;
 }
@@ -231,14 +63,14 @@ fn _http_check_protocol(cfd, buf, blen, config) {
     var v = http_find_header(buf, blen, "MCP-Protocol-Version");
     if (v == 0) {
         if (http_config_require_protocol(config) == 1) {
-            _http_send_status(cfd, 400, "Bad Request");
-            return 400;
+            http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+            return HTTP_BAD_REQUEST;
         }
         return 0;
     }
     if (validate_protocol_version(v) != 0) {
-        _http_send_status(cfd, 400, "Bad Request");
-        return 400;
+        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        return HTTP_BAD_REQUEST;
     }
     return 0;
 }
@@ -248,133 +80,90 @@ fn _http_check_session(cfd, buf, blen, config, method) {
     if (st == 0) { return 0; }
     var sid = http_find_header(buf, blen, "MCP-Session-Id");
     if (sid == 0) {
-        # Initialize requests are allowed without a session ID; sessions get
-        # created by the dispatcher on initialize and the response carries
-        # the new MCP-Session-Id header.
         if (streq(method, "initialize") == 1) { return 0; }
-        _http_send_status(cfd, 404, "Not Found");
-        return 404;
+        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        return HTTP_NOT_FOUND;
     }
     if (session_store_validate(st, sid) == 0) {
-        _http_send_status(cfd, 404, "Not Found");
-        return 404;
+        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        return HTTP_NOT_FOUND;
     }
     return 0;
 }
 
-# ================================================================
-# Per-connection handler
-# ================================================================
-
-# Determine the JSON-RPC method from the body cstr (cheap peek for
-# session middleware before dispatch).
 fn _http_peek_method(body) {
     var m = jsonx_get_str(body, "method");
     if (m == 0) { return ""; }
     return m;
 }
 
-fn _http_handle_connection(cfd, dispatcher, config, req_buf, max_buf) {
-    # Read request — single recv. Adequate for typical JSON-RPC payloads.
-    var n_result = sock_recv(cfd, req_buf, max_buf - 1);
-    if (is_err_result(n_result) == 1) { return 0; }
-    var n = payload(n_result);
-    if (n <= 0) { return 0; }
-    store8(req_buf + n, 0);
+# ================================================================
+# Request handler — invoked per connection by http_server_run
+# ================================================================
 
-    var method = http_get_method(req_buf, n);
-    var path = http_get_path(req_buf, n);
+fn _http_handle(config, cfd, buf, n) {
+    var method = http_get_method(buf, n);
+    var path   = http_get_path(buf, n);
 
-    # Only POST <endpoint> is dispatched.
     if (streq(method, "POST") == 0) {
-        _http_send_status(cfd, 405, "Method Not Allowed");
+        http_send_status(cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed");
         return 0;
     }
-    if (streq(path, http_config_path(config)) == 0) {
-        _http_send_status(cfd, 404, "Not Found");
+    if (streq(http_path_only(path), http_config_path(config)) == 0) {
+        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
         return 0;
     }
 
-    # Middleware
-    if (_http_check_origin(cfd, req_buf, n, config) != 0) { return 0; }
-    if (_http_check_protocol(cfd, req_buf, n, config) != 0) { return 0; }
+    if (_http_check_origin(cfd, buf, n, config) != 0) { return 0; }
+    if (_http_check_protocol(cfd, buf, n, config) != 0) { return 0; }
 
-    # Body
-    var body_off = http_body_offset(req_buf, n);
-    if (body_off < 0) {
-        _http_send_status(cfd, 400, "Bad Request");
+    var bo = http_body_offset(buf, n);
+    if (bo < 0 || bo > n) {
+        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
         return 0;
     }
-    if (body_off > n) {
-        _http_send_status(cfd, 400, "Bad Request");
-        return 0;
-    }
-    var clen = http_content_length(req_buf, n);
-    if (clen <= 0) { clen = n - body_off; }
+    var clen = http_content_length(buf, n);
+    if (clen <= 0) { clen = n - bo; }
     if (clen < 0) { clen = 0; }
     var body = alloc(clen + 1);
-    memcpy(body, req_buf + body_off, clen);
+    memcpy(body, buf + bo, clen);
     store8(body + clen, 0);
 
-    # Session check (after body is parsed enough to peek method)
     var rpc_method = _http_peek_method(body);
-    if (_http_check_session(cfd, req_buf, n, config, rpc_method) != 0) { return 0; }
+    if (_http_check_session(cfd, buf, n, config, rpc_method) != 0) { return 0; }
 
-    # Initialize special-case: optionally create a new session and return
-    # MCP-Session-Id header.
+    # Initialize: optionally create a session, return MCP-Session-Id header.
     var extra = 0;
     var st = http_config_session_store(config);
-    if (st != 0) {
-        if (streq(rpc_method, "initialize") == 1) {
-            var pv = jsonx_get_str(jsonx_get_raw(body, "params"), "protocolVersion");
-            if (pv == 0) { pv = "2025-11-25"; }
-            var sid = session_store_create(st, pv);
-            var sb = str_builder_new();
-            str_builder_add_cstr(sb, "MCP-Session-Id: ");
-            str_builder_add_cstr(sb, sid);
-            str_builder_add_cstr(sb, "\r\n");
-            extra = str_data(str_builder_build(sb));
-        }
+    if (st != 0 && streq(rpc_method, "initialize") == 1) {
+        var pv = jsonx_get_str(jsonx_get_raw(body, "params"), "protocolVersion");
+        if (pv == 0) { pv = "2025-11-25"; }
+        var sid = session_store_create(st, pv);
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "MCP-Session-Id: ");
+        str_builder_add_cstr(sb, sid);
+        str_builder_add_cstr(sb, "\r\n");
+        extra = str_data(str_builder_build(sb));
     }
 
-    var resp = codec_process_message(body, dispatcher);
+    var resp = codec_process_message(body, http_config_dispatcher(config));
     if (resp == 0) {
-        _http_send_204(cfd, extra);
+        http_send_204(cfd, extra);
         return 0;
     }
-    _http_send_json_200(cfd, resp, strlen(resp), extra);
+    http_send_response(cfd, HTTP_OK, "OK", "application/json",
+                       resp, strlen(resp), extra);
     return 0;
 }
 
 # ================================================================
-# Server entry — bind, listen, accept loop
+# Server entry — defers to stdlib http_server_run
 # ================================================================
 
-var HTTP_REQ_BUF_SIZE = 65536;
-var _http_req_buf = 0;
-
 fn transport_http_run(dispatcher, config) {
-    if (_http_req_buf == 0) { _http_req_buf = alloc(HTTP_REQ_BUF_SIZE); }
-
-    var sfd_r = tcp_socket();
-    if (is_err_result(sfd_r) == 1) { return 1; }
-    var sfd = payload(sfd_r);
-    sock_reuse(sfd);
-
-    var br = sock_bind(sfd, http_config_addr(config), http_config_port(config));
-    if (is_err_result(br) == 1) { return 1; }
-
-    var lr = sock_listen(sfd, 16);
-    if (is_err_result(lr) == 1) { return 1; }
-
-    while (1 == 1) {
-        var cr = sock_accept(sfd);
-        if (is_err_result(cr) == 1) { } # transient — keep going
-        else {
-            var cfd = payload(cr);
-            _http_handle_connection(cfd, dispatcher, config, _http_req_buf, HTTP_REQ_BUF_SIZE);
-            sock_close(cfd);
-        }
-    }
-    return 0;
+    store64(config + 48, dispatcher);
+    return http_server_run(http_config_addr(config),
+                           http_config_port(config),
+                           &_http_handle,
+                           config);
 }

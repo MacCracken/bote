@@ -1077,6 +1077,9 @@ fn main() {
     var libro_sink = audit_sink_new(&libro_audit_log, la);
     assert(audit_sink_log_fp(libro_sink) != 0, "libro audit fp wired");
     assert_eq(audit_sink_ctx(libro_sink), la, "libro audit ctx is LibroAudit");
+    # NB: live chain growth still triggers the v1.2.1 heap heisenbug here
+    # despite the freed function-count budget — see CHANGELOG. Adapter
+    # itself is correct (proved in isolated probes).
 
     # ---------------- events_majra: EventSink wire-up shape ----------------
     var majra_fp = &majra_events_publish;

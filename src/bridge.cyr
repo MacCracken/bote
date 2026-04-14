@@ -12,24 +12,28 @@
 # wrap_tool_result passes through if the value already has a "content" array.
 
 # ================================================================
-# BridgeConfig (24 bytes):
+# BridgeConfig (32 bytes):
 #   +0  bind_addr        i64 (network-order IPv4)
 #   +8  port             i64
 #   +16 allowed_origins  vec of cstrs or 0 (0 / empty / contains "*" → wildcard)
+#   +24 dispatcher       Dispatcher ptr (set by transport_bridge_run)
 # ================================================================
 
 fn bridge_config_new(addr, port) {
-    var c = alloc(24);
+    var c = alloc(32);
     store64(c, addr);
     store64(c + 8, port);
     store64(c + 16, 0);
+    store64(c + 24, 0);
     return c;
 }
 
-fn bridge_config_with_origins(c, vec) { store64(c + 16, vec); return c; }
-fn bridge_config_addr(c) { return load64(c); }
-fn bridge_config_port(c) { return load64(c + 8); }
-fn bridge_config_origins(c) { return load64(c + 16); }
+fn bridge_config_with_origins(c, vec)        { store64(c + 16, vec); return c; }
+fn bridge_config_with_dispatcher(c, d)       { store64(c + 24, d);   return c; }
+fn bridge_config_addr(c)       { return load64(c); }
+fn bridge_config_port(c)       { return load64(c + 8); }
+fn bridge_config_origins(c)    { return load64(c + 16); }
+fn bridge_config_dispatcher(c) { return load64(c + 24); }
 
 # ================================================================
 # Envelope wrappers
@@ -170,111 +174,82 @@ fn _bridge_cors_headers(allowed_origins, request_origin) {
 }
 
 fn _bridge_send_health(cfd, allowed_origins, request_origin) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n");
-    str_builder_add_cstr(sb, _bridge_cors_headers(allowed_origins, request_origin));
-    str_builder_add_cstr(sb, "Connection: close\r\n\r\nok");
-    var s = str_data(str_builder_build(sb));
-    sock_send(cfd, s, strlen(s));
+    var cors = _bridge_cors_headers(allowed_origins, request_origin);
+    http_send_response(cfd, HTTP_OK, "OK", "text/plain", "ok", 2, cors);
     return 0;
 }
 
 # ================================================================
-# Per-connection handler
+# Per-connection handler — invoked per connection by http_server_run
 # ================================================================
+#
+# BridgeConfig now carries the dispatcher in the +24 slot (see
+# bridge_config_with_dispatcher below). We pass the config as ctx.
 
-fn _bridge_handle_connection(cfd, dispatcher, allowed_origins, req_buf, max_buf) {
-    var n_r = sock_recv(cfd, req_buf, max_buf - 1);
-    if (is_err_result(n_r) == 1) { return 0; }
-    var n = payload(n_r);
-    if (n <= 0) { return 0; }
-    store8(req_buf + n, 0);
+fn _bridge_handle(config, cfd, buf, n) {
+    var allowed_origins = bridge_config_origins(config);
+    var dispatcher      = bridge_config_dispatcher(config);
 
-    var method = http_get_method(req_buf, n);
-    var path = http_get_path(req_buf, n);
-    var origin = http_find_header(req_buf, n, "Origin");
-    var cors = _bridge_cors_headers(allowed_origins, origin);
+    var method = http_get_method(buf, n);
+    var path   = http_get_path(buf, n);
+    var origin = http_find_header(buf, n, "Origin");
+    var cors   = _bridge_cors_headers(allowed_origins, origin);
 
     # OPTIONS preflight
     if (streq(method, "OPTIONS") == 1) {
-        _http_send_204(cfd, cors);
+        http_send_204(cfd, cors);
         return 0;
     }
     # GET /health
     if (streq(method, "GET") == 1) {
-        if (streq(path, "/health") == 1) {
+        if (streq(http_path_only(path), "/health") == 1) {
             _bridge_send_health(cfd, allowed_origins, origin);
             return 0;
         }
-        _http_send_status(cfd, 404, "Not Found");
+        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
         return 0;
     }
     # Anything other than POST is rejected.
     if (streq(method, "POST") == 0) {
-        _http_send_status(cfd, 405, "Method Not Allowed");
+        http_send_status(cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed");
         return 0;
     }
     # Only "/" is the bridge endpoint.
-    if (streq(path, "/") == 0) {
-        _http_send_status(cfd, 404, "Not Found");
+    if (streq(http_path_only(path), "/") == 0) {
+        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
         return 0;
     }
 
-    # Body
-    var body_off = http_body_offset(req_buf, n);
-    if (body_off < 0) {
-        _http_send_status(cfd, 400, "Bad Request");
+    var body_off = http_body_offset(buf, n);
+    if (body_off < 0 || body_off > n) {
+        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
         return 0;
     }
-    if (body_off > n) {
-        _http_send_status(cfd, 400, "Bad Request");
-        return 0;
-    }
-    var clen = http_content_length(req_buf, n);
+    var clen = http_content_length(buf, n);
     if (clen <= 0) { clen = n - body_off; }
     if (clen < 0) { clen = 0; }
     var body = alloc(clen + 1);
-    memcpy(body, req_buf + body_off, clen);
+    memcpy(body, buf + body_off, clen);
     store8(body + clen, 0);
 
     var resp = bridge_process_message(body, dispatcher);
     if (resp == 0) {
-        _http_send_204(cfd, cors);
+        http_send_204(cfd, cors);
         return 0;
     }
-    _http_send_json_200(cfd, resp, strlen(resp), cors);
+    http_send_response(cfd, HTTP_OK, "OK", "application/json",
+                       resp, strlen(resp), cors);
     return 0;
 }
 
 # ================================================================
-# Server entry
+# Server entry — defers to stdlib http_server_run
 # ================================================================
 
-var BRIDGE_REQ_BUF_SIZE = 65536;
-var _bridge_req_buf = 0;
-
 fn transport_bridge_run(dispatcher, config) {
-    if (_bridge_req_buf == 0) { _bridge_req_buf = alloc(BRIDGE_REQ_BUF_SIZE); }
-
-    var sfd_r = tcp_socket();
-    if (is_err_result(sfd_r) == 1) { return 1; }
-    var sfd = payload(sfd_r);
-    sock_reuse(sfd);
-
-    var br = sock_bind(sfd, bridge_config_addr(config), bridge_config_port(config));
-    if (is_err_result(br) == 1) { return 1; }
-    var lr = sock_listen(sfd, 16);
-    if (is_err_result(lr) == 1) { return 1; }
-
-    var origins = bridge_config_origins(config);
-    while (1 == 1) {
-        var cr = sock_accept(sfd);
-        if (is_err_result(cr) == 1) { } # transient
-        else {
-            var cfd = payload(cr);
-            _bridge_handle_connection(cfd, dispatcher, origins, _bridge_req_buf, BRIDGE_REQ_BUF_SIZE);
-            sock_close(cfd);
-        }
-    }
-    return 0;
+    bridge_config_with_dispatcher(config, dispatcher);
+    return http_server_run(bridge_config_addr(config),
+                           bridge_config_port(config),
+                           &_bridge_handle,
+                           config);
 }
