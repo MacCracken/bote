@@ -2,6 +2,28 @@
 
 All notable changes to bote are documented here.
 
+## [1.0.1] — 2026-04-13 — Retire rust-old/, trim spec-compliance, bench comparison
+
+### Removed
+- **`rust-old/`** — the Rust source archive that came in via `cyrius port` is gone. Its purpose (porting reference) is fulfilled. The last Rust state remains accessible at git tag `0.92.0`.
+- `.gitignore` rules for `rust-old/target/` and `rust-old/**/target/` (no longer needed).
+
+### Added
+- **`docs/benchmarks-rust-v-cyrius.md`** — side-by-side performance comparison. Source / binary / dep counts, per-op timings (Rust v0.92.0 vs Cyrius v1.0.1), the structural reasons Cyrius is 3-10× slower per op, and where each side wins. Preserves the 5-entry Rust bench history before the archive went away.
+- Cyrius pin bumped to **4.4.4** (`cyrius.toml`). All correctness pain points from the original port are now fixed in cyrius itself; only the documented `var buf[N]` size limit remains as a design choice.
+
+### Changed
+- **`docs/spec-compliance.md`** — rewritten. Was carrying the Rust-era matrix that listed modules like `host::McpContentBlock` and `auth::TokenClaims` as "Complete" when they aren't ported yet. New version lists **only what cyrius v1.0.x covers today** (with explicit `✅` checkmarks per module + accessor function name) plus a single "Gaps that need coverage" section that points at the roadmap rather than duplicating it.
+- README, `docs/architecture/overview.md`, `docs/development/roadmap.md` — `rust-old/` references rewritten to point at git tag `0.92.0`.
+- Server `initialize` response — `serverInfo.version` now reports `"1.0.1"`.
+
+### Verified
+- 301 tests pass on cyrius 4.4.4
+- 4 fuzz harnesses pass (no regressions)
+- All 4 transports (stdio / HTTP / Unix / bridge) confirmed end-to-end
+
+---
+
 ## [1.0.0] — 2026-04-13 — Stable cyrius MCP core
 
 Bote's cyrius implementation is **stable**. The MCP protocol surface, registry,

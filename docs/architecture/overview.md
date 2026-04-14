@@ -4,9 +4,10 @@
 >
 > **Name**: Bote (German) — messenger.
 >
-> **Lineage**: Originally a Rust crate (preserved in `rust-old/`). Ported to
-> Cyrius via `cyrius port` on 2026-04-13. The Rust archive is the historical
-> reference; this doc describes the live Cyrius implementation.
+> **Lineage**: Originally a Rust crate. Ported to Cyrius via `cyrius port`
+> on 2026-04-13 (v1.0.0). The Rust archive was retired in v1.0.1; the last
+> Rust snapshot is at git tag `0.92.0`. This doc describes the live Cyrius
+> implementation.
 
 ---
 
@@ -93,7 +94,7 @@ fuzz/
 ├── codec_process.fcyr
 ├── jsonx_extract.fcyr
 └── schema_validate.fcyr
-rust-old/                   — Rust source archive (preserved by `cyrius port`)
+                            (Rust archive retired in v1.0.1; see git tag 0.92.0)
 ```
 
 ---

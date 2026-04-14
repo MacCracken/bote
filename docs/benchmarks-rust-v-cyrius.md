@@ -1,16 +1,17 @@
 # Benchmarks: Rust vs Cyrius
 
-Comparing the Rust implementation (preserved in `rust-old/`, last benched at
-v0.92.0 on 2026-04-03) with the Cyrius port (current, v1.0.0, cyrius 4.4.3).
+Comparing the Rust implementation (last benched at v0.92.0 on 2026-04-03,
+preserved at git tag `0.92.0`) with the Cyrius port (current, v1.0.1,
+cyrius 4.4.4).
 
-| | Rust v0.92.0 | Cyrius v1.0.0 |
+| | Rust v0.92.0 | Cyrius v1.0.1 |
 |---|---|---|
-| **Source LOC** | 10,877 (`rust-old/src/`) | 3,142 (`src/`) — **~3.5× smaller** |
+| **Source LOC** | 10,877 (Rust src/, archived at tag `0.92.0`) | 3,142 (`src/`) — **~3.5× smaller** |
 | **External crate deps** | ~50 (axum, tokio, serde_json, criterion, etc.) | 0 — vendored stdlib in `lib/` |
 | **Binary** | (release build not committed) | 127 KB, single static ELF, no libc dependency |
 | **Build tool** | cargo + rustc | `cyrius build` (one shot, sub-second) |
 | **Tests** | 248 lib + 44 conformance + 12 doc | 301 unit + 4 fuzz (~330 calls) |
-| **Benchmarks** | 13 criterion benches (in `rust-old/benches/dispatch.rs`) | 10 hot-path benches (in `tests/bote.bcyr`) |
+| **Benchmarks** | 13 criterion benches (Rust `benches/dispatch.rs` at tag `0.92.0`) | 10 hot-path benches (in `tests/bote.bcyr`) |
 | **CPU** | (history) AMD Ryzen 7 5800H | (current) AMD Ryzen 7 5800H |
 
 The Rust version had a richer feature surface — streaming dispatch, RwLock-backed
@@ -25,7 +26,7 @@ transports) — see `docs/development/roadmap.md` for the v1.x extension plan.
 These are the most directly comparable measurements. Workloads aren't identical
 (see notes), so treat as **order-of-magnitude rather than head-to-head**.
 
-| Operation | Rust v0.92.0 | Cyrius v1.0.0 | Ratio | Notes |
+| Operation | Rust v0.92.0 | Cyrius v1.0.1 | Ratio | Notes |
 |---|---|---|:-:|---|
 | `dispatch initialize` | 281 ns | ~1 µs | **3.5×** | Both build a JSON response with serverInfo + capabilities. |
 | `dispatch tools/list` | 109 µs (100 tools) | 2 µs (1 tool) | n/a | Rust scales linearly with N tools (~1.1 µs/tool); Cyrius single-tool is mostly fixed overhead. Re-bench with N=100 in Cyrius would land in roughly the same ballpark. |
@@ -43,7 +44,7 @@ These are the most directly comparable measurements. Workloads aren't identical
 
 ### Cyrius-only benchmarks (no direct Rust analogue)
 
-| Operation | Cyrius v1.0.0 | What it measures |
+| Operation | Cyrius v1.0.1 | What it measures |
 |---|---|---|
 | `jsonx_get_str_flat` | 597 ns | Extract `"name"` from a flat JSON object cstr |
 | `jsonx_get_raw_nested` | 882 ns | Extract `"arguments"` (a nested object) — slice-based parser respects nested braces |
@@ -136,22 +137,23 @@ deployment.
 
 ## Source
 
-- **Rust history**: `rust-old/benches/history.log` (5 entries: v0.22.3 →
-  v0.92.0, 2026-03-22 to 2026-04-03)
-- **Rust bench source**: `rust-old/benches/dispatch.rs`
+- **Rust history**: `benches/history.log` at git tag `0.92.0` (5 entries:
+  v0.22.3 → v0.92.0, 2026-03-22 to 2026-04-03)
+- **Rust bench source**: `benches/dispatch.rs` at git tag `0.92.0`
 - **Cyrius bench source**: `tests/bote.bcyr`
 - **Cyrius re-runs**: `cyrius bench tests/bote.bcyr`
 
 To re-baseline Cyrius:
 
 ```sh
-cyriusly use 4.4.3
+cyriusly use 4.4.4
 cyrius bench tests/bote.bcyr
 ```
 
 To re-baseline Rust (would require restoring the Rust toolchain + dependencies):
 
 ```sh
-cd rust-old
+git worktree add /tmp/bote-rust 0.92.0
+cd /tmp/bote-rust
 cargo bench --bench dispatch
 ```

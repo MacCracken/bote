@@ -4,7 +4,7 @@
 >
 > **Spec**: MCP 2025-11-25 | **Compliance**: [spec-compliance.md](../spec-compliance.md)
 
-For shipped detail: [CHANGELOG.md](../../CHANGELOG.md). For Rust history: `rust-old/`.
+For shipped detail: [CHANGELOG.md](../../CHANGELOG.md). For Rust history: git tag `0.92.0` (Rust archive retired in v1.0.1).
 
 ---
 

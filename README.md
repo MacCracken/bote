@@ -10,10 +10,12 @@ implementations across the AGNOS ecosystem.
 
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 
-> **Note**: bote was originally a Rust crate (see `rust-old/` for the archive).
-> It was ported to Cyrius via `cyrius port` — see [docs/development/cyrius-port.md](docs/development/cyrius-port.md)
-> for the porting log and [docs/cyrius-feedback.md](docs/cyrius-feedback.md) for
-> language issues discovered along the way.
+> **Note**: bote was originally a Rust crate. Ported to Cyrius via
+> `cyrius port` for v1.0.0; the Rust archive was retired in v1.0.1
+> (the snapshot lives at git tag `0.92.0` for reference). See
+> [docs/cyrius-feedback.md](docs/cyrius-feedback.md) for language issues
+> discovered along the way and [docs/benchmarks-rust-v-cyrius.md](docs/benchmarks-rust-v-cyrius.md)
+> for the side-by-side performance comparison.
 
 ---
 
@@ -33,7 +35,7 @@ reimplement the same protocol.
 | **HTTP middleware** — Origin allow-list, MCP-Protocol-Version, MCP-Session-Id | Complete |
 | **Sessions** — create/validate/prune; auto-create on `initialize` | Complete |
 | **Streaming primitives** — ProgressUpdate, CancellationToken, progress notifications | Data layer (no thread integration yet) |
-| **Audit / events / sandbox** — libro / majra / kavach integrations | Pending (Rust modules archived in `rust-old/`) |
+| **Audit / events / sandbox** — libro / majra / kavach integrations | Pending (v1.1+ — see roadmap) |
 | **TypeScript bridge** — CORS + MCP envelope | Pending |
 | **WebSocket transport** | Pending (cyrius `lib/ws.cyr` is client-side only) |
 
