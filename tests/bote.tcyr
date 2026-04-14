@@ -277,6 +277,17 @@ fn main() {
     assert(jx_xs != 0, "jx xs found");
     assert(streq(jx_xs, "[1,{\"k\":\"v\"},3]") == 1, "jx array with nested obj");
 
+    # ---------------- jsonx: truncated string regression (jsonx_get_str must clamp) ----------------
+    # Input has opening quote but no closing — _jx_skip_string returns end == len,
+    # so end - pos - 2 was negative → memcpy(out, src, -1) → segfault.
+    # Now clamped to 0 (returns empty string).
+    var trunc1 = jsonx_get_str("{\"k\":\"", "k");
+    assert(trunc1 != 0, "trunc string returns non-null");
+    assert_eq(strlen(trunc1), 0, "trunc string is empty");
+    var trunc2 = jsonx_get_str("{\"k\":\"v", "k");
+    assert(trunc2 != 0, "trunc-with-data returns non-null");
+    # NB: behavior is to drop the unfinished 'v' since there's no closing quote.
+
     # ---------------- jsonx: predicates ----------------
     assert_eq(jsonx_has("{\"k\":1}", "k"), 1, "jsonx_has yes");
     assert_eq(jsonx_has("{\"k\":1}", "x"), 0, "jsonx_has no");
