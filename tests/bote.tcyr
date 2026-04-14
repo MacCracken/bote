@@ -15,8 +15,13 @@ include "lib/chrono.cyr"
 include "lib/tagged.cyr"
 include "lib/net.cyr"
 include "lib/base64.cyr"
+include "lib/http_server.cyr"
 include "lib/freelist.cyr"
 include "lib/thread.cyr"
+# NB: libro / majra / sigil / sakshi / bigint intentionally NOT here.
+# audit_libro + events_majra shape tests live in bote_libro_tools.tcyr
+# (which pulls those deps). Keeps bote.tcyr's compile unit lean and
+# matches what 4.8.4's release binary can handle on CI.
 include "lib/assert.cyr"
 
 include "src/error.cyr"
@@ -25,8 +30,6 @@ include "src/jsonx.cyr"
 include "src/registry.cyr"
 include "src/events.cyr"
 include "src/audit.cyr"
-include "src/audit_libro.cyr"
-include "src/events_majra.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
@@ -345,7 +348,7 @@ fn main() {
     var d = dispatcher_new(dreg);
 
     var init_req = req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2024-11-05\"}");
-    var init_resp = dispatcher_dispatch(d, init_req);
+    var init_resp = dispatcher_dispatch(d, init_req, 0);
     assert(init_resp != 0, "init not notification");
     assert(streq(resp_id(init_resp), "1") == 1, "init id");
     var init_result = resp_result(init_resp);
@@ -358,19 +361,19 @@ fn main() {
 
     # Init with unsupported version → fall back to latest
     var bad_init = req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"1999-01-01\"}");
-    var bi_resp = dispatcher_dispatch(d, bad_init);
+    var bi_resp = dispatcher_dispatch(d, bad_init, 0);
     var bi_neg = jsonx_get_str(resp_result(bi_resp), "protocolVersion");
     assert(streq(bi_neg, "2025-11-25") == 1, "init falls back to latest");
 
     # ---------------- dispatch: tools/list empty ----------------
-    var ll_resp = dispatcher_dispatch(d, req_new("2", "tools/list"));
+    var ll_resp = dispatcher_dispatch(d, req_new("2", "tools/list"), 0);
     var ll_body = resp_result(ll_resp);
     assert(streq(ll_body, "{\"tools\":[]}") == 1, "tools/list empty");
 
     # ---------------- dispatch: tools/list with one tool ----------------
     var sa = schema_new("object", 0, vec_new());
     registry_register(dreg, tool_def_new("svc_echo", "echo it", sa));
-    var ll2 = dispatcher_dispatch(d, req_new("2", "tools/list"));
+    var ll2 = dispatcher_dispatch(d, req_new("2", "tools/list"), 0);
     var ll2_body = resp_result(ll2);
     assert_eq(jsonx_has(ll2_body, "tools"), 1, "list has tools");
     # The tools array is "[{...}]" — get_raw returns the array verbatim
@@ -381,7 +384,7 @@ fn main() {
     dispatcher_handle(d, "svc_echo", &h_echo);
     var call_req = req_with_params(req_new("3", "tools/call"),
         "{\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}");
-    var call_resp = dispatcher_dispatch(d, call_req);
+    var call_resp = dispatcher_dispatch(d, call_req, 0);
     var call_result = resp_result(call_resp);
     assert(call_result != 0, "call has result");
     assert(streq(call_result, "{\"msg\":\"hi\"}") == 1, "echo handler returned args");
@@ -391,31 +394,31 @@ fn main() {
     registry_register(dreg, tool_def_new("svc_const", "constant", sa));
     dispatcher_handle(d, "svc_const", &h_const);
     var cc = dispatcher_dispatch(d, req_with_params(req_new("4", "tools/call"),
-        "{\"name\":\"svc_const\",\"arguments\":{}}"));
+        "{\"name\":\"svc_const\",\"arguments\":{}}"), 0);
     assert(streq(resp_result(cc), "{\"answer\":42}") == 1, "const handler returned constant");
 
     # ---------------- dispatch: tools/call missing name ----------------
-    var bad_call = dispatcher_dispatch(d, req_with_params(req_new("5", "tools/call"), "{}"));
+    var bad_call = dispatcher_dispatch(d, req_with_params(req_new("5", "tools/call"), "{}"), 0);
     var bc_err = resp_error_obj(bad_call);
     assert(bc_err != 0, "missing name -> err");
     assert_eq(rpc_err_code(bc_err), 0 - 32602, "missing name -32602");
 
     # ---------------- dispatch: tools/call unknown tool ----------------
     var unk_call = dispatcher_dispatch(d, req_with_params(req_new("6", "tools/call"),
-        "{\"name\":\"nope_x\",\"arguments\":{}}"));
+        "{\"name\":\"nope_x\",\"arguments\":{}}"), 0);
     var uc_err = resp_error_obj(unk_call);
     assert(uc_err != 0, "unknown tool -> err");
     assert_eq(rpc_err_code(uc_err), 0 - 32601, "unknown tool -32601");
 
     # ---------------- dispatch: unknown method ----------------
-    var um_resp = dispatcher_dispatch(d, req_new("7", "garbage/method"));
+    var um_resp = dispatcher_dispatch(d, req_new("7", "garbage/method"), 0);
     var um_err = resp_error_obj(um_resp);
     assert(um_err != 0, "unknown method -> err");
     assert_eq(rpc_err_code(um_err), 0 - 32601, "unknown method -32601");
 
     # ---------------- dispatch: notification returns 0 ----------------
     var notif = req_notification("notifications/initialized");
-    assert_eq(dispatcher_dispatch(d, notif), 0, "notification dispatch returns 0");
+    assert_eq(dispatcher_dispatch(d, notif, 0), 0, "notification dispatch returns 0");
 
     # ---------------- dispatch: dynamic register_tool with bad name ----------------
     var bad_reg = dispatcher_register_tool(d, tool_def_new("badname", "x", sa), &h_echo);
@@ -426,14 +429,14 @@ fn main() {
     var ok_reg = dispatcher_register_tool(d, tool_def_new("dyn_tool", "dyn", sa), &h_echo);
     assert_eq(ok_reg, 0, "valid register succeeds");
     var dyn_call = dispatcher_dispatch(d, req_with_params(req_new("8", "tools/call"),
-        "{\"name\":\"dyn_tool\",\"arguments\":{\"q\":1}}"));
+        "{\"name\":\"dyn_tool\",\"arguments\":{\"q\":1}}"), 0);
     assert(streq(resp_result(dyn_call), "{\"q\":1}") == 1, "dyn handler dispatched");
 
     # ---------------- dispatch: deregister ----------------
     var dereg_ok = dispatcher_deregister_tool(d, "dyn_tool");
     assert_eq(dereg_ok, 0, "deregister ok");
     var dyn_after = dispatcher_dispatch(d, req_with_params(req_new("9", "tools/call"),
-        "{\"name\":\"dyn_tool\",\"arguments\":{}}"));
+        "{\"name\":\"dyn_tool\",\"arguments\":{}}"), 0);
     var da_err = resp_error_obj(dyn_after);
     assert(da_err != 0, "after dereg unknown tool");
     assert_eq(rpc_err_code(da_err), 0 - 32601, "after dereg -32601");
@@ -498,12 +501,12 @@ fn main() {
     assert_eq(codec_process_message("{\"jsonrpc\":\"2.0\",\"method\":\"notify\"}", d2), 0, "single notif -> 0");
 
     # process_message non-json → parse error
-    var pmpe = codec_process_message("not json", d2);
+    var pmpe = codec_process_message("not json", d2, 0);
     assert(pmpe != 0, "non-json returns err");
     assert_eq(jsonx_has(pmpe, "error"), 1, "non-json -> error obj");
 
     # process_message non-object/non-array → invalid request
-    var pmni = codec_process_message("42", d2);
+    var pmni = codec_process_message("42", d2, 0);
     assert(pmni != 0, "scalar returns err");
     assert_eq(jsonx_has(pmni, "error"), 1, "scalar -> error obj");
 
@@ -532,7 +535,7 @@ fn main() {
     assert_eq(pmbz, 0, "all-notif batch -> 0");
 
     # empty batch → invalid request
-    var pmbe = codec_process_message("[]", d2);
+    var pmbe = codec_process_message("[]", d2, 0);
     assert(pmbe != 0, "empty batch returns err");
     assert_eq(jsonx_has(pmbe, "error"), 1, "empty batch -> error");
 
@@ -967,7 +970,7 @@ fn main() {
     # tools/call success → audit + bote/tool/completed
     var w_call = req_with_params(req_new("1", "tools/call"),
         "{\"name\":\"svc_echo\",\"arguments\":{\"k\":\"v\"},\"caller_id\":\"agent-x\"}");
-    var w_resp = dispatcher_dispatch(wd, w_call);
+    var w_resp = dispatcher_dispatch(wd, w_call, 0);
     assert(w_resp != 0, "wire call returns response");
     assert_eq(vec_len(_audit_events), 1, "1 audit event");
     var w_ev = vec_get(_audit_events, 0);
@@ -985,7 +988,7 @@ fn main() {
     registry_register(wreg, tool_def_new("svc_unhandled", "no handler",
                                          schema_new("object", 0, vec_new())));
     var w_unk = dispatcher_dispatch(wd, req_with_params(req_new("2", "tools/call"),
-        "{\"name\":\"svc_unhandled\",\"arguments\":{}}"));
+        "{\"name\":\"svc_unhandled\",\"arguments\":{}}"), 0);
     assert(resp_error_obj(w_unk) != 0, "unhandled tool returns error");
     assert_eq(vec_len(_audit_events), 1, "fail logged");
     assert_eq(tool_call_event_success(vec_get(_audit_events, 0)), 0, "fail success=0");
@@ -997,7 +1000,7 @@ fn main() {
     _ev_reset();
     _audit_reset();
     var w_miss = dispatcher_dispatch(wd, req_with_params(req_new("2b", "tools/call"),
-        "{\"name\":\"never_existed\",\"arguments\":{}}"));
+        "{\"name\":\"never_existed\",\"arguments\":{}}"), 0);
     assert(resp_error_obj(w_miss) != 0, "missing tool returns error");
     assert_eq(vec_len(_audit_events), 0, "validate-stage err: no audit");
     assert_eq(vec_len(_ev_topics), 0, "validate-stage err: no event");
@@ -1005,8 +1008,8 @@ fn main() {
     # initialize + tools/list do NOT emit tool-call events
     _ev_reset();
     _audit_reset();
-    dispatcher_dispatch(wd, req_new("3", "initialize"));
-    dispatcher_dispatch(wd, req_new("4", "tools/list"));
+    dispatcher_dispatch(wd, req_new("3", "initialize"), 0);
+    dispatcher_dispatch(wd, req_new("4", "tools/list"), 0);
     assert_eq(vec_len(_audit_events), 0, "init/list no audit");
     assert_eq(vec_len(_ev_topics), 0, "init/list no events");
 
@@ -1032,7 +1035,7 @@ fn main() {
         "use svc_new instead"));
     dispatcher_handle(wd, "svc_old", &h_echo);
     dispatcher_dispatch(wd, req_with_params(req_new("5", "tools/call"),
-        "{\"name\":\"svc_old\",\"arguments\":{}}"));
+        "{\"name\":\"svc_old\",\"arguments\":{}}"), 0);
     # Expect: bote/tool/deprecated then bote/tool/completed
     assert_eq(vec_len(_ev_topics), 2, "two events on deprecated call");
     assert(streq(vec_get(_ev_topics, 0), "bote/tool/deprecated") == 1, "deprecated first");
@@ -1045,7 +1048,7 @@ fn main() {
         tool_def_new("svc_bare", "bare", schema_new("object", 0, vec_new())));
     dispatcher_handle(bare, "svc_bare", &h_echo);
     var bare_resp = dispatcher_dispatch(bare, req_with_params(req_new("9", "tools/call"),
-        "{\"name\":\"svc_bare\",\"arguments\":{\"x\":1}}"));
+        "{\"name\":\"svc_bare\",\"arguments\":{\"x\":1}}"), 0);
     assert(bare_resp != 0, "bare dispatch still works");
     assert_eq(resp_error_obj(bare_resp), 0, "bare success no error");
 
@@ -1056,24 +1059,6 @@ fn main() {
     # standalone examples/audit_demo.cyr program (runs as a separate
     # binary because libro+majra+full-test cross-product trips a heap
     # heisenbug — see programs/README in v1.2.1).
-
-    # ---------------- audit_libro: struct + accessors ----------------
-    var la = libro_audit_new(99);
-    assert_eq(libro_audit_chain(la), 99, "la chain stored");
-    assert(streq(libro_audit_source(la), "bote") == 1, "la default source");
-    assert_eq(libro_audit_agent_id(la), 0, "la default agent_id");
-    libro_audit_with_source(la, "my-server");
-    libro_audit_with_agent_id(la, "default-agent");
-    assert(streq(libro_audit_source(la), "my-server") == 1, "custom source");
-    assert(streq(libro_audit_agent_id(la), "default-agent") == 1, "configured agent_id");
-
-    # ---------------- audit_libro: AuditSink wire-up shape ----------------
-    var libro_sink = audit_sink_new(&libro_audit_log, la);
-    assert(audit_sink_log_fp(libro_sink) != 0, "libro audit fp wired");
-    assert_eq(audit_sink_ctx(libro_sink), la, "libro audit ctx is LibroAudit");
-    # NB: live chain growth still triggers the v1.2.1 heap heisenbug here
-    # despite the freed function-count budget — see CHANGELOG. Adapter
-    # itself is correct (proved in isolated probes).
 
     # ================================================================
     # v1.4.0: streamable HTTP transport — data layer
@@ -1145,12 +1130,6 @@ fn main() {
     # exercises the same stdlib helper but at our usage site.
     assert(streq(http_path_only("/mcp?lastEventId=evt-7"), "/mcp") == 1,
            "path strips query for routing");
-
-    # ---------------- events_majra: EventSink wire-up shape ----------------
-    var majra_fp = &majra_events_publish;
-    assert(majra_fp != 0, "majra events fp addressable");
-    var majra_sink = event_sink_new(majra_fp, 0);     # ctx=0 → adapter no-ops
-    event_sink_publish(majra_sink, "any/topic", "{}");  # safe with ctx=0
 
     # v1.5.0: WebSocket transport — config + handler wire-up
     var wcfg = ws_config_new("/mcp", 0x0100007F, 8393);

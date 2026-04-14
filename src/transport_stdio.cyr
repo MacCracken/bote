@@ -28,7 +28,7 @@ fn _stdio_process_lines(dispatcher) {
             store8(_stdio_buf + scanned, 0);
             if (line_len > 0) {
                 var line_ptr = _stdio_buf + line_start;
-                var resp = codec_process_message(line_ptr, dispatcher);
+                var resp = codec_process_message(line_ptr, dispatcher, 0);
                 if (resp != 0) {
                     syscall(SYS_WRITE, 1, resp, strlen(resp));
                     syscall(SYS_WRITE, 1, "\n", 1);
@@ -66,7 +66,7 @@ fn transport_stdio_run(dispatcher) {
             # EOF — process any final line that lacks a trailing newline
             if (_stdio_buf_len > 0) {
                 store8(_stdio_buf + _stdio_buf_len, 0);
-                var resp = codec_process_message(_stdio_buf, dispatcher);
+                var resp = codec_process_message(_stdio_buf, dispatcher, 0);
                 if (resp != 0) {
                     syscall(SYS_WRITE, 1, resp, strlen(resp));
                     syscall(SYS_WRITE, 1, "\n", 1);

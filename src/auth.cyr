@@ -147,7 +147,7 @@ fn auth_send_unauthorized(cfd, realm) {
 # already on the wire, caller should `return 0;` to its handler frame.
 # ================================================================
 
-fn auth_bearer_check(cfd, buf, blen, validator_fp, validator_ctx) {
+fn auth_bearer_check(cfd, buf, blen, validator_fp, validator_ctx, claims_out) {
     if (validator_fp == 0) { return 0; }    # auth disabled
 
     var token = auth_bearer_extract(buf, blen);
@@ -160,6 +160,8 @@ fn auth_bearer_check(cfd, buf, blen, validator_fp, validator_ctx) {
         auth_send_unauthorized(cfd, 0);
         return HTTP_UNAUTHORIZED;
     }
+    # 2.5.0: surface validator's return so transport can thread to handler.
+    if (claims_out != 0) { store64(claims_out, claims); }
     return 0;
 }
 

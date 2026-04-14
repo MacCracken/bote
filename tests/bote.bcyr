@@ -47,15 +47,15 @@ fn h_echo_b(args) { return args; }
 # ================================================================
 
 fn b_dispatch_initialize() {
-    return dispatcher_dispatch(_b_dispatcher, _b_init_req);
+    return dispatcher_dispatch(_b_dispatcher, _b_init_req, 0);
 }
 
 fn b_dispatch_tools_list() {
-    return dispatcher_dispatch(_b_dispatcher, _b_list_req);
+    return dispatcher_dispatch(_b_dispatcher, _b_list_req, 0);
 }
 
 fn b_dispatch_tools_call() {
-    return dispatcher_dispatch(_b_dispatcher, _b_call_req);
+    return dispatcher_dispatch(_b_dispatcher, _b_call_req, 0);
 }
 
 fn b_jsonx_get_str_flat() {
@@ -75,7 +75,7 @@ fn b_codec_serialize_response() {
 }
 
 fn b_codec_process_message() {
-    return codec_process_message(_b_call_line, _b_dispatcher);
+    return codec_process_message(_b_call_line, _b_dispatcher, 0);
 }
 
 fn b_validate_compiled_simple() {

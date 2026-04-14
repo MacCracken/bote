@@ -19,7 +19,7 @@ fn _mcp_is_supported(v) {
 
 fn _mcp_latest_version() { return "2025-11-25"; }
 
-fn _bote_server_version() { return "2.4.0"; }
+fn _bote_server_version() { return "2.5.0"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -300,7 +300,7 @@ fn _extract_tool_name(params_cstr, err_out) {
 #
 # Returns a JsonRpcResponse ptr, or 0 if the request is a notification.
 
-fn dispatcher_dispatch(d, request) {
+fn dispatcher_dispatch(d, request, claims) {
     if (req_is_notification(request) == 1) { return 0; }
 
     var id = req_id(request);
@@ -378,7 +378,7 @@ fn dispatcher_dispatch(d, request) {
         }
         var fp = map_get(handlers, name);
         # 2.0 ABI: fncall2 with claims (always 0 in 2.0; populated in 2.x)
-        var result = fncall2(fp, args, 0);
+        var result = fncall2(fp, args, claims);
         var dur_ms = (clock_now_ns() - t_start) / 1000000;
         if (result == 0) { result = "null"; }
         var ev_ok = tool_call_event_new(name, dur_ms, 1, 0, caller_id);

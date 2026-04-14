@@ -258,13 +258,15 @@ fn _strm_peek_method(body) {
 # ================================================================
 
 fn _strm_handle_post(cfd, buf, n, config) {
+    var claims_slot[8]; store64(&claims_slot, 0);
     if (_strm_check_origin(cfd, buf, n, config) != 0) { return 0; }
     if (http_find_header(buf, n, "Transfer-Encoding") != 0) {
         http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
     }
     if (auth_bearer_check(cfd, buf, n,
                           streamable_config_bearer_validator(config),
-                          streamable_config_bearer_ctx(config)) != 0) { return 0; }
+                          streamable_config_bearer_ctx(config),
+                          &claims_slot) != 0) { return 0; }
     if (_strm_check_protocol(cfd, buf, n) != 0) { return 0; }
 
     var bo = http_body_offset(buf, n);
@@ -299,7 +301,7 @@ fn _strm_handle_post(cfd, buf, n, config) {
         extra = str_data(str_builder_build(sb));
     }
 
-    var resp = codec_process_message(body, streamable_config_dispatcher(config));
+    var resp = codec_process_message(body, streamable_config_dispatcher(config), load64(&claims_slot));
     if (resp == 0) {
         http_send_204(cfd, extra);
         return 0;
@@ -332,7 +334,8 @@ fn _strm_handle_get(cfd, buf, n, config) {
     }
     if (auth_bearer_check(cfd, buf, n,
                           streamable_config_bearer_validator(config),
-                          streamable_config_bearer_ctx(config)) != 0) { return 0; }
+                          streamable_config_bearer_ctx(config),
+                          0) != 0) { return 0; }
     if (_strm_check_protocol(cfd, buf, n) != 0) { return 0; }
     if (_strm_check_session(cfd, buf, n, config, "") != 0) { return 0; }
 

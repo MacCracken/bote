@@ -112,9 +112,11 @@ fn _bote_ws_handler(config, cfd, buf, n) {
     if (http_find_header(buf, n, "Transfer-Encoding") != 0) {
         http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
     }
+    var claims_slot[8]; store64(&claims_slot, 0);
     if (auth_bearer_check(cfd, buf, n,
                           ws_config_bearer_validator(config),
-                          ws_config_bearer_ctx(config)) != 0) { return 0; }
+                          ws_config_bearer_ctx(config),
+                          &claims_slot) != 0) { return 0; }
     if (_ws_check_protocol(cfd, buf, n, config) != 0) { return 0; }
 
     var ws = ws_server_handshake(cfd, buf, n);
@@ -122,13 +124,14 @@ fn _bote_ws_handler(config, cfd, buf, n) {
         http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
         return 0;
     }
+    var ws_claims = load64(&claims_slot);
 
     # Each frame is one JSON-RPC message. Loop until peer closes or the
     # socket errors out (ws_server_recv returns 0).
     while (1 == 1) {
         var msg = ws_server_recv(ws);
         if (msg == 0) { return 0; }
-        var resp = codec_process_message(msg, ws_config_dispatcher(config));
+        var resp = codec_process_message(msg, ws_config_dispatcher(config), ws_claims);
         if (resp != 0) {
             ws_server_send_text(ws, resp);
         }

@@ -2,6 +2,69 @@
 
 All notable changes to bote are documented here.
 
+## [2.5.0] — 2026-04-14 — Claims propagation + cyrius 4.8.4 pin
+
+Lands the claims-propagation refactor that 2.0's handler-ABI break
+was designed for. Validators' return values now flow transport →
+codec → dispatcher → `fncall2(handler, args, claims)`. Handlers that
+want per-tool authorization can inspect `claims` directly (opaque
+cstr, JWT payload ptr, whatever the backend validator produced).
+Handlers that ignore it see no change — the 2nd arg is just unused.
+
+Pairs with **cyrius 4.8.4**, which closed the three 4.8.3 regressions
+that temporarily blocked the refactor (see `docs/bugs/cyrius-4.8.3-
+regressions.md` — all three fixes landed in 4.8.4 as advertised).
+
+### Changed
+- **cyrius pin**: 4.8.1 → 4.8.4 (needed for the path-traversal fix,
+  include-once cap 64→256, and nested-include `PP_IFDEF_PASS` fixpoint).
+- **`src/auth.cyr`** — `auth_bearer_check` gains a `claims_out` ptr param;
+  writes the validator's return to `*claims_out` on success. Passing 0
+  means "don't care" (e.g. streamable GET which doesn't dispatch).
+- **`src/dispatch.cyr`** — `dispatcher_dispatch(d, request)` → `(d, request, claims)`; `fncall2(fp, args, 0)` → `fncall2(fp, args, claims)`.
+- **`src/codec.cyr`** — `codec_process_message` + `_cdc_process_single` both gain `claims` arg; thread through to `dispatcher_dispatch`.
+- **`src/bridge.cyr`** — `bridge_process_message` + `_bridge_process_single` both gain `claims`; handler captures into `claims_slot[8]`, passes through.
+- **Per-transport handlers** — `transport_http` / `transport_ws` / `bridge` declare `var claims_slot[8]; store64(&claims_slot, 0);`, pass `&claims_slot` to `auth_bearer_check`, then `load64(&claims_slot)` into the dispatch call. `transport_streamable` does the same for its POST path; its GET path passes 0 (SSE stream, no dispatch). `transport_stdio` and `transport_unix` (local-only, no auth) pass 0 verbatim.
+- **`tests/bote.tcyr`** — `lib/http_server.cyr` added explicitly (the dep resolver wasn't pulling it transitively for this compile unit). libro+majra+sigil+sakshi+bigint `include`s tried locally (compiled fine on `cc3 4.8.4-alpha2`) but reverted after the 4.8.4 release binary on CI hit the misleading `lib/assert.cyr:3` parse error at `fn=908/4096` — well under cap but still tripping. Left for a later round once the CI binary skew is resolved.
+
+### Validator contract (handler perspective)
+
+Handlers now look like:
+
+```cyr
+fn my_tool(args, claims) {
+    # claims is 0 if auth was disabled at the transport config, or the
+    # validator's non-zero return otherwise. For the bundled validators:
+    #   auth_validator_allow_all      → returns the token cstr
+    #   auth_validator_allowlist      → returns the token cstr on match
+    #   auth_validator_jwt_hs256      → returns the token cstr on valid JWT
+    # A consumer-supplied validator may return a parsed claims struct.
+    # Treat as opaque unless you know which validator is configured.
+    if (claims == 0) { return _err("auth required"); }
+    # ... use `args` + `claims` ...
+    return some_result;
+}
+```
+
+### Verified (cyrius 4.8.4)
+- All 8 test files green: `bote.tcyr` 386 / `bote_libro_tools.tcyr` 22 / `bote_content.tcyr` 24 / `bote_host.tcyr` 67 / `bote_auth.tcyr` 38 / `bote_sandbox.tcyr` 13 / `bote_jwt.tcyr` 28 / `bote_pkce.tcyr` 17 = **595 total**.
+- The audit_libro + events_majra shape-only tests that tried to fit into `bote.tcyr` on 2.4.0-era were dropped here too — they'd need `lib/libro_*` + `lib/majra_*` in `bote.tcyr`'s compile unit, which locally passes cyrius 4.8.4-alpha2 but fails on the 4.8.4 release binary that CI installs. Keeping `bote.tcyr` lean and not pulling those in dodges the version-skew issue while we work out what's different across 4.8.4 builds.
+- Production build: `src/main.cyr -> bote 370480 bytes 684ms [x86]` with 15 undefined-fn warnings (same as 2.4.0 — libro heisenbug-avoidance stubs).
+- `cyrlint src/auth.cyr src/dispatch.cyr src/codec.cyr src/bridge.cyr` → 0 warnings.
+- Live HTTP: `./bote http 8390` + `curl -X POST -H 'Authorization: Bearer tok' ...` with `BOTE_BEARER_TOKENS=tok` — handler receives `args` + `claims=tok` (bearer middleware unchanged; just the plumbing downstream).
+- 4.8.4 capacity meter on `tests/bote.tcyr`: `fn_table 1233/4096`, `identifiers 32312/131072` (25% used) — comfortable headroom for future 2.x features.
+
+### Resolved from prior reports
+- `docs/bugs/cyrius-4.8.3-regressions.md` — all three blockers closed in 4.8.4.
+- `docs/development/roadmap.md` — the "waiting on 4.8.3 capacity meter" note can now be cleared; next refactor cycle has hard numbers.
+
+### Carried forward
+- v1.2.1 libro-growth heisenbug: unchanged.
+- Slowloris recv timeout (audit H5): still needs `sock_set_recv_timeout` stdlib helper.
+- WS handshake key-length validation (audit M4): upstream stdlib.
+- DNS for SSRF hostname classification: still needs `getaddrinfo` stub.
+- JWT RS256 / ES256: still waits on sigil RSA / ECDSA primitives.
+
 ## [2.4.0] — 2026-04-14 — Bump cyrius 4.8.1 + base64url adoption + compile-unit trim
 
 Toolchain bump and structural cleanup. The cyrius 4.8.1 stdlib added

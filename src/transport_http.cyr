@@ -129,9 +129,11 @@ fn _http_handle(config, cfd, buf, n) {
     if (http_find_header(buf, n, "Transfer-Encoding") != 0) {
         http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
     }
+    var claims_slot[8]; store64(&claims_slot, 0);
     if (auth_bearer_check(cfd, buf, n,
                           http_config_bearer_validator(config),
-                          http_config_bearer_ctx(config)) != 0) { return 0; }
+                          http_config_bearer_ctx(config),
+                          &claims_slot) != 0) { return 0; }
     if (_http_check_protocol(cfd, buf, n, config) != 0) { return 0; }
 
     var bo = http_body_offset(buf, n);
@@ -171,7 +173,7 @@ fn _http_handle(config, cfd, buf, n) {
         extra = str_data(str_builder_build(sb));
     }
 
-    var resp = codec_process_message(body, http_config_dispatcher(config));
+    var resp = codec_process_message(body, http_config_dispatcher(config), load64(&claims_slot));
     if (resp == 0) {
         http_send_204(cfd, extra);
         return 0;

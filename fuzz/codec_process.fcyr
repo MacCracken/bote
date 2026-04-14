@@ -57,7 +57,7 @@ vec_push(corpus, "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"},42,{
 
 var i = 0;
 while (i < vec_len(corpus)) {
-    var out = codec_process_message(vec_get(corpus, i), d);
+    var out = codec_process_message(vec_get(corpus, i), d, 0);
     # Output is either 0 (valid: no response needed) OR a non-empty cstr that
     # parses as JSON. We can't validate JSON here without a parser, so just
     # check it's a non-empty cstr.

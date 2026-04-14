@@ -104,7 +104,7 @@ fn _cdc_invalid_request(reason) {
 }
 
 # Process a single request body. Returns serialized response cstr or 0 (notif).
-fn _cdc_process_single(line, dispatcher) {
+fn _cdc_process_single(line, dispatcher, claims) {
     var req = codec_parse_request(line);
     if (req == 0) { return _cdc_invalid_request("malformed object"); }
     if (streq(req_jsonrpc(req), "2.0") == 0) {
@@ -116,7 +116,7 @@ fn _cdc_process_single(line, dispatcher) {
         if (id == 0) { id = "null"; }
         return codec_serialize_response(resp_error(id, 0 - 32600, str_data(str_builder_build(sb))));
     }
-    var resp = dispatcher_dispatch(dispatcher, req);
+    var resp = dispatcher_dispatch(dispatcher, req, claims);
     if (resp == 0) { return 0; }
     return codec_serialize_response(resp);
 }
@@ -145,7 +145,7 @@ fn _cdc_split_array(buf) {
 }
 
 # Process a raw JSON-RPC message. Returns serialized response cstr or 0.
-fn codec_process_message(input, dispatcher) {
+fn codec_process_message(input, dispatcher, claims) {
     if (input == 0) { return _cdc_parse_error("empty input"); }
     var len = strlen(input);
     var i = _cdc_skip_ws(input, len, 0);
@@ -173,7 +173,7 @@ fn codec_process_message(input, dispatcher) {
             if (jsonx_is_object(elem) == 0) {
                 vec_push(responses, _cdc_invalid_request("batch element is not an object"));
             } else {
-                var single = _cdc_process_single(elem, dispatcher);
+                var single = _cdc_process_single(elem, dispatcher, claims);
                 if (single != 0) { vec_push(responses, single); }
             }
             ei = ei + 1;
@@ -193,7 +193,7 @@ fn codec_process_message(input, dispatcher) {
     }
 
     if (first == 123) {
-        return _cdc_process_single(input, dispatcher);
+        return _cdc_process_single(input, dispatcher, claims);
     }
 
     return _cdc_invalid_request("expected object or array");

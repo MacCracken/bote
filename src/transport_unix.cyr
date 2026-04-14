@@ -29,7 +29,7 @@ fn _unix_process_lines(cfd, dispatcher, buf, blen_ptr) {
             store8(buf + scanned, 0);
             var line_len = scanned - line_start;
             if (line_len > 0) {
-                var resp = codec_process_message(buf + line_start, dispatcher);
+                var resp = codec_process_message(buf + line_start, dispatcher, 0);
                 if (resp != 0) {
                     sock_send(cfd, resp, strlen(resp));
                     sock_send(cfd, "\n", 1);
@@ -69,7 +69,7 @@ fn _unix_handle_client(cfd, dispatcher) {
             # EOF — flush any final unterminated line.
             if (blen > 0) {
                 store8(buf + blen, 0);
-                var resp = codec_process_message(buf, dispatcher);
+                var resp = codec_process_message(buf, dispatcher, 0);
                 if (resp != 0) {
                     sock_send(cfd, resp, strlen(resp));
                     sock_send(cfd, "\n", 1);

@@ -99,7 +99,7 @@ fn wrap_error_result(message) {
 #              (JSON-RPC 2.0 forbids both result+error; SY wants the envelope)
 # Other methods (initialize, tools/list, batch elements) pass through unchanged.
 
-fn _bridge_process_single(line, dispatcher) {
+fn _bridge_process_single(line, dispatcher, claims) {
     var req = codec_parse_request(line);
     if (req == 0) {
         var sb = str_builder_new();
@@ -115,7 +115,7 @@ fn _bridge_process_single(line, dispatcher) {
         if (id_v == 0) { id_v = "null"; }
         return codec_serialize_response(resp_error(id_v, 0 - 32600, str_data(str_builder_build(sb2))));
     }
-    var resp = dispatcher_dispatch(dispatcher, req);
+    var resp = dispatcher_dispatch(dispatcher, req, claims);
     if (resp == 0) { return 0; }
 
     # Bridge wrapping only applies to tools/call.
@@ -134,7 +134,7 @@ fn _bridge_process_single(line, dispatcher) {
     return codec_serialize_response(resp);
 }
 
-fn bridge_process_message(input, dispatcher) {
+fn bridge_process_message(input, dispatcher, claims) {
     if (input == 0) { return _cdc_parse_error("empty input"); }
     var len = strlen(input);
     var i = _cdc_skip_ws(input, len, 0);
@@ -143,8 +143,8 @@ fn bridge_process_message(input, dispatcher) {
 
     # Batch arrays defer to the codec (no per-element wrapping; the bridge
     # contract is single-tool-call → MCP envelope).
-    if (first == 91) { return codec_process_message(input, dispatcher); }
-    if (first == 123) { return _bridge_process_single(input, dispatcher); }
+    if (first == 91) { return codec_process_message(input, dispatcher, claims); }
+    if (first == 123) { return _bridge_process_single(input, dispatcher, claims); }
     return _cdc_invalid_request("expected object or array");
 }
 
@@ -240,9 +240,11 @@ fn _bridge_handle(config, cfd, buf, n) {
         http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
     }
     # Bearer auth (no-op when no validator configured)
+    var claims_slot[8]; store64(&claims_slot, 0);
     if (auth_bearer_check(cfd, buf, n,
                           bridge_config_bearer_validator(config),
-                          bridge_config_bearer_ctx(config)) != 0) { return 0; }
+                          bridge_config_bearer_ctx(config),
+                          &claims_slot) != 0) { return 0; }
 
     # 413 cap on oversized declared bodies (audit M1). 60 KB headroom
     # keeps us inside the 64 KB recv buffer with room for headers.
@@ -264,7 +266,7 @@ fn _bridge_handle(config, cfd, buf, n) {
     memcpy(body, buf + body_off, clen);
     store8(body + clen, 0);
 
-    var resp = bridge_process_message(body, dispatcher);
+    var resp = bridge_process_message(body, dispatcher, load64(&claims_slot));
     if (resp == 0) {
         http_send_204(cfd, cors);
         return 0;
