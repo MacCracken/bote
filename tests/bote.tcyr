@@ -19,6 +19,7 @@ include "src/jsonx.cyr"
 include "src/registry.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
+include "src/schema.cyr"
 
 # Test handler: echoes its arguments verbatim.
 fn h_echo(args) {
@@ -473,6 +474,120 @@ fn main() {
     var pmbe = codec_process_message("[]", d2);
     assert(pmbe != 0, "empty batch returns err");
     assert_eq(jsonx_has(pmbe, "error"), 1, "empty batch -> error");
+
+    # ---------------- schema: type checking ----------------
+    var ps = vec_new();
+    vec_push(ps, schema_prop_new("name", "{\"type\":\"string\"}"));
+    var s_str = schema_new("object", ps, vec_new());
+    var c_str = compiled_compile(s_str);
+
+    assert_eq(vec_len(compiled_validate(c_str, "{\"name\":\"alice\"}")), 0, "string ok");
+    assert_eq(vec_len(compiled_validate(c_str, "{\"name\":42}")), 1, "string rejects int");
+
+    var ps_n = vec_new();
+    vec_push(ps_n, schema_prop_new("score", "{\"type\":\"number\"}"));
+    var c_num = compiled_compile(schema_new("object", ps_n, vec_new()));
+    assert_eq(vec_len(compiled_validate(c_num, "{\"score\":42}")), 0, "number ok int");
+    assert_eq(vec_len(compiled_validate(c_num, "{\"score\":\"abc\"}")), 1, "number rejects string");
+
+    var ps_i = vec_new();
+    vec_push(ps_i, schema_prop_new("count", "{\"type\":\"integer\"}"));
+    var c_int = compiled_compile(schema_new("object", ps_i, vec_new()));
+    assert_eq(vec_len(compiled_validate(c_int, "{\"count\":42}")), 0, "integer ok");
+    assert_eq(vec_len(compiled_validate(c_int, "{\"count\":3.14}")), 1, "integer rejects float");
+
+    var ps_b = vec_new();
+    vec_push(ps_b, schema_prop_new("flag", "{\"type\":\"boolean\"}"));
+    var c_bool = compiled_compile(schema_new("object", ps_b, vec_new()));
+    assert_eq(vec_len(compiled_validate(c_bool, "{\"flag\":true}")), 0, "bool ok true");
+    assert_eq(vec_len(compiled_validate(c_bool, "{\"flag\":false}")), 0, "bool ok false");
+    assert_eq(vec_len(compiled_validate(c_bool, "{\"flag\":\"yes\"}")), 1, "bool rejects string");
+
+    # ---------------- schema: array of strings ----------------
+    var ps_a = vec_new();
+    vec_push(ps_a, schema_prop_new("tags", "{\"type\":\"array\",\"items\":{\"type\":\"string\"}}"));
+    var c_arr = compiled_compile(schema_new("object", ps_a, vec_new()));
+    assert_eq(vec_len(compiled_validate(c_arr, "{\"tags\":[\"a\",\"b\"]}")), 0, "array of strings ok");
+    assert_eq(vec_len(compiled_validate(c_arr, "{\"tags\":[1,2]}")), 2, "array of strings rejects ints");
+    assert_eq(vec_len(compiled_validate(c_arr, "{\"tags\":\"not array\"}")), 1, "array rejects scalar");
+
+    # ---------------- schema: nested object ----------------
+    var ps_o = vec_new();
+    vec_push(ps_o, schema_prop_new("config",
+        "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"}},\"required\":[\"host\"]}"));
+    var c_obj = compiled_compile(schema_new("object", ps_o, vec_new()));
+    assert_eq(vec_len(compiled_validate(c_obj, "{\"config\":{\"host\":\"localhost\",\"port\":8080}}")), 0, "nested ok");
+    assert_eq(vec_len(compiled_validate(c_obj, "{\"config\":{\"port\":8080}}")), 1, "nested missing required");
+    assert_eq(vec_len(compiled_validate(c_obj, "{\"config\":{\"host\":42}}")), 1, "nested wrong type");
+
+    # ---------------- schema: enum ----------------
+    var ps_e = vec_new();
+    vec_push(ps_e, schema_prop_new("mode", "{\"type\":\"string\",\"enum\":[\"read\",\"write\",\"append\"]}"));
+    var c_en = compiled_compile(schema_new("object", ps_e, vec_new()));
+    assert_eq(vec_len(compiled_validate(c_en, "{\"mode\":\"read\"}")), 0, "enum ok");
+    assert_eq(vec_len(compiled_validate(c_en, "{\"mode\":\"delete\"}")), 1, "enum rejects unknown");
+
+    # ---------------- schema: number bounds ----------------
+    var ps_nb = vec_new();
+    vec_push(ps_nb, schema_prop_new("age", "{\"type\":\"number\",\"minimum\":0,\"maximum\":150}"));
+    var c_nb = compiled_compile(schema_new("object", ps_nb, vec_new()));
+    assert_eq(vec_len(compiled_validate(c_nb, "{\"age\":25}")), 0, "in bounds");
+    assert_eq(vec_len(compiled_validate(c_nb, "{\"age\":-1}")), 1, "below min");
+    assert_eq(vec_len(compiled_validate(c_nb, "{\"age\":200}")), 1, "above max");
+
+    # ---------------- schema: integer bounds ----------------
+    var ps_ib = vec_new();
+    vec_push(ps_ib, schema_prop_new("retries", "{\"type\":\"integer\",\"minimum\":0,\"maximum\":5}"));
+    var c_ib = compiled_compile(schema_new("object", ps_ib, vec_new()));
+    assert_eq(vec_len(compiled_validate(c_ib, "{\"retries\":3}")), 0, "int in bounds");
+    assert_eq(vec_len(compiled_validate(c_ib, "{\"retries\":-1}")), 1, "int below");
+    assert_eq(vec_len(compiled_validate(c_ib, "{\"retries\":10}")), 1, "int above");
+
+    # ---------------- schema: required ----------------
+    var ps_r = vec_new();
+    vec_push(ps_r, schema_prop_new("name", "{\"type\":\"string\"}"));
+    vec_push(ps_r, schema_prop_new("age", "{\"type\":\"integer\"}"));
+    var req_one = vec_new();
+    vec_push(req_one, "name");
+    var c_req = compiled_compile(schema_new("object", ps_r, req_one));
+    assert_eq(vec_len(compiled_validate(c_req, "{\"name\":\"alice\"}")), 0, "required present");
+    assert_eq(vec_len(compiled_validate(c_req, "{\"age\":25}")), 1, "missing required");
+
+    # ---------------- schema: multiple violations reported ----------------
+    var req2 = vec_new();
+    vec_push(req2, "name");
+    vec_push(req2, "age");
+    var c_multi = compiled_compile(schema_new("object", ps_r, req2));
+    assert_eq(vec_len(compiled_validate(c_multi, "{}")), 2, "two missing required");
+
+    # ---------------- schema: unknown type → ANY ----------------
+    var ps_any = vec_new();
+    vec_push(ps_any, schema_prop_new("data", "{\"type\":\"custom_type\"}"));
+    var c_any = compiled_compile(schema_new("object", ps_any, vec_new()));
+    assert_eq(vec_len(compiled_validate(c_any, "{\"data\":42}")), 0, "any accepts int");
+    assert_eq(vec_len(compiled_validate(c_any, "{\"data\":\"hi\"}")), 0, "any accepts string");
+
+    # ---------------- schema: extra fields allowed ----------------
+    assert_eq(vec_len(compiled_validate(c_str, "{\"name\":\"a\",\"extra\":42}")), 0, "extra allowed");
+
+    # ---------------- schema: non-object rejected ----------------
+    assert_eq(vec_len(compiled_validate(c_str, "\"not object\"")), 1, "non-object rejected");
+
+    # ---------------- registry: validate uses compiled when attached ----------------
+    var rcompiled = registry_new();
+    var p_compiled = vec_new();
+    vec_push(p_compiled, schema_prop_new("count", "{\"type\":\"integer\",\"minimum\":1,\"maximum\":10}"));
+    var s_compiled = schema_new("object", p_compiled, vec_new());
+    var t_compiled = tool_def_with_compiled(tool_def_new("svc_count", "compiled", s_compiled),
+                                            compiled_compile(s_compiled));
+    registry_register(rcompiled, t_compiled);
+    assert_eq(registry_validate_params(rcompiled, "svc_count", "{\"count\":5}"), 0, "compiled validate ok");
+    var bv = registry_validate_params(rcompiled, "svc_count", "{\"count\":99}");
+    assert(bv != 0, "compiled validate err on bound");
+    assert_eq(bote_err_tag(bv), ERR_SCHEMA_VIOLATION, "bound err -> SCHEMA_VIOLATION");
+    var tv = registry_validate_params(rcompiled, "svc_count", "{\"count\":\"x\"}");
+    assert(tv != 0, "compiled validate err on type");
+    assert_eq(bote_err_tag(tv), ERR_SCHEMA_VIOLATION, "type err -> SCHEMA_VIOLATION");
 
     return assert_summary();
 }

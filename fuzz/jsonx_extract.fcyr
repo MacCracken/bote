@@ -1,0 +1,69 @@
+# Fuzz: jsonx_get_str / get_raw / has / is_object must not crash on arbitrary input.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
+
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+
+alloc_init();
+
+var inputs = vec_new();
+vec_push(inputs, 0);
+vec_push(inputs, "");
+vec_push(inputs, "{");
+vec_push(inputs, "{\"");
+vec_push(inputs, "{\"k");
+vec_push(inputs, "{\"k\"");
+vec_push(inputs, "{\"k\":");
+vec_push(inputs, "{\"k\":\"");
+vec_push(inputs, "{\"k\":\"v");
+vec_push(inputs, "{\"k\":\"v\"");
+vec_push(inputs, "{\"k\":\"v\",");
+vec_push(inputs, "{\"k\":{");
+vec_push(inputs, "{\"k\":[");
+vec_push(inputs, "{\"k\":[1,2,");
+vec_push(inputs, "{\"a\":1,\"b\":{\"c\":[{\"d\":\"e\"}]}}");
+vec_push(inputs, "{\"a\":\"\\\"\"}");                          # escaped quote in value
+vec_push(inputs, "{\"a\":\"\\\\\"}");                          # escaped backslash
+vec_push(inputs, "{\"a\":\"line1\\nline2\"}");
+vec_push(inputs, "[1,2,3]");
+vec_push(inputs, "null");
+vec_push(inputs, "garbage");
+
+var keys = vec_new();
+vec_push(keys, "name");
+vec_push(keys, "id");
+vec_push(keys, "arguments");
+vec_push(keys, "");
+vec_push(keys, "k");
+vec_push(keys, "a");
+vec_push(keys, "missing_key_xyz");
+
+# Cross-product fuzz
+var i = 0;
+while (i < vec_len(inputs)) {
+    var input = vec_get(inputs, i);
+    var ki = 0;
+    while (ki < vec_len(keys)) {
+        var key = vec_get(keys, ki);
+        # Each must return cleanly without crashing.
+        jsonx_get_raw(input, key);
+        jsonx_get_str(input, key);
+        jsonx_has(input, key);
+        ki = ki + 1;
+    }
+    jsonx_is_object(input);
+    i = i + 1;
+}
+
+syscall(SYS_EXIT, 0);

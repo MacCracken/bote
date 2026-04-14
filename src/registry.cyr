@@ -102,28 +102,31 @@ fn schema_prop_value(p) { return load64(p + 8); }
 # ToolDef
 # ================================================================
 #
-# Layout (48 bytes):
+# Layout (56 bytes):
 #   +0  name         cstr
 #   +8  description  cstr
 #   +16 input_schema ptr to ToolSchema
 #   +24 version      cstr or 0
 #   +32 deprecated   cstr or 0 (deprecation message)
 #   +40 annotations  ptr to ToolAnnotations or 0
+#   +48 compiled     ptr to CompiledSchema or 0 (set by tool_def_with_compiled)
 
 fn tool_def_new(name, description, input_schema) {
-    var d = alloc(48);
+    var d = alloc(56);
     store64(d, name);
     store64(d + 8, description);
     store64(d + 16, input_schema);
     store64(d + 24, 0);
     store64(d + 32, 0);
     store64(d + 40, 0);
+    store64(d + 48, 0);
     return d;
 }
 
 fn tool_def_with_version(d, version) { store64(d + 24, version); return d; }
 fn tool_def_with_deprecated(d, msg) { store64(d + 32, msg); return d; }
 fn tool_def_with_annotations(d, ann) { store64(d + 40, ann); return d; }
+fn tool_def_with_compiled(d, c) { store64(d + 48, c); return d; }
 
 fn tool_def_name(d) { return load64(d); }
 fn tool_def_description(d) { return load64(d + 8); }
@@ -131,6 +134,7 @@ fn tool_def_input_schema(d) { return load64(d + 16); }
 fn tool_def_version(d) { return load64(d + 24); }
 fn tool_def_deprecated(d) { return load64(d + 32); }
 fn tool_def_annotations(d) { return load64(d + 40); }
+fn tool_def_compiled(d) { return load64(d + 48); }
 
 # ================================================================
 # ToolRegistry
@@ -283,14 +287,24 @@ fn registry_validate_params(r, name, params_cstr) {
         return bote_err_new(ERR_TOOL_NOT_FOUND, name, 0);
     }
     var t = registry_get(r, name);
-    var schema = tool_def_input_schema(t);
 
     # 1. params must be a JSON object.
     if (_vp_first_nonws(params_cstr) != 123) {
         return bote_err_new(ERR_INVALID_PARAMS, name, "params must be an object");
     }
 
-    # 2. Each required field must be present.
+    # 2. Compiled schema path (preferred — full type/enum/bounds/nested checks).
+    var compiled = tool_def_compiled(t);
+    if (compiled != 0) {
+        var violations = compiled_validate(compiled, params_cstr);
+        if (vec_len(violations) > 0) {
+            return bote_err_with_violations(ERR_SCHEMA_VIOLATION, name, violations);
+        }
+        return 0;
+    }
+
+    # 3. Fallback: required-field-present check via lib/json.cyr.
+    var schema = tool_def_input_schema(t);
     var required = schema_required(schema);
     if (required == 0) { return 0; }
     var nreq = vec_len(required);

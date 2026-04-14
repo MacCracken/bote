@@ -1,0 +1,171 @@
+# bote.bcyr — benchmarks for hot paths
+# Run: cyrius bench tests/bote.bcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
+include "lib/bench.cyr"
+
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+
+# ================================================================
+# Globals — preallocated state shared by benchmark callbacks
+# ================================================================
+
+var _b_dispatcher = 0;
+var _b_init_req = 0;
+var _b_list_req = 0;
+var _b_call_req = 0;
+var _b_call_resp = 0;
+var _b_flat_obj = "{\"name\":\"echo\",\"id\":42,\"flag\":true}";
+var _b_nested_obj = "{\"name\":\"calc\",\"arguments\":{\"a\":1,\"b\":2,\"deep\":{\"x\":[1,2,3]}}}";
+var _b_call_line = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}}";
+var _b_compiled_simple = 0;
+var _b_compiled_nested = 0;
+var _b_compiled_simple_params = "{\"count\":5}";
+var _b_compiled_nested_params = "{\"config\":{\"host\":\"localhost\",\"port\":8080}}";
+
+fn h_echo_b(args) { return args; }
+
+# ================================================================
+# Benchmark callbacks (no-arg functions, called by bench_run)
+# ================================================================
+
+fn b_dispatch_initialize() {
+    return dispatcher_dispatch(_b_dispatcher, _b_init_req);
+}
+
+fn b_dispatch_tools_list() {
+    return dispatcher_dispatch(_b_dispatcher, _b_list_req);
+}
+
+fn b_dispatch_tools_call() {
+    return dispatcher_dispatch(_b_dispatcher, _b_call_req);
+}
+
+fn b_jsonx_get_str_flat() {
+    return jsonx_get_str(_b_flat_obj, "name");
+}
+
+fn b_jsonx_get_raw_nested() {
+    return jsonx_get_raw(_b_nested_obj, "arguments");
+}
+
+fn b_codec_parse_request() {
+    return codec_parse_request(_b_call_line);
+}
+
+fn b_codec_serialize_response() {
+    return codec_serialize_response(_b_call_resp);
+}
+
+fn b_codec_process_message() {
+    return codec_process_message(_b_call_line, _b_dispatcher);
+}
+
+fn b_validate_compiled_simple() {
+    return vec_len(compiled_validate(_b_compiled_simple, _b_compiled_simple_params));
+}
+
+fn b_validate_compiled_nested() {
+    return vec_len(compiled_validate(_b_compiled_nested, _b_compiled_nested_params));
+}
+
+# ================================================================
+# Setup
+# ================================================================
+
+fn _bench_setup() {
+    var reg = registry_new();
+    var s = schema_new("object", 0, vec_new());
+    registry_register(reg, tool_def_new("svc_echo", "echo", s));
+    _b_dispatcher = dispatcher_new(reg);
+    dispatcher_handle(_b_dispatcher, "svc_echo", &h_echo_b);
+
+    _b_init_req = req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}");
+    _b_list_req = req_new("2", "tools/list");
+    _b_call_req = req_with_params(req_new("3", "tools/call"),
+        "{\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}");
+    _b_call_resp = resp_success("3", "{\"msg\":\"hi\"}");
+
+    # Compiled schemas
+    var ps = vec_new();
+    vec_push(ps, schema_prop_new("count", "{\"type\":\"integer\",\"minimum\":1,\"maximum\":10}"));
+    _b_compiled_simple = compiled_compile(schema_new("object", ps, vec_new()));
+
+    var pn = vec_new();
+    vec_push(pn, schema_prop_new("config",
+        "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"}},\"required\":[\"host\"]}"));
+    _b_compiled_nested = compiled_compile(schema_new("object", pn, vec_new()));
+    return 0;
+}
+
+# ================================================================
+# Main
+# ================================================================
+
+fn main() {
+    alloc_init();
+    _bench_setup();
+
+    var benches = vec_new();
+
+    var b1 = bench_new("dispatch_initialize");
+    bench_run(b1, &b_dispatch_initialize, 10000);
+    vec_push(benches, b1);
+
+    var b2 = bench_new("dispatch_tools_list");
+    bench_run(b2, &b_dispatch_tools_list, 10000);
+    vec_push(benches, b2);
+
+    var b3 = bench_new("dispatch_tools_call");
+    bench_run(b3, &b_dispatch_tools_call, 10000);
+    vec_push(benches, b3);
+
+    var b4 = bench_new("jsonx_get_str_flat");
+    bench_run(b4, &b_jsonx_get_str_flat, 100000);
+    vec_push(benches, b4);
+
+    var b5 = bench_new("jsonx_get_raw_nested");
+    bench_run(b5, &b_jsonx_get_raw_nested, 100000);
+    vec_push(benches, b5);
+
+    var b6 = bench_new("codec_parse_request");
+    bench_run(b6, &b_codec_parse_request, 10000);
+    vec_push(benches, b6);
+
+    var b7 = bench_new("codec_serialize_response");
+    bench_run(b7, &b_codec_serialize_response, 10000);
+    vec_push(benches, b7);
+
+    var b8 = bench_new("codec_process_message");
+    bench_run(b8, &b_codec_process_message, 10000);
+    vec_push(benches, b8);
+
+    var b9 = bench_new("validate_compiled_simple");
+    bench_run(b9, &b_validate_compiled_simple, 10000);
+    vec_push(benches, b9);
+
+    var b10 = bench_new("validate_compiled_nested");
+    bench_run(b10, &b_validate_compiled_nested, 10000);
+    vec_push(benches, b10);
+
+    bench_report_all(benches);
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

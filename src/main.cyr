@@ -22,6 +22,7 @@ include "src/jsonx.cyr"
 include "src/registry.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
+include "src/schema.cyr"
 include "src/transport_stdio.cyr"
 
 # Demo handler for the built-in `bote_echo` tool.

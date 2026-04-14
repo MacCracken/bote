@@ -1,0 +1,89 @@
+# Fuzz: compiled_validate must not crash on arbitrary inputs against various schemas.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
+
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+
+alloc_init();
+
+# Build several compiled schemas
+var schemas = vec_new();
+
+var ps1 = vec_new();
+vec_push(ps1, schema_prop_new("s", "{\"type\":\"string\"}"));
+vec_push(schemas, compiled_compile(schema_new("object", ps1, vec_new())));
+
+var ps2 = vec_new();
+vec_push(ps2, schema_prop_new("n", "{\"type\":\"integer\",\"minimum\":0,\"maximum\":100}"));
+vec_push(schemas, compiled_compile(schema_new("object", ps2, vec_new())));
+
+var ps3 = vec_new();
+vec_push(ps3, schema_prop_new("arr", "{\"type\":\"array\",\"items\":{\"type\":\"string\"}}"));
+vec_push(schemas, compiled_compile(schema_new("object", ps3, vec_new())));
+
+var ps4 = vec_new();
+vec_push(ps4, schema_prop_new("nested", "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"integer\"}},\"required\":[\"x\"]}"));
+vec_push(schemas, compiled_compile(schema_new("object", ps4, vec_new())));
+
+var ps5 = vec_new();
+vec_push(ps5, schema_prop_new("e", "{\"type\":\"string\",\"enum\":[\"a\",\"b\",\"c\"]}"));
+vec_push(schemas, compiled_compile(schema_new("object", ps5, vec_new())));
+
+var inputs = vec_new();
+vec_push(inputs, "{}");
+vec_push(inputs, "{\"s\":\"x\"}");
+vec_push(inputs, "{\"s\":42}");
+vec_push(inputs, "{\"n\":50}");
+vec_push(inputs, "{\"n\":-5}");
+vec_push(inputs, "{\"n\":1000}");
+vec_push(inputs, "{\"n\":\"x\"}");
+vec_push(inputs, "{\"arr\":[]}");
+vec_push(inputs, "{\"arr\":[\"a\",\"b\"]}");
+vec_push(inputs, "{\"arr\":[1,2,3]}");
+vec_push(inputs, "{\"arr\":\"not array\"}");
+vec_push(inputs, "{\"nested\":{}}");
+vec_push(inputs, "{\"nested\":{\"x\":1}}");
+vec_push(inputs, "{\"nested\":{\"x\":\"bad\"}}");
+vec_push(inputs, "{\"nested\":\"flat\"}");
+vec_push(inputs, "{\"e\":\"a\"}");
+vec_push(inputs, "{\"e\":\"x\"}");
+vec_push(inputs, "{\"e\":42}");
+vec_push(inputs, "{\"unknown_field\":[1,2,{\"deep\":true}]}");
+vec_push(inputs, "null");
+vec_push(inputs, "[]");
+vec_push(inputs, "\"a string\"");
+vec_push(inputs, "garbage");
+vec_push(inputs, "");
+
+var si = 0;
+while (si < vec_len(schemas)) {
+    var sc = vec_get(schemas, si);
+    var ii = 0;
+    while (ii < vec_len(inputs)) {
+        var input = vec_get(inputs, ii);
+        # Must always return a vec (possibly empty or with violations) without crashing.
+        var v = compiled_validate(sc, input);
+        if (v == 0) { syscall(SYS_EXIT, 30); }
+        # vec_len must be callable
+        vec_len(v);
+        ii = ii + 1;
+    }
+    si = si + 1;
+}
+
+syscall(SYS_EXIT, 0);

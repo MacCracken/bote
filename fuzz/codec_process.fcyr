@@ -1,0 +1,70 @@
+# Fuzz: codec_process_message must always return valid JSON (or 0) on any input.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
+
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+
+fn h_echo_f(args) { return args; }
+
+alloc_init();
+
+# Set up a minimal dispatcher
+var reg = registry_new();
+registry_register(reg, tool_def_new("svc_echo", "echo", schema_new("object", 0, vec_new())));
+var d = dispatcher_new(reg);
+dispatcher_handle(d, "svc_echo", &h_echo_f);
+
+var corpus = vec_new();
+vec_push(corpus, "");
+vec_push(corpus, " ");
+vec_push(corpus, "garbage");
+vec_push(corpus, "{");
+vec_push(corpus, "}");
+vec_push(corpus, "[]");
+vec_push(corpus, "[null]");
+vec_push(corpus, "[42]");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"method\":\"x\"}");                                  # notification
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":1}");                                          # missing method
+vec_push(corpus, "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"x\"}");                          # wrong version
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}");                # missing params.name
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{}}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"\"}}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"nope_x\",\"arguments\":{}}}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"svc_echo\",\"arguments\":[1,2,3]}}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"svc_echo\"}}");
+vec_push(corpus, "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}]");
+vec_push(corpus, "[{\"jsonrpc\":\"2.0\",\"method\":\"a\"},{\"jsonrpc\":\"2.0\",\"method\":\"b\"}]");
+vec_push(corpus, "[{},{},{}]");
+vec_push(corpus, "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"},42,{\"jsonrpc\":\"2.0\",\"method\":\"x\"}]");
+
+var i = 0;
+while (i < vec_len(corpus)) {
+    var out = codec_process_message(vec_get(corpus, i), d);
+    # Output is either 0 (valid: no response needed) OR a non-empty cstr that
+    # parses as JSON. We can't validate JSON here without a parser, so just
+    # check it's a non-empty cstr.
+    if (out != 0) {
+        if (strlen(out) == 0) { syscall(SYS_EXIT, 20); }
+        # Must start with `{` or `[`
+        var c = load8(out);
+        if (c != 123) { if (c != 91) { syscall(SYS_EXIT, 21); } }
+    }
+    i = i + 1;
+}
+
+syscall(SYS_EXIT, 0);

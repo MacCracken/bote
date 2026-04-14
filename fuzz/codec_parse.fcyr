@@ -1,0 +1,83 @@
+# Fuzz: codec_parse_request must never crash on arbitrary input.
+# Exit codes: 0 ok, 10+ unexpected non-null on garbage that should be 0.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
+
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+
+alloc_init();
+
+# Build a corpus of malformed/edge-case inputs.
+var corpus = vec_new();
+vec_push(corpus, 0);
+vec_push(corpus, "");
+vec_push(corpus, " ");
+vec_push(corpus, "\n\n\t  ");
+vec_push(corpus, "{");
+vec_push(corpus, "}");
+vec_push(corpus, "{}");
+vec_push(corpus, "[]");
+vec_push(corpus, "[");
+vec_push(corpus, "]");
+vec_push(corpus, "{\"");
+vec_push(corpus, "{\"k");
+vec_push(corpus, "{\"k\"");
+vec_push(corpus, "{\"k\":");
+vec_push(corpus, "{\"k\":1");
+vec_push(corpus, "{\"k\":1}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\"}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"method\":\"x\"}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"method\":\"x\",\"id\":1,\"params\":{}}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"method\":\"x\",\"id\":\"\",\"params\":[]}");
+vec_push(corpus, "{\"jsonrpc\":\"\",\"method\":\"\"}");
+vec_push(corpus, "null");
+vec_push(corpus, "true");
+vec_push(corpus, "false");
+vec_push(corpus, "42");
+vec_push(corpus, "-1");
+vec_push(corpus, "3.14");
+vec_push(corpus, "\"a string\"");
+vec_push(corpus, "{{}");
+vec_push(corpus, "{}}");
+vec_push(corpus, "{\"a\":{\"b\":{\"c\":{\"d\":1}}}}");
+vec_push(corpus, "[[[[[[[]]]]]]]");
+vec_push(corpus, "{,,,,}");
+vec_push(corpus, "{\"k\":\"\\\"\\\\\\n\\t\\r\"}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\",\"unknown_field\":[1,2,{\"deeper\":true}]}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":\"abc-123\",\"method\":\"a/b/c\"}");
+
+# Run: each must return either a valid request or 0; no crash, no hang.
+var i = 0;
+while (i < vec_len(corpus)) {
+    var input = vec_get(corpus, i);
+    var req = codec_parse_request(input);
+    # If a request object came back, sanity-check its accessors don't dereference nulls.
+    if (req != 0) {
+        var jr = req_jsonrpc(req);
+        var m = req_method(req);
+        # Both must be present (not 0).
+        if (jr == 0) { syscall(SYS_EXIT, 10); }
+        if (m == 0) { syscall(SYS_EXIT, 11); }
+        # is_notification must not crash
+        var is_notif = req_is_notification(req);
+        if (is_notif != 0) { if (is_notif != 1) { syscall(SYS_EXIT, 12); } }
+    }
+    i = i + 1;
+}
+
+syscall(SYS_EXIT, 0);
