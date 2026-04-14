@@ -1,10 +1,10 @@
 [package]
 name = "bote"
-version = "1.9.1"
+version = "1.9.2"
 description = "MCP core service in Cyrius — JSON-RPC 2.0, six transports, bearer auth, libro audit tools, content blocks, host registry + SSRF guard"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "4.6.2"
+cyrius = "4.7.0"
 
 [build]
 entry = "src/main.cyr"

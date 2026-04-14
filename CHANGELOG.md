@@ -2,6 +2,34 @@
 
 All notable changes to bote are documented here.
 
+## [1.9.2] — 2026-04-14 — Bump pin to cyrius 4.7.0
+
+Toolchain bump only. No source changes — bote doesn't use 4.7.0's
+headline feature (`shared;` / `.so` output) and the identifier-buffer
+ceiling that's been pinning the test split + the deferred annotations
+work isn't lifted until 4.7.1 (in flight upstream).
+
+### Changed
+- **cyrius pin** `4.6.2` → `4.7.0` (`cyrius.toml` + `.cyrius-toolchain`).
+- `src/dispatch.cyr` — `_bote_server_version` → `"1.9.2"`.
+
+### What we got from 4.7.0
+- Real `dlopen`-able `.so` end-to-end (`shared;` mode) — not used by bote today, will matter when we factor a tool out as a loadable module.
+- `DT_INIT` runs top-level initializers on dlopen, PIC-safe addressing in shared mode, full `.dynamic`/`.dynsym`/`.hash` emission.
+- Shared-mode DCE fix (parallel to the 4.6.0-beta2 object-mode fix).
+
+### What we're waiting for in 4.7.1
+- Identifier-buffer ceiling raise. Bote currently sits one feature past it: every attempt to add `content_with_annotations` (deferred from 1.9.1) trips the same misleading `lib/assert.cyr:3: expected '=', got string` cascade. Will land + collapse the per-module test-file split when 4.7.1 ships.
+
+### Verified (cyrius 4.7.0)
+- All five test files green: `bote.tcyr` 394 / `bote_libro_tools.tcyr` 22 / `bote_content.tcyr` 18 / `bote_host.tcyr` 56 / `bote_auth.tcyr` 29 = **519 total** (unchanged).
+- `cyrius build src/main.cyr bote` → OK; `./bote` reports `"version":"1.9.2"`.
+- `cyrlint src/*.cyr` → 0 warnings.
+
+### Carried forward
+- cyrius identifier-buffer ceiling — fix in flight for 4.7.1.
+- v1.2.1 libro-growth heisenbug: unchanged.
+
 ## [1.9.1] — 2026-04-14 — IPv6 SSRF + binary-blob resource + env-driven bearer auth
 
 Closes three deferred items from earlier releases. A fourth (block annotations) was tried and reverted — it tipped the cyrius 4.6.2 identifier-buffer ceiling. Will land in 2.0 / when 4.7.0 frees up headroom.
