@@ -26,7 +26,17 @@ echo "$NEW" > VERSION
 # 2. cyrius.toml [package] version (what `cyrius build` reads)
 sed -i "s/^version = \"$OLD\"/version = \"$NEW\"/" cyrius.toml
 
-# 3. CHANGELOG.md — add dated section if the new version isn't already present
+# 3. src/dispatch.cyr — _bote_server_version() is what the MCP initialize
+#    handshake reports to clients. Must match VERSION or `initialize` lies.
+if [ -f src/dispatch.cyr ]; then
+    if grep -q "_bote_server_version" src/dispatch.cyr; then
+        sed -i "s|fn _bote_server_version() { return \"$OLD\"; }|fn _bote_server_version() { return \"$NEW\"; }|" src/dispatch.cyr
+    else
+        echo "  warning: _bote_server_version not found in src/dispatch.cyr" >&2
+    fi
+fi
+
+# 4. CHANGELOG.md — add dated section if the new version isn't already present
 if ! grep -q "## \[$NEW\]" CHANGELOG.md 2>/dev/null; then
     # Insert right after the top-level intro line so the newest version is
     # always first under the heading. Keep-a-Changelog style.
@@ -53,6 +63,7 @@ echo ""
 echo "Updated:"
 echo "  VERSION"
 echo "  cyrius.toml"
+echo "  src/dispatch.cyr (_bote_server_version)"
 if [ "$CHANGELOG_ADDED" = "1" ]; then
     echo "  CHANGELOG.md (placeholder section inserted — fill it in)"
 else
@@ -63,5 +74,6 @@ echo "Still manual (when applicable):"
 echo "  - Flesh out CHANGELOG.md Added/Changed/Fixed/Security sections"
 echo "  - docs/development/roadmap.md status line"
 echo "  - 'cyrius = \"X.Y.Z\"' pin in cyrius.toml if compiler version changed"
+echo "  - .cyrius-toolchain pin if compiler version changed (CI installs this)"
 echo "  - Run: cyrius test tests/bote.tcyr && cyrius bench tests/bote.bcyr"
 echo "  - Tag + push: git tag -a $NEW -m \"bote $NEW\" && git push --tags"
