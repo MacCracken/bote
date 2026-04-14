@@ -1,0 +1,128 @@
+# bote::transport::ws — MCP over WebSocket (RFC 6455)
+#
+# Built on stdlib lib/http_server.cyr (HTTP routing, 4.5.0+) and
+# lib/ws_server.cyr (WS upgrade + frame I/O, 4.5.1+).
+#
+# Wire format: each WebSocket TEXT frame is one JSON-RPC 2.0 message.
+# Control frames (ping/pong/close) are handled transparently by
+# ws_server_recv; this file is just the MCP-specific wire-up.
+#
+# Middleware (origin / protocol-version) runs on the HTTP upgrade request
+# — same checks as transport_http. Session binding is deferred until
+# streaming dispatch lands (v1.6+); the WS socket itself is the session.
+
+# ================================================================
+# WsConfig (48 bytes):
+#   +0  endpoint_path     cstr (e.g. "/mcp")
+#   +8  bind_addr         i64 (network-order IPv4)
+#   +16 port              i64
+#   +24 allowed_origins   vec of cstrs or 0
+#   +32 require_protocol  0/1
+#   +40 dispatcher        Dispatcher ptr (set by transport_ws_run)
+# ================================================================
+
+fn ws_config_new(path, addr, port) {
+    var c = alloc(48);
+    store64(c, path);
+    store64(c + 8, addr);
+    store64(c + 16, port);
+    store64(c + 24, 0);
+    store64(c + 32, 0);
+    store64(c + 40, 0);
+    return c;
+}
+
+fn ws_config_with_allowed_origins(c, vec) { store64(c + 24, vec); return c; }
+fn ws_config_with_require_protocol(c, r)  { store64(c + 32, r);   return c; }
+
+fn ws_config_path(c)             { return load64(c); }
+fn ws_config_addr(c)             { return load64(c + 8); }
+fn ws_config_port(c)             { return load64(c + 16); }
+fn ws_config_allowed_origins(c)  { return load64(c + 24); }
+fn ws_config_require_protocol(c) { return load64(c + 32); }
+fn ws_config_dispatcher(c)       { return load64(c + 40); }
+
+# ================================================================
+# Middleware — same shape as transport_http, run pre-upgrade
+# ================================================================
+
+fn _ws_check_origin(cfd, buf, blen, config) {
+    var allowed = ws_config_allowed_origins(config);
+    if (allowed == 0) { return 0; }
+    var origin = http_find_header(buf, blen, "Origin");
+    var orig = origin;
+    if (orig == 0) { orig = ""; }
+    if (validate_origin(orig, allowed) != 0) {
+        http_send_status(cfd, HTTP_FORBIDDEN, "Forbidden");
+        return HTTP_FORBIDDEN;
+    }
+    return 0;
+}
+
+fn _ws_check_protocol(cfd, buf, blen, config) {
+    var v = http_find_header(buf, blen, "MCP-Protocol-Version");
+    if (v == 0) {
+        if (ws_config_require_protocol(config) == 1) {
+            http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+            return HTTP_BAD_REQUEST;
+        }
+        return 0;
+    }
+    if (validate_protocol_version(v) != 0) {
+        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        return HTTP_BAD_REQUEST;
+    }
+    return 0;
+}
+
+# ================================================================
+# Upgrade handler — invoked per connection by http_server_run
+# ================================================================
+
+fn _bote_ws_handler(config, cfd, buf, n) {
+    var method = http_get_method(buf, n);
+    var path   = http_get_path(buf, n);
+
+    # Only GET on the configured endpoint is valid for a WS upgrade.
+    if (streq(method, "GET") == 0) {
+        http_send_status(cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed");
+        return 0;
+    }
+    if (streq(http_path_only(path), ws_config_path(config)) == 0) {
+        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        return 0;
+    }
+
+    if (_ws_check_origin(cfd, buf, n, config) != 0) { return 0; }
+    if (_ws_check_protocol(cfd, buf, n, config) != 0) { return 0; }
+
+    var ws = ws_server_handshake(cfd, buf, n);
+    if (ws == 0) {
+        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        return 0;
+    }
+
+    # Each frame is one JSON-RPC message. Loop until peer closes or the
+    # socket errors out (ws_server_recv returns 0).
+    while (1 == 1) {
+        var msg = ws_server_recv(ws);
+        if (msg == 0) { return 0; }
+        var resp = codec_process_message(msg, ws_config_dispatcher(config));
+        if (resp != 0) {
+            ws_server_send_text(ws, resp);
+        }
+    }
+    return 0;
+}
+
+# ================================================================
+# Server entry — defers to stdlib http_server_run
+# ================================================================
+
+fn transport_ws_run(dispatcher, config) {
+    store64(config + 40, dispatcher);
+    return http_server_run(ws_config_addr(config),
+                           ws_config_port(config),
+                           &_bote_ws_handler,
+                           config);
+}

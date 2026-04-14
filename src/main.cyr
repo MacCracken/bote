@@ -18,6 +18,7 @@ include "lib/fnptr.cyr"
 include "lib/chrono.cyr"
 include "lib/tagged.cyr"
 include "lib/net.cyr"
+include "lib/base64.cyr"
 include "lib/freelist.cyr"
 include "lib/thread.cyr"
 include "lib/assert.cyr"
@@ -58,6 +59,8 @@ include "lib/libro_merkle.cyr"
 include "src/transport_unix.cyr"
 include "src/bridge.cyr"
 include "src/transport_streamable.cyr"
+include "lib/ws_server.cyr"
+include "src/transport_ws.cyr"
 fn bote_echo_handler(args) {
     return args;
 }
@@ -88,9 +91,12 @@ fn main() {
     dispatcher_handle(dispatcher, "bote_echo", &bote_echo_handler);
 
     # Mode selection:
-    #   bote                — stdio transport (default)
-    #   bote http [port]    — HTTP transport on port (default 8390)
-    #   bote unix <path>    — Unix socket transport at the given path
+    #   bote                     — stdio transport (default)
+    #   bote http [port]         — HTTP transport (default 8390)
+    #   bote unix <path>         — Unix socket transport
+    #   bote bridge [port]       — TS bridge with CORS (default 8391)
+    #   bote streamable [port]   — Streamable HTTP / SSE (default 8392)
+    #   bote ws [port]           — WebSocket MCP transport (default 8393)
     if (argc() >= 2) {
         if (streq(argv(1), "http") == 1) {
             var port = 8390;
@@ -119,6 +125,13 @@ fn main() {
             if (sport == 0) { sport = 8392; }
             var scfg = streamable_config_new("/mcp", INADDR_LOOPBACK(), sport);
             return transport_streamable_run(dispatcher, scfg);
+        }
+        if (streq(argv(1), "ws") == 1) {
+            var wport = 8393;
+            if (argc() >= 3) { wport = _parse_uint(argv(2)); }
+            if (wport == 0) { wport = 8393; }
+            var wcfg = ws_config_new("/mcp", INADDR_LOOPBACK(), wport);
+            return transport_ws_run(dispatcher, wcfg);
         }
     }
     return transport_stdio_run(dispatcher);

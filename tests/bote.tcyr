@@ -14,6 +14,7 @@ include "lib/fnptr.cyr"
 include "lib/chrono.cyr"
 include "lib/tagged.cyr"
 include "lib/net.cyr"
+include "lib/base64.cyr"
 include "lib/freelist.cyr"
 include "lib/thread.cyr"
 include "lib/sakshi.cyr"
@@ -51,6 +52,11 @@ include "src/discovery.cyr"
 include "src/transport_http.cyr"
 include "src/bridge.cyr"
 include "src/transport_streamable.cyr"
+# NB: lib/ws_server.cyr intentionally NOT included here — its frame I/O isn't
+# exercised in these shape-only tests (live round-trip is covered by the
+# stdlib ws_server conformance tests). Keeping it out also avoids pushing
+# the cyrius 4.5.1 parser past its input-buffer cap.
+include "src/transport_ws.cyr"
 
 # Test handler: echoes its arguments verbatim.
 fn h_echo(args) {
@@ -1154,6 +1160,25 @@ fn main() {
     assert(majra_fp != 0, "majra events fp addressable");
     var majra_sink = event_sink_new(majra_fp, 0);     # ctx=0 → adapter no-ops
     event_sink_publish(majra_sink, "any/topic", "{}");  # safe with ctx=0
+
+    # v1.5.0: WebSocket transport — config + handler wire-up
+    var wcfg = ws_config_new("/mcp", 0x0100007F, 8393);
+    assert(streq(ws_config_path(wcfg), "/mcp") == 1, "wcfg path");
+    assert_eq(ws_config_addr(wcfg), 0x0100007F, "wcfg addr");
+    assert_eq(ws_config_port(wcfg), 8393, "wcfg port");
+    assert_eq(ws_config_allowed_origins(wcfg), 0, "wcfg no default origins");
+    assert_eq(ws_config_require_protocol(wcfg), 0, "wcfg protocol not required");
+    assert_eq(ws_config_dispatcher(wcfg), 0, "wcfg dispatcher unset pre-run");
+    var worigins = vec_new();
+    vec_push(worigins, "http://localhost");
+    ws_config_with_allowed_origins(wcfg, worigins);
+    assert_eq(ws_config_allowed_origins(wcfg), worigins, "wcfg origins wired");
+    ws_config_with_require_protocol(wcfg, 1);
+    assert_eq(ws_config_require_protocol(wcfg), 1, "wcfg require_protocol");
+    assert(&_bote_ws_handler != 0, "_bote_ws_handler fp");
+    var wdisp = dispatcher_new(registry_new());
+    store64(wcfg + 40, wdisp);
+    assert_eq(ws_config_dispatcher(wcfg), wdisp, "wcfg dispatcher wired");
 
     return assert_summary();
 }

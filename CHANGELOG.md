@@ -2,6 +2,62 @@
 
 All notable changes to bote are documented here.
 
+## [1.5.0] — 2026-04-14 — WebSocket transport (RFC 6455)
+
+Adds a sixth MCP transport: **WebSocket**. Each TEXT frame is one JSON-RPC
+2.0 message. Built on `lib/ws_server.cyr` which landed in **cyrius 4.5.1**
+(see `docs/proposals/cyrius-stdlib-ws-server.md` for the design rationale)
+— and on the existing `lib/http_server.cyr` for the HTTP/1.1 Upgrade
+handshake. **~110 LOC** of MCP-specific wire-up on top of the stdlib,
+versus ~400 LOC if hand-rolled.
+
+### Added
+- **`src/transport_ws.cyr`** (~110 LOC):
+  - **`WsConfig`** (48 bytes) — path, addr, port, allowed_origins, require_protocol, dispatcher
+  - **`_bote_ws_handler`** — invoked per connection by `http_server_run`. Enforces Origin + `MCP-Protocol-Version` middleware (same shape as `transport_http`), calls `ws_server_handshake` to upgrade in place, then loops reading TEXT frames and feeding each to `codec_process_message` (control frames — ping/pong/close — handled by stdlib transparently).
+  - **`transport_ws_run(dispatcher, config)`** — defers to stdlib `http_server_run`.
+- **CLI** — `./build/bote ws [port]` (default `8393`).
+- **Proposal artifacts** under `docs/proposals/` (same workflow as the http_server proposal that became cyrius 4.5.0):
+  - `cyrius-stdlib-ws-server.md` — design doc + RFC 6455 spec coverage table
+  - `lib_ws_server.cyr` — reference implementation with inlined SHA-1
+  - `lib_ws_server_example.cyr` — runnable echo server
+
+### Changed
+- **cyrius pin bumped to 4.5.1** (required for `lib/ws_server.cyr`).
+- `src/main.cyr` dispatches on `ws` argv (default port 8393).
+
+### Spec compliance (RFC 6455, delegated to stdlib)
+- ✅ HTTP/1.1 Upgrade handshake, `Sec-WebSocket-Accept = base64(sha1(key + magic))`
+- ✅ `Sec-WebSocket-Version: 13` enforced
+- ✅ Server reads MASKED client frames, writes UNMASKED server frames
+- ✅ Small / medium (16-bit) / large (64-bit) payload length encodings
+- ✅ Text + Binary data frames
+- ✅ Ping / Pong control frames (handled transparently by `ws_server_recv`)
+- ✅ Close handshake with status code + optional reason
+- 🟡 Per-message deflate (RFC 7692) — deferred to stdlib
+- 🟡 Subprotocol negotiation (`Sec-WebSocket-Protocol`) — header read but not enforced
+
+### Tests
+- 10 new unit assertions (**392 total**, was 382):
+  - `WsConfig` defaults + setters (path, addr, port, origins, require_protocol, dispatcher)
+  - `_bote_ws_handler` fn-pointer addressability
+  - Dispatcher wire-up on `transport_ws_run`
+- Live handshake + frame round-trip stays with the stdlib `ws_server` conformance tests (avoids duplicating the protocol suite, and dodges the 4.5.1 parser input-buffer cap we hit when pulling the full `ws_server.cyr` into this file).
+
+### Verified (cyrius 4.5.1)
+- `cyrius test tests/bote.tcyr` → **392 passed, 0 failed**
+- `cyrius build` → `./bote` (with `ws` subcommand binds `127.0.0.1:8393` and returns 101 on `GET /mcp` with a valid `Sec-WebSocket-Key` — verified via local `wscat` / `curl` probe)
+- `cyrius bench` → 10 hot paths unchanged
+- `./build/bote` initialize handshake reports `"version":"1.5.0"`
+
+### Carried forward
+- v1.2.1 libro live-integration heisenbug: still present, still tracked.
+
+### Known cyrius 4.5.1 artifact
+- The parser's input-buffer cap is reached when `tests/bote.tcyr` also includes `lib/ws_server.cyr` directly. Worked around by keeping ws_server out of the test file (the handler's frame I/O is covered by the stdlib conformance tests anyway). Tracked upstream; a follow-up cyrius patch will lift the cap.
+
+---
+
 ## [1.4.0] — 2026-04-14 — Streamable HTTP transport (MCP 2025-11-25)
 
 Closes the **streamable HTTP** spec item from MCP 2025-11-25. Single endpoint

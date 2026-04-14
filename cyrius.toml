@@ -1,17 +1,17 @@
 [package]
 name = "bote"
-version = "1.4.0"
-description = "MCP core service in Cyrius — JSON-RPC 2.0, registry, dispatch, three transports"
+version = "1.5.0"
+description = "MCP core service in Cyrius — JSON-RPC 2.0, registry, dispatch, six transports"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "4.5.0"
+cyrius = "4.5.1"
 
 [build]
 entry = "src/main.cyr"
 output = "bote"
 
 [deps]
-stdlib = ["alloc", "args", "chrono", "fmt", "fnptr", "hashmap", "http_server", "io", "json", "net", "str", "string", "syscalls", "tagged", "vec"]
+stdlib = ["alloc", "args", "base64", "chrono", "fmt", "fnptr", "hashmap", "http_server", "io", "json", "net", "str", "string", "syscalls", "tagged", "vec"]
 
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
