@@ -1,28 +1,20 @@
 # Bote Roadmap
 
-> **Current**: `2.4.0` (cyrius 4.8.1). 8 test files, 603 unit
-> assertions, 10 benchmarks, 4 fuzz harnesses, 6 transports,
-> handler-claims ABI in place (2.0), JWT HS256 + PKCE-S256 (2.2 /
-> 2.3), sandbox adapter (2.1), base64url adoption + compile-unit
-> trim (2.4).
+> **Current**: `2.5.1` (cyrius 4.8.4). 8 test files, **603 unit
+> assertions**, 10 benchmarks, 4 fuzz harnesses, 6 transports,
+> handler-claims ABI plumbed end-to-end, JWT HS256 + RFC 7636 PKCE,
+> bearer + allowlist + JWT validators, pluggable sandbox runner
+> (kavach 3.0 compatible), typed MCP content blocks with
+> annotations, HostRegistry + IPv4/IPv6 SSRF guard.
 >
 > **Spec**: MCP 2025-11-25 | **Compliance**: [spec-compliance.md](../spec-compliance.md)
 >
 > **Bench history**: [benchmarks-rust-v-cyrius.md](../benchmarks-rust-v-cyrius.md)
+>
+> **Full release history**: [CHANGELOG.md](../../CHANGELOG.md).
+> Rust archive preserved at git tag `0.92.0` (retired in v1.0.1).
 
-### Waiting on cyrius 4.8.3 — capacity meter
-
-Per the cyrius lang-agent: **4.8.3** will add a compile-time capacity
-meter (visibility into identifier-table utilization, no language
-change). Bote's **2.5.0 — claims propagation** is queued for immediately
-after that lands. Plan: measure the current test compile unit's actual
-headroom, size the auth → dispatch claims plumbing against that
-number, then land in one focused release instead of try-and-revert.
-
-Do not start 2.5.0 until 4.8.3 ships.
-
-For shipped detail per release: [CHANGELOG.md](../../CHANGELOG.md).
-For Rust history: git tag `0.92.0` (Rust archive retired in v1.0.1).
+2.0 shipped. 2.x is feature-stable on the handler ABI (fn `(args, claims) → result_cstr`) and the six transports; patch releases add capabilities, not shape changes.
 
 ---
 
@@ -30,79 +22,75 @@ For Rust history: git tag `0.92.0` (Rust archive retired in v1.0.1).
 
 | Release | Headline |
 |---|---|
-| **1.0.0** | Cyrius port — protocol core, registry, dispatch, schema, codec, sessions, discovery, four transports |
-| **1.0.1** | Retire `rust-old/` directory; preserve at git tag `0.92.0` |
-| **1.1.0** | AuditSink + EventSink + dispatcher wire-up (sinks-noop default keeps zero overhead) |
-| **1.2.0** | LibroAudit + MajraEvents adapters via `[deps.libro]` + `[deps.majra]` |
-| **1.2.1** | Adapter init-dance docs + cstr→Str boundary fix |
-| **1.3.0** | Adopt cyrius 4.5.0's stdlib `lib/http_server.cyr` (saved ~28 fns) |
-| **1.4.0** | Streamable HTTP transport (MCP 2025-11-25): POST + GET SSE, Last-Event-ID resumption |
-| **1.5.0** | WebSocket transport (RFC 6455) on stdlib `lib/ws_server.cyr` |
-| **1.5.1** | P(-1) hardening: HTTP body-length clamp, `events_after` null guard, lint cleanup |
-| **1.6.0** | `libro_tools` — 5 built-in MCP audit tools |
-| **1.7.0** | Typed MCP content blocks (text / image / audio / resource / resource_link) |
-| **1.8.0** | `HostRegistry` + `ssrf_check` (IPv4 blocklist) |
-| **1.8.1** | Bump cyrius pin to 4.6.2 |
+| **1.0.0 – 1.8.1** | Cyrius port + incremental ships: AuditSink / EventSink, libro + majra adapters, streamable HTTP, WebSocket, libro_tools, content blocks, HostRegistry + IPv4 SSRF |
 | **1.9.0** | Bearer-token middleware (RFC 6750) — opt-in, all four HTTP-family transports |
-| **1.9.1** | IPv6 SSRF blocklist + `content_resource_blob` + `BOTE_BEARER_TOKENS` env-wired auth |
-| **1.9.2** | Bump cyrius pin to 4.7.0 |
+| **1.9.1** | IPv6 SSRF + `content_resource_blob` + `BOTE_BEARER_TOKENS` env-wired auth |
+| **1.9.2 – 1.9.3** | Toolchain bumps (cyrius 4.7.0 → 4.7.1); 2.0-prep doc sweep |
+| **1.9.4** | Security batch A — HTTP smuggling guard, constant-time bearer compare, batch-size cap, jsonx depth cap, urandom-or-fail |
+| **1.9.5** | Security batch B — SSRF rewrite (integer-form / octal / IPv4-mapped IPv6 bypasses, 3 criticals closed) |
+| **1.9.6** | Final pre-2.0 polish — 413 cap, bridge CORS oracle fix, Unix socket mode 0600, `content_with_annotations` |
+| **2.0.0** | Stable release — handler-claims ABI (`fn h(args, claims)`), carry-forward of all 1.9.x hardening |
+| **2.1.0** | Pluggable sandbox runner — kavach 3.0 compatible via fn-pointer + ctx adapter |
+| **2.2.0** | JWT HS256 verifier + validator adapter |
+| **2.3.0** | RFC 7636 PKCE-S256 helpers (verifier gen + S256 challenge) |
+| **2.3.1** | Cleanup — remove proposal docs that landed upstream |
+| **2.4.0** | Bump cyrius 4.8.1 + base64url adoption + compile-unit trim |
+| **2.5.0** | Claims propagation through transports (validator's return threads to handler) |
+| **2.5.1** | Restore audit_libro + events_majra tests after cyrius 4.8.4 retag |
+
+See [CHANGELOG.md](../../CHANGELOG.md) for the full detail per release.
 
 ---
 
-## Headed for v2.0
+## Forward roadmap
 
-The 1.x line is feature-stable; v2.0 is the cleanup + completion ship.
+### Next candidates (no blockers)
 
-### Must-have for 2.0
-
-| Item | Effort | Status |
+| Item | Effort | Notes |
 |---|---|---|
-| **Security audit + repair** — 0-day / CVE-class external research and fixes (header injection, timing-safe token compare, JSON depth caps, request-size limits, error-message disclosure, etc.) | Medium | In progress |
-| **`content_with_annotations`** (audience + priority MCP optional metadata on any block) | Low | Reverted from 1.9.1 — tipped the cyrius 4.5.1 / 4.6.2 identifier-buffer ceiling. Lands when 4.7.1 frees room. |
-| **Claims propagation to handlers** — handler signature carries the validator's claims so handlers can authorize per-tool | Medium-High | Handler-ABI change; want one shot to land cleanly with the right shape. |
-| **OAuth 2.1 / PKCE-S256** — token acquisition flow on top of the existing bearer substrate | High | Bearer middleware (1.9.0) already provides the validator surface. |
-| **JWT verifier helper** (`auth_validator_jwt_hs256` / `_rs256`) — common case for production deployments | Medium | Will reuse `lib/sigil.cyr` for SHA-256; RS256 needs RSA. |
-| **Final hardening sweep** (P(-1) audit) before tagging 2.0 | Medium | Standing process; runs once 4.7.1 + above land. |
+| **`schema_compile` + `auth_bearer_check` benches** | Low | Close out the "should add to Cyrius" list in `docs/benchmarks-rust-v-cyrius.md`. `auth_bearer_check` benchmark validates the no-overhead claim when the validator is unset. |
+| **CHANGELOG `[Unreleased]` section** | Low | Conventional Keep-a-Changelog flow; avoids the "TODO" placeholder we've been rewriting each release. |
+| **OAuth 2.1 authorization-code flow** (bote-as-AS) | High | Out of scope for MCP core; bote is the resource server. Flagged as explicitly deferred — consumers compose bote with their own AS layer. |
+| **`HostRegistry` hot-reload from config file** | Medium | Useful for deployments that rotate allowed upstreams without a restart. |
+| **Block-level annotations propagation through `wrap_tool_result`** | Low | `content_with_annotations` shipped in 1.9.6; making the bridge preserve annotations on unwrapped tool results is the last mile. |
 
-### Nice-to-have for 2.0
+### Blocked on cyrius / external
+
+| Item | Waiting on |
+|---|---|
+| **Threaded streaming dispatch** (`dispatcher_dispatch_streaming`) | cyrius `lib/thread.cyr` MPSC + `lib/async.cyr` cancellation polling firming up. Data primitives (`ProgressUpdate`, `CancellationToken`) already in place. |
+| **`$/cancelRequest` mid-stream handling** | Streaming dispatch first. |
+| **Slowloris recv timeout** (audit H5) | `sock_set_recv_timeout` helper in stdlib `lib/net.cyr`. |
+| **WebSocket `Sec-WebSocket-Key` length validation** (audit M4) | stdlib `lib/ws_server.cyr` fix. |
+| **WebSocket arena-per-frame allocator** | stdlib `fl_free` support for long-lived connections. |
+| **WS subprotocol negotiation** (`Sec-WebSocket-Protocol`) | Header is read; enforcement needs a registry design. |
+| **WS per-message deflate** (RFC 7692) | LZ77 + Huffman in stdlib; likely via a future `lib/dynlib.cyr` zlib binding. |
+| **DNS resolution for hostname SSRF** | cyrius `getaddrinfo` stub. Production callers pair with a network-policy egress block. |
+| **JWT RS256 / ES256** | sigil RSA / ECDSA primitives. HS256 already shipped in 2.2.0. |
+
+### Carried forward (not release-blocking)
 
 | Item | Notes |
 |---|---|
-| **DNS resolution for hostname classification** in `ssrf_check` | A name resolving to `127.0.0.1` (e.g. `127.0.0.1.nip.io`) currently passes the conservative blocklist. Production deployments pair with a network policy; a cyrius DNS stub would let us catch it in-process. |
-| **Block-level annotations propagation through `wrap_tool_result`** | Once `content_with_annotations` lands. |
-| **`schema_compile` benchmark** | Startup cost matters for projects with many tools. |
-| **`auth_bearer_check` benchmark** | Validate the no-overhead claim when validator unset. |
-| **CHANGELOG migration to "[Unreleased]" section** | Conventional Keep-a-Changelog flow. |
-
-### Deferred past 2.0 (waiting on cyrius / external)
-
-| Item | Blocked by |
-|---|---|
-| **Threaded streaming dispatch** (`dispatcher_dispatch_streaming`) | cyrius `lib/thread.cyr` MPSC + `lib/async.cyr` cancellation polling firming up; data primitives (`ProgressUpdate`, `CancellationToken`) already in place. |
-| **`$/cancelRequest` mid-stream handling** | Streaming dispatch first. |
-| **WebSocket per-connection arena allocator** | Long-lived WS connections accumulate per-frame allocs in the bump allocator; needs `fl_free` support or arena-per-message lifetime. |
-| **`kavach` v2 sandbox integration** | Kavach v2 hardening at a stable release. |
-| **Live libro integration heisenbug** (v1.2.1 carried) | Heap-layout sensitivity; investigation pending. Does not affect the 1.6.0+ libro_tools (read-only). |
-| **WS subprotocol negotiation** (`Sec-WebSocket-Protocol`) | Header is read but not enforced; consumers can inspect. |
-| **WS per-message deflate** (RFC 7692) | Significant code (LZ77 + Huffman); will hang off a future `lib/dynlib.cyr` zlib binding. |
-| **HostRegistry persistence / hot-reload** | Registry built in-process from config; no file watch yet. |
+| **v1.2.1 libro-growth heisenbug** | Heap-layout sensitivity when the chain grows while libro+majra+bote are all loaded. Does not affect 1.6.0+ `libro_tools` (read-only). Isolated probes prove the adapter is correct. |
+| **Per-thread request buffers** | cyrius-side; affects future threaded dispatch. |
 
 ---
 
 ## Feature freeze
 
-The 1.x line preserves the data shapes frozen in 1.0.0:
+Data shapes frozen in 2.0.0:
 - `JsonRpcRequest` / `Response` / `Error`
 - `ToolDef` (with `compiled` slot — additions allowed at the tail)
 - `ToolSchema` / `ToolAnnotations`
 - `BoteError` (12 tag variants — additions allowed at the tail)
 - `HttpConfig` / `BridgeConfig` / `StreamableConfig` / `WsConfig` / `McpSession` / `SessionStore`
 - `CompiledSchema` / `PropertyDef`
+- **Handler ABI**: `fn h(args_cstr, claims) → result_cstr` (the breaking change 2.0 made)
 
-Config structs grew in 1.9.0 (bearer slots **appended** at the end of
-each transport config — existing offsets preserved). 2.0 may make
-breaking changes if claims-propagation requires a handler-signature
-ABI change; that's the primary 2.0 reason.
+2.x may append fields at the tail of any struct. Any shape change
+that removes / reorders fields or changes a fn signature triggers
+3.0.
 
 ---
 
@@ -126,20 +114,19 @@ Status against current cyrius (4.8.4):
 | `lib/http_server.cyr` stdlib primitive | ✅ Shipped in 4.5.0 (bote adopted in 1.3.0) |
 | `lib/ws_server.cyr` stdlib primitive | ✅ Shipped in 4.5.1 (bote adopted in 1.5.0) |
 | Identifier-buffer cap | ✅ Raised to 131072 bytes (4.6.2) |
-| Function-table cap | ✅ Raised from 2048 to 4096 (4.7.1) |
-| `BUILD_METHOD_NAME` scratch corruption (misleading `lib/assert.cyr:3` error) | ✅ Fixed in 4.7.1 at the `GNPOS(S)` scratch anchor |
+| Function-table cap | ✅ Raised 2048 → 4096 (4.7.1) |
+| `BUILD_METHOD_NAME` scratch corruption (misleading `lib/assert.cyr:3` error) | ✅ Fixed in 4.7.1 |
 | `lib/base64.cyr` URL-safe variant | ✅ Shipped in 4.8.1 (bote adopted in 2.4.0) |
 | Capacity meter (`CYRIUS_STATS=1` + `cyrius capacity` + `ERR_EXPECT` diagnostic) | ✅ Shipped in 4.8.3 |
 | Path-traversal rejection on `../sibling` dep paths | ✅ Fixed in 4.8.4 |
 | Include-once cap 64 → 256 | ✅ Raised in 4.8.4 |
 | `PP_IFDEF_PASS` nested-include fixpoint | ✅ Shipped in 4.8.4 |
-| 4.8.4 release-binary vs alpha2 skew | ✅ Closed by the 2026-04-14 retag; bote 2.5.1 restored full dep-graph tests |
+| 4.8.4 release-binary vs alpha2 skew | ✅ Closed by 2026-04-14 retag; bote 2.5.1 restored full dep-graph tests |
 | Per-thread request buffers (process-global today) | 🟡 Tracked upstream; affects future threaded dispatch |
 | Bump allocator without `fl_free` for general use | 🟡 Tracked; affects WS arena work |
 
-No current open bugs. Future reports will land back under `docs/bugs/`
-during active triage and be moved to `docs/resolved-lang-issues.md`
-when the upstream fix + bote adoption closes the loop.
+No current open bugs. Future reports land under `docs/bugs/` during
+active triage and move to `docs/resolved-lang-issues.md` when closed.
 
 ---
 
@@ -150,3 +137,4 @@ when the upstream fix + bote adoption closes the loop.
 - **Workflow orchestration** — that's szal.
 - **Agent lifecycle** — that's daimon.
 - **Storage** — that's patra (libro for audit, patra for general).
+- **Authorization server** — bote is the resource server. OAuth 2.1 AS flow belongs alongside bote, not inside.
