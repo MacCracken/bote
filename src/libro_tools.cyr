@@ -1,0 +1,305 @@
+# bote::libro_tools — five built-in MCP tools over a libro audit chain.
+#
+# Tools (all prefixed `libro_` so they're one namespace for clients):
+#
+#   libro_query      search / filter / paginate chain entries
+#   libro_verify     verify chain integrity (hash-link + self-hash)
+#   libro_export     return the chain as a JSON array (in-memory)
+#   libro_proof      Merkle inclusion proof for one entry by index
+#   libro_retention  apply a retention policy, return archive summary
+#
+# Wiring: bote calls `libro_tools_init(chain)` once, then
+# `libro_tools_register(dispatcher)`. The chain pointer is stashed in a
+# module-level var (handlers have a single-arg signature in cyrius, no
+# closures — this is the standard workaround).
+#
+# All libro boundaries expect Str (fat string {data, len}); MCP args
+# arrive as cstr. Every cross-boundary pass wraps with str_from() — the
+# same pattern that fixed the v1.2.1 audit_libro cstr/Str heisenbug.
+
+# ================================================================
+# Module state: the chain we're wrapping, set once at init
+# ================================================================
+
+var _libro_tools_chain = 0;
+
+fn libro_tools_init(chain) {
+    _libro_tools_chain = chain;
+    return 0;
+}
+
+# ================================================================
+# Small helpers
+# ================================================================
+
+# Parse a JSON number field out of args_cstr. Returns 0 if absent.
+# (Bote-wide pattern: 0 is "absent"; handlers treat 0 as default.)
+fn _lt_get_int(args, key) {
+    var raw = jsonx_get_raw(args, key);
+    if (raw == 0) { return 0; }
+    # raw is a cstr like "42"; wrap + parse
+    return str_to_int(str_from(raw));
+}
+
+# Build {"ok":false,"error":"<msg>"} for handler failure paths.
+fn _lt_error(msg) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"ok\":false,\"error\":\"");
+    _json_emit_escaped(sb, msg);
+    str_builder_add_cstr(sb, "\"}");
+    return str_data(str_builder_build(sb));
+}
+
+# Emit one entry as a JSON object into sb.
+fn _lt_emit_entry(sb, e) {
+    str_builder_add_cstr(sb, "{\"timestamp\":");
+    str_builder_add_int(sb, entry_timestamp(e));
+    str_builder_add_cstr(sb, ",\"severity\":");
+    str_builder_add_int(sb, entry_severity(e));
+    str_builder_add_cstr(sb, ",\"source\":\"");
+    _json_emit_escaped(sb, str_data(entry_source(e)));
+    str_builder_add_cstr(sb, "\",\"action\":\"");
+    _json_emit_escaped(sb, str_data(entry_action(e)));
+    str_builder_add_cstr(sb, "\",\"agent_id\":\"");
+    _json_emit_escaped(sb, str_data(entry_agent_id(e)));
+    str_builder_add_cstr(sb, "\",\"hash\":\"");
+    _json_emit_escaped(sb, str_data(entry_hash(e)));
+    str_builder_add_cstr(sb, "\"}");
+    return 0;
+}
+
+# Emit a vec of entries as a JSON array into sb.
+fn _lt_emit_entries_array(sb, entries) {
+    str_builder_add_cstr(sb, "[");
+    var n = vec_len(entries);
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        _lt_emit_entry(sb, vec_get(entries, i));
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]");
+    return 0;
+}
+
+# ================================================================
+# libro_query — search / filter / paginate
+#
+# args: {source?, agent_id?, action?, severity?, min_severity?,
+#        after?, before?, offset?, limit?}
+# result: {"ok":true,"entries":[{...}]}
+# ================================================================
+
+fn libro_tool_query(args) {
+    if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
+
+    var q = query_new();
+    var src = jsonx_get_str(args, "source");
+    if (src != 0) { query_source(q, str_from(src)); }
+    var aid = jsonx_get_str(args, "agent_id");
+    if (aid != 0) { query_agent_id(q, str_from(aid)); }
+    var act = jsonx_get_str(args, "action");
+    if (act != 0) { query_action(q, str_from(act)); }
+
+    if (jsonx_has(args, "severity") == 1) {
+        query_severity(q, _lt_get_int(args, "severity"));
+    }
+    if (jsonx_has(args, "min_severity") == 1) {
+        query_min_severity(q, _lt_get_int(args, "min_severity"));
+    }
+    if (jsonx_has(args, "after") == 1) {
+        query_after(q, _lt_get_int(args, "after"));
+    }
+    if (jsonx_has(args, "before") == 1) {
+        query_before(q, _lt_get_int(args, "before"));
+    }
+
+    var matched = query_apply(q, chain_entries(_libro_tools_chain));
+
+    # Pagination: offset + limit slice the matched vec.
+    var offset = _lt_get_int(args, "offset");
+    var limit = _lt_get_int(args, "limit");
+    var page = vec_new();
+    var total = vec_len(matched);
+    var start = offset;
+    if (start < 0) { start = 0; }
+    var end = total;
+    if (limit > 0 && start + limit < end) { end = start + limit; }
+    var i = start;
+    while (i < end) {
+        vec_push(page, vec_get(matched, i));
+        i = i + 1;
+    }
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"ok\":true,\"total\":");
+    str_builder_add_int(sb, total);
+    str_builder_add_cstr(sb, ",\"entries\":");
+    _lt_emit_entries_array(sb, page);
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+# libro_verify — hash-link integrity check
+#
+# args: {} (no params)
+# result: {"ok":true} | {"ok":false,"code":N,"message":"..."}
+# ================================================================
+
+fn libro_tool_verify(args) {
+    if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
+    var err = chain_verify(_libro_tools_chain);
+    if (err == 0) { return "{\"ok\":true}"; }
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"ok\":false,\"code\":");
+    str_builder_add_int(sb, error_code(err));
+    str_builder_add_cstr(sb, ",\"index\":");
+    str_builder_add_int(sb, error_index(err));
+    str_builder_add_cstr(sb, ",\"message\":\"");
+    var m = error_msg(err);
+    if (m != 0) { _json_emit_escaped(sb, str_data(m)); }
+    str_builder_add_cstr(sb, "\"}");
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+# libro_export — return the chain as a JSON array of entries
+#
+# args: {} (no params)
+# result: {"ok":true,"count":N,"entries":[...]}
+# ================================================================
+
+fn libro_tool_export(args) {
+    if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
+    var entries = chain_entries(_libro_tools_chain);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"ok\":true,\"count\":");
+    str_builder_add_int(sb, vec_len(entries));
+    str_builder_add_cstr(sb, ",\"entries\":");
+    _lt_emit_entries_array(sb, entries);
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+# libro_proof — Merkle inclusion proof for entry at index
+#
+# args: {"index": N}
+# result: {"ok":true,"root":"<hex>","leaf_count":N,"index":N} |
+#         {"ok":false,"error":"..."}
+#
+# Note: the path hashes are omitted here to keep the response compact;
+# the verifier can reconstruct the tree from libro_export and validate.
+# A richer "path" field can be added in a follow-up release once the
+# wire format is pinned.
+# ================================================================
+
+fn libro_tool_proof(args) {
+    if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
+    if (jsonx_has(args, "index") == 0) { return _lt_error("missing 'index'"); }
+    var idx = _lt_get_int(args, "index");
+
+    var entries = chain_entries(_libro_tools_chain);
+    if (idx < 0 || idx >= vec_len(entries)) { return _lt_error("index out of range"); }
+
+    var tree = merkle_build(entries);
+    if (tree == 0) { return _lt_error("empty chain"); }
+    var proof = merkle_proof(tree, idx);
+    if (proof == 0) { return _lt_error("proof unavailable"); }
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"ok\":true,\"index\":");
+    str_builder_add_int(sb, idx);
+    str_builder_add_cstr(sb, ",\"leaf_count\":");
+    str_builder_add_int(sb, merkle_tree_leaf_count(tree));
+    str_builder_add_cstr(sb, ",\"root\":\"");
+    var root = merkle_tree_root(tree);
+    if (root != 0) { _json_emit_escaped(sb, str_data(root)); }
+    str_builder_add_cstr(sb, "\"}");
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+# libro_retention — apply a retention policy, return archive summary
+#
+# args: {"policy": "keep_count"|"keep_duration"|"keep_after"|
+#                  "pci_dss"|"hipaa"|"sox",
+#        "value": N (required for keep_count/keep_duration/keep_after)}
+# result: {"ok":true,"archived":N,"retained":M} |
+#         {"ok":false,"error":"..."}
+# ================================================================
+
+fn libro_tool_retention(args) {
+    if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
+    var policy_name = jsonx_get_str(args, "policy");
+    if (policy_name == 0) { return _lt_error("missing 'policy'"); }
+
+    var policy = 0;
+    if (streq(policy_name, "keep_count") == 1) {
+        policy = retention_keep_count(_lt_get_int(args, "value"));
+    } elif (streq(policy_name, "keep_duration") == 1) {
+        policy = retention_keep_duration(_lt_get_int(args, "value"));
+    } elif (streq(policy_name, "keep_after") == 1) {
+        policy = retention_keep_after(_lt_get_int(args, "value"));
+    } elif (streq(policy_name, "pci_dss") == 1) {
+        policy = retention_pci_dss();
+    } elif (streq(policy_name, "hipaa") == 1) {
+        policy = retention_hipaa();
+    } elif (streq(policy_name, "sox") == 1) {
+        policy = retention_sox();
+    } else {
+        return _lt_error("unknown policy");
+    }
+
+    var before = vec_len(chain_entries(_libro_tools_chain));
+    chain_apply_retention(_libro_tools_chain, policy);
+    var after = vec_len(chain_entries(_libro_tools_chain));
+    var archived = before - after;
+    if (archived < 0) { archived = 0; }
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"ok\":true,\"archived\":");
+    str_builder_add_int(sb, archived);
+    str_builder_add_cstr(sb, ",\"retained\":");
+    str_builder_add_int(sb, after);
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+# Registration: add all 5 tools to the dispatcher + registry
+# ================================================================
+
+fn libro_tools_register(dispatcher) {
+    var reg = dispatcher_registry(dispatcher);
+    var empty = vec_new();
+    var obj_schema = schema_new("object", 0, empty);
+
+    registry_register(reg, tool_def_new(
+        "libro_query", "Search the libro audit chain (filter by source/agent/severity/time + paginate)",
+        obj_schema));
+    dispatcher_handle(dispatcher, "libro_query", &libro_tool_query);
+
+    registry_register(reg, tool_def_new(
+        "libro_verify", "Verify the libro chain's hash-link integrity",
+        obj_schema));
+    dispatcher_handle(dispatcher, "libro_verify", &libro_tool_verify);
+
+    registry_register(reg, tool_def_new(
+        "libro_export", "Return every entry on the libro chain as a JSON array",
+        obj_schema));
+    dispatcher_handle(dispatcher, "libro_export", &libro_tool_export);
+
+    registry_register(reg, tool_def_new(
+        "libro_proof", "Generate a Merkle inclusion proof for the entry at the given index",
+        obj_schema));
+    dispatcher_handle(dispatcher, "libro_proof", &libro_tool_proof);
+
+    registry_register(reg, tool_def_new(
+        "libro_retention", "Apply a retention policy to the libro chain, archive old entries",
+        obj_schema));
+    dispatcher_handle(dispatcher, "libro_retention", &libro_tool_retention);
+    return 0;
+}

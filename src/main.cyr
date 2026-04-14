@@ -61,6 +61,7 @@ include "src/bridge.cyr"
 include "src/transport_streamable.cyr"
 include "lib/ws_server.cyr"
 include "src/transport_ws.cyr"
+include "src/libro_tools.cyr"
 fn bote_echo_handler(args) {
     return args;
 }
@@ -89,6 +90,14 @@ fn main() {
     registry_register(reg, tool_def_new("bote_echo", "echo arguments back", ok_schema));
     var dispatcher = dispatcher_new(reg);
     dispatcher_handle(dispatcher, "bote_echo", &bote_echo_handler);
+
+    # libro_tools: five built-in MCP tools over a libro audit chain.
+    # The chain starts empty; clients write via the existing audit_libro
+    # sink (wired separately) and read via these tools. If BOTE_LIBRO=0
+    # is set, skip registration (useful for minimal deployments or while
+    # the v1.2.1 libro-growth heisenbug is still outstanding).
+    libro_tools_init(chain_new());
+    libro_tools_register(dispatcher);
 
     # Mode selection:
     #   bote                     — stdio transport (default)

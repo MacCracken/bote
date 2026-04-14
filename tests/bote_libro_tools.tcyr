@@ -1,0 +1,107 @@
+# bote_libro_tools.tcyr — unit tests for src/libro_tools.cyr
+#
+# Split out of bote.tcyr because including the libro_tools dependency
+# graph (all 9 libro modules + bote's schema/registry/dispatch) in
+# addition to the full bote test surface trips the cyrius 4.5.1
+# parser identifier-buffer cap. See docs/bugs/cyrius-4.5.1-...
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/sakshi.cyr"
+include "lib/bigint.cyr"
+include "lib/sigil.cyr"
+include "lib/libro_error.cyr"
+include "lib/libro_hasher.cyr"
+include "lib/libro_entry.cyr"
+include "lib/libro_verify.cyr"
+include "lib/libro_query.cyr"
+include "lib/libro_retention.cyr"
+include "lib/libro_chain.cyr"
+include "lib/libro_export.cyr"
+include "lib/libro_merkle.cyr"
+include "lib/assert.cyr"
+
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/dispatch.cyr"
+include "src/schema.cyr"
+include "src/libro_tools.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ---------------- Registration ----------------
+    libro_tools_init(chain_new());
+    var reg = registry_new();
+    var d = dispatcher_new(reg);
+    libro_tools_register(d);
+
+    assert_eq(map_has(dispatcher_handlers(d), "libro_query"), 1, "libro_query registered");
+    assert_eq(map_has(dispatcher_handlers(d), "libro_verify"), 1, "libro_verify registered");
+    assert_eq(map_has(dispatcher_handlers(d), "libro_export"), 1, "libro_export registered");
+    assert_eq(map_has(dispatcher_handlers(d), "libro_proof"), 1, "libro_proof registered");
+    assert_eq(map_has(dispatcher_handlers(d), "libro_retention"), 1, "libro_retention registered");
+
+    # ---------------- Handler shape on empty chain ----------------
+    # Each tool must return a JSON cstr (not 0, starts with '{').
+
+    var qr = libro_tool_query("{}");
+    assert(qr != 0, "query returns non-null");
+    assert_eq(load8(qr), 123, "query returns '{'");
+
+    var vr = libro_tool_verify("{}");
+    assert(vr != 0, "verify returns non-null");
+    assert_eq(load8(vr), 123, "verify returns '{'");
+
+    var er = libro_tool_export("{}");
+    assert(er != 0, "export returns non-null");
+    assert_eq(load8(er), 123, "export returns '{'");
+
+    # libro_proof requires {"index": N}
+    var pr_missing = libro_tool_proof("{}");
+    assert(pr_missing != 0, "proof missing index returns non-null");
+
+    var pr_oor = libro_tool_proof("{\"index\":99}");
+    assert(pr_oor != 0, "proof OOR returns non-null");
+
+    # libro_retention requires {"policy": "..."}
+    var rr_missing = libro_tool_retention("{}");
+    assert(rr_missing != 0, "retention missing policy returns non-null");
+
+    var rr_bad = libro_tool_retention("{\"policy\":\"not_a_policy\"}");
+    assert(rr_bad != 0, "retention bad policy returns non-null");
+
+    # Each preset policy is addressable (empty chain → 0 archived, 0 retained)
+    var rr_pci = libro_tool_retention("{\"policy\":\"pci_dss\"}");
+    assert(rr_pci != 0, "retention pci_dss returns non-null");
+    var rr_kc = libro_tool_retention("{\"policy\":\"keep_count\",\"value\":10}");
+    assert(rr_kc != 0, "retention keep_count returns non-null");
+
+    # ---------------- Handler fn pointers are addressable ----------------
+    assert(&libro_tool_query != 0, "query fp addressable");
+    assert(&libro_tool_verify != 0, "verify fp addressable");
+    assert(&libro_tool_export != 0, "export fp addressable");
+    assert(&libro_tool_proof != 0, "proof fp addressable");
+    assert(&libro_tool_retention != 0, "retention fp addressable");
+
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

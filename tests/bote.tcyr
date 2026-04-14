@@ -55,7 +55,8 @@ include "src/transport_streamable.cyr"
 # NB: lib/ws_server.cyr intentionally NOT included here — its frame I/O isn't
 # exercised in these shape-only tests (live round-trip is covered by the
 # stdlib ws_server conformance tests). Keeping it out also avoids pushing
-# the cyrius 4.5.1 parser past its input-buffer cap.
+# the cyrius 4.5.1 parser past its input-buffer cap. Same reason splits
+# libro_tools into tests/bote_libro_tools.tcyr.
 include "src/transport_ws.cyr"
 
 # Test handler: echoes its arguments verbatim.
@@ -1183,6 +1184,9 @@ fn main() {
     var wdisp = dispatcher_new(registry_new());
     store64(wcfg + 40, wdisp);
     assert_eq(ws_config_dispatcher(wcfg), wdisp, "wcfg dispatcher wired");
+
+    # v1.6.0: libro_tools tests live in tests/bote_libro_tools.tcyr
+    # (splitting to stay under the cyrius 4.5.1 parser identifier-buffer cap).
 
     return assert_summary();
 }

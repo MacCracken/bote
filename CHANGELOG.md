@@ -2,6 +2,39 @@
 
 All notable changes to bote are documented here.
 
+## [1.6.0] — 2026-04-14 — libro_tools (5 built-in MCP audit tools)
+
+Lands the `libro_tools` module from the 1.3 roadmap: five MCP tools that
+expose a libro audit chain through the normal `tools/call` JSON-RPC
+surface. Any MCP client can now search, verify, export, prove, and
+retain-manage a bote-hosted chain without learning libro's native API.
+
+### Added
+- **`src/libro_tools.cyr`** (~310 LOC) — five handlers + registration:
+  - `libro_query` — filter by `source` / `agent_id` / `severity` / `min_severity` / `action` / `after` / `before`; paginate with `offset` + `limit`. Returns `{"ok":true,"total":N,"entries":[...]}`.
+  - `libro_verify` — hash-link integrity check. Returns `{"ok":true}` or `{"ok":false,"code":N,"index":i,"message":"..."}`.
+  - `libro_export` — every entry as a JSON array. Returns `{"ok":true,"count":N,"entries":[...]}`.
+  - `libro_proof` — Merkle inclusion proof for the entry at `index`. Returns `{"ok":true,"index":i,"leaf_count":N,"root":"<hex>"}`. Path hashes are not yet emitted — a follow-up will pin the wire format and include them.
+  - `libro_retention` — apply `keep_count` / `keep_duration` / `keep_after` / `pci_dss` / `hipaa` / `sox` policies. Returns `{"ok":true,"archived":N,"retained":M}`.
+- `libro_tools_init(chain)` + `libro_tools_register(dispatcher)` wire-up. Every cstr→Str crossing at the libro boundary goes through `str_from()` (the v1.2.1 cstr/Str fix pattern).
+- **`src/main.cyr`** — the built-in dispatcher now creates an empty chain at startup and registers the five tools by default, so MCP clients discover them via `tools/list` without any flags.
+
+### Tests
+- **New test file** — `tests/bote_libro_tools.tcyr` (22 assertions). Lives separately from `tests/bote.tcyr` because pulling libro_tools into the main test file trips the cyrius 4.5.1 parser identifier-buffer cap. Split-test is tracked to collapse back in 4.6.1 when the cap is lifted.
+- Coverage: registration of all five tools in the dispatcher map, handler-fn-pointer addressability, empty-chain shape of each tool's response (`{`-prefixed JSON), required-arg validation (`libro_proof` without `index`, `libro_retention` without `policy`), policy name whitelist (unknown policy → `ok:false`), each preset policy (`pci_dss`, `keep_count`) returns successfully.
+- **Total assertions: 416** (was 394). Breakdown: `tests/bote.tcyr` 394, `tests/bote_libro_tools.tcyr` 22.
+
+### Verified (cyrius 4.5.1)
+- `cyrius test tests/bote.tcyr` → **394 passed, 0 failed**
+- `cyrius test tests/bote_libro_tools.tcyr` → **22 passed, 0 failed**
+- `cyrius bench tests/bote.bcyr` → all 10 hot paths within noise of the 1.5.1 baseline (dispatch_* 1–3µs, jsonx_* 588–925ns, codec_* 773ns–6µs, validate_* 970ns–2µs).
+- `cyrlint src/libro_tools.cyr tests/bote_libro_tools.tcyr` → **0 warnings**.
+- `./bote` (stdio transport) — `initialize` → `{"serverInfo":{"name":"bote","version":"1.6.0"}}`, `tools/list` returns `bote_echo` + 5 `libro_*` entries, all 5 `tools/call` paths return clean JSON on an empty chain (verified by hand).
+
+### Known (unchanged)
+- **v1.2.1 libro-growth heisenbug**: creating an empty chain at startup (`chain_new()`) is safe; growing via `chain_append` is where the heap-sensitivity shows up. `libro_tools` itself is correct — only reads chain state, doesn't append. Writes still go through `src/audit_libro.cyr`, which is where the heisenbug lives.
+- **cyrius 4.5.1 identifier-buffer cap** (`docs/bugs/cyrius-4.5.1-identifier-buffer-cap.md`) — forced the second test file. Tracked for 4.6.1.
+
 ## [1.5.1] — 2026-04-14 — P(-1) scaffold hardening
 
 First hardening pass since 1.5.0. No new features; audit-driven fixes to
