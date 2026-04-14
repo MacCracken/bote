@@ -1,4 +1,4 @@
-# bote.tcyr — error + protocol unit tests
+# bote.tcyr — error + protocol + registry unit tests
 # Run: cyrius test tests/bote.tcyr
 
 include "lib/string.cyr"
@@ -7,10 +7,14 @@ include "lib/alloc.cyr"
 include "lib/vec.cyr"
 include "lib/str.cyr"
 include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/json.cyr"
 include "lib/assert.cyr"
 
 include "src/error.cyr"
 include "src/protocol.cyr"
+include "src/registry.cyr"
 
 fn main() {
     alloc_init();
@@ -100,6 +104,120 @@ fn main() {
     # ---------------- protocol: response preserves arbitrary id ----------------
     var rid = resp_success("\"abc-123\"", "{}");
     assert(streq(resp_id(rid), "\"abc-123\"") == 1, "string id preserved");
+
+    # ---------------- registry: empty ----------------
+    var reg = registry_new();
+    assert_eq(registry_is_empty(reg), 1, "new reg empty");
+    assert_eq(registry_len(reg), 0, "new reg len 0");
+    assert_eq(registry_get(reg, "anything"), 0, "get on empty returns 0");
+    assert_eq(vec_len(registry_list(reg)), 0, "list on empty returns empty vec");
+
+    # ---------------- registry: register + get + contains ----------------
+    var req_path = vec_new();
+    vec_push(req_path, "path");
+    var schema_a = schema_new("object", 0, req_path);
+    var tool_a = tool_def_new("scan", "scan tool", schema_a);
+    registry_register(reg, tool_a);
+    assert_eq(registry_contains(reg, "scan"), 1, "contains registered");
+    assert_eq(registry_contains(reg, "nope"), 0, "contains absent");
+    assert_eq(registry_len(reg), 1, "len after register");
+    var got = registry_get(reg, "scan");
+    assert(got != 0, "get returns def");
+    assert(streq(tool_def_name(got), "scan") == 1, "got correct name");
+    assert(streq(tool_def_description(got), "scan tool") == 1, "got description");
+
+    # ---------------- registry: list returns insertion order ----------------
+    var schema_b = schema_new("object", 0, vec_new());
+    registry_register(reg, tool_def_new("alpha", "a tool", schema_b));
+    registry_register(reg, tool_def_new("beta", "b tool", schema_b));
+    var lst = registry_list(reg);
+    assert_eq(vec_len(lst), 3, "list has 3");
+    assert(streq(tool_def_name(vec_get(lst, 0)), "scan") == 1, "list[0] = scan");
+    assert(streq(tool_def_name(vec_get(lst, 1)), "alpha") == 1, "list[1] = alpha");
+    assert(streq(tool_def_name(vec_get(lst, 2)), "beta") == 1, "list[2] = beta");
+
+    # ---------------- registry: register overwrites ----------------
+    var schema_dup = schema_new("object", 0, vec_new());
+    registry_register(reg, tool_def_new("scan", "updated", schema_dup));
+    assert_eq(registry_len(reg), 3, "len unchanged on overwrite");
+    assert(streq(tool_def_description(registry_get(reg, "scan")), "updated") == 1, "description updated");
+
+    # ---------------- registry: validate_params ok with required field ----------------
+    var reg2 = registry_new();
+    var rp2 = vec_new();
+    vec_push(rp2, "path");
+    var schema_p = schema_new("object", 0, rp2);
+    registry_register(reg2, tool_def_new("scan", "scan tool", schema_p));
+    var ok_err = registry_validate_params(reg2, "scan", "{\"path\":\"/tmp\"}");
+    assert_eq(ok_err, 0, "validate ok with field");
+
+    # ---------------- registry: validate_params missing field ----------------
+    var miss_err = registry_validate_params(reg2, "scan", "{}");
+    assert(miss_err != 0, "validate err on missing");
+    assert_eq(bote_err_tag(miss_err), ERR_INVALID_PARAMS, "missing -> INVALID_PARAMS");
+
+    # ---------------- registry: validate_params unknown tool ----------------
+    var unk_err = registry_validate_params(reg2, "nope", "{}");
+    assert(unk_err != 0, "validate err on unknown");
+    assert_eq(bote_err_tag(unk_err), ERR_TOOL_NOT_FOUND, "unknown -> TOOL_NOT_FOUND");
+
+    # ---------------- registry: validate rejects non-object params ----------------
+    var nob1 = registry_validate_params(reg2, "scan", "null");
+    assert(nob1 != 0, "null rejected");
+    assert_eq(bote_err_tag(nob1), ERR_INVALID_PARAMS, "null -> INVALID_PARAMS");
+    var nob2 = registry_validate_params(reg2, "scan", "[1,2]");
+    assert(nob2 != 0, "array rejected");
+    var nob3 = registry_validate_params(reg2, "scan", "42");
+    assert(nob3 != 0, "number rejected");
+    var nob4 = registry_validate_params(reg2, "scan", "true");
+    assert(nob4 != 0, "bool rejected");
+    var nob5 = registry_validate_params(reg2, "scan", "\"string\"");
+    assert(nob5 != 0, "string rejected");
+
+    # ---------------- registry: validate passes with no required ----------------
+    var reg3 = registry_new();
+    registry_register(reg3, tool_def_new("open", "no required", schema_new("object", 0, vec_new())));
+    assert_eq(registry_validate_params(reg3, "open", "{}"), 0, "empty ok no required");
+
+    # ---------------- registry: deregister ----------------
+    var removed = registry_deregister(reg2, "scan");
+    assert(removed != 0, "deregister returns def");
+    assert_eq(registry_contains(reg2, "scan"), 0, "after dereg not contains");
+    assert_eq(registry_len(reg2), 0, "after dereg len 0");
+    assert_eq(registry_deregister(reg2, "scan"), 0, "dereg twice returns 0");
+
+    # ---------------- registry: versioned ----------------
+    var regv = registry_new();
+    var ts = schema_new("object", 0, vec_new());
+    registry_register(regv, tool_def_with_version(tool_def_new("calc", "v1", ts), "1.0"));
+    registry_register(regv, tool_def_with_version(tool_def_new("calc", "v2", ts), "2.0"));
+    var v1 = registry_get_versioned(regv, "calc", "1.0");
+    var v2 = registry_get_versioned(regv, "calc", "2.0");
+    assert(v1 != 0, "got v1");
+    assert(v2 != 0, "got v2");
+    assert(streq(tool_def_description(v1), "v1") == 1, "v1 description");
+    assert(streq(tool_def_description(v2), "v2") == 1, "v2 description");
+    assert_eq(registry_get_versioned(regv, "calc", "9.9"), 0, "missing version");
+    assert_eq(vec_len(registry_list_versions(regv, "calc")), 2, "two versions tracked");
+
+    # ---------------- registry: deprecate ----------------
+    registry_deprecate(regv, "calc", "use calc2");
+    var dep_t = registry_get(regv, "calc");
+    assert(streq(tool_def_deprecated(dep_t), "use calc2") == 1, "deprecated set");
+
+    # ---------------- annotations: presets ----------------
+    var ro = ann_read_only();
+    assert_eq(ann_read_only_hint(ro), HINT_TRUE, "ro hint true");
+    assert_eq(ann_destructive_hint(ro), HINT_FALSE, "ro destructive false");
+    assert_eq(ann_idempotent_hint(ro), HINT_TRUE, "ro idempotent true");
+    assert_eq(ann_open_world_hint(ro), HINT_FALSE, "ro open_world false");
+
+    var de = ann_destructive();
+    assert_eq(ann_read_only_hint(de), HINT_FALSE, "de read_only false");
+    assert_eq(ann_destructive_hint(de), HINT_TRUE, "de destructive true");
+
+    var blank = ann_new();
+    assert_eq(ann_read_only_hint(blank), HINT_UNSET, "blank unset");
 
     return assert_summary();
 }
