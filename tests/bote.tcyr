@@ -18,6 +18,7 @@ include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/registry.cyr"
 include "src/dispatch.cyr"
+include "src/codec.cyr"
 
 # Test handler: echoes its arguments verbatim.
 fn h_echo(args) {
@@ -379,6 +380,99 @@ fn main() {
     var dereg_miss = dispatcher_deregister_tool(d, "never_existed");
     assert(dereg_miss != 0, "dereg missing returns err");
     assert_eq(bote_err_tag(dereg_miss), ERR_TOOL_NOT_FOUND, "dereg missing -> TOOL_NOT_FOUND");
+
+    # ---------------- codec: parse_request happy path ----------------
+    var pr = codec_parse_request("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}");
+    assert(pr != 0, "parse_request ok");
+    assert(streq(req_jsonrpc(pr), "2.0") == 1, "pr jsonrpc");
+    assert(streq(req_method(pr), "tools/list") == 1, "pr method");
+    assert(streq(req_id(pr), "1") == 1, "pr id raw");
+    assert(streq(req_params(pr), "{}") == 1, "pr params raw");
+
+    # parse_request missing params → defaults to "null"
+    var pr2 = codec_parse_request("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\"}");
+    assert(streq(req_params(pr2), "null") == 1, "params defaults null");
+
+    # parse_request notification (no id)
+    var pr3 = codec_parse_request("{\"jsonrpc\":\"2.0\",\"method\":\"notify\"}");
+    assert_eq(req_is_notification(pr3), 1, "parse notification flagged");
+
+    # parse_request malformed → 0
+    assert_eq(codec_parse_request("not json"), 0, "parse non-json -> 0");
+    assert_eq(codec_parse_request("[1,2]"), 0, "parse array -> 0 (not object)");
+    assert_eq(codec_parse_request("{\"id\":1}"), 0, "parse no method -> 0");
+
+    # ---------------- codec: serialize_response ----------------
+    var sok = codec_serialize_response(resp_success("1", "{\"x\":1}"));
+    assert(streq(sok, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"x\":1}}") == 1, "serialize success");
+
+    var serr = codec_serialize_response(resp_error("1", 0 - 32601, "tool not found"));
+    assert(streq(serr, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"tool not found\"}}") == 1, "serialize error");
+
+    # serialize with null result
+    var sn = codec_serialize_response(resp_success("1", 0));
+    assert(streq(sn, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}") == 1, "serialize null result");
+
+    # serialize with string id
+    var sid = codec_serialize_response(resp_success("\"abc\"", "true"));
+    assert(streq(sid, "{\"jsonrpc\":\"2.0\",\"id\":\"abc\",\"result\":true}") == 1, "serialize string id");
+
+    # serialize escapes message quote/backslash/newline
+    var sesc = codec_serialize_response(resp_error("1", 0 - 32000, "a \"b\" \\ c\nd"));
+    assert(streq(sesc, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"a \\\"b\\\" \\\\ c\\nd\"}}") == 1, "serialize escapes");
+
+    # ---------------- codec: process_message single ----------------
+    var dreg2 = registry_new();
+    var d2 = dispatcher_new(dreg2);
+    var sa2 = schema_new("object", 0, vec_new());
+    registry_register(dreg2, tool_def_new("svc_echo", "echo", sa2));
+    dispatcher_handle(d2, "svc_echo", &h_echo);
+
+    var pm1 = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}", d2);
+    assert(pm1 != 0, "single ok");
+    assert_eq(jsonx_has(pm1, "result"), 1, "single has result");
+
+    # process_message notification → 0
+    assert_eq(codec_process_message("{\"jsonrpc\":\"2.0\",\"method\":\"notify\"}", d2), 0, "single notif -> 0");
+
+    # process_message non-json → parse error
+    var pmpe = codec_process_message("not json", d2);
+    assert(pmpe != 0, "non-json returns err");
+    assert_eq(jsonx_has(pmpe, "error"), 1, "non-json -> error obj");
+
+    # process_message non-object/non-array → invalid request
+    var pmni = codec_process_message("42", d2);
+    assert(pmni != 0, "scalar returns err");
+    assert_eq(jsonx_has(pmni, "error"), 1, "scalar -> error obj");
+
+    # process_message wrong jsonrpc version
+    var pmwv = codec_process_message("{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"x\"}", d2);
+    assert_eq(jsonx_has(pmwv, "error"), 1, "wrong version -> err");
+
+    # ---------------- codec: process_message batch ----------------
+    var pmb = codec_process_message(
+        "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"},{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}]",
+        d2);
+    assert(pmb != 0, "batch returns array");
+    # Should be an array
+    assert_eq(load8(pmb), 91, "batch starts with [");
+
+    # batch with notification (only one response back)
+    var pmbn = codec_process_message(
+        "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"},{\"jsonrpc\":\"2.0\",\"method\":\"notify\"}]",
+        d2);
+    assert(pmbn != 0, "mixed batch returns");
+
+    # all-notifications batch → 0
+    var pmbz = codec_process_message(
+        "[{\"jsonrpc\":\"2.0\",\"method\":\"a\"},{\"jsonrpc\":\"2.0\",\"method\":\"b\"}]",
+        d2);
+    assert_eq(pmbz, 0, "all-notif batch -> 0");
+
+    # empty batch → invalid request
+    var pmbe = codec_process_message("[]", d2);
+    assert(pmbe != 0, "empty batch returns err");
+    assert_eq(jsonx_has(pmbe, "error"), 1, "empty batch -> error");
 
     return assert_summary();
 }

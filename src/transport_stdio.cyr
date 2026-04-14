@@ -1,0 +1,81 @@
+# bote::transport::stdio — line-oriented JSON-RPC over stdin/stdout
+# Mirrors rust-old/src/transport/stdio.rs (sync path; streaming deferred)
+
+# Buffer for in-flight stdin data (large enough for any reasonable JSON-RPC line).
+# Heap-allocated to avoid the cyrius static-buffer size limit.
+var STDIO_BUF_SIZE = 131072;
+var _stdio_buf = 0;
+var _stdio_buf_len = 0;
+
+fn _stdio_init() {
+    if (_stdio_buf == 0) {
+        _stdio_buf = alloc(STDIO_BUF_SIZE);
+    }
+    _stdio_buf_len = 0;
+    return 0;
+}
+
+# Process all complete (newline-terminated) lines in the stdio buffer.
+# Returns 0 if no lines processed; 1 if at least one line was dispatched.
+fn _stdio_process_lines(dispatcher) {
+    var processed = 0;
+    var scanned = 0;
+    var line_start = 0;
+    while (scanned < _stdio_buf_len) {
+        if (load8(_stdio_buf + scanned) == 10) {
+            # Replace newline with NUL → cstr
+            var line_len = scanned - line_start;
+            store8(_stdio_buf + scanned, 0);
+            if (line_len > 0) {
+                var line_ptr = _stdio_buf + line_start;
+                var resp = codec_process_message(line_ptr, dispatcher);
+                if (resp != 0) {
+                    syscall(SYS_WRITE, 1, resp, strlen(resp));
+                    syscall(SYS_WRITE, 1, "\n", 1);
+                }
+                processed = 1;
+            }
+            line_start = scanned + 1;
+        }
+        scanned = scanned + 1;
+    }
+    # Shift leftover (partial line) to start of buffer
+    if (line_start > 0) {
+        var leftover = _stdio_buf_len - line_start;
+        if (leftover > 0) {
+            memcpy(_stdio_buf, _stdio_buf + line_start, leftover);
+        }
+        _stdio_buf_len = leftover;
+    }
+    return processed;
+}
+
+# Run the stdio transport loop. Reads stdin until EOF, dispatches each
+# newline-terminated message, writes responses to stdout.
+fn transport_stdio_run(dispatcher) {
+    _stdio_init();
+    while (1 == 1) {
+        var space = STDIO_BUF_SIZE - _stdio_buf_len;
+        if (space <= 0) {
+            # Line too long — drop the buffer and continue
+            _stdio_buf_len = 0;
+            space = STDIO_BUF_SIZE;
+        }
+        var n = syscall(SYS_READ, 0, _stdio_buf + _stdio_buf_len, space);
+        if (n <= 0) {
+            # EOF — process any final line that lacks a trailing newline
+            if (_stdio_buf_len > 0) {
+                store8(_stdio_buf + _stdio_buf_len, 0);
+                var resp = codec_process_message(_stdio_buf, dispatcher);
+                if (resp != 0) {
+                    syscall(SYS_WRITE, 1, resp, strlen(resp));
+                    syscall(SYS_WRITE, 1, "\n", 1);
+                }
+            }
+            return 0;
+        }
+        _stdio_buf_len = _stdio_buf_len + n;
+        _stdio_process_lines(dispatcher);
+    }
+    return 0;
+}

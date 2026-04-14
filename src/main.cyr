@@ -21,11 +21,22 @@ include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/registry.cyr"
 include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/transport_stdio.cyr"
+
+# Demo handler for the built-in `bote_echo` tool.
+fn bote_echo_handler(args) {
+    return args;
+}
 
 fn main() {
     alloc_init();
-    println("bote - MCP core (cyrius port, scaffold)");
-    return 0;
+    var reg = registry_new();
+    var ok_schema = schema_new("object", 0, vec_new());
+    registry_register(reg, tool_def_new("bote_echo", "echo arguments back", ok_schema));
+    var dispatcher = dispatcher_new(reg);
+    dispatcher_handle(dispatcher, "bote_echo", &bote_echo_handler);
+    return transport_stdio_run(dispatcher);
 }
 
 var r = main();
