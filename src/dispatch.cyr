@@ -19,7 +19,7 @@ fn _mcp_is_supported(v) {
 
 fn _mcp_latest_version() { return "2025-11-25"; }
 
-fn _bote_server_version() { return "1.0.1"; }
+fn _bote_server_version() { return "1.1.0"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -60,23 +60,32 @@ fn validate_tool_name(name) {
 }
 
 # ================================================================
-# Dispatcher struct (24 bytes):
+# Dispatcher struct (40 bytes):
 #   +0  registry            ptr
 #   +8  handlers            hashmap: name_cstr -> fn ptr (sync handler)
-#   +16 streaming_handlers  hashmap: name_cstr -> fn ptr (reserved for streaming port)
+#   +16 streaming_handlers  hashmap: name_cstr -> fn ptr (reserved for v1.3)
+#   +24 audit_sink          AuditSink ptr or 0 (no-op when 0)
+#   +32 event_sink          EventSink ptr or 0 (no-op when 0)
 # ================================================================
 
 fn dispatcher_new(reg) {
-    var d = alloc(24);
+    var d = alloc(40);
     store64(d, reg);
     store64(d + 8, map_new());
     store64(d + 16, map_new());
+    store64(d + 24, 0);
+    store64(d + 32, 0);
     return d;
 }
 
-fn dispatcher_registry(d) { return load64(d); }
-fn dispatcher_handlers(d) { return load64(d + 8); }
-fn dispatcher_streaming(d) { return load64(d + 16); }
+fn dispatcher_registry(d)   { return load64(d); }
+fn dispatcher_handlers(d)   { return load64(d + 8); }
+fn dispatcher_streaming(d)  { return load64(d + 16); }
+fn dispatcher_audit_sink(d) { return load64(d + 24); }
+fn dispatcher_event_sink(d) { return load64(d + 32); }
+
+fn dispatcher_set_audit(d, sink) { store64(d + 24, sink); return d; }
+fn dispatcher_set_events(d, sink) { store64(d + 32, sink); return d; }
 
 # Register a sync tool handler. handler is a function pointer of signature
 #   fn handler(args_cstr) → result_cstr (raw JSON literal, e.g. "{\"ok\":true}")
@@ -95,18 +104,31 @@ fn dispatcher_is_streaming_tool(d, name) {
     return map_has(dispatcher_streaming(d), name);
 }
 
+# Build {"tool_name":"<name>"} for a register/dereg/deprecate event payload.
+fn _emit_tool_name_payload(name) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"tool_name\":\"");
+    _json_emit_escaped(sb, name);
+    str_builder_add_cstr(sb, "\"}");
+    return str_data(str_builder_build(sb));
+}
+
 # Dynamic registration: validates the tool name, registers in registry,
 # inserts handler. Returns 0 on success, BoteError ptr on failure.
+# Emits TOPIC_TOOL_REGISTERED on success.
 fn dispatcher_register_tool(d, tool_def, handler_fp) {
     var name = tool_def_name(tool_def);
     var verr = validate_tool_name(name);
     if (verr != 0) { return verr; }
     registry_register(dispatcher_registry(d), tool_def);
     map_set(dispatcher_handlers(d), name, handler_fp);
+    event_sink_publish(dispatcher_event_sink(d), TOPIC_TOOL_REGISTERED(),
+                       _emit_tool_name_payload(name));
     return 0;
 }
 
 # Returns 0 on success, BoteError ptr on failure (tool not found).
+# Emits TOPIC_TOOL_DEREGISTERED on success.
 fn dispatcher_deregister_tool(d, name) {
     var removed = registry_deregister(dispatcher_registry(d), name);
     map_delete(dispatcher_handlers(d), name);
@@ -114,6 +136,8 @@ fn dispatcher_deregister_tool(d, name) {
     if (removed == 0) {
         return bote_err_new(ERR_TOOL_NOT_FOUND, name, 0);
     }
+    event_sink_publish(dispatcher_event_sink(d), TOPIC_TOOL_DEREGISTERED(),
+                       _emit_tool_name_payload(name));
     return 0;
 }
 
@@ -312,9 +336,10 @@ fn dispatcher_dispatch(d, request) {
             return resp_error(id, bote_err_rpc_code(bote_err_tag(verr)), str_data(bote_err_format(verr)));
         }
 
-        # Extract arguments (default to "{}" if absent)
+        # Extract arguments (default to "{}" if absent), caller_id (optional)
         var args = jsonx_get_raw(params, "arguments");
         if (args == 0) { args = "{}"; }
+        var caller_id = jsonx_get_str(params, "caller_id");
 
         # Validate
         var verr2 = registry_validate_params(reg, name, args);
@@ -322,14 +347,42 @@ fn dispatcher_dispatch(d, request) {
             return resp_error(id, bote_err_rpc_code(bote_err_tag(verr2)), str_data(bote_err_format(verr2)));
         }
 
-        # Dispatch
+        # Deprecation event (best-effort; never blocks dispatch)
+        var t = registry_get(reg, name);
+        if (t != 0) {
+            var dep = tool_def_deprecated(t);
+            if (dep != 0) {
+                var ds = str_builder_new();
+                str_builder_add_cstr(ds, "{\"tool_name\":\"");
+                _json_emit_escaped(ds, name);
+                str_builder_add_cstr(ds, "\",\"message\":\"");
+                _json_emit_escaped(ds, dep);
+                str_builder_add_cstr(ds, "\"}");
+                event_sink_publish(dispatcher_event_sink(d), TOPIC_TOOL_DEPRECATED(),
+                                   str_data(str_builder_build(ds)));
+            }
+        }
+
+        # Dispatch with timing + audit + event hooks
+        var t_start = clock_now_ns();
         if (map_has(handlers, name) == 0) {
+            var dur_nh = (clock_now_ns() - t_start) / 1000000;
             var nf = bote_err_new(ERR_TOOL_NOT_FOUND, name, 0);
-            return resp_error(id, bote_err_rpc_code(bote_err_tag(nf)), str_data(bote_err_format(nf)));
+            var msg_nh = str_data(bote_err_format(nf));
+            var ev_nh = tool_call_event_new(name, dur_nh, 0, msg_nh, caller_id);
+            audit_sink_log(dispatcher_audit_sink(d), ev_nh);
+            event_sink_publish(dispatcher_event_sink(d), TOPIC_TOOL_FAILED(),
+                               tool_call_event_to_json(ev_nh));
+            return resp_error(id, bote_err_rpc_code(bote_err_tag(nf)), msg_nh);
         }
         var fp = map_get(handlers, name);
         var result = fncall1(fp, args);
+        var dur_ms = (clock_now_ns() - t_start) / 1000000;
         if (result == 0) { result = "null"; }
+        var ev_ok = tool_call_event_new(name, dur_ms, 1, 0, caller_id);
+        audit_sink_log(dispatcher_audit_sink(d), ev_ok);
+        event_sink_publish(dispatcher_event_sink(d), TOPIC_TOOL_COMPLETED(),
+                           tool_call_event_to_json(ev_ok));
         return resp_success(id, result);
     }
 

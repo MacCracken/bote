@@ -8,32 +8,34 @@ For shipped detail: [CHANGELOG.md](../../CHANGELOG.md). For Rust history: git ta
 
 ---
 
-## v1.1.0 — Audit + Events + Discovery wire-up + libro_tools
+## v1.1.0 — AuditSink + EventSink + dispatcher wire-up — **SHIPPED**
 
-All four are now unblocked: **libro v1.0.3** and **majra v2.2.0** are sibling
-cyrius projects. Wire them into `cyrius.toml` via `[deps.libro] path = "../libro"`
-and `[deps.majra] path = "../majra"`.
+Core sink abstractions (function-pointer + ctx struct, since cyrius has no
+traits). Dispatcher emits audit log + event publish on every `tools/call` and
+on register/dereg/deprecated. Topic constants for all 10 well-known topics.
+Discovery migrated to EventSink. 50 new tests; sinks-noop default keeps zero
+overhead.
 
-| Module | Effort | Notes |
-|---|---|---|
-| `src/audit.cyr` + `LibroAudit` adapter | Medium | `AuditSink` analogue (function-pointer-based since cyrius has no traits). Wraps libro's `memstore_append` / hash chain. |
-| `src/events.cyr` + `MajraEvents` adapter | Medium | Topic constants + sink fn-pointer; calls majra's `pubsub_publish` with serialized `ToolCallEvent`. |
-| `src/discovery.cyr` wire-up | Low | Replace placeholder `publish_fp` with majra `pubsub_publish`; replace `DiscoveryReceiver` queue with majra `pubsub_subscribe`. |
-| `src/libro_tools.cyr` | Medium | 5 built-in MCP tools (`libro_query`, `libro_verify`, `libro_export`, `libro_proof`, `libro_retention`). Direct calls to libro's `memstore_*` / `verify_*` functions. |
+## v1.2.0 — libro / majra adapters + libro_tools + Host + Auth + Streamable HTTP
 
----
-
-## v1.2.0 — Host, Auth, Streamable HTTP
+The audit/event sink shapes are stable (frozen in 1.1.0). The 1.2 release
+plugs in real backends and adds the larger feature surface.
 
 | Module | Effort | Notes |
 |---|---|---|
+| `src/audit_libro.cyr` (LibroAudit adapter) | Medium | `log_libro(ctx, event)` calls `chain_append_with_agent`. Needs `[deps.libro] path = "../libro"` in `cyrius.toml`. |
+| `src/events_majra.cyr` (MajraEvents adapter) | Medium | `publish_majra(ctx, topic, payload)` calls `pubsub_publish`. Needs `[deps.majra] path = "../majra"`. |
+| `src/libro_tools.cyr` | Medium | 5 built-in MCP tools (`libro_query`, `libro_verify`, `libro_export`, `libro_proof`, `libro_retention`). Direct calls to libro's `chain_*` / `memstore_*` functions. |
 | `src/host.cyr` | High | MCP content blocks (text/image/audio/resource), host registry, SSRF check. No AGNOS deps. |
 | `src/auth.cyr` | High | OAuth 2.1 / PKCE-S256 / bearer-token claims + middleware. Token-validator fn pointer on `HttpConfig`. No AGNOS deps. |
 | `src/transport_streamable.cyr` | High | Single endpoint POST+GET, SSE event IDs, `Last-Event-ID` resumption, `retry:` hint. Builds on `transport_http`. |
 
 ---
 
-## v1.3.0 — WebSocket + Sandbox + streaming dispatch
+## v1.3.0 — WebSocket + Sandbox + streaming dispatch + libro/majra adapters
+
+Note: v1.2 was renamed to combine adapter work with host/auth/streamable.
+This v1.3 keeps the originally-planned scope.
 
 | Module | Effort | Notes |
 |---|---|---|

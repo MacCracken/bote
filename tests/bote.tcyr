@@ -20,6 +20,8 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/registry.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
@@ -39,13 +41,30 @@ fn h_const(args) {
     return "{\"answer\":42}";
 }
 
-# Discovery test sink: pushes announcements into a global vec.
-var _disc_sink_queue = 0;
-fn disc_sink(topic, json) {
-    if (_disc_sink_queue == 0) { _disc_sink_queue = vec_new(); }
-    vec_push(_disc_sink_queue, json);
+# EventSink test backend: pushes (topic, payload) pairs into a global vec.
+# Used by discovery, audit, and events tests below.
+var _ev_topics = 0;
+var _ev_payloads = 0;
+fn test_event_publish(ctx, topic, payload) {
+    if (_ev_topics == 0) { _ev_topics = vec_new(); _ev_payloads = vec_new(); }
+    vec_push(_ev_topics, topic);
+    vec_push(_ev_payloads, payload);
     return 0;
 }
+fn _ev_reset() {
+    _ev_topics = vec_new();
+    _ev_payloads = vec_new();
+    return 0;
+}
+
+# AuditSink test backend: pushes ToolCallEvent ptrs into a global vec.
+var _audit_events = 0;
+fn test_audit_log(ctx, event) {
+    if (_audit_events == 0) { _audit_events = vec_new(); }
+    vec_push(_audit_events, event);
+    return 0;
+}
+fn _audit_reset() { _audit_events = vec_new(); return 0; }
 
 fn main() {
     alloc_init();
@@ -743,21 +762,23 @@ fn main() {
     assert_eq(jsonx_has(ann_json, "tools"), 1, "ann json has tools");
     assert(streq(jsonx_get_str(ann_json, "node_id"), "node-1") == 1, "ann json node-1");
 
-    # ---------------- discovery: service publish ----------------
-    _disc_sink_queue = vec_new();
-    var disc = discovery_new("node-x", &disc_sink);
+    # ---------------- discovery: service publish (via EventSink) ----------------
+    _ev_reset();
+    var disc_sink = event_sink_new(&test_event_publish, 0);
+    var disc = discovery_new("node-x", disc_sink);
     assert(streq(discovery_node_id(disc), "node-x") == 1, "disc node id");
     assert(streq(discovery_topic(disc), "bote/tool/announce") == 1, "disc topic");
 
     var emitted = discovery_announce(disc, disc_tools);
     assert(emitted != 0, "announce returns json");
-    assert_eq(vec_len(_disc_sink_queue), 1, "sink got 1");
-    assert(streq(jsonx_get_str(vec_get(_disc_sink_queue, 0), "node_id"), "node-x") == 1, "sink node-x");
+    assert_eq(vec_len(_ev_topics), 1, "sink got 1");
+    assert(streq(vec_get(_ev_topics, 0), "bote/tool/announce") == 1, "topic right");
+    assert(streq(jsonx_get_str(vec_get(_ev_payloads, 0), "node_id"), "node-x") == 1, "payload node-x");
 
     var disc_quiet = discovery_new("node-q", 0);
     var quiet_json = discovery_announce(disc_quiet, disc_tools);
     assert(quiet_json != 0, "quiet still builds json");
-    assert_eq(vec_len(_disc_sink_queue), 1, "quiet didn't publish");
+    assert_eq(vec_len(_ev_topics), 1, "quiet didn't publish");
 
     # ---------------- discovery: receiver queue ----------------
     var rx = discovery_receiver_new();
@@ -860,6 +881,158 @@ fn main() {
         "[{\"jsonrpc\":\"2.0\",\"method\":\"a\"},{\"jsonrpc\":\"2.0\",\"method\":\"b\"},{\"jsonrpc\":\"2.0\",\"method\":\"c\"}]",
         bd);
     assert_eq(pure_notifs, 0, "pure-notification batch returns 0");
+
+    # ================================================================
+    # v1.1.0: audit + events + dispatcher wire-up
+    # ================================================================
+
+    # ---------------- events: topic constants ----------------
+    assert(streq(TOPIC_TOOL_COMPLETED(), "bote/tool/completed") == 1, "topic completed");
+    assert(streq(TOPIC_TOOL_FAILED(), "bote/tool/failed") == 1, "topic failed");
+    assert(streq(TOPIC_TOOL_REGISTERED(), "bote/tool/registered") == 1, "topic registered");
+    assert(streq(TOPIC_TOOL_DEREGISTERED(), "bote/tool/deregistered") == 1, "topic deregistered");
+    assert(streq(TOPIC_TOOL_DEPRECATED(), "bote/tool/deprecated") == 1, "topic deprecated");
+    assert(streq(TOPIC_TOOL_ANNOUNCE(), "bote/tool/announce") == 1, "topic announce");
+
+    # ---------------- events: noop sink is safe ----------------
+    var noop_ev = event_sink_noop();
+    event_sink_publish(noop_ev, "any/topic", "{}");
+    event_sink_publish(0, "any/topic", "{}");
+    assert(noop_ev != 0, "noop sink is allocated");
+    assert_eq(event_sink_publish_fp(noop_ev), 0, "noop fp is 0");
+
+    # ---------------- events: real sink invocation ----------------
+    _ev_reset();
+    var live_ev = event_sink_new(&test_event_publish, 0);
+    event_sink_publish(live_ev, "topic.a", "{\"k\":1}");
+    event_sink_publish(live_ev, "topic.b", "[1,2]");
+    assert_eq(vec_len(_ev_topics), 2, "two events");
+    assert(streq(vec_get(_ev_topics, 0), "topic.a") == 1, "first topic");
+    assert(streq(vec_get(_ev_payloads, 1), "[1,2]") == 1, "second payload");
+
+    # ---------------- audit: ToolCallEvent + JSON ----------------
+    var ev_ok = tool_call_event_new("echo", 42, 1, 0, "agent-1");
+    assert(streq(tool_call_event_tool_name(ev_ok), "echo") == 1, "ev tool_name");
+    assert_eq(tool_call_event_duration_ms(ev_ok), 42, "ev duration");
+    assert_eq(tool_call_event_success(ev_ok), 1, "ev success");
+    var json_ok = tool_call_event_to_json(ev_ok);
+    assert(streq(json_ok, "{\"tool_name\":\"echo\",\"duration_ms\":42,\"success\":true,\"caller_id\":\"agent-1\"}") == 1, "ev json ok");
+
+    var ev_fail = tool_call_event_new("broken", 5, 0, "handler crashed", 0);
+    var json_fail = tool_call_event_to_json(ev_fail);
+    assert(streq(json_fail, "{\"tool_name\":\"broken\",\"duration_ms\":5,\"success\":false,\"error\":\"handler crashed\"}") == 1, "ev json fail");
+    # error and caller_id both omitted when 0
+    var ev_min = tool_call_event_new("plain", 1, 1, 0, 0);
+    var json_min = tool_call_event_to_json(ev_min);
+    assert(streq(json_min, "{\"tool_name\":\"plain\",\"duration_ms\":1,\"success\":true}") == 1, "ev json min");
+
+    # ---------------- audit: noop sink is safe ----------------
+    audit_sink_log(0, ev_ok);
+    audit_sink_log(audit_sink_noop(), ev_ok);
+
+    # ---------------- audit: real sink invocation ----------------
+    _audit_reset();
+    var alive = audit_sink_new(&test_audit_log, 0);
+    audit_sink_log(alive, ev_ok);
+    audit_sink_log(alive, ev_fail);
+    assert_eq(vec_len(_audit_events), 2, "audit got 2");
+    assert(streq(tool_call_event_tool_name(vec_get(_audit_events, 0)), "echo") == 1, "audit[0] echo");
+    assert(streq(tool_call_event_tool_name(vec_get(_audit_events, 1)), "broken") == 1, "audit[1] broken");
+
+    # ---------------- dispatcher: wire-up audit + events ----------------
+    _ev_reset();
+    _audit_reset();
+    var wreg = registry_new();
+    registry_register(wreg, tool_def_new("svc_echo", "echo", schema_new("object", 0, vec_new())));
+    var wd = dispatcher_new(wreg);
+    dispatcher_handle(wd, "svc_echo", &h_echo);
+    dispatcher_set_audit(wd, audit_sink_new(&test_audit_log, 0));
+    dispatcher_set_events(wd, event_sink_new(&test_event_publish, 0));
+
+    # tools/call success → audit + bote/tool/completed
+    var w_call = req_with_params(req_new("1", "tools/call"),
+        "{\"name\":\"svc_echo\",\"arguments\":{\"k\":\"v\"},\"caller_id\":\"agent-x\"}");
+    var w_resp = dispatcher_dispatch(wd, w_call);
+    assert(w_resp != 0, "wire call returns response");
+    assert_eq(vec_len(_audit_events), 1, "1 audit event");
+    var w_ev = vec_get(_audit_events, 0);
+    assert(streq(tool_call_event_tool_name(w_ev), "svc_echo") == 1, "wire audit name");
+    assert_eq(tool_call_event_success(w_ev), 1, "wire audit success");
+    assert(streq(tool_call_event_caller_id(w_ev), "agent-x") == 1, "wire caller_id");
+    assert_eq(vec_len(_ev_topics), 1, "1 event topic");
+    assert(streq(vec_get(_ev_topics, 0), "bote/tool/completed") == 1, "completed topic");
+
+    # tools/call where the tool is registered but its handler isn't
+    # → audit + bote/tool/failed (validate_params catches truly-unknown names
+    #   earlier without emitting; that path mirrors the Rust behavior).
+    _ev_reset();
+    _audit_reset();
+    registry_register(wreg, tool_def_new("svc_unhandled", "no handler",
+                                         schema_new("object", 0, vec_new())));
+    var w_unk = dispatcher_dispatch(wd, req_with_params(req_new("2", "tools/call"),
+        "{\"name\":\"svc_unhandled\",\"arguments\":{}}"));
+    assert(resp_error_obj(w_unk) != 0, "unhandled tool returns error");
+    assert_eq(vec_len(_audit_events), 1, "fail logged");
+    assert_eq(tool_call_event_success(vec_get(_audit_events, 0)), 0, "fail success=0");
+    assert_eq(vec_len(_ev_topics), 1, "fail emitted");
+    assert(streq(vec_get(_ev_topics, 0), "bote/tool/failed") == 1, "failed topic");
+
+    # And: truly-unknown tool name (caught by validate_params) does NOT emit
+    # — matches Rust which only audits at the handler-lookup boundary.
+    _ev_reset();
+    _audit_reset();
+    var w_miss = dispatcher_dispatch(wd, req_with_params(req_new("2b", "tools/call"),
+        "{\"name\":\"never_existed\",\"arguments\":{}}"));
+    assert(resp_error_obj(w_miss) != 0, "missing tool returns error");
+    assert_eq(vec_len(_audit_events), 0, "validate-stage err: no audit");
+    assert_eq(vec_len(_ev_topics), 0, "validate-stage err: no event");
+
+    # initialize + tools/list do NOT emit tool-call events
+    _ev_reset();
+    _audit_reset();
+    dispatcher_dispatch(wd, req_new("3", "initialize"));
+    dispatcher_dispatch(wd, req_new("4", "tools/list"));
+    assert_eq(vec_len(_audit_events), 0, "init/list no audit");
+    assert_eq(vec_len(_ev_topics), 0, "init/list no events");
+
+    # ---------------- dispatcher: register/deregister emit topics ----------------
+    _ev_reset();
+    var ok_reg2 = dispatcher_register_tool(wd,
+        tool_def_new("svc_dyn", "dyn", schema_new("object", 0, vec_new())), &h_echo);
+    assert_eq(ok_reg2, 0, "dyn register ok");
+    assert_eq(vec_len(_ev_topics), 1, "register emitted");
+    assert(streq(vec_get(_ev_topics, 0), "bote/tool/registered") == 1, "registered topic");
+    assert(streq(jsonx_get_str(vec_get(_ev_payloads, 0), "tool_name"), "svc_dyn") == 1, "register payload");
+
+    _ev_reset();
+    dispatcher_deregister_tool(wd, "svc_dyn");
+    assert_eq(vec_len(_ev_topics), 1, "dereg emitted");
+    assert(streq(vec_get(_ev_topics, 0), "bote/tool/deregistered") == 1, "deregistered topic");
+
+    # ---------------- dispatcher: deprecated tool emits TOPIC_TOOL_DEPRECATED on call ----------------
+    _ev_reset();
+    _audit_reset();
+    registry_register(wreg, tool_def_with_deprecated(
+        tool_def_new("svc_old", "old", schema_new("object", 0, vec_new())),
+        "use svc_new instead"));
+    dispatcher_handle(wd, "svc_old", &h_echo);
+    dispatcher_dispatch(wd, req_with_params(req_new("5", "tools/call"),
+        "{\"name\":\"svc_old\",\"arguments\":{}}"));
+    # Expect: bote/tool/deprecated then bote/tool/completed
+    assert_eq(vec_len(_ev_topics), 2, "two events on deprecated call");
+    assert(streq(vec_get(_ev_topics, 0), "bote/tool/deprecated") == 1, "deprecated first");
+    assert(streq(vec_get(_ev_topics, 1), "bote/tool/completed") == 1, "completed second");
+    assert(streq(jsonx_get_str(vec_get(_ev_payloads, 0), "message"), "use svc_new instead") == 1, "deprecation message");
+
+    # ---------------- dispatcher: noop sinks (default) don't break anything ----------------
+    var bare = dispatcher_new(registry_new());
+    registry_register(dispatcher_registry(bare),
+        tool_def_new("svc_bare", "bare", schema_new("object", 0, vec_new())));
+    dispatcher_handle(bare, "svc_bare", &h_echo);
+    var bare_resp = dispatcher_dispatch(bare, req_with_params(req_new("9", "tools/call"),
+        "{\"name\":\"svc_bare\",\"arguments\":{\"x\":1}}"));
+    assert(bare_resp != 0, "bare dispatch still works");
+    assert_eq(resp_error_obj(bare_resp), 0, "bare success no error");
 
     return assert_summary();
 }

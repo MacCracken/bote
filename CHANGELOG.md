@@ -2,6 +2,46 @@
 
 All notable changes to bote are documented here.
 
+## [1.1.0] — 2026-04-13 — AuditSink + EventSink + dispatcher wire-up
+
+First minor bump on the cyrius lineage. Adds the audit and event-publishing
+abstractions and wires them into the dispatcher. Adapters for libro / majra /
+discovery-via-pubsub land in **v1.2.0**.
+
+### Added
+- **`src/events.cyr`** — `EventSink` (function-pointer + opaque ctx struct, the cyrius equivalent of the Rust trait), `event_sink_new` / `event_sink_publish` / `event_sink_noop`. Topic constants exported as functions: `TOPIC_TOOL_COMPLETED`, `TOPIC_TOOL_FAILED`, `TOPIC_TOOL_REGISTERED`, `TOPIC_TOOL_DEREGISTERED`, `TOPIC_TOOL_DEPRECATED`, `TOPIC_TOOL_ANNOUNCE`, `TOPIC_TOOL_DISCOVERED`, plus 3 sandbox topics for the v1.3 sandbox port.
+- **`src/audit.cyr`** — `ToolCallEvent` (40 bytes: tool_name, duration_ms, success, error, caller_id), `tool_call_event_to_json` (matches Rust `serde_json` output, skips `error` / `caller_id` when 0), `AuditSink` struct + `audit_sink_log` / `audit_sink_noop`.
+- **`Dispatcher` extended** to 40 bytes — new slots for `audit_sink` and `event_sink`. Setters: `dispatcher_set_audit(d, sink)` and `dispatcher_set_events(d, sink)`. Sinks default to 0 (no-op); pre-1.1 callers see no behavior change.
+- **Dispatcher emits per-call audit + event hooks**:
+  - `tools/call` success → `audit_sink_log` + publish to `bote/tool/completed`
+  - `tools/call` failure (handler not in map) → `audit_sink_log` + publish to `bote/tool/failed`
+  - `tools/call` on a deprecated tool → publish to `bote/tool/deprecated` *before* the call
+  - `dispatcher_register_tool` → publish to `bote/tool/registered`
+  - `dispatcher_deregister_tool` → publish to `bote/tool/deregistered`
+  - All include a `{"tool_name":"..."}` payload (deprecated also includes `message`).
+- **`caller_id`** now extracted from `tools/call` params (`jsonx_get_str(params, "caller_id")`) and threaded through to the audit event.
+- **`src/discovery.cyr` migrated to `EventSink`** — `discovery_new(node_id, event_sink)` replaces the bare `publish_fp`. Uses `discovery_event_sink(d)` accessor; same callers, cleaner integration with the rest of the event surface.
+- **50 new unit assertions** (351 total, was 301): topic constants, sink no-op safety, sink invocation, ToolCallEvent JSON round-trips (success / failure / minimal), full dispatcher wire-up (success+failure+initialize+list+register+dereg+deprecated paths), discovery via EventSink, "validate-stage error doesn't audit" parity check vs. Rust.
+
+### Performance
+Audit + event hooks add ~2µs to `dispatch_tools_call` (1µs → 3µs) and ~2µs to `codec_process_message` (4µs → 6µs) when sinks are wired. With `audit_sink_noop()` / `event_sink_noop()` (or unset, the default), the overhead is a single null-pointer check per emission site. Other benchmarks unchanged.
+
+### Changed
+- `discovery_new` signature: was `(node_id, publish_fp)` taking a bare `fn(topic, json)` pointer; now `(node_id, event_sink)` taking an EventSink. **Source-breaking** — but the only known caller was `tests/bote.tcyr`, and the new shape is what real callers (MajraEvents in v1.2) need anyway. v1.0 callers building a discovery service should switch to `event_sink_new(&publish_fn, ctx)`.
+
+### Verification (cyrius 4.4.4)
+- `cyrius test` → **351 passed, 0 failed**
+- `cyrius fuzz` → 4 passed, 0 failed
+- `cyrius bench` → 10 hot paths, sinks-noop overhead is 1 conditional branch per emission
+- `./build/bote` initialize handshake reports `"version":"1.1.0"`
+
+### Deferred to v1.2.0
+- `src/audit_libro.cyr` — LibroAudit adapter (calls `chain_append_with_agent` on libro's hash chain). Needs `[deps.libro] path = "../libro"` in `cyrius.toml`.
+- `src/events_majra.cyr` — MajraEvents adapter (calls `pubsub_publish`). Needs `[deps.majra] path = "../majra"` in `cyrius.toml`.
+- `src/libro_tools.cyr` — 5 built-in MCP tools (`libro_query`, `libro_verify`, `libro_export`, `libro_proof`, `libro_retention`). Depends on audit + libro.
+
+---
+
 ## [1.0.1] — 2026-04-13 — Retire rust-old/, trim spec-compliance, bench comparison
 
 ### Removed

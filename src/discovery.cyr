@@ -59,34 +59,34 @@ fn announcement_to_json(a) {
 }
 
 # DiscoveryService (24 bytes):
-#   +0  node_id      cstr
-#   +8  publish_fp   function pointer: fn (topic_cstr, json_cstr) → 0
-#                    (0 = no sink configured; announcements are no-ops)
-#   +16 last_topic   cstr — the topic announcements are published on
-#                    (mirrors rust events::TOPIC_TOOL_ANNOUNCE)
+#   +0  node_id     cstr
+#   +8  event_sink  EventSink ptr (or 0 — announcements then build-only)
+#   +16 topic       cstr — TOPIC_TOOL_ANNOUNCE
+#
+# v1.0.0 used a bare publish_fp here; v1.1.0 unifies on EventSink so callers
+# can plug in MajraEvents (v1.2.0) the same way they would for tool-call events.
 
-fn discovery_topic_announce() { return "bote/tool/announce"; }
+fn discovery_topic_announce() { return TOPIC_TOOL_ANNOUNCE(); }
 
-fn discovery_new(node_id, publish_fp) {
+fn discovery_new(node_id, event_sink) {
     var d = alloc(24);
     store64(d, node_id);
-    store64(d + 8, publish_fp);
+    store64(d + 8, event_sink);
     store64(d + 16, discovery_topic_announce());
     return d;
 }
 
-fn discovery_node_id(d) { return load64(d); }
-fn discovery_publish_fp(d) { return load64(d + 8); }
-fn discovery_topic(d) { return load64(d + 16); }
+fn discovery_node_id(d)    { return load64(d); }
+fn discovery_event_sink(d) { return load64(d + 8); }
+fn discovery_topic(d)      { return load64(d + 16); }
 
-# Announce a vec of ToolDef ptrs to the network. If no publish_fp is
-# configured, the announcement is built but not delivered (no-op).
-# Returns the JSON string emitted (useful for tests + future SSE streams).
+# Announce a vec of ToolDef ptrs. If no event_sink is configured, the
+# announcement is built but not delivered (no-op). Returns the JSON string
+# emitted (useful for tests + future SSE streams).
 fn discovery_announce(d, tools) {
     var ann = announcement_new(discovery_node_id(d), tools);
     var json = announcement_to_json(ann);
-    var fp = discovery_publish_fp(d);
-    if (fp != 0) { fncall2(fp, discovery_topic(d), json); }
+    event_sink_publish(discovery_event_sink(d), discovery_topic(d), json);
     return json;
 }
 
