@@ -108,9 +108,13 @@ ABI change; that's the primary 2.0 reason.
 
 ## Cyrius-language dependencies
 
-Some bote work is gated on cyrius. See
-[docs/cyrius-feedback.md](../cyrius-feedback.md) for the full list with
-reproductions. Status against current cyrius (4.8.4):
+Some bote work is gated on cyrius. Live language-level friction
+(idioms, missing stdlib surface, cyrius patterns bote needs):
+[docs/cyrius-feedback.md](../cyrius-feedback.md). Historical index of
+resolved upstream issues bote reported + each fix landed:
+[docs/resolved-lang-issues.md](../resolved-lang-issues.md).
+
+Status against current cyrius (4.8.4):
 
 | Issue | Status |
 |---|---|
@@ -126,28 +130,16 @@ reproductions. Status against current cyrius (4.8.4):
 | `BUILD_METHOD_NAME` scratch corruption (misleading `lib/assert.cyr:3` error) | ✅ Fixed in 4.7.1 at the `GNPOS(S)` scratch anchor |
 | `lib/base64.cyr` URL-safe variant | ✅ Shipped in 4.8.1 (bote adopted in 2.4.0) |
 | Capacity meter (`CYRIUS_STATS=1` + `cyrius capacity` + `ERR_EXPECT` diagnostic) | ✅ Shipped in 4.8.3 |
-| Path-traversal rejection on `../sibling` dep paths | ✅ Fixed in 4.8.4 (per bote's `docs/bugs/cyrius-4.8.3-regressions.md`) |
+| Path-traversal rejection on `../sibling` dep paths | ✅ Fixed in 4.8.4 |
 | Include-once cap 64 → 256 | ✅ Raised in 4.8.4 |
 | `PP_IFDEF_PASS` nested-include fixpoint | ✅ Shipped in 4.8.4 |
+| 4.8.4 release-binary vs alpha2 skew | ✅ Closed by the 2026-04-14 retag; bote 2.5.1 restored full dep-graph tests |
 | Per-thread request buffers (process-global today) | 🟡 Tracked upstream; affects future threaded dispatch |
 | Bump allocator without `fl_free` for general use | 🟡 Tracked; affects WS arena work |
-| 4.8.4 release binary compiles bote's libro/majra compile unit differently than 4.8.4-alpha2 local build | 🟡 **Open** — see [docs/bugs/cyrius-4.8.4-ci-binary-skew.md](../bugs/cyrius-4.8.4-ci-binary-skew.md) |
 
----
-
-## Open bugs (upstream — bote blocked or partially worked around)
-
-Every report in `docs/bugs/` with its current status. Each links to
-the full diagnostic + reproducer.
-
-| Report | Status | Bote impact |
-|---|---|---|
-| [cyrius-4.5.1-identifier-buffer-cap.md](../bugs/cyrius-4.5.1-identifier-buffer-cap.md) | ✅ Resolved by 4.6.2 + 4.7.1 | No current impact |
-| [cyrius-4.8.3-regressions.md](../bugs/cyrius-4.8.3-regressions.md) — path traversal + include cap + PP_IFDEF | ✅ All three fixed in 4.8.4 | No current impact |
-| [cyrius-4.8.4-ci-binary-skew.md](../bugs/cyrius-4.8.4-ci-binary-skew.md) — release binary failed on bote's libro/majra compile unit while alpha2 passed | ✅ **Closed** — cyrius retagged `4.8.4` with the alpha2-that-actually-works binary (2026-04-14). Bote 2.5.1 restored the full dep-graph tests. | None |
-
-All bote-side workarounds are documented inline; when an upstream
-fix lands, the recovery is a pin bump + minor test-file edit.
+No current open bugs. Future reports will land back under `docs/bugs/`
+during active triage and be moved to `docs/resolved-lang-issues.md`
+when the upstream fix + bote adoption closes the loop.
 
 ---
 
