@@ -1,0 +1,81 @@
+# bote_sandbox.tcyr — unit tests for src/sandbox.cyr
+#
+# Same per-module pattern as the other split test files (see
+# tests/bote_libro_tools.tcyr, bote_content.tcyr, bote_host.tcyr,
+# bote_auth.tcyr).
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/assert.cyr"
+
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/dispatch.cyr"
+include "src/sandbox.cyr"
+
+# Mock kavach-style runner that always returns a hardcoded result.
+# In real consumer code, ctx would carry a kavach Sandbox handle and
+# the body would call kavach's process_exec / noop_exec / etc.
+fn mock_runner(ctx, command, timeout_ms) {
+    return "{\"exit_code\":42,\"stdout\":\"mock\",\"stderr\":\"\",\"duration_ms\":7,\"timed_out\":0}";
+}
+
+fn main() {
+    alloc_init();
+
+    # ---------------- Runner shape ----------------
+    var s = sandbox_runner_new(&mock_runner, 0);
+    assert(s != 0, "runner allocates");
+    assert(sandbox_runner_fp(s) == &mock_runner, "runner fp accessor");
+    assert_eq(sandbox_runner_ctx(s), 0, "runner ctx 0");
+
+    # ---------------- run() invokes the fp ----------------
+    var r1 = sandbox_run(s, "echo hi", 1000);
+    assert(streq(r1, "{\"exit_code\":42,\"stdout\":\"mock\",\"stderr\":\"\",\"duration_ms\":7,\"timed_out\":0}") == 1,
+           "run dispatches to mock runner");
+
+    # ---------------- null-runner safety ----------------
+    var rnull = sandbox_run(0, "anything", 0);
+    assert(rnull != 0, "null runner returns error envelope, not crash");
+
+    # ---------------- noop adapter ----------------
+    var noop = sandbox_runner_noop_new();
+    assert(noop != 0, "noop runner addressable");
+    var rn = sandbox_run(noop, "ls -la", 5000);
+    assert(streq(rn, "{\"exit_code\":0,\"stdout\":\"ls -la\",\"stderr\":\"\",\"duration_ms\":0,\"timed_out\":0}") == 1,
+           "noop echoes command as stdout, exit 0");
+
+    # Noop with null command — graceful
+    var rn0 = sandbox_run(noop, 0, 0);
+    assert(rn0 != 0, "noop with null command returns non-null");
+
+    # Noop escapes JSON properly in echoed command
+    var rn_quote = sandbox_run(noop, "echo \"hi\"", 0);
+    assert(streq(rn_quote, "{\"exit_code\":0,\"stdout\":\"echo \\\"hi\\\"\",\"stderr\":\"\",\"duration_ms\":0,\"timed_out\":0}") == 1,
+           "noop JSON-escapes the command");
+
+    # ---------------- fp addressability ----------------
+    assert(&sandbox_runner_new != 0, "runner_new fp addressable");
+    assert(&sandbox_run != 0, "run fp addressable");
+    assert(&sandbox_runner_noop != 0, "noop runner fp addressable");
+    assert(&sandbox_runner_noop_new != 0, "noop_new fp addressable");
+
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

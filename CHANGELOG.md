@@ -2,6 +2,38 @@
 
 All notable changes to bote are documented here.
 
+## [2.1.0] — 2026-04-14 — Pluggable sandbox runner (kavach 3.0 compatible)
+
+Lands the sandbox abstraction the 2.0 roadmap deferred. **`kavach` is at
+3.0** (multi-backend: NOOP / process / OCI / gvisor / firecracker / SEV)
+— the previous "waits on kavach v2" CHANGELOG line was stale. Bote now
+ships the abstract `SandboxRunner` surface; consumers wire kavach (or
+any other sandbox) behind a single fn-pointer + ctx, the same adapter
+pattern used for `AuditSink` (libro) and `EventSink` (majra).
+
+### Added
+- **`src/sandbox.cyr`** (~50 LOC, no deps):
+  - `sandbox_runner_new(run_fp, ctx)` — 16-byte handle.
+  - `sandbox_run(s, command, timeout_ms)` — null-safe; returns the runner's JSON result or an error envelope. Suggested result shape matches kavach's `ExecResult`: `{"exit_code":N,"stdout":"...","stderr":"...","duration_ms":N,"timed_out":0|1}`.
+  - `sandbox_runner_noop` + `sandbox_runner_noop_new()` — built-in adapter that echoes the command back as stdout (exit 0). Useful for tests and for environments where sandboxing isn't required.
+- Validator signature: `fn run(ctx, command_cstr, timeout_ms) → result_cstr`. Tool authors call `sandbox_run(s, command, timeout)` from inside their handler body when they need to invoke an external process under isolation.
+
+### Why a fn-pointer adapter, not a `[deps.kavach]` direct link
+Kavach 3.0 is a substantial dependency (33 modules / ~7K LOC). Pulling it directly into bote's compile unit would tip the cyrius 4.7.1 identifier-table cap that's already constraining bote (see `docs/bugs/cyrius-4.5.1-identifier-buffer-cap.md`). The adapter pattern keeps bote independent — consumers that need kavach link it in their own `cyrius.toml` and write a 5-line `kavach_run_adapter(ctx, cmd, timeout) → ExecResult-as-JSON` function. Consumers that prefer a different sandbox (or none at all) drop in a different fn-pointer.
+
+### Tests
+- **New test file** — `tests/bote_sandbox.tcyr` (13 assertions). Covers runner shape (alloc + accessors), `sandbox_run` dispatching to a configured fp, null-safety on a null runner, the noop adapter (echo + JSON escaping), and fn-pointer addressability.
+- **558 total** (was 545). Breakdown: `bote.tcyr` 394, `bote_libro_tools.tcyr` 22, `bote_content.tcyr` 24, `bote_host.tcyr` 67, `bote_auth.tcyr` 38, `bote_sandbox.tcyr` 13.
+
+### Verified (cyrius 4.7.1)
+- All six test files green.
+- `cyrius bench tests/bote.bcyr` → 10 hot paths within noise of 2.0.
+- `cyrlint src/sandbox.cyr tests/bote_sandbox.tcyr` → 0 warnings.
+- `./bote` reports `"version":"2.1.0"`.
+
+### Roadmap note
+- The earlier "kavach sandbox waits on kavach v2 hardening" item is **closed** — kavach 3.0 is shipped and bote 2.1.0 provides the integration substrate. Consumer-side adapter (~5 lines wrapping `noop_exec` / `process_exec` / `oci_exec` / etc.) is left to the consuming application — bote stays kavach-agnostic.
+
 ## [2.0.0] — 2026-04-14 — Stable: handler-claims ABI + carry-forward of all 1.9.x security work
 
 The 1.x line ports bote from Rust to Cyrius and then iterates feature-by-feature; the 2.0 ship is the **first stable line** with a single deliberate ABI break (handler signature) so the auth → handler claims pipeline can land cleanly in 2.x without another major bump.

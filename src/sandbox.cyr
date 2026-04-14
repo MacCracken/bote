@@ -1,0 +1,63 @@
+# bote::sandbox — pluggable sandbox runner for tool handlers.
+#
+# Same fn-pointer + ctx adapter pattern as AuditSink (src/audit.cyr) and
+# EventSink (src/events.cyr). Bote ships the abstract surface and a noop
+# adapter; consumers wire their backend (kavach 3.0 — multi-backend
+# sandboxing — is the canonical choice in the AGNOS ecosystem) by
+# providing a fn pointer that satisfies the SandboxRunner shape:
+#
+#   fn run(ctx, command_cstr, timeout_ms) → result_cstr (JSON)
+#
+# Result is a JSON cstr the handler can return verbatim or post-process.
+# Suggested shape (matches kavach's ExecResult):
+#   {"exit_code":N,"stdout":"...","stderr":"...","duration_ms":N,"timed_out":0|1}
+#
+# Tool handlers that don't use the sandbox are unaffected — the dispatcher
+# doesn't know about this module. Tool handlers that DO use it just call
+# `sandbox_run(s, command, timeout)` from inside their handler body.
+
+# ================================================================
+# SandboxRunner (16 bytes):
+#   +0  run_fp   fn ptr (ctx, command_cstr, timeout_ms) → result_cstr
+#   +8  ctx      i64 (passed verbatim to run_fp; backend's state)
+# ================================================================
+
+fn sandbox_runner_new(run_fp, ctx) {
+    var s = alloc(16);
+    store64(s, run_fp);
+    store64(s + 8, ctx);
+    return s;
+}
+
+fn sandbox_runner_fp(s)  { return load64(s); }
+fn sandbox_runner_ctx(s) { return load64(s + 8); }
+
+# Invoke the runner. `command` is an opaque cstr the backend interprets
+# (a shell command line, an argv vec, a JSON spec — backend's choice).
+# `timeout_ms` is a hint; the backend may clamp to its own ceiling.
+# Returns the runner's JSON result. If the runner is null, returns an
+# error envelope (so handlers don't have to null-check).
+fn sandbox_run(s, command, timeout_ms) {
+    if (s == 0) { return "{\"exit_code\":-1,\"stderr\":\"no sandbox configured\"}"; }
+    var fp = sandbox_runner_fp(s);
+    if (fp == 0) { return "{\"exit_code\":-1,\"stderr\":\"no sandbox configured\"}"; }
+    return fncall3(fp, sandbox_runner_ctx(s), command, timeout_ms);
+}
+
+# Built-in noop runner — for testing and for environments where
+# sandboxing isn't required (echoes the command back as stdout, exit 0).
+# Drop-in replacement when you want sandbox API surface but no isolation.
+fn sandbox_runner_noop(ctx, command, timeout_ms) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"exit_code\":0,\"stdout\":\"");
+    if (command != 0) { _json_emit_escaped(sb, command); }
+    str_builder_add_cstr(sb, "\",\"stderr\":\"\",\"duration_ms\":0,\"timed_out\":0}");
+    return str_data(str_builder_build(sb));
+}
+
+# Convenience: a SandboxRunner backed by the noop adapter. Useful for
+# handler unit tests that need a non-null sandbox without spinning up
+# a real backend.
+fn sandbox_runner_noop_new() {
+    return sandbox_runner_new(&sandbox_runner_noop, 0);
+}
