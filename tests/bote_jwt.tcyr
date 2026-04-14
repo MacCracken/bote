@@ -1,0 +1,122 @@
+# bote_jwt.tcyr — unit tests for src/jwt.cyr (HS256 verifier).
+#
+# Same per-module pattern as bote_sandbox / bote_libro_tools / etc.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fnptr.cyr"
+include "lib/freelist.cyr"
+include "lib/sakshi.cyr"
+include "lib/bigint.cyr"
+include "lib/sigil.cyr"
+include "lib/assert.cyr"
+
+include "src/jwt.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ================================================================
+    # base64url decode — RFC 4648 §10 vectors + URL-safety check
+    # ================================================================
+    var len_slot[8]; store64(&len_slot, 0);
+
+    var d_foo = jwt_b64u_decode("Zm9v", 4, &len_slot);
+    assert(d_foo != 0, "decode 'Zm9v' returns non-null");
+    assert_eq(load64(&len_slot), 3, "decode 'Zm9v' length 3");
+    assert(streq(d_foo, "foo") == 1, "decode 'Zm9v' = 'foo'");
+
+    var d_fb = jwt_b64u_decode("Zm9vYmFy", 8, &len_slot);
+    assert_eq(load64(&len_slot), 6, "decode 'Zm9vYmFy' length 6");
+    assert(streq(d_fb, "foobar") == 1, "decode 'Zm9vYmFy' = 'foobar'");
+
+    # JWT header from RFC 7515 §3.5 (URL-safe alphabet, no padding)
+    var d_hdr = jwt_b64u_decode("eyJ0eXAiOiJKV1QiLA0KICJhbGciOiJIUzI1NiJ9", 40, &len_slot);
+    assert(d_hdr != 0, "RFC 7515 header decodes");
+    assert_eq(load64(&len_slot), 30, "RFC 7515 header length 30");
+
+    # URL-safe characters: '-' (62) and '_' (63) accepted, '+' / '/' would
+    # be rejected as 'invalid' by the table (they're not in _b64u_enc).
+    var d_url = jwt_b64u_decode("-_4", 3, &len_slot);
+    assert(d_url != 0, "URL-safe '-_4' decodes");
+
+    # ================================================================
+    # JWT verify — known-good token from a hand-computed HS256 sign
+    # ================================================================
+    # Header = {"alg":"HS256","typ":"JWT"} → eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
+    # Payload = {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    #         → eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ
+    # Secret = "your-256-bit-secret"
+    # Sig (HS256) → SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c
+    # This is the canonical jwt.io example — should verify.
+    var token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    var secret = "your-256-bit-secret";
+    assert_eq(jwt_verify_hs256(token, secret, strlen(secret)), 1, "jwt.io canonical token verifies");
+
+    # Wrong secret rejects
+    assert_eq(jwt_verify_hs256(token, "wrong-secret", 12), 0, "wrong secret rejects");
+
+    # Tampered signature rejects — flip the FIRST sig char (S→T).
+    # NB: tampering only the trailing chars can be a no-op after b64u
+    # decode because the low bits drop in a 3-rem tail; flipping a high
+    # byte produces a guaranteed-different decoded signature.
+    var tampered = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.TflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    assert_eq(jwt_verify_hs256(tampered, secret, strlen(secret)), 0, "tampered sig rejects");
+
+    # Tampered payload (last char of payload changed) rejects — sig won't match
+    var tamp_pl = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIzfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    assert_eq(jwt_verify_hs256(tamp_pl, secret, strlen(secret)), 0, "tampered payload rejects");
+
+    # Malformed: not enough segments
+    assert_eq(jwt_verify_hs256("a.b", secret, strlen(secret)), 0, "two segments rejects");
+    assert_eq(jwt_verify_hs256("just-a-string", secret, strlen(secret)), 0, "no dots rejects");
+
+    # Null/empty inputs
+    assert_eq(jwt_verify_hs256(0, secret, strlen(secret)), 0, "null token rejects");
+    assert_eq(jwt_verify_hs256(token, 0, 0), 0, "null secret rejects");
+    assert_eq(jwt_verify_hs256(token, secret, 0), 0, "zero-len secret rejects");
+
+    # Non-HS256 alg downgrade rejected — header with "alg":"none"
+    # Header = {"alg":"none"} → eyJhbGciOiJub25lIn0
+    var none_token = "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.";
+    assert_eq(jwt_verify_hs256(none_token, secret, strlen(secret)), 0,
+              "alg=none downgrade rejected");
+
+    # ================================================================
+    # JwtSecret handle + validator adapter
+    # ================================================================
+    var sh = jwt_secret_new(secret);
+    assert(sh != 0, "secret handle allocates");
+    assert(streq(jwt_secret_data(sh), secret) == 1, "secret data accessor");
+    assert_eq(jwt_secret_len(sh), 19, "secret len accessor");
+
+    # Validator with the bearer-middleware signature returns the token
+    # cstr (truthy "claims") on success.
+    var claims_ok = auth_validator_jwt_hs256(token, sh);
+    assert(claims_ok != 0, "validator returns claims on valid token");
+    assert(streq(claims_ok, token) == 1, "claims = original token");
+
+    # Wrong-secret handle → 0
+    var bad_sh = jwt_secret_new("wrong-secret");
+    assert_eq(auth_validator_jwt_hs256(token, bad_sh), 0, "validator rejects wrong-secret");
+
+    # Null handle → 0 (no segfault)
+    assert_eq(auth_validator_jwt_hs256(token, 0), 0, "validator null-handle safe");
+
+    # ================================================================
+    # Fn-pointer addressability (for plugging into auth_bearer_check)
+    # ================================================================
+    assert(&jwt_verify_hs256 != 0, "verify fp addressable");
+    assert(&auth_validator_jwt_hs256 != 0, "validator fp addressable");
+    assert(&jwt_secret_new != 0, "secret_new fp addressable");
+
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

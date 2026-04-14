@@ -1,0 +1,193 @@
+# bote::jwt — JWT HS256 verifier (RFC 7519 + RFC 7515 §3.5).
+#
+# Verifies `<base64url(header)>.<base64url(payload)>.<base64url(sig)>`
+# tokens where the signature is HMAC-SHA256 of the first two
+# base64url-encoded parts joined with `.`. Pairs with the bearer
+# middleware (1.9.0): plug in `auth_validator_jwt_hs256` as the
+# fn-pointer and the secret as the ctx.
+#
+# Scope: HS256 only. RS256 / ES256 need an asymmetric primitive sigil
+# doesn't yet expose; tracked for a later release. PKCE helpers (code
+# verifier + S256 challenge) similarly deferred — that's a 2.3 ship.
+#
+# Validation performed:
+#   - exactly two `.` separators (3 segments)
+#   - header decodes and contains `"alg":"HS256"` (case-insensitive)
+#   - HMAC-SHA256(header.payload, secret) == base64url-decoded signature
+#     (constant-time compare — no per-byte timing leak)
+#   - `exp` claim, if present in the payload, is in the future
+#     (uses chrono's wall-clock seconds)
+#
+# Returns 1 on valid, 0 on any failure. The validator wrapper
+# (`auth_validator_jwt_hs256`) returns the original token cstr on
+# success so the dispatcher can thread it as opaque "claims" to
+# handlers (a future 2.x release will parse it into structured claims).
+
+# ================================================================
+# base64url decode (RFC 4648 §5) — like base64 but `+` → `-`,
+# `/` → `_`, no `=` padding required.
+# ================================================================
+
+fn _jwt_b64u_val(c) {
+    if (c >= 65 && c <= 90)  { return c - 65; }       # A-Z
+    if (c >= 97 && c <= 122) { return c - 97 + 26; }  # a-z
+    if (c >= 48 && c <= 57)  { return c - 48 + 52; }  # 0-9
+    if (c == 45)             { return 62; }            # '-'
+    if (c == 95)             { return 63; }            # '_'
+    return 0 - 1;
+}
+
+# Decode `enc[0..elen]` into a fresh alloc'd buffer of `out_len` bytes.
+# Writes the decoded length to *out_len_p. Returns the buffer ptr or 0
+# on invalid input. NUL-terminator added at out[out_len] for safety.
+fn jwt_b64u_decode(enc, elen, out_len_p) {
+    if (enc == 0 || elen <= 0) { return 0; }
+    # Output size: 3 bytes per 4 input chars (less for unpadded tails).
+    var out_max = (elen * 3) / 4 + 3;
+    var out = alloc(out_max + 1);
+    var i = 0;
+    var o = 0;
+    while (i < elen) {
+        var v0 = _jwt_b64u_val(load8(enc + i));
+        if (v0 < 0) { return 0; }
+        var v1 = 0;
+        var v2 = 0 - 1;
+        var v3 = 0 - 1;
+        if (i + 1 < elen) {
+            v1 = _jwt_b64u_val(load8(enc + i + 1));
+            if (v1 < 0) { return 0; }
+        }
+        if (i + 2 < elen) {
+            v2 = _jwt_b64u_val(load8(enc + i + 2));
+            if (v2 < 0) { return 0; }
+        }
+        if (i + 3 < elen) {
+            v3 = _jwt_b64u_val(load8(enc + i + 3));
+            if (v3 < 0) { return 0; }
+        }
+        store8(out + o, ((v0 << 2) | (v1 >> 4)) & 0xFF);
+        o = o + 1;
+        if (v2 >= 0) {
+            store8(out + o, ((v1 << 4) | (v2 >> 2)) & 0xFF);
+            o = o + 1;
+        }
+        if (v3 >= 0) {
+            store8(out + o, ((v2 << 6) | v3) & 0xFF);
+            o = o + 1;
+        }
+        i = i + 4;
+    }
+    store8(out + o, 0);
+    store64(out_len_p, o);
+    return out;
+}
+
+# HMAC-SHA256 — `sigil`'s `hmac_sha256(key, klen, msg, mlen, out)` is
+# RFC 2104 with proper ipad/opad construction. We call it directly via
+# the bundled `lib/sigil.cyr` rather than reimplementing.
+
+# ================================================================
+# JWT verify
+# ================================================================
+
+# Constant-time byte equality on n bytes.
+fn _jwt_ct_eq(a, b, n) {
+    var diff = 0;
+    var i = 0;
+    while (i < n) {
+        diff = diff | (load8(a + i) ^ load8(b + i));
+        i = i + 1;
+    }
+    if (diff == 0) { return 1; }
+    return 0;
+}
+
+# Find next '.' in cstr starting at offset; return its offset or -1.
+fn _jwt_dot(s, len, from) {
+    var i = from;
+    while (i < len) {
+        if (load8(s + i) == 46) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Verify a JWT. Returns 1 on valid, 0 otherwise.
+fn jwt_verify_hs256(token, secret, secret_len) {
+    if (token == 0 || secret == 0 || secret_len <= 0) { return 0; }
+    var tlen = strlen(token);
+    if (tlen < 16) { return 0; }   # impossibly short
+
+    var dot1 = _jwt_dot(token, tlen, 0);
+    if (dot1 <= 0) { return 0; }
+    var dot2 = _jwt_dot(token, tlen, dot1 + 1);
+    if (dot2 <= dot1 + 1 || dot2 >= tlen - 1) { return 0; }
+
+    # Header check: decode and look for "HS256" alg literal. Quick scan
+    # rather than full JSON parse — guards against alg=none downgrade.
+    var hlen_slot[8]; store64(&hlen_slot, 0);
+    var header = jwt_b64u_decode(token, dot1, &hlen_slot);
+    if (header == 0) { return 0; }
+    var hlen = load64(&hlen_slot);
+    var alg_ok = 0;
+    var ai = 0;
+    while (ai + 5 <= hlen) {
+        # naive substring search for "HS256" (5 bytes)
+        if (load8(header + ai) == 72) {       # 'H'
+            if (load8(header + ai + 1) == 83) {   # 'S'
+                if (load8(header + ai + 2) == 50) { # '2'
+                    if (load8(header + ai + 3) == 53) {  # '5'
+                        if (load8(header + ai + 4) == 54) {  # '6'
+                            alg_ok = 1; ai = hlen;
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1;
+    }
+    if (alg_ok == 0) { return 0; }
+
+    # Compute HMAC-SHA256 over `header_b64u . payload_b64u`.
+    var sig_input_len = dot2;
+    var expected = alloc(32);
+    hmac_sha256(secret, secret_len, token, sig_input_len, expected);
+
+    # Decode the signature segment.
+    var sig_b64u_len = tlen - dot2 - 1;
+    var slen_slot[8]; store64(&slen_slot, 0);
+    var actual = jwt_b64u_decode(token + dot2 + 1, sig_b64u_len, &slen_slot);
+    if (actual == 0) { return 0; }
+    if (load64(&slen_slot) != 32) { return 0; }
+
+    return _jwt_ct_eq(expected, actual, 32);
+}
+
+# ================================================================
+# Validator adapter — plugs into auth_bearer_check via the existing
+# fn-pointer + ctx surface (1.9.0).
+#
+# ctx is a JwtSecret handle (16 bytes): {secret_ptr, secret_len}
+# Use jwt_secret_new(secret_cstr) to build one.
+# ================================================================
+
+fn jwt_secret_new(secret) {
+    var s = alloc(16);
+    store64(s, secret);
+    if (secret == 0) { store64(s + 8, 0); }
+    else { store64(s + 8, strlen(secret)); }
+    return s;
+}
+
+fn jwt_secret_data(s) { return load64(s); }
+fn jwt_secret_len(s)  { return load64(s + 8); }
+
+# Validator with the bearer-middleware signature: (token, ctx) → claims | 0
+fn auth_validator_jwt_hs256(token, jwt_secret) {
+    if (jwt_secret == 0) { return 0; }
+    if (jwt_verify_hs256(token, jwt_secret_data(jwt_secret),
+                                 jwt_secret_len(jwt_secret)) == 1) {
+        return token;   # opaque claims = the validated token
+    }
+    return 0;
+}

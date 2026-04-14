@@ -2,6 +2,52 @@
 
 All notable changes to bote are documented here.
 
+## [2.2.0] — 2026-04-14 — JWT HS256 verifier (auth roadmap)
+
+Lands the JWT bearer-token verifier from the 2.0 deferred list. Pairs
+with the bearer middleware (1.9.0) — plug `auth_validator_jwt_hs256`
+into `auth_bearer_check` and your bearer endpoint validates RFC 7519
+JWTs against an HMAC-SHA256 secret.
+
+### Added
+- **`src/jwt.cyr`** (~170 LOC). Opt-in module; not wired into the default `main.cyr`. Consumers `include` it explicitly.
+  - **`jwt_verify_hs256(token, secret, secret_len) → 0|1`** — full RFC 7515 §3.5 verification: 3-segment split, header decode + `alg=HS256` check (rejects `alg=none` downgrade), HMAC-SHA256 over `header.payload`, constant-time signature compare.
+  - **`jwt_secret_new(secret) → handle`** + accessors. 16-byte handle, opaque to bote.
+  - **`auth_validator_jwt_hs256(token, secret_handle) → claims | 0`** — drop-in for the bearer middleware fn-pointer slot. Returns the original token cstr as opaque "claims" on success.
+  - **`jwt_b64u_decode(enc, elen, *out_len) → ptr | 0`** — RFC 4648 §5 base64url decoder. Inlined for now; will lift to stdlib `lib/base64.cyr` once `cyrius-stdlib-base64url.md` lands (proposal in `docs/proposals/`).
+- **HMAC-SHA256 via sigil.** Calls sigil's existing `hmac_sha256` (already in the bundled `lib/sigil.cyr`) — bote doesn't reimplement. Saves ~30 LOC of inline crypto.
+
+### Security properties
+- **`alg=none` downgrade rejected** — the header is decoded and scanned for the literal `HS256`. A token with `{"alg":"none"}` cannot pass even with an empty signature.
+- **Constant-time signature compare** — `_jwt_ct_eq` XOR-accumulates all 32 bytes with no early exit. Defeats the per-byte timing oracle.
+- **Caller-supplied secret only** — bote doesn't store, log, or expose the secret. The validator handle holds a pointer + length; rotation is the caller's responsibility.
+
+### Tests
+- **`tests/bote_jwt.tcyr`** — 28 assertions:
+  - base64url decode of RFC 4648 §10 vectors (`"Zm9v"` → `"foo"`, `"Zm9vYmFy"` → `"foobar"`)
+  - JWT decode of the RFC 7515 §3.5 example header
+  - URL-safe alphabet (`-` and `_` accepted)
+  - **Canonical jwt.io HS256 token** (`SflKxwRJ...` with secret `your-256-bit-secret`) verifies — the standard reference vector for HS256 implementations
+  - Wrong secret rejected; tampered signature rejected; tampered payload rejected
+  - 2-segment / no-dot / null-token / null-secret / zero-length-secret all rejected
+  - `alg=none` downgrade rejected
+  - `JwtSecret` handle accessors, validator adapter returns claims on success / 0 on bad secret / 0 on null handle
+  - Fn-pointer addressability for plugging into `auth_bearer_check`
+- **586 total** (was 558). Breakdown: `bote.tcyr` 394, `bote_libro_tools.tcyr` 22, `bote_content.tcyr` 24, `bote_host.tcyr` 67, `bote_auth.tcyr` 38, `bote_sandbox.tcyr` 13, `bote_jwt.tcyr` 28.
+
+### Verified (cyrius 4.7.1)
+- All seven test files green.
+- `cyrius bench tests/bote.bcyr` → 10 hot paths within noise of 2.1.
+- `cyrlint src/jwt.cyr tests/bote_jwt.tcyr` → 0 warnings.
+- `./bote` reports `"version":"2.2.0"`.
+
+### Proposed for cyrius 4.8.0
+- **`base64url_encode` / `base64url_decode` in `lib/base64.cyr`** — see `docs/proposals/cyrius-stdlib-base64url.md`. Ship-ready reference impl + RFC 4648 §10 test vectors. Bote 2.2.x will lift its inline `jwt_b64u_decode` to the stdlib call once the cyrius agent folds it in (drops ~50 LOC + a few fns from bote's compile unit — meaningful for the long-running cyrius identifier-table cap pressure).
+
+### Roadmap
+- **OAuth 2.1 / PKCE-S256** still ahead — JWT HS256 is the verifier substrate; PKCE helpers are a future ship.
+- **JWT RS256 / ES256** waits on sigil's RSA / ECDSA primitives.
+
 ## [2.1.0] — 2026-04-14 — Pluggable sandbox runner (kavach 3.0 compatible)
 
 Lands the sandbox abstraction the 2.0 roadmap deferred. **`kavach` is at
