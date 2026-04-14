@@ -1,0 +1,62 @@
+# bote::audit::libro — LibroAudit adapter
+# Mirrors rust-old/src/audit.rs::libro_impl::LibroAudit.
+#
+# Wraps a libro audit chain with bote's AuditSink contract:
+#   - Severity: SEV_INFO on success, SEV_ERROR on failure
+#   - Action:   "tool.completed" on success, "tool.failed" on failure
+#   - Source:   "bote" by default (override via libro_audit_with_source)
+#   - Agent:    caller_id from the event takes precedence over configured agent_id
+#   - Details:  serialized ToolCallEvent JSON
+#
+# Wire-up:
+#   var chain = chain_new();
+#   var la = libro_audit_new(chain);
+#   var sink = audit_sink_new(&libro_audit_log, la);
+#   dispatcher_set_audit(d, sink);
+
+# LibroAudit (24 bytes):
+#   +0  chain     libro chain ptr
+#   +8  source    cstr (default "bote")
+#   +16 agent_id  cstr or 0 (default 0)
+
+fn libro_audit_new(chain) {
+    var la = alloc(24);
+    store64(la, chain);
+    store64(la + 8, "bote");
+    store64(la + 16, 0);
+    return la;
+}
+
+fn libro_audit_with_source(la, source)     { store64(la + 8, source);   return la; }
+fn libro_audit_with_agent_id(la, agent_id) { store64(la + 16, agent_id); return la; }
+
+fn libro_audit_chain(la)    { return load64(la); }
+fn libro_audit_source(la)   { return load64(la + 8); }
+fn libro_audit_agent_id(la) { return load64(la + 16); }
+
+# AuditSink-compatible log function.
+# ctx is a LibroAudit ptr.
+fn libro_audit_log(ctx, event) {
+    if (ctx == 0 || event == 0) { return 0; }
+    var chain = libro_audit_chain(ctx);
+    if (chain == 0) { return 0; }
+
+    var success = tool_call_event_success(event);
+    var severity = SEV_INFO;
+    var action = "tool.completed";
+    if (success == 0) { severity = SEV_ERROR; action = "tool.failed"; }
+
+    var source = libro_audit_source(ctx);
+    var details = tool_call_event_to_json(event);
+
+    # caller_id takes precedence over configured agent_id
+    var agent = tool_call_event_caller_id(event);
+    if (agent == 0) { agent = libro_audit_agent_id(ctx); }
+
+    if (agent != 0) {
+        chain_append_with_agent(chain, severity, source, action, details, agent);
+    } else {
+        chain_append(chain, severity, source, action, details);
+    }
+    return 0;
+}

@@ -1,9 +1,8 @@
 # bote — MCP Core Service (Cyrius port)
-# Ported from 10877 lines of Rust.
 #
-# Modules:
-#   src/error.cyr     — BoteError tags + JSON-RPC code mapping
-#   src/protocol.cyr  — JsonRpcRequest / JsonRpcResponse / JsonRpcError
+# v1.2.0 wires libro (audit chain, deps.libro tag 1.0.3) and majra
+# (pub/sub, deps.majra tag 2.2.0) via thin adapter modules.
+# See src/audit_libro.cyr + src/events_majra.cyr for the wire-up.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -19,13 +18,33 @@ include "lib/fnptr.cyr"
 include "lib/chrono.cyr"
 include "lib/tagged.cyr"
 include "lib/net.cyr"
-
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/assert.cyr"
+include "lib/sakshi.cyr"
+include "lib/bigint.cyr"
+include "lib/sigil.cyr"
+include "lib/libro_error.cyr"
+include "lib/libro_hasher.cyr"
+include "lib/libro_entry.cyr"
+include "lib/libro_verify.cyr"
+include "lib/libro_query.cyr"
+include "lib/libro_retention.cyr"
+include "lib/libro_chain.cyr"
+include "lib/majra_error.cyr"
+include "lib/majra_counter.cyr"
+include "lib/majra_envelope.cyr"
+include "lib/majra_namespace.cyr"
+include "lib/majra_queue.cyr"
+include "lib/majra_pubsub.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/registry.cyr"
 include "src/events.cyr"
 include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
@@ -34,10 +53,10 @@ include "src/session.cyr"
 include "src/discovery.cyr"
 include "src/transport_stdio.cyr"
 include "src/transport_http.cyr"
+include "lib/libro_export.cyr"
+include "lib/libro_merkle.cyr"
 include "src/transport_unix.cyr"
 include "src/bridge.cyr"
-
-# Demo handler for the built-in `bote_echo` tool.
 fn bote_echo_handler(args) {
     return args;
 }

@@ -2,6 +2,40 @@
 
 All notable changes to bote are documented here.
 
+## [1.2.0] — 2026-04-13 — LibroAudit + MajraEvents adapters
+
+Wires bote's AuditSink and EventSink (introduced in 1.1.0) to the **libro**
+audit chain and **majra** pub/sub. First release with `[deps.<crate>]` git+tag
+pinned dependencies.
+
+### Added
+- **`[deps.libro]`** — pinned to git tag `1.0.3` (`https://github.com/MacCracken/libro`, falls back to local `../libro`). 9 modules pulled in: `error / hasher / entry / verify / query / retention / chain / export / merkle`.
+- **`[deps.majra]`** — pinned to git tag `2.2.0` (`https://github.com/MacCracken/majra`, falls back to local `../majra`). 6 modules pulled in: `error / counter / envelope / namespace / queue / pubsub`. Trimmed to only the modules `pubsub` actually exercises (skipped `metrics / ratelimit / heartbeat / fleet / dag / etc`).
+- **`src/audit_libro.cyr`** — `LibroAudit` adapter (24 bytes: chain ptr, source cstr, agent_id cstr). `libro_audit_new(chain)`, `libro_audit_with_source(la, src)`, `libro_audit_with_agent_id(la, id)`, `libro_audit_log(ctx, event)`. Maps bote's ToolCallEvent to libro's `chain_append_with_agent` (or `chain_append` when no agent): `SEV_INFO` + `"tool.completed"` on success, `SEV_ERROR` + `"tool.failed"` on failure. **caller_id wins over the configured agent_id.**
+- **`src/events_majra.cyr`** — thin `majra_events_publish(ctx, topic, payload)` that calls `pubsub_publish(ps, topic, payload)`. Wire-up:
+  ```
+  var ps = pubsub_new();
+  var sink = event_sink_new(&majra_events_publish, ps);
+  dispatcher_set_events(d, sink);
+  ```
+- 8 new unit assertions (359 total) covering adapter struct shapes, accessors, AuditSink fp wiring, EventSink fp wiring (incl. `ctx=0` no-op safety).
+
+### Performance
+Bench numbers unchanged from 1.1.0 — adapters are pass-through over already-measured sink-publish overhead.
+
+### Deferred
+Live `chain_append_with_agent` integration tests (and full pubsub deliver paths) require running libro/majra's full init dance (`alloc_init`, `fl_init`, `ed25519_init`, `patra_init`, etc). Those are exercised by libro's and majra's own test suites; bote's tests currently verify the **adapter shape** (struct + fp wiring). Live integration tests will land in **v1.2.1** once the init-call documentation is finalized.
+
+`src/libro_tools.cyr` (5 built-in MCP audit tools) deferred to **v1.3.0**. Reason: the cyrius compiler hits an internal token-table boundary when the full bote + libro + majra + tool-handler-fns set is included in one compilation unit. v1.3.0 will either (a) split bote into multiple compilation units (multi-file linker, on cyrius's v4.5 roadmap) or (b) ship libro_tools as a separate `[deps.bote-libro-tools]` package.
+
+### Verified (cyrius 4.4.4)
+- 359 tests passed, 0 failed
+- 4 fuzz harnesses passed
+- 10 benchmarks unchanged
+- `./build/bote` initialize handshake reports `"version":"1.2.0"`
+
+---
+
 ## [1.1.0] — 2026-04-13 — AuditSink + EventSink + dispatcher wire-up
 
 First minor bump on the cyrius lineage. Adds the audit and event-publishing

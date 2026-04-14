@@ -1,6 +1,6 @@
 [package]
 name = "bote"
-version = "1.1.0"
+version = "1.2.0"
 description = "MCP core service in Cyrius — JSON-RPC 2.0, registry, dispatch, three transports"
 license = "GPL-3.0-only"
 language = "cyrius"
@@ -12,3 +12,15 @@ output = "bote"
 
 [deps]
 stdlib = ["alloc", "args", "chrono", "fmt", "fnptr", "hashmap", "io", "json", "net", "str", "string", "syscalls", "tagged", "vec"]
+
+[deps.libro]
+git = "https://github.com/MacCracken/libro"
+path = "../libro"
+tag = "1.0.3"
+modules = ["src/error.cyr", "src/hasher.cyr", "src/entry.cyr", "src/verify.cyr", "src/query.cyr", "src/retention.cyr", "src/chain.cyr", "src/export.cyr", "src/merkle.cyr"]
+
+[deps.majra]
+git = "https://github.com/MacCracken/majra"
+path = "../majra"
+tag = "2.2.0"
+modules = ["src/error.cyr", "src/counter.cyr", "src/envelope.cyr", "src/namespace.cyr", "src/queue.cyr", "src/pubsub.cyr"]
