@@ -1,14 +1,25 @@
 # Bote Roadmap
 
-> **Current**: `1.9.2` (cyrius 4.7.0). 4,888 LOC `src/`, 519 unit
-> assertions across 5 test files, 10 benchmarks, 4 fuzz harnesses,
-> 6 transports, all major Rust v0.92.0 features ported plus net-new
-> (streamable HTTP, WebSocket, content blocks, SSRF guard, env-driven
-> bearer auth).
+> **Current**: `2.4.0` (cyrius 4.8.1). 8 test files, 603 unit
+> assertions, 10 benchmarks, 4 fuzz harnesses, 6 transports,
+> handler-claims ABI in place (2.0), JWT HS256 + PKCE-S256 (2.2 /
+> 2.3), sandbox adapter (2.1), base64url adoption + compile-unit
+> trim (2.4).
 >
 > **Spec**: MCP 2025-11-25 | **Compliance**: [spec-compliance.md](../spec-compliance.md)
 >
 > **Bench history**: [benchmarks-rust-v-cyrius.md](../benchmarks-rust-v-cyrius.md)
+
+### Waiting on cyrius 4.8.3 — capacity meter
+
+Per the cyrius lang-agent: **4.8.3** will add a compile-time capacity
+meter (visibility into identifier-table utilization, no language
+change). Bote's **2.5.0 — claims propagation** is queued for immediately
+after that lands. Plan: measure the current test compile unit's actual
+headroom, size the auth → dispatch claims plumbing against that
+number, then land in one focused release instead of try-and-revert.
+
+Do not start 2.5.0 until 4.8.3 ships.
 
 For shipped detail per release: [CHANGELOG.md](../../CHANGELOG.md).
 For Rust history: git tag `0.92.0` (Rust archive retired in v1.0.1).
