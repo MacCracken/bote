@@ -11,6 +11,9 @@ include "lib/io.cyr"
 include "lib/hashmap.cyr"
 include "lib/json.cyr"
 include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
 include "lib/assert.cyr"
 
 include "src/error.cyr"
@@ -20,6 +23,9 @@ include "src/registry.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/transport_http.cyr"
 
 # Test handler: echoes its arguments verbatim.
 fn h_echo(args) {
@@ -588,6 +594,120 @@ fn main() {
     var tv = registry_validate_params(rcompiled, "svc_count", "{\"count\":\"x\"}");
     assert(tv != 0, "compiled validate err on type");
     assert_eq(bote_err_tag(tv), ERR_SCHEMA_VIOLATION, "type err -> SCHEMA_VIOLATION");
+
+    # ---------------- stream: cancellation token ----------------
+    var tok = cancel_token_new();
+    assert_eq(cancel_token_is_cancelled(tok), 0, "fresh token not cancelled");
+    cancel_token_cancel(tok);
+    assert_eq(cancel_token_is_cancelled(tok), 1, "after cancel set");
+
+    # ---------------- stream: progress sender + updates ----------------
+    var ps_send = progress_sender_new();
+    progress_sender_report(ps_send, 3, 10);
+    progress_sender_report_msg(ps_send, 5, 10, "halfway");
+    var updates = progress_sender_updates(ps_send);
+    assert_eq(vec_len(updates), 2, "two updates");
+    var u1 = vec_get(updates, 0);
+    assert_eq(progress_update_progress(u1), 3, "u1 progress");
+    assert_eq(progress_update_total(u1), 10, "u1 total");
+    var u2 = vec_get(updates, 1);
+    assert_eq(progress_update_progress(u2), 5, "u2 progress");
+    assert(streq(progress_update_message(u2), "halfway") == 1, "u2 message");
+
+    # send-after-close is silently dropped
+    progress_sender_close(ps_send);
+    progress_sender_report(ps_send, 9, 10);
+    assert_eq(vec_len(updates), 2, "post-close drop");
+
+    # ---------------- stream: progress_notification JSON ----------------
+    var u_notif = progress_update_new(3, 10, "working");
+    var prog_notif = progress_notification("42", u_notif);
+    assert(streq(prog_notif, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":42,\"progress\":3,\"total\":10,\"message\":\"working\"}}") == 1, "progress notif json");
+
+    var u_min = progress_update_new(7, 0 - 1, 0);
+    var notif_min = progress_notification("\"abc\"", u_min);
+    assert(streq(notif_min, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":\"abc\",\"progress\":7}}") == 1, "progress notif minimal");
+
+    # ---------------- session: validate_protocol_version ----------------
+    assert_eq(validate_protocol_version("2025-11-25"), 0, "proto 2025-11-25 ok");
+    assert_eq(validate_protocol_version("2025-03-26"), 0, "proto 2025-03-26 ok");
+    assert_eq(validate_protocol_version("2024-11-05"), 0, "proto 2024-11-05 ok");
+    assert(validate_protocol_version("1999-01-01") != 0, "proto 1999 rejected");
+    assert(validate_protocol_version(0) != 0, "null proto rejected");
+
+    # ---------------- session: validate_origin ----------------
+    assert_eq(validate_origin("", 0), 0, "empty origin allowed");
+    assert_eq(validate_origin(0, 0), 0, "null origin allowed");
+
+    var allowed_star = vec_new();
+    vec_push(allowed_star, "*");
+    assert_eq(validate_origin("http://evil.com", allowed_star), 0, "wildcard allows");
+
+    var allowed_loop = vec_new();
+    vec_push(allowed_loop, "http://localhost:8090");
+    assert_eq(validate_origin("http://localhost:8090", allowed_loop), 0, "matched origin");
+    assert(validate_origin("http://evil.com", allowed_loop) != 0, "unmatched origin");
+
+    var allowed_empty = vec_new();
+    assert(validate_origin("http://localhost", allowed_empty) != 0, "empty list strict mode");
+
+    # ---------------- session: SessionStore lifecycle ----------------
+    var store = session_store_default();
+    assert_eq(session_store_active_count(store), 0, "fresh store empty");
+    var sid_a = session_store_create(store, "2025-11-25");
+    assert(sid_a != 0, "sid created");
+    assert_eq(strlen(sid_a), 32, "sid is 32 hex chars");
+    assert_eq(session_store_active_count(store), 1, "one session");
+    var s = session_store_validate(store, sid_a);
+    assert(s != 0, "validate returns session");
+    assert(streq(mcp_session_protocol_version(s), "2025-11-25") == 1, "session proto");
+    assert_eq(session_store_validate(store, "nonexistent_id"), 0, "unknown sid -> 0");
+
+    var sid_b = session_store_create(store, "2024-11-05");
+    assert_eq(session_store_active_count(store), 2, "two sessions");
+    assert(streq(sid_a, sid_b) == 0, "session ids unique");
+
+    assert_eq(session_store_remove(store, sid_a), 1, "remove returns 1");
+    assert_eq(session_store_active_count(store), 1, "one left");
+    assert_eq(session_store_remove(store, sid_a), 0, "remove again returns 0");
+    assert_eq(session_store_remove(store, sid_b), 1, "remove last");
+    assert_eq(session_store_active_count(store), 0, "store empty");
+
+    # ---------------- session: prune_expired ----------------
+    var short_store = session_store_new(1);
+    session_store_create(short_store, "2025-11-25");
+    session_store_create(short_store, "2025-11-25");
+    sleep_ms(10);
+    var pruned = session_store_prune_expired(short_store);
+    assert_eq(pruned, 2, "pruned 2");
+    assert_eq(session_store_active_count(short_store), 0, "after prune empty");
+
+    _http_init_crlf();
+    # ---------------- HTTP: header parsing helpers ----------------
+    var fake = alloc(512);
+    var fake_n = 0;
+    memcpy(fake, "POST /mcp HTTP/1.1", 18); fake_n = 18;
+    store8(fake + fake_n, 13); store8(fake + fake_n + 1, 10); fake_n = fake_n + 2;
+    memcpy(fake + fake_n, "Host: localhost:9999", 20); fake_n = fake_n + 20;
+    store8(fake + fake_n, 13); store8(fake + fake_n + 1, 10); fake_n = fake_n + 2;
+    memcpy(fake + fake_n, "Content-Length: 5", 17); fake_n = fake_n + 17;
+    store8(fake + fake_n, 13); store8(fake + fake_n + 1, 10); fake_n = fake_n + 2;
+    memcpy(fake + fake_n, "Origin: http://x", 16); fake_n = fake_n + 16;
+    store8(fake + fake_n, 13); store8(fake + fake_n + 1, 10); fake_n = fake_n + 2;
+    store8(fake + fake_n, 13); store8(fake + fake_n + 1, 10); fake_n = fake_n + 2;
+    memcpy(fake + fake_n, "hello", 5); fake_n = fake_n + 5;
+    store8(fake + fake_n, 0);
+
+    assert(streq(http_get_method(fake, fake_n), "POST") == 1, "http method");
+    assert(streq(http_get_path(fake, fake_n), "/mcp") == 1, "http path");
+    assert_eq(http_content_length(fake, fake_n), 5, "content-length 5");
+    assert(streq(http_find_header(fake, fake_n, "Origin"), "http://x") == 1, "origin parsed");
+    assert(streq(http_find_header(fake, fake_n, "Host"), "localhost:9999") == 1, "host parsed");
+    assert(streq(http_find_header(fake, fake_n, "content-length"), "5") == 1, "case-insensitive");
+    assert_eq(http_find_header(fake, fake_n, "Missing"), 0, "missing header -> 0");
+    var bo = http_body_offset(fake, fake_n);
+    assert(bo > 0, "body offset > 0");
+    assert(memeq(fake + bo, "hello", 5) == 1, "body bytes match");
 
     return assert_summary();
 }

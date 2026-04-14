@@ -12,9 +12,13 @@ include "lib/vec.cyr"
 include "lib/str.cyr"
 include "lib/syscalls.cyr"
 include "lib/io.cyr"
+include "lib/args.cyr"
 include "lib/hashmap.cyr"
 include "lib/json.cyr"
 include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
 
 include "src/error.cyr"
 include "src/protocol.cyr"
@@ -23,20 +27,59 @@ include "src/registry.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
 include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
 
 # Demo handler for the built-in `bote_echo` tool.
 fn bote_echo_handler(args) {
     return args;
 }
 
+# Parse a positive decimal integer from a cstr; returns 0 on bad input.
+fn _parse_uint(s) {
+    if (s == 0) { return 0; }
+    var n = 0;
+    var i = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c < 48) { return n; }
+        if (c > 57) { return n; }
+        n = n * 10 + (c - 48);
+        i = i + 1;
+    }
+    return n;
+}
+
 fn main() {
     alloc_init();
+    args_init();
+
     var reg = registry_new();
     var ok_schema = schema_new("object", 0, vec_new());
     registry_register(reg, tool_def_new("bote_echo", "echo arguments back", ok_schema));
     var dispatcher = dispatcher_new(reg);
     dispatcher_handle(dispatcher, "bote_echo", &bote_echo_handler);
+
+    # Mode selection:
+    #   bote                — stdio transport (default)
+    #   bote http [port]    — HTTP transport on port (default 8390)
+    #   bote unix <path>    — Unix socket transport at the given path
+    if (argc() >= 2) {
+        if (streq(argv(1), "http") == 1) {
+            var port = 8390;
+            if (argc() >= 3) { port = _parse_uint(argv(2)); }
+            if (port == 0) { port = 8390; }
+            var cfg = http_config_new("/mcp", INADDR_LOOPBACK(), port);
+            return transport_http_run(dispatcher, cfg);
+        }
+        if (streq(argv(1), "unix") == 1) {
+            if (argc() < 3) { return 2; }
+            return transport_unix_run(dispatcher, argv(2));
+        }
+    }
     return transport_stdio_run(dispatcher);
 }
 

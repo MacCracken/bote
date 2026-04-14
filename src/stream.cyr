@@ -1,0 +1,110 @@
+# bote::stream — progress + cancellation primitives
+# Mirrors rust-old/src/stream.rs (data + JSON serialization;
+# thread-spawning / mpsc-channel integration deferred until streaming dispatch
+# is wired through a transport).
+#
+# Sentinel: total = 0 - 1 (i.e. -1) means "no total given".
+# message = 0 means "no message".
+
+# CancellationToken (8 bytes): pointer to a single i64 flag. Multiple clones
+# share the same flag (they hold the same pointer).
+fn cancel_token_new() {
+    var flag = alloc(8);
+    store64(flag, 0);
+    return flag;
+}
+
+fn cancel_token_cancel(t) { store64(t, 1); return 0; }
+fn cancel_token_is_cancelled(t) { return load64(t); }
+
+# ProgressUpdate (24 bytes):
+#   +0  progress  i64
+#   +8  total     i64 (0 - 1 means "no total")
+#   +16 message   cstr or 0
+
+fn progress_update_new(progress, total, message) {
+    var u = alloc(24);
+    store64(u, progress);
+    store64(u + 8, total);
+    store64(u + 16, message);
+    return u;
+}
+
+fn progress_update_progress(u) { return load64(u); }
+fn progress_update_total(u) { return load64(u + 8); }
+fn progress_update_message(u) { return load64(u + 16); }
+
+fn progress_update_has_total(u) {
+    if (load64(u + 8) == 0 - 1) { return 0; }
+    return 1;
+}
+
+# ProgressSender (16 bytes):
+#   +0  updates_vec  vec of ProgressUpdate ptrs (collected synchronously for now)
+#   +8  closed       0/1 (1 = receiver dropped, send becomes no-op)
+#
+# When real channels arrive (lib/thread.cyr MPSC), swap the vec for a chan ptr.
+
+fn progress_sender_new() {
+    var s = alloc(16);
+    store64(s, vec_new());
+    store64(s + 8, 0);
+    return s;
+}
+
+fn progress_sender_updates(s) { return load64(s); }
+fn progress_sender_close(s) { store64(s + 8, 1); return 0; }
+fn progress_sender_is_closed(s) { return load64(s + 8); }
+
+fn progress_sender_send(s, update) {
+    if (progress_sender_is_closed(s) == 1) { return 0; }
+    vec_push(progress_sender_updates(s), update);
+    return 0;
+}
+
+# Convenience: report progress out of total.
+fn progress_sender_report(s, progress, total) {
+    return progress_sender_send(s, progress_update_new(progress, total, 0));
+}
+
+# Convenience: report progress with a message.
+fn progress_sender_report_msg(s, progress, total, message) {
+    return progress_sender_send(s, progress_update_new(progress, total, message));
+}
+
+# StreamContext (16 bytes):
+#   +0  progress     ProgressSender ptr
+#   +8  cancellation CancellationToken ptr
+
+fn stream_context_new() {
+    var c = alloc(16);
+    store64(c, progress_sender_new());
+    store64(c + 8, cancel_token_new());
+    return c;
+}
+
+fn stream_context_progress(c) { return load64(c); }
+fn stream_context_cancellation(c) { return load64(c + 8); }
+
+# Build a JSON-RPC notification cstr for a progress update.
+# request_id is a raw JSON literal cstr (e.g. "1", "\"abc\"", "null").
+fn progress_notification(request_id, update) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":");
+    if (request_id == 0) { str_builder_add_cstr(sb, "null"); }
+    else { str_builder_add_cstr(sb, request_id); }
+    str_builder_add_cstr(sb, ",\"progress\":");
+    str_builder_add_int(sb, progress_update_progress(update));
+    if (progress_update_has_total(update) == 1) {
+        str_builder_add_cstr(sb, ",\"total\":");
+        str_builder_add_int(sb, progress_update_total(update));
+    }
+    var msg = progress_update_message(update);
+    if (msg != 0) {
+        str_builder_add_cstr(sb, ",\"message\":\"");
+        _json_emit_escaped(sb, msg);
+        str_builder_add_cstr(sb, "\"");
+    }
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}

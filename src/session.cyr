@@ -1,0 +1,200 @@
+# bote::session — MCP session lifecycle (MCP 2025-11-25)
+# Mirrors rust-old/src/session.rs
+
+# ================================================================
+# Header name constants
+# ================================================================
+fn mcp_protocol_version_header() { return "MCP-Protocol-Version"; }
+fn mcp_session_id_header() { return "MCP-Session-Id"; }
+
+# ================================================================
+# validate_protocol_version(version_cstr) → 0 ok / err_msg cstr
+# ================================================================
+fn validate_protocol_version(v) {
+    if (v == 0) { return "unsupported MCP protocol version: (null)"; }
+    if (streq(v, "2024-11-05") == 1) { return 0; }
+    if (streq(v, "2025-03-26") == 1) { return 0; }
+    if (streq(v, "2025-11-25") == 1) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "unsupported MCP protocol version: ");
+    str_builder_add_cstr(sb, v);
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+# validate_origin(origin_cstr, allowed_origins_vec) → 0 ok / err_msg cstr
+# ================================================================
+fn validate_origin(origin, allowed_origins) {
+    # Empty Origin header is allowed (same-origin requests omit it).
+    if (origin == 0) { return 0; }
+    if (strlen(origin) == 0) { return 0; }
+
+    if (allowed_origins != 0) {
+        var n = vec_len(allowed_origins);
+        # Wildcard short-circuit.
+        var i = 0;
+        while (i < n) {
+            if (streq(vec_get(allowed_origins, i), "*") == 1) { return 0; }
+            i = i + 1;
+        }
+        if (n == 0) { return "no origins allowed (strict mode)"; }
+        # Exact match.
+        var j = 0;
+        while (j < n) {
+            if (streq(vec_get(allowed_origins, j), origin) == 1) { return 0; }
+            j = j + 1;
+        }
+    } else {
+        return "no origins allowed (strict mode)";
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "origin not allowed: ");
+    str_builder_add_cstr(sb, origin);
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+# Session ID generation — 32 hex chars from /dev/urandom (16 random bytes)
+# ================================================================
+
+fn _hex_byte(b, out) {
+    var hi = (b >> 4) & 15;
+    var lo = b & 15;
+    if (hi < 10) { store8(out, 48 + hi); } else { store8(out, 87 + hi); }
+    if (lo < 10) { store8(out + 1, 48 + lo); } else { store8(out + 1, 87 + lo); }
+    return 0;
+}
+
+fn _gen_session_id() {
+    var raw = alloc(16);
+    var out = alloc(33);
+    var fd = syscall(SYS_OPEN, "/dev/urandom", 0, 0);
+    if (fd >= 0) {
+        syscall(SYS_READ, fd, raw, 16);
+        syscall(SYS_CLOSE, fd);
+    } else {
+        # Fallback: clock-based pseudo-id
+        var t = clock_now_ns();
+        store64(raw, t);
+        store64(raw + 8, t * 0x100000001B3);
+    }
+    var i = 0;
+    while (i < 16) {
+        _hex_byte(load8(raw + i), out + i * 2);
+        i = i + 1;
+    }
+    store8(out + 32, 0);
+    return out;
+}
+
+# ================================================================
+# McpSession (32 bytes):
+#   +0  session_id        cstr
+#   +8  protocol_version  cstr
+#   +16 created_at_ns     i64 (monotonic)
+#   +24 last_active_ns    i64
+# ================================================================
+fn mcp_session_new(sid, protocol_version, now_ns) {
+    var s = alloc(32);
+    store64(s, sid);
+    store64(s + 8, protocol_version);
+    store64(s + 16, now_ns);
+    store64(s + 24, now_ns);
+    return s;
+}
+
+fn mcp_session_id(s) { return load64(s); }
+fn mcp_session_protocol_version(s) { return load64(s + 8); }
+fn mcp_session_created_at(s) { return load64(s + 16); }
+fn mcp_session_last_active(s) { return load64(s + 24); }
+fn mcp_session_touch(s, now_ns) { store64(s + 24, now_ns); return 0; }
+
+# ================================================================
+# SessionStore (24 bytes):
+#   +0  sessions    hashmap: sid_cstr -> McpSession ptr
+#   +8  ids         vec of sid_cstrs (insertion order — for prune iteration)
+#   +16 timeout_ns  i64
+# ================================================================
+fn session_store_new(timeout_ns) {
+    var st = alloc(24);
+    store64(st, map_new());
+    store64(st + 8, vec_new());
+    store64(st + 16, timeout_ns);
+    return st;
+}
+
+# Default: 1 hour timeout (3600 * 1e9 ns).
+fn session_store_default() {
+    return session_store_new(3600000000000);
+}
+
+fn session_store_sessions(st) { return load64(st); }
+fn session_store_ids(st) { return load64(st + 8); }
+fn session_store_timeout_ns(st) { return load64(st + 16); }
+
+# Create a new session and return its ID (cstr).
+fn session_store_create(st, protocol_version) {
+    var sid = _gen_session_id();
+    var now = clock_now_ns();
+    var session = mcp_session_new(sid, protocol_version, now);
+    map_set(session_store_sessions(st), sid, session);
+    vec_push(session_store_ids(st), sid);
+    return sid;
+}
+
+# Validate and touch a session. Returns the session ptr or 0 if unknown.
+fn session_store_validate(st, sid) {
+    var s = map_get(session_store_sessions(st), sid);
+    if (s == 0) { return 0; }
+    mcp_session_touch(s, clock_now_ns());
+    return s;
+}
+
+# Remove a session. Returns 1 if found, 0 if not.
+fn session_store_remove(st, sid) {
+    if (map_has(session_store_sessions(st), sid) == 0) { return 0; }
+    map_delete(session_store_sessions(st), sid);
+    var ids = session_store_ids(st);
+    var n = vec_len(ids);
+    var i = 0;
+    while (i < n) {
+        if (streq(vec_get(ids, i), sid) == 1) {
+            vec_remove(ids, i);
+            i = n;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Number of active sessions.
+fn session_store_active_count(st) {
+    return map_count(session_store_sessions(st));
+}
+
+# Prune sessions inactive longer than timeout. Returns the number pruned.
+fn session_store_prune_expired(st) {
+    var now = clock_now_ns();
+    var timeout = session_store_timeout_ns(st);
+    var sessions = session_store_sessions(st);
+    var ids = session_store_ids(st);
+    var pruned = 0;
+    var i = 0;
+    while (i < vec_len(ids)) {
+        var sid = vec_get(ids, i);
+        var s = map_get(sessions, sid);
+        if (s == 0) {
+            vec_remove(ids, i);
+        } else {
+            var age = now - mcp_session_last_active(s);
+            if (age >= timeout) {
+                map_delete(sessions, sid);
+                vec_remove(ids, i);
+                pruned = pruned + 1;
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+    return pruned;
+}

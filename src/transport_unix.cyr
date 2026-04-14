@@ -1,0 +1,107 @@
+# bote::transport::unix — line-oriented JSON-RPC over a Unix domain socket.
+# Mirrors rust-old/src/transport/unix.rs (sync, single-connection-at-a-time).
+#
+# net.cyr only has AF_INET helpers, so we open the AF_UNIX socket directly.
+
+var AF_UNIX = 1;
+
+# Build a sockaddr_un (110 bytes) at addr_buf with `path` (cstr).
+# Returns the actual struct length to pass to bind() (sun_family + path + NUL).
+fn _unix_sockaddr(addr_buf, path) {
+    memset(addr_buf, 0, 110);
+    store16(addr_buf, AF_UNIX);
+    var plen = strlen(path);
+    if (plen > 107) { plen = 107; }
+    memcpy(addr_buf + 2, path, plen);
+    store8(addr_buf + 2 + plen, 0);
+    return 2 + plen + 1;
+}
+
+# Process complete (newline-terminated) lines in the per-connection buffer.
+# Returns 1 if any was processed.
+fn _unix_process_lines(cfd, dispatcher, buf, blen_ptr) {
+    var blen = load64(blen_ptr);
+    var processed = 0;
+    var scanned = 0;
+    var line_start = 0;
+    while (scanned < blen) {
+        if (load8(buf + scanned) == 10) {
+            store8(buf + scanned, 0);
+            var line_len = scanned - line_start;
+            if (line_len > 0) {
+                var resp = codec_process_message(buf + line_start, dispatcher);
+                if (resp != 0) {
+                    sock_send(cfd, resp, strlen(resp));
+                    sock_send(cfd, "\n", 1);
+                }
+                processed = 1;
+            }
+            line_start = scanned + 1;
+        }
+        scanned = scanned + 1;
+    }
+    if (line_start > 0) {
+        var leftover = blen - line_start;
+        if (leftover > 0) { memcpy(buf, buf + line_start, leftover); }
+        store64(blen_ptr, leftover);
+    }
+    return processed;
+}
+
+var UNIX_BUF_SIZE = 131072;
+
+fn _unix_handle_client(cfd, dispatcher) {
+    var buf = alloc(UNIX_BUF_SIZE);
+    var blen_slot = alloc(8);
+    store64(blen_slot, 0);
+    while (1 == 1) {
+        var blen = load64(blen_slot);
+        var space = UNIX_BUF_SIZE - blen;
+        if (space <= 0) {
+            store64(blen_slot, 0);
+            blen = 0;
+            space = UNIX_BUF_SIZE;
+        }
+        var n_r = sock_recv(cfd, buf + blen, space);
+        if (is_err_result(n_r) == 1) { return 0; }
+        var n = payload(n_r);
+        if (n <= 0) {
+            # EOF — flush any final unterminated line.
+            if (blen > 0) {
+                store8(buf + blen, 0);
+                var resp = codec_process_message(buf, dispatcher);
+                if (resp != 0) {
+                    sock_send(cfd, resp, strlen(resp));
+                    sock_send(cfd, "\n", 1);
+                }
+            }
+            return 0;
+        }
+        store64(blen_slot, blen + n);
+        _unix_process_lines(cfd, dispatcher, buf, blen_slot);
+    }
+    return 0;
+}
+
+# Bind a Unix socket at `path` and accept connections, dispatching each
+# newline-terminated message via codec_process_message. Removes any prior
+# socket file at that path.
+fn transport_unix_run(dispatcher, path) {
+    syscall(SYS_UNLINK, path);
+    var sfd = syscall(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0);
+    if (sfd < 0) { return 1; }
+    var addr = alloc(110);
+    var addrlen = _unix_sockaddr(addr, path);
+    var br = syscall(SYS_BIND, sfd, addr, addrlen);
+    if (br < 0) { syscall(SYS_CLOSE, sfd); return 1; }
+    var lr = syscall(SYS_LISTEN, sfd, 16);
+    if (lr < 0) { syscall(SYS_CLOSE, sfd); return 1; }
+    while (1 == 1) {
+        var cfd = syscall(SYS_ACCEPT, sfd, 0, 0);
+        if (cfd >= 0) {
+            _unix_handle_client(cfd, dispatcher);
+            syscall(SYS_CLOSE, cfd);
+        }
+    }
+    return 0;
+}
