@@ -2,6 +2,69 @@
 
 All notable changes to bote are documented here.
 
+## [0.1.0] — 2026-04-13 — Cyrius port baseline
+
+### Breaking
+- **Language switch**: bote moved from Rust to Cyrius. The Rust source is preserved under `rust-old/` for reference and recovery. Version reset to `0.1.0` to mark the new lineage.
+- **API change**: idiomatic Cyrius — module-prefixed function APIs (`registry_register`, `dispatcher_dispatch`, `codec_process_message`) over offset-addressed structs (`store64`/`load64`). No traits, generics, async, or borrow checking. Handler functions are i64 function pointers (`fn h(args_cstr) → result_cstr`).
+
+### Added
+- **`src/error.cyr`** — `BoteErrTag` enum (12 variants), `bote_err_rpc_code`, `bote_err_format`, schema-violation list support.
+- **`src/protocol.cyr`** — `JsonRpcRequest` / `JsonRpcResponse` / `JsonRpcError` with raw-JSON-literal id/params/result/data slots.
+- **`src/jsonx.cyr`** — Nested-aware JSON value extractor (`jsonx_get_raw`, `jsonx_get_str`, `jsonx_has`, `jsonx_is_object`). Handles nested objects, arrays, escaped strings; needed because `lib/json.cyr` is flat-only.
+- **`src/registry.cyr`** — `ToolDef` (with `version`, `deprecated`, `annotations`, `compiled` slots), `ToolSchema`, `ToolAnnotations` (presets `read_only` / `destructive`), `ToolRegistry` (insertion-ordered, hashmap-indexed). Versioned tools, deprecation, validate-by-required-fields fallback.
+- **`src/dispatch.cyr`** — `Dispatcher`, sync handler dispatch, `initialize` / `tools/list` / `tools/call` routing, MCP protocol-version negotiation, `validate_tool_name` (project_tool format, 256 char max), dynamic register/deregister.
+- **`src/codec.cyr`** — `codec_parse_request`, `codec_serialize_response`, `codec_process_message` (single + batch + notification + error responses), JSON-message escaping reused from dispatch.
+- **`src/schema.cyr`** — `CompiledSchema` with full type-checking (`string`, `number`, `integer`, `boolean`, `array`, `object`, `Any`), enum constraints, numeric bounds, recursive nested objects + array items, multi-violation reporting. `tool_def_with_compiled` slot wires it into `registry_validate_params`.
+- **`src/stream.cyr`** — `CancellationToken`, `ProgressUpdate`, `ProgressSender`, `StreamContext`, `progress_notification` JSON builder. (Thread integration deferred.)
+- **`src/session.cyr`** — `SessionStore` (hex-encoded 16-byte SIDs from `/dev/urandom`), `validate_protocol_version`, `validate_origin` (wildcard `*`, exact match, strict mode).
+- **`src/transport_stdio.cyr`** — Line-oriented JSON-RPC over stdin/stdout, 128KB heap-allocated buffer, partial-line shifting.
+- **`src/transport_http.cyr`** — HTTP/1.1 server (`POST /mcp` → JSON-RPC). Origin/MCP-Protocol-Version/MCP-Session-Id middleware. Auto-creates a session on `initialize` and emits the new `MCP-Session-Id` response header. Case-insensitive header lookup. 64KB request buffer.
+- **`src/transport_unix.cyr`** — `AF_UNIX` line-oriented transport (own socket-creation code since `lib/net.cyr` is `AF_INET`-only). 128KB per-connection buffer.
+- **CLI** — `./build/bote [stdio|http <port>|unix <path>]` selects transport.
+- **Tests** — `tests/bote.tcyr` with **251 unit assertions** covering all modules.
+- **Benchmarks** — `tests/bote.bcyr` with 10 hot-path benchmarks (all sub-10µs on x86_64).
+- **Fuzz** — `fuzz/codec_parse.fcyr`, `fuzz/codec_process.fcyr`, `fuzz/jsonx_extract.fcyr`, `fuzz/schema_validate.fcyr` (~330 fuzzed calls; no crashes).
+- **`docs/cyrius-feedback.md`** — language-level issues found during the port.
+- `.gitignore` rules for `rust-old/target/` and `/build/`.
+
+### Performance
+- `dispatch_initialize` ~2µs avg
+- `dispatch_tools_list` ~2µs avg
+- `dispatch_tools_call` ~1µs avg
+- `jsonx_get_str_flat` 600ns avg
+- `jsonx_get_raw_nested` ~1µs avg
+- `codec_parse_request` ~2µs avg
+- `codec_serialize_response` ~1µs avg
+- `codec_process_message` (full pipeline) ~5µs avg
+- `validate_compiled_simple` ~1µs avg
+- `validate_compiled_nested` ~3µs avg
+
+### Deferred to future cyrius releases
+- `bridge` — TypeScript bridge with CORS / MCP envelope wrapping.
+- `audit` — libro hash-linked audit chain integration.
+- `events` — majra pub/sub event publishing.
+- `discovery` — cross-node tool announcements (depends on `events`).
+- `sandbox` — kavach tool isolation.
+- `host` — MCP hosting layer (content blocks, host registry).
+- `libro_tools` — 5 built-in libro audit MCP tools.
+- `auth` — OAuth 2.1 / PKCE / bearer-token middleware.
+- `transport_ws` — server-side WebSocket (cyrius `lib/ws.cyr` is client-only).
+- `transport_streamable` — streamable HTTP (POST + SSE single endpoint).
+- Streaming dispatch (needs thread + channel integration).
+
+### Known cyrius-language workarounds applied
+- `\r` string escape emits byte `r` (114) instead of CR (13) — built CRLF via `store8`.
+- `&&` / `||` operators do not short-circuit — guarded null derefs nested as `if (p != 0) { if (...) { ... } }`.
+- No per-block local scoping — distinct names per `fn` body (`req_one`, `rcompiled`, `prog_notif`, etc.).
+- Static `var buf[N] >~ 16KB` exhausts the output buffer — large buffers heap-allocated (`var ptr = 0;` global + `ptr = alloc(N);` at startup).
+
+See [docs/cyrius-feedback.md](docs/cyrius-feedback.md) for full reproductions.
+
+---
+
+## Historical (Rust) — preserved under `rust-old/`
+
 ## [0.91.0] — 2026-04-02
 
 ### Added

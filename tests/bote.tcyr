@@ -25,6 +25,7 @@ include "src/codec.cyr"
 include "src/schema.cyr"
 include "src/stream.cyr"
 include "src/session.cyr"
+include "src/discovery.cyr"
 include "src/transport_http.cyr"
 
 # Test handler: echoes its arguments verbatim.
@@ -35,6 +36,14 @@ fn h_echo(args) {
 # Test handler: returns a constant.
 fn h_const(args) {
     return "{\"answer\":42}";
+}
+
+# Discovery test sink: pushes announcements into a global vec.
+var _disc_sink_queue = 0;
+fn disc_sink(topic, json) {
+    if (_disc_sink_queue == 0) { _disc_sink_queue = vec_new(); }
+    vec_push(_disc_sink_queue, json);
+    return 0;
 }
 
 fn main() {
@@ -708,6 +717,48 @@ fn main() {
     var bo = http_body_offset(fake, fake_n);
     assert(bo > 0, "body offset > 0");
     assert(memeq(fake + bo, "hello", 5) == 1, "body bytes match");
+
+    # ---------------- discovery: announcement JSON ----------------
+    var disc_tools = vec_new();
+    var disc_sa = schema_new("object", 0, vec_new());
+    vec_push(disc_tools, tool_def_new("svc_alpha", "alpha tool", disc_sa));
+    vec_push(disc_tools, tool_def_with_version(tool_def_new("svc_beta", "beta tool", disc_sa), "2.0"));
+    var ann = announcement_new("node-1", disc_tools);
+    assert(streq(announcement_node_id(ann), "node-1") == 1, "ann node id");
+    assert_eq(vec_len(announcement_tools(ann)), 2, "ann two tools");
+
+    var ann_json = announcement_to_json(ann);
+    assert_eq(jsonx_has(ann_json, "node_id"), 1, "ann json has node_id");
+    assert_eq(jsonx_has(ann_json, "tools"), 1, "ann json has tools");
+    assert(streq(jsonx_get_str(ann_json, "node_id"), "node-1") == 1, "ann json node-1");
+
+    # ---------------- discovery: service publish ----------------
+    _disc_sink_queue = vec_new();
+    var disc = discovery_new("node-x", &disc_sink);
+    assert(streq(discovery_node_id(disc), "node-x") == 1, "disc node id");
+    assert(streq(discovery_topic(disc), "bote/tool/announce") == 1, "disc topic");
+
+    var emitted = discovery_announce(disc, disc_tools);
+    assert(emitted != 0, "announce returns json");
+    assert_eq(vec_len(_disc_sink_queue), 1, "sink got 1");
+    assert(streq(jsonx_get_str(vec_get(_disc_sink_queue, 0), "node_id"), "node-x") == 1, "sink node-x");
+
+    var disc_quiet = discovery_new("node-q", 0);
+    var quiet_json = discovery_announce(disc_quiet, disc_tools);
+    assert(quiet_json != 0, "quiet still builds json");
+    assert_eq(vec_len(_disc_sink_queue), 1, "quiet didn't publish");
+
+    # ---------------- discovery: receiver queue ----------------
+    var rx = discovery_receiver_new();
+    assert_eq(discovery_receiver_len(rx), 0, "empty receiver");
+    assert_eq(discovery_receiver_try_recv(rx), 0, "empty try_recv -> 0");
+
+    discovery_receiver_push(rx, "ann1");
+    discovery_receiver_push(rx, "ann2");
+    assert_eq(discovery_receiver_len(rx), 2, "two queued");
+    assert(streq(discovery_receiver_try_recv(rx), "ann1") == 1, "fifo head ann1");
+    assert(streq(discovery_receiver_try_recv(rx), "ann2") == 1, "fifo head ann2");
+    assert_eq(discovery_receiver_try_recv(rx), 0, "drained -> 0");
 
     return assert_summary();
 }

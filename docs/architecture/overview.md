@@ -1,145 +1,179 @@
-# Bote Architecture
+# Bote Architecture (Cyrius)
 
-> MCP core service — JSON-RPC 2.0 protocol, tool registry, dispatch, streaming, and observability.
+> MCP core service — JSON-RPC 2.0 protocol, tool registry, dispatch, three transports.
 >
-> **Name**: Bote (German) — messenger. The messenger between agents and tools.
-> Eliminates 23 separate MCP stdio implementations across AGNOS consumer apps.
+> **Name**: Bote (German) — messenger.
+>
+> **Lineage**: Originally a Rust crate (preserved in `rust-old/`). Ported to
+> Cyrius via `cyrius port` on 2026-04-13. The Rust archive is the historical
+> reference; this doc describes the live Cyrius implementation.
 
 ---
 
 ## Design Principles
 
-1. **One protocol implementation** — every app uses bote instead of reimplementing JSON-RPC 2.0
-2. **Registry-driven** — tools are registered with schemas, dispatch validates automatically
-3. **Transport-agnostic** — stdio, HTTP, WebSocket, Unix socket via feature flags
-4. **Streaming-ready** — progress notifications and cancellation for long-running tools
-5. **Audit-ready** — every tool call loggable via libro; events published via majra
-6. **Minimal by default** — no default features; consumers opt in to what they need
+1. **One protocol implementation** — every consumer dispatches through bote instead of reimplementing JSON-RPC 2.0.
+2. **Registry-driven** — tools registered with schemas, dispatch validates automatically.
+3. **Transport-agnostic** — same `Dispatcher` powers stdio, HTTP, Unix sockets.
+4. **Streaming-ready data layer** — progress + cancellation primitives in place; thread integration to come with future cyrius features.
+5. **Audit-ready hooks** — sites identified for libro/majra integration; modules to land in a future port.
+6. **No global state in the dispatcher** — caller owns the registry and dispatcher heap pointers; transports are stateless.
 
 ---
 
-## System Architecture
+## System
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  Consumers (agnoshi, daimon, SY, AgnosAI, consumer apps)      │
-│                                                               │
-│  Client: JSON-RPC 2.0 over stdio / HTTP / WebSocket / Unix    │
-└───────────────────────────┬──────────────────────────────────┘
-                            │
-┌───────────────────────────▼──────────────────────────────────┐
-│  Bote Core                                                    │
-│                                                               │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │  Transport Layer (feature-gated)                         │ │
-│  │  stdio │ HTTP (axum) │ WebSocket │ Unix socket           │ │
-│  │        │ + SSE stream │           │                       │ │
-│  └────────────────────────┬────────────────────────────────┘ │
-│                           │                                   │
-│  ┌────────────┐  ┌────────▼─────────┐  ┌──────────────────┐ │
-│  │  Registry  │  │   Dispatcher     │  │  Stream Context  │ │
-│  │ (tool defs │──│ dispatch()       │  │  (progress +     │ │
-│  │  + schemas)│  │ dispatch_stream()│──│   cancellation)  │ │
-│  └────────────┘  └────────┬─────────┘  └──────────────────┘ │
-│                           │                                   │
-│  ┌────────────────────────▼────────────────────────────────┐ │
-│  │  Tool Handlers                                           │ │
-│  │  Sync: Fn(Value) -> Value                                │ │
-│  │  Streaming: Fn(Value, StreamContext) -> Value             │ │
-│  └──────────────────────────────────────────────────────────┘ │
-│                                                               │
-│  ┌──────────────────┐  ┌──────────────────┐                  │
-│  │ libro (audit)    │  │ majra (events)   │                  │
-│  │ AuditSink trait  │  │ EventSink trait  │                  │
-│  │ feature: audit   │  │ feature: events  │                  │
-│  └──────────────────┘  └──────────────────┘                  │
-└───────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│ Consumers (jalwa, shruti, tazama, daimon, agnoshi, …)            │
+│                                                                  │
+│ Client: JSON-RPC 2.0 over stdio / HTTP / Unix socket             │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │
+┌──────────────────────────────▼───────────────────────────────────┐
+│ Bote (Cyrius)                                                    │
+│                                                                  │
+│ ┌──────────────────────────────────────────────────────────────┐ │
+│ │ Transport Layer                                              │ │
+│ │ stdio          HTTP/1.1 (own server)        unix (AF_UNIX)   │ │
+│ │ +middleware:   Origin / Protocol-Version /                   │ │
+│ │                Session-Id                                    │ │
+│ └────────────────────────┬─────────────────────────────────────┘ │
+│                          │                                       │
+│ ┌────────────────────────▼─────────────────────────────────────┐ │
+│ │ codec — parse_request / serialize_response /                 │ │
+│ │         process_message (single + batch + notif)             │ │
+│ └────────────────────────┬─────────────────────────────────────┘ │
+│                          │                                       │
+│ ┌──────────────┐ ┌───────▼────────┐ ┌──────────────────────────┐ │
+│ │ registry     │ │ dispatch       │ │ stream                   │ │
+│ │ (ToolDef +   │─│ (initialize /  │─│ (ProgressUpdate,         │ │
+│ │  schemas +   │ │ tools/list /   │ │  CancellationToken,      │ │
+│ │  versions)   │ │ tools/call)    │ │  progress_notification)  │ │
+│ └──────┬───────┘ └───────┬────────┘ └──────────────────────────┘ │
+│        │                 │                                       │
+│ ┌──────▼─────────────────▼──────────────────────────────────────┐│
+│ │ schema (CompiledSchema: type / enum / bounds / nested)        ││
+│ └───────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│ ┌──────────────────────────────────────────────────────────────┐ │
+│ │ jsonx — nested-aware JSON value extractor                    │ │
+│ │ session — SessionStore, validate_origin, validate_protocol   │ │
+│ │ error  — BoteErrTag, rpc_code mapping, format                │ │
+│ └──────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Module Structure
+## Module Layout
 
 ```
 src/
-├── lib.rs              Public API, Result type, Send+Sync assertions
-├── error.rs            BoteError (#[non_exhaustive]) with JSON-RPC error codes
-├── protocol.rs         JsonRpcRequest, JsonRpcResponse, JsonRpcError
-├── registry.rs         ToolRegistry, ToolDef, ToolSchema, validation
-├── dispatch.rs         Dispatcher, DispatchOutcome, tool name extraction
-├── stream.rs           CancellationToken, ProgressUpdate, StreamContext
-├── audit.rs            AuditSink trait, ToolCallEvent, LibroAudit (feature: audit)
-├── events.rs           EventSink trait, topic constants, MajraEvents (feature: events)
-├── transport/
-│   ├── mod.rs          Re-exports: parse_request, serialize_response, process_message
-│   ├── codec.rs        JSON-RPC codec, batch processing, jsonrpc validation
-│   ├── stdio.rs        Blocking line-oriented transport (sync + streaming)
-│   ├── http.rs         Axum-based HTTP + SSE streaming (feature: http)
-│   ├── ws.rs           WebSocket bidirectional transport (feature: ws)
-│   └── unix.rs         Unix domain socket transport (feature: unix)
-├── tests/
-│   └── mod.rs          Integration tests
-└── (benches/dispatch.rs  8 benchmarks)
+├── main.cyr                — CLI entry: argv selects transport
+├── error.cyr               — BoteErrTag (12 variants), rpc_code, format
+├── protocol.cyr            — JsonRpcRequest / Response / Error data types
+├── jsonx.cyr               — nested-aware JSON extractor
+├── registry.cyr            — ToolDef, ToolSchema, ToolAnnotations, ToolRegistry
+├── dispatch.cyr            — Dispatcher + dispatcher_dispatch
+├── codec.cyr               — parse_request / serialize_response / process_message
+├── schema.cyr              — CompiledSchema typed validation
+├── stream.cyr              — progress + cancellation primitives
+├── session.cyr             — SessionStore, protocol/origin validators
+├── transport_stdio.cyr     — line-buffered stdin/stdout loop
+├── transport_http.cyr      — HTTP/1.1 server + middleware
+└── transport_unix.cyr      — AF_UNIX line-buffered loop
+
+lib/                        — vendored cyrius stdlib (47 modules)
+tests/
+├── bote.tcyr               — 251 unit assertions
+└── bote.bcyr               — 10 hot-path benchmarks
+fuzz/
+├── codec_parse.fcyr
+├── codec_process.fcyr
+├── jsonx_extract.fcyr
+└── schema_validate.fcyr
+rust-old/                   — Rust source archive (preserved by `cyrius port`)
 ```
 
 ---
 
-## Feature Flags
+## Data Representation Conventions
 
-| Flag | Dependencies | Description |
-|------|-------------|-------------|
-| `http` | axum, tokio, futures-util | HTTP transport (POST + SSE streaming) |
-| `ws` | tokio, tokio-tungstenite, futures-util | WebSocket transport |
-| `unix` | tokio | Unix domain socket transport |
-| `all-transports` | all above | Enables http + ws + unix |
-| `audit` | libro | Audit logging via hash-linked chain |
-| `events` | majra | Event publishing via pub/sub |
-| `full` | all above | All transports + audit + events |
+Cyrius is i64-only (no floats, no generics, no traits). Bote follows these
+conventions throughout:
 
----
+| Pattern | Example |
+|---|---|
+| Structs are heap-alloc'd byte ranges with fixed offsets | `var d = alloc(48); store64(d + 8, name);` |
+| Accessors are `module_field(ptr) → load64(ptr + offset)` | `tool_def_name(d) → load64(d)` |
+| Optional fields use `0` as the sentinel | `tool_def_version(d) == 0` means no version |
+| Tagged enums = i64 tag at offset 0 | `bote_err_tag(e) == ERR_INVALID_PARAMS` |
+| Lists are `vec_*` from `lib/vec.cyr`; maps are `map_*` from `lib/hashmap.cyr` | |
+| Strings are null-terminated cstrs unless prefixed `s_` (then `Str` from `lib/str.cyr`) | |
+| Function pointers via `&fn_name`, called with `fncall1(fp, arg)` | |
 
-## MCP Protocol Methods
-
-| Method | Description |
-|--------|-------------|
-| `initialize` | Handshake — returns server info, capabilities, negotiated protocol version |
-| `tools/list` | List all registered tools with schemas |
-| `tools/call` | Call a tool by name with arguments |
-| `$/cancelRequest` | Cancel an in-progress streaming tool call |
+JSON-RPC `id`, `params`, `result`, and error `data` are stored as **raw
+JSON-literal cstrs** (e.g. `"1"`, `"\"abc\""`, `"null"`, `"{...}"`) since cyrius
+has no nested JSON value type. The `jsonx` module extracts subtrees by slicing
+the source bytes (respecting nested braces, brackets, and quoted strings).
 
 ---
 
-## JSON-RPC Error Codes
+## Error Codes
 
 | Code | Meaning |
-|------|---------|
+|---|---|
 | -32700 | Parse error |
-| -32600 | Invalid request (bad jsonrpc version, empty batch, non-object) |
-| -32601 | Method/tool not found |
-| -32602 | Invalid params (missing required fields, empty tool name) |
-| -32000 | Tool execution error |
+| -32600 | Invalid request (bad jsonrpc version, empty batch, non-object element) |
+| -32601 | Method not found / tool not found |
+| -32602 | Invalid params (missing required, schema violation, empty tool name) |
+| -32000 | Tool execution error / sandbox error |
 | -32003 | Transport closed / bind failed |
-| -32603 | Internal error (handler panicked) |
+| -32603 | Internal error |
 | -32800 | Request cancelled |
 
----
-
-## Event Topics (majra)
-
-| Topic | When |
-|-------|------|
-| `bote/tool/completed` | Tool call succeeded |
-| `bote/tool/failed` | Tool call failed |
-| `bote/tool/registered` | Tool registered |
+Maintained in `src/error.cyr::bote_err_rpc_code`.
 
 ---
 
-## Consumers
+## Transports
 
-| Project | Usage |
-|---------|-------|
-| **23 AGNOS consumer apps** | Replace inline MCP servers with bote dispatch |
-| **daimon** | 144 MCP tools via bote registry |
-| **SecureYeoman** | TypeScript bridge to Rust MCP core |
-| **agnoshi** | Tool discovery and invocation |
-| **AgnosAI** | Sandboxed tool execution via kavach + bote |
+### stdio
+Line-oriented JSON-RPC over fd 0 / fd 1. Reads chunks from stdin, splits on
+`\n`, dispatches each complete line, leaves partial lines in a 128KB
+heap-allocated buffer. EOF flushes any final non-terminated line.
+
+### HTTP/1.1
+Own minimal server (no `axum` equivalent in cyrius stdlib). Bind to
+`127.0.0.1:port`, accept-loop, single-recv per connection (suitable for
+typical JSON-RPC payloads under the 64KB request buffer). Routes:
+
+| Method/Path | Action |
+|---|---|
+| `POST <endpoint>` (default `/mcp`) | dispatch JSON-RPC |
+| Anything else | 404 / 405 |
+
+Middleware (when configured on `HttpConfig`):
+- **Origin** allow-list (403 on rejection; wildcard `*` allows all; empty list = strict mode rejects all)
+- **MCP-Protocol-Version** (400 if invalid; 400 if absent and `require_protocol == 1`)
+- **MCP-Session-Id** (404 on unknown SID; auto-bypass for `initialize`)
+
+If a `SessionStore` is configured and the request is `initialize`, the response
+includes a fresh `MCP-Session-Id` header (32-hex random from `/dev/urandom`).
+
+### Unix domain socket
+Same line-oriented protocol as stdio, but over `AF_UNIX`. Socket file is
+unlinked + recreated on bind. Per-connection 128KB buffer.
+
+---
+
+## Verification
+
+| Artifact | Count | Where |
+|---|---|---|
+| Unit tests | 251 | `tests/bote.tcyr` |
+| Benchmarks | 10 | `tests/bote.bcyr` |
+| Fuzz harnesses | 4 | `fuzz/*.fcyr` |
+
+All hot paths are sub-10µs on x86_64.

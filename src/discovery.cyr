@@ -1,0 +1,119 @@
+# bote::discovery — cross-node tool announcements
+# Mirrors rust-old/src/discovery.rs.
+#
+# The Rust version publishes announcements via majra pub/sub. Cyrius doesn't
+# have a `lib/majra.cyr` port yet (will land with v0.2.0 events module), so
+# this module ships the data layer + a callback-based announcement sink:
+# callers register a function pointer that receives each announcement.
+# When the events module lands, the publisher path becomes a one-line wire-up.
+
+# ToolAnnouncement (16 bytes):
+#   +0  node_id  cstr
+#   +8  tools    vec of ToolDef ptrs
+fn announcement_new(node_id, tools) {
+    var a = alloc(16);
+    store64(a, node_id);
+    store64(a + 8, tools);
+    return a;
+}
+
+fn announcement_node_id(a) { return load64(a); }
+fn announcement_tools(a) { return load64(a + 8); }
+
+# Serialize a ToolAnnouncement to JSON: {"node_id":"...","tools":[...]}
+# Reuses dispatch's _emit_schema for each tool's inputSchema.
+fn announcement_to_json(a) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"node_id\":\"");
+    _json_emit_escaped(sb, announcement_node_id(a));
+    str_builder_add_cstr(sb, "\",\"tools\":[");
+    var tools = announcement_tools(a);
+    if (tools != 0) {
+        var n = vec_len(tools);
+        var i = 0;
+        while (i < n) {
+            if (i > 0) { str_builder_add_cstr(sb, ","); }
+            var t = vec_get(tools, i);
+            str_builder_add_cstr(sb, "{");
+            _json_emit_str_field(sb, "name", tool_def_name(t));
+            str_builder_add_cstr(sb, ",");
+            _json_emit_str_field(sb, "description", tool_def_description(t));
+            str_builder_add_cstr(sb, ",\"inputSchema\":");
+            _emit_schema(sb, tool_def_input_schema(t));
+            var v = tool_def_version(t);
+            if (v != 0) {
+                str_builder_add_cstr(sb, ",");
+                _json_emit_str_field(sb, "version", v);
+            }
+            var dep = tool_def_deprecated(t);
+            if (dep != 0) {
+                str_builder_add_cstr(sb, ",");
+                _json_emit_str_field(sb, "deprecated", dep);
+            }
+            str_builder_add_cstr(sb, "}");
+            i = i + 1;
+        }
+    }
+    str_builder_add_cstr(sb, "]}");
+    return str_data(str_builder_build(sb));
+}
+
+# DiscoveryService (24 bytes):
+#   +0  node_id      cstr
+#   +8  publish_fp   function pointer: fn (topic_cstr, json_cstr) → 0
+#                    (0 = no sink configured; announcements are no-ops)
+#   +16 last_topic   cstr — the topic announcements are published on
+#                    (mirrors rust events::TOPIC_TOOL_ANNOUNCE)
+
+fn discovery_topic_announce() { return "bote/tool/announce"; }
+
+fn discovery_new(node_id, publish_fp) {
+    var d = alloc(24);
+    store64(d, node_id);
+    store64(d + 8, publish_fp);
+    store64(d + 16, discovery_topic_announce());
+    return d;
+}
+
+fn discovery_node_id(d) { return load64(d); }
+fn discovery_publish_fp(d) { return load64(d + 8); }
+fn discovery_topic(d) { return load64(d + 16); }
+
+# Announce a vec of ToolDef ptrs to the network. If no publish_fp is
+# configured, the announcement is built but not delivered (no-op).
+# Returns the JSON string emitted (useful for tests + future SSE streams).
+fn discovery_announce(d, tools) {
+    var ann = announcement_new(discovery_node_id(d), tools);
+    var json = announcement_to_json(ann);
+    var fp = discovery_publish_fp(d);
+    if (fp != 0) { fncall2(fp, discovery_topic(d), json); }
+    return json;
+}
+
+# DiscoveryReceiver — a vec-backed mailbox a test/consumer drains via try_recv.
+# When events lands, this becomes a thin wrapper over a majra subscription.
+
+fn discovery_receiver_new() {
+    var r = alloc(8);
+    store64(r, vec_new());
+    return r;
+}
+
+fn discovery_receiver_queue(r) { return load64(r); }
+
+# Push an announcement (JSON cstr) into the receiver's queue.
+fn discovery_receiver_push(r, json) {
+    vec_push(discovery_receiver_queue(r), json);
+    return 0;
+}
+
+# Pop the next announcement JSON or 0 if empty.
+fn discovery_receiver_try_recv(r) {
+    var q = discovery_receiver_queue(r);
+    if (vec_len(q) == 0) { return 0; }
+    var head = vec_get(q, 0);
+    vec_remove(q, 0);
+    return head;
+}
+
+fn discovery_receiver_len(r) { return vec_len(discovery_receiver_queue(r)); }
