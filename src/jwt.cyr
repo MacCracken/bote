@@ -23,63 +23,16 @@
 # success so the dispatcher can thread it as opaque "claims" to
 # handlers (a future 2.x release will parse it into structured claims).
 
-# ================================================================
-# base64url decode (RFC 4648 §5) — like base64 but `+` → `-`,
-# `/` → `_`, no `=` padding required.
-# ================================================================
-
-fn _jwt_b64u_val(c) {
-    if (c >= 65 && c <= 90)  { return c - 65; }       # A-Z
-    if (c >= 97 && c <= 122) { return c - 97 + 26; }  # a-z
-    if (c >= 48 && c <= 57)  { return c - 48 + 52; }  # 0-9
-    if (c == 45)             { return 62; }            # '-'
-    if (c == 95)             { return 63; }            # '_'
-    return 0 - 1;
-}
-
-# Decode `enc[0..elen]` into a fresh alloc'd buffer of `out_len` bytes.
-# Writes the decoded length to *out_len_p. Returns the buffer ptr or 0
-# on invalid input. NUL-terminator added at out[out_len] for safety.
+# base64url decode — uses cyrius stdlib's `lib/base64.cyr` (4.8.1+).
+# Wrapper translates the stdlib's `{ptr,len}` 16-byte return-pair to
+# our older `(ptr, *out_len)` shape so existing call sites and tests
+# stay unchanged.
 fn jwt_b64u_decode(enc, elen, out_len_p) {
     if (enc == 0 || elen <= 0) { return 0; }
-    # Output size: 3 bytes per 4 input chars (less for unpadded tails).
-    var out_max = (elen * 3) / 4 + 3;
-    var out = alloc(out_max + 1);
-    var i = 0;
-    var o = 0;
-    while (i < elen) {
-        var v0 = _jwt_b64u_val(load8(enc + i));
-        if (v0 < 0) { return 0; }
-        var v1 = 0;
-        var v2 = 0 - 1;
-        var v3 = 0 - 1;
-        if (i + 1 < elen) {
-            v1 = _jwt_b64u_val(load8(enc + i + 1));
-            if (v1 < 0) { return 0; }
-        }
-        if (i + 2 < elen) {
-            v2 = _jwt_b64u_val(load8(enc + i + 2));
-            if (v2 < 0) { return 0; }
-        }
-        if (i + 3 < elen) {
-            v3 = _jwt_b64u_val(load8(enc + i + 3));
-            if (v3 < 0) { return 0; }
-        }
-        store8(out + o, ((v0 << 2) | (v1 >> 4)) & 0xFF);
-        o = o + 1;
-        if (v2 >= 0) {
-            store8(out + o, ((v1 << 4) | (v2 >> 2)) & 0xFF);
-            o = o + 1;
-        }
-        if (v3 >= 0) {
-            store8(out + o, ((v2 << 6) | v3) & 0xFF);
-            o = o + 1;
-        }
-        i = i + 4;
-    }
-    store8(out + o, 0);
-    store64(out_len_p, o);
-    return out;
+    var pair = base64url_decode(enc, elen);
+    if (pair == 0) { return 0; }
+    store64(out_len_p, load64(pair + 8));
+    return load64(pair);
 }
 
 # HMAC-SHA256 — `sigil`'s `hmac_sha256(key, klen, msg, mlen, out)` is

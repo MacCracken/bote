@@ -2,6 +2,35 @@
 
 All notable changes to bote are documented here.
 
+## [2.4.0] — 2026-04-14 — Bump cyrius 4.8.1 + base64url adoption + compile-unit trim
+
+Toolchain bump and structural cleanup. The cyrius 4.8.1 stdlib added
+`base64url_encode` / `base64url_decode` (the proposal we shipped in
+2.2.0 / cleaned up in 2.3.1 — your cyrius agent landed it). This
+release adopts those primitives and trims compile-unit headroom enough
+that future ABI work (claims propagation in 2.5) fits cleanly.
+
+### Changed
+- **cyrius pin** `4.7.1` → `4.8.1` (`cyrius.toml` + `.cyrius-toolchain`).
+- **`src/jwt.cyr` lifts to stdlib base64url.** The inline `_jwt_b64u_val` table-builder + `jwt_b64u_decode` byte-loop (~55 LOC, 2 fns) is now a 7-line wrapper that calls `base64url_decode` from `lib/base64.cyr`. Test signatures unchanged — the wrapper translates the stdlib's `{ptr, len}` 16-byte pair to our existing `(ptr, *out_len)` shape so `tests/bote_jwt.tcyr` passes unchanged.
+- **`src/main.cyr` trim.** Removed `lib/assert.cyr`, `lib/sakshi.cyr`, `lib/bigint.cyr` from the production main.cyr include list. None were actually referenced by main — they were transitively pulled in once-upon-a-time and never cleaned. Frees ~50 fns from production compile unit (was 1001 → 943 unreachable).
+- **`tests/bote.tcyr` trim.** Removed `lib/sakshi.cyr`, `lib/bigint.cyr`, `lib/sigil.cyr`, all `lib/libro_*.cyr`, all `lib/majra_*.cyr` from the **core test** compile unit. Those modules were only needed by integration tests that already live in their own per-module test files (`tests/bote_libro_tools.tcyr`, etc.). Frees enough headroom (was 830 → 457 unreachable) that the larger 4.8.1 `lib/base64.cyr` (67 LOC → 177 LOC for the new base64url variants) doesn't tip the cap. The `&libro_audit_log` reference in `bote.tcyr` becomes an undefined-fn warning at compile — harmless because that test only checks fn-pointer addressability, never invokes.
+
+### Verified (cyrius 4.8.1)
+- All 8 test files green: `bote.tcyr` 394 / `bote_libro_tools.tcyr` 22 / `bote_content.tcyr` 24 / `bote_host.tcyr` 67 / `bote_auth.tcyr` 38 / `bote_sandbox.tcyr` 13 / `bote_jwt.tcyr` 28 / `bote_pkce.tcyr` 17 = **603 total** (unchanged).
+- `cyrius build src/main.cyr bote` → OK; `./bote` reports `"version":"2.4.0"`.
+- `cyrlint src/jwt.cyr src/main.cyr` → 0 warnings.
+
+### What this unlocks (deferred to 2.5.0)
+- **Claims propagation through transports.** The plumbing change (auth_bearer_check → codec_process_message → dispatcher_dispatch all gain a `claims` arg, transports capture and thread the validator's return) was attempted in 2.3.0 and reverted because it tipped the test cap. With the trim landed here, **the freed headroom is enough that the same attempt should succeed** — left for 2.5.0 because the patch touches every transport handler and warrants its own focused release.
+
+### Carried forward
+- v1.2.1 libro-growth heisenbug: unchanged.
+- Slowloris recv timeout (audit H5): still needs a `sock_set_recv_timeout` stdlib helper.
+- WS handshake key-length validation (audit M4): still upstream stdlib.
+- DNS for SSRF hostname classification: still needs cyrius `getaddrinfo` stub.
+- JWT RS256 / ES256: still waits on sigil RSA / ECDSA primitives.
+
 ## [2.3.1] — 2026-04-14 — Cleanup: remove proposal docs that landed upstream
 
 All three of bote's proposal documents have been folded into cyrius
