@@ -1,18 +1,22 @@
 # Cyrius Language Feedback (from porting bote)
 
 > **Initially tested against**: a pre-4.x cyrius (`cyrius version` reported `0.1.0`).
-> **Re-verified against**: cyrius **4.4.0** (`cyriusly install 4.4.0 && cyriusly use 4.4.0`).
+> **Re-verified against**: cyrius **4.4.3** (`cyriusly install 4.4.3 && cyriusly use 4.4.3`).
 >
-> Status as of 4.4.0:
-> - ✅ #1 (`\r` escape) — **FIXED**
-> - ✅ #3 (no per-block local scoping) — **FIXED**
-> - ❌ #2 (`&&`/`||` short-circuit) — still evaluates both operands
-> - 🟡 #4 (static `var buf[N]` size) — documented gotcha, unchanged
-> - 🟡 #5 (`is_err` vs `is_err_result` naming) — unchanged
-> - 🟢 #6 (cascading parse errors) — improved with DCE messages but root cause unchanged
-> - 🟢 #7 (`fmt_int` to stdout only) — unchanged
+> Status as of 4.4.3:
+> - ✅ #1 (`\r` escape) — **FIXED in 4.4.0**
+> - ✅ #2 (`&&`/`||` short-circuit) — **FIXED in 4.4.3**
+> - ✅ #3 (no per-block local scoping) — **FIXED in 4.4.0**
+> - 🟡 #4 (static `var buf[N]` size) — documented gotcha by design; better diagnostic message in 4.4.3 (`512 bytes: buf` + heap-alloc tip)
+> - 🟡 #5 (`is_err` vs `is_err_result` naming) — vidya pattern bug, not cyrius bug; unchanged
+> - ✅ #6 (cascading parse errors from missing include) — **FIXED in 4.4.3** (clean compile when a transitively-needed lib is missing)
+> - ✅ #7 (`fmt_int` to stdout only) — **FIXED in 4.4.3** — `fmt_int_fd(fd, n)` shipped in `lib/fmt.cyr`
 >
-> **Two-thirds of the correctness bugs were fixed between the initial and re-verification install.** Reproductions kept below for regression tracking.
+> **All three 🔴 correctness bugs are fixed. Both 🟢 diagnostics improved.**
+>
+> The workarounds in bote's source are retained as-is — they still compile and
+> behave correctly, and the explicit nesting (`if (p != 0) { if (...) }`) reads
+> cleanly. A future cleanup pass can collapse them now that `&&` short-circuits.
 
 This doc collects language-level issues encountered while porting ~10K lines of
 Rust to ~3K lines of Cyrius (12 modules + tests + benches + fuzz). Each item
@@ -94,7 +98,7 @@ str_builder_add_cstr(sb, _crlf);
 
 ---
 
-## 🔴 2. `&&` and `||` do not short-circuit
+## ✅ 2. `&&` and `||` do not short-circuit — FIXED in 4.4.3
 
 ### Symptom
 Code like `if (p != 0 && vec_len(p) > 0) { ... }` segfaults when `p == 0`,
@@ -272,7 +276,7 @@ inherited) is a good candidate for `cyrius lint` to catch.
 
 ---
 
-## 🟢 6. Cascading parse errors from undefined symbols
+## ✅ 6. Cascading parse errors from undefined symbols — FIXED in 4.4.3
 
 ### Symptom
 Forgetting `include "lib/io.cyr"` while using `lib/json.cyr` (which references
@@ -302,7 +306,7 @@ this. Better diagnostic would save a lot of bisecting.
 
 ---
 
-## 🟢 7. fmt_int writes to stdout regardless of caller intent
+## ✅ 7. fmt_int writes to stdout regardless of caller intent — FIXED in 4.4.3
 
 ### Symptom
 Diagnostic prints to stderr that include `fmt_int(value)` cause output
@@ -323,9 +327,12 @@ exists per `lib/fmt.cyr`, but isn't always obvious).
 Use `fmt_int_buf` + explicit `syscall(SYS_WRITE, fd, buf, len)`, or
 `str_builder_add_int(sb, n)` when building a response.
 
+### Resolution in 4.4.3
+`lib/fmt.cyr` now ships `fmt_int_fd(fd, n)` alongside `fmt_int(n)`. Diagnostic
+prints to stderr can use `fmt_int_fd(2, value)` directly.
+
 ### Severity
-🟢 — existing API has the building blocks; might benefit from a sibling
-`fmt_eprintf` / `efmt_int`.
+🟢 — Resolved.
 
 ---
 

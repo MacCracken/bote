@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "MCP core service in Cyrius — JSON-RPC 2.0, registry, dispatch, three transports"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "4.4.1"
+cyrius = "4.4.3"
 
 [build]
 entry = "src/main.cyr"
