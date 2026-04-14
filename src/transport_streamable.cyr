@@ -1,0 +1,371 @@
+# bote::transport::streamable — Streamable HTTP transport (MCP 2025-11-25)
+# Mirrors rust-old/src/transport/streamable.rs.
+#
+# Single endpoint serves both POST (JSON-RPC) and GET (SSE).
+# Built on stdlib lib/http_server.cyr (4.5.0+) chunked primitives.
+#
+# What's implemented in v1.4.0:
+#   - POST <endpoint>  → JSON-RPC dispatch (identical to transport_http)
+#   - GET  <endpoint>  → opens SSE stream, emits priming event + retry hint
+#                        + replays buffered events if Last-Event-ID is set,
+#                        then closes
+#   - Origin / MCP-Protocol-Version / MCP-Session-Id middleware (from session.cyr)
+#   - EventIdGenerator (monotonic "evt-N" counter)
+#   - StreamEvent + ResumptionBuffer (bounded ring of recent events)
+#
+# What's deferred (waits on streaming dispatch / lib/thread.cyr v1.5+):
+#   - Server-initiated push events on the GET stream (the resumption buffer
+#     is wired in but stays empty until something publishes to it)
+#   - $/cancelRequest mid-stream
+
+# ================================================================
+# EventIdGenerator (8 bytes): monotonic counter
+# ================================================================
+
+fn event_id_gen_new() {
+    var g = alloc(8);
+    store64(g, 0);
+    return g;
+}
+
+# Returns a new alloc'd cstr "evt-N" and bumps the counter.
+fn event_id_gen_next(g) {
+    var n = load64(g);
+    store64(g, n + 1);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "evt-");
+    str_builder_add_int(sb, n);
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+# StreamEvent (24 bytes):
+#   +0  id    cstr ("evt-N")
+#   +8  type  cstr ("message")
+#   +16 data  cstr (JSON payload, may be "")
+# ================================================================
+
+fn stream_event_new(id, data) {
+    var e = alloc(24);
+    store64(e, id);
+    store64(e + 8, "message");
+    store64(e + 16, data);
+    return e;
+}
+
+# Primer event (empty data, sent on GET connect to confirm the stream).
+fn stream_event_primer(id) { return stream_event_new(id, ""); }
+
+fn stream_event_id(e)   { return load64(e); }
+fn stream_event_type(e) { return load64(e + 8); }
+fn stream_event_data(e) { return load64(e + 16); }
+
+# Render a StreamEvent in SSE wire format:
+#   id: <id>\n
+#   event: <type>\n
+#   data: <data>\n
+#   \n
+fn stream_event_to_wire(e) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "id: ");
+    str_builder_add_cstr(sb, stream_event_id(e));
+    str_builder_add_cstr(sb, "\nevent: ");
+    str_builder_add_cstr(sb, stream_event_type(e));
+    str_builder_add_cstr(sb, "\ndata: ");
+    str_builder_add_cstr(sb, stream_event_data(e));
+    str_builder_add_cstr(sb, "\n\n");
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+# ResumptionBuffer (24 bytes):
+#   +0  events    vec of StreamEvent ptrs (insertion order)
+#   +8  max_size  i64
+#   +16 unused    reserved
+# ================================================================
+
+fn resumption_buffer_new(max_size) {
+    var rb = alloc(24);
+    store64(rb, vec_new());
+    store64(rb + 8, max_size);
+    store64(rb + 16, 0);
+    return rb;
+}
+
+fn resumption_buffer_default() { return resumption_buffer_new(1000); }
+
+fn resumption_buffer_events(rb)   { return load64(rb); }
+fn resumption_buffer_max_size(rb) { return load64(rb + 8); }
+fn resumption_buffer_len(rb)      { return vec_len(load64(rb)); }
+
+# Push an event. Evicts oldest when over max_size.
+fn resumption_buffer_push(rb, event) {
+    var events = resumption_buffer_events(rb);
+    if (vec_len(events) >= resumption_buffer_max_size(rb)) {
+        vec_remove(events, 0);
+    }
+    vec_push(events, event);
+    return 0;
+}
+
+# Return a vec of events whose IDs come after `last_event_id`.
+# Returns empty vec if last_event_id isn't found (client missed too much).
+fn resumption_buffer_events_after(rb, last_event_id) {
+    var out = vec_new();
+    var events = resumption_buffer_events(rb);
+    var n = vec_len(events);
+    var found_at = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(events, i);
+        if (streq(stream_event_id(e), last_event_id) == 1) {
+            found_at = i;
+            i = n;
+        }
+        i = i + 1;
+    }
+    if (found_at < 0) { return out; }
+    var j = found_at + 1;
+    while (j < n) {
+        vec_push(out, vec_get(events, j));
+        j = j + 1;
+    }
+    return out;
+}
+
+# ================================================================
+# StreamableConfig (64 bytes):
+#   +0  endpoint_path     cstr (e.g. "/mcp")
+#   +8  bind_addr         i64
+#   +16 port              i64
+#   +24 allowed_origins   vec of cstrs or 0
+#   +32 require_protocol  0/1
+#   +40 session_store     SessionStore ptr or 0
+#   +48 retry_ms          i64 (SSE retry hint, default 5000)
+#   +56 dispatcher        Dispatcher ptr (set by transport_streamable_run)
+# ================================================================
+
+fn streamable_config_new(path, addr, port) {
+    var c = alloc(64);
+    store64(c, path);
+    store64(c + 8, addr);
+    store64(c + 16, port);
+    store64(c + 24, 0);
+    store64(c + 32, 0);
+    store64(c + 40, 0);
+    store64(c + 48, 5000);
+    store64(c + 56, 0);
+    return c;
+}
+
+fn streamable_config_with_allowed_origins(c, vec) { store64(c + 24, vec); return c; }
+fn streamable_config_with_require_protocol(c, r)  { store64(c + 32, r);   return c; }
+fn streamable_config_with_session_store(c, st)    { store64(c + 40, st);  return c; }
+fn streamable_config_with_retry_ms(c, ms)         { store64(c + 48, ms);  return c; }
+
+fn streamable_config_path(c)             { return load64(c); }
+fn streamable_config_addr(c)             { return load64(c + 8); }
+fn streamable_config_port(c)             { return load64(c + 16); }
+fn streamable_config_allowed_origins(c)  { return load64(c + 24); }
+fn streamable_config_require_protocol(c) { return load64(c + 32); }
+fn streamable_config_session_store(c)    { return load64(c + 40); }
+fn streamable_config_retry_ms(c)         { return load64(c + 48); }
+fn streamable_config_dispatcher(c)       { return load64(c + 56); }
+
+# ================================================================
+# Per-process resumption buffer + event-id generator (one per server)
+# ================================================================
+
+var _strm_event_ids = 0;
+var _strm_resumption = 0;
+
+fn _strm_init() {
+    if (_strm_event_ids == 0)  { _strm_event_ids  = event_id_gen_new(); }
+    if (_strm_resumption == 0) { _strm_resumption = resumption_buffer_default(); }
+    return 0;
+}
+
+# ================================================================
+# Middleware (reuses transport_http patterns; same checks)
+# ================================================================
+
+fn _strm_check_origin(cfd, buf, blen, config) {
+    var allowed = streamable_config_allowed_origins(config);
+    if (allowed == 0) { return 0; }
+    var origin = http_find_header(buf, blen, "Origin");
+    var orig = origin;
+    if (orig == 0) { orig = ""; }
+    if (validate_origin(orig, allowed) != 0) {
+        http_send_status(cfd, HTTP_FORBIDDEN, "Forbidden");
+        return HTTP_FORBIDDEN;
+    }
+    return 0;
+}
+
+# Streamable spec REQUIRES MCP-Protocol-Version on every request.
+fn _strm_check_protocol(cfd, buf, blen) {
+    var v = http_find_header(buf, blen, "MCP-Protocol-Version");
+    if (v == 0) {
+        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        return HTTP_BAD_REQUEST;
+    }
+    if (validate_protocol_version(v) != 0) {
+        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        return HTTP_BAD_REQUEST;
+    }
+    return 0;
+}
+
+fn _strm_check_session(cfd, buf, blen, config, method) {
+    var st = streamable_config_session_store(config);
+    if (st == 0) { return 0; }
+    var sid = http_find_header(buf, blen, "MCP-Session-Id");
+    if (sid == 0) {
+        if (streq(method, "initialize") == 1) { return 0; }
+        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        return HTTP_NOT_FOUND;
+    }
+    if (session_store_validate(st, sid) == 0) {
+        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        return HTTP_NOT_FOUND;
+    }
+    return 0;
+}
+
+fn _strm_peek_method(body) {
+    var m = jsonx_get_str(body, "method");
+    if (m == 0) { return ""; }
+    return m;
+}
+
+# ================================================================
+# POST handler — JSON-RPC dispatch (identical shape to transport_http)
+# ================================================================
+
+fn _strm_handle_post(cfd, buf, n, config) {
+    if (_strm_check_origin(cfd, buf, n, config) != 0) { return 0; }
+    if (_strm_check_protocol(cfd, buf, n) != 0) { return 0; }
+
+    var bo = http_body_offset(buf, n);
+    if (bo < 0 || bo > n) {
+        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        return 0;
+    }
+    var clen = http_content_length(buf, n);
+    if (clen <= 0) { clen = n - bo; }
+    if (clen < 0) { clen = 0; }
+    var body = alloc(clen + 1);
+    memcpy(body, buf + bo, clen);
+    store8(body + clen, 0);
+
+    var rpc_method = _strm_peek_method(body);
+    if (_strm_check_session(cfd, buf, n, config, rpc_method) != 0) { return 0; }
+
+    var extra = 0;
+    var st = streamable_config_session_store(config);
+    if (st != 0 && streq(rpc_method, "initialize") == 1) {
+        var pv = jsonx_get_str(jsonx_get_raw(body, "params"), "protocolVersion");
+        if (pv == 0) { pv = "2025-11-25"; }
+        var sid = session_store_create(st, pv);
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "MCP-Session-Id: ");
+        str_builder_add_cstr(sb, sid);
+        str_builder_add_cstr(sb, "\r\n");
+        extra = str_data(str_builder_build(sb));
+    }
+
+    var resp = codec_process_message(body, streamable_config_dispatcher(config));
+    if (resp == 0) {
+        http_send_204(cfd, extra);
+        return 0;
+    }
+    http_send_response(cfd, HTTP_OK, "OK", "application/json",
+                       resp, strlen(resp), extra);
+    return 0;
+}
+
+# ================================================================
+# GET handler — open SSE stream
+# ================================================================
+
+# Send `retry: <ms>\n\n` over the chunked stream. Per SSE spec this hints
+# the client at how long to wait before reconnecting.
+fn _strm_send_retry(cfd, retry_ms) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "retry: ");
+    str_builder_add_int(sb, retry_ms);
+    str_builder_add_cstr(sb, "\n\n");
+    var s = str_data(str_builder_build(sb));
+    http_send_chunk(cfd, s, strlen(s));
+    return 0;
+}
+
+fn _strm_handle_get(cfd, buf, n, config) {
+    if (_strm_check_origin(cfd, buf, n, config) != 0) { return 0; }
+    if (_strm_check_protocol(cfd, buf, n) != 0) { return 0; }
+    if (_strm_check_session(cfd, buf, n, config, "") != 0) { return 0; }
+
+    # Open the SSE stream
+    http_send_chunked_start(cfd, HTTP_OK, "text/event-stream", 0);
+
+    # Priming event — confirms the stream is up, gives client an event ID
+    # baseline for reconnection.
+    var primer = stream_event_primer(event_id_gen_next(_strm_event_ids));
+    var primer_wire = stream_event_to_wire(primer);
+    http_send_chunk(cfd, primer_wire, strlen(primer_wire));
+
+    # Replay buffered events past Last-Event-ID, if provided.
+    var last_id = http_find_header(buf, n, "Last-Event-ID");
+    if (last_id != 0) {
+        var replay = resumption_buffer_events_after(_strm_resumption, last_id);
+        var ri = 0;
+        var rn = vec_len(replay);
+        while (ri < rn) {
+            var ev = vec_get(replay, ri);
+            var wire = stream_event_to_wire(ev);
+            http_send_chunk(cfd, wire, strlen(wire));
+            ri = ri + 1;
+        }
+    }
+
+    # Send retry hint and close. Server-initiated event push waits on
+    # streaming dispatch (v1.5+); for now the GET stream is open just long
+    # enough to deliver the primer + any buffered replay.
+    _strm_send_retry(cfd, streamable_config_retry_ms(config));
+    http_send_chunked_end(cfd);
+    return 0;
+}
+
+# ================================================================
+# Top-level handler — dispatched by stdlib http_server_run
+# ================================================================
+
+fn _strm_handle(config, cfd, buf, n) {
+    var method = http_get_method(buf, n);
+    var path   = http_get_path(buf, n);
+
+    # Path must match the configured endpoint (strip query first).
+    if (streq(http_path_only(path), streamable_config_path(config)) == 0) {
+        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        return 0;
+    }
+
+    if (streq(method, "POST") == 1) { return _strm_handle_post(cfd, buf, n, config); }
+    if (streq(method, "GET") == 1)  { return _strm_handle_get(cfd, buf, n, config); }
+
+    http_send_status(cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed");
+    return 0;
+}
+
+# ================================================================
+# Server entry
+# ================================================================
+
+fn transport_streamable_run(dispatcher, config) {
+    _strm_init();
+    store64(config + 56, dispatcher);
+    return http_server_run(streamable_config_addr(config),
+                           streamable_config_port(config),
+                           &_strm_handle,
+                           config);
+}

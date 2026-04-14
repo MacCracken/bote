@@ -57,6 +57,7 @@ include "lib/libro_export.cyr"
 include "lib/libro_merkle.cyr"
 include "src/transport_unix.cyr"
 include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
 fn bote_echo_handler(args) {
     return args;
 }
@@ -111,6 +112,13 @@ fn main() {
             vec_push(origins, "*");
             bridge_config_with_origins(bcfg, origins);
             return transport_bridge_run(dispatcher, bcfg);
+        }
+        if (streq(argv(1), "streamable") == 1) {
+            var sport = 8392;
+            if (argc() >= 3) { sport = _parse_uint(argv(2)); }
+            if (sport == 0) { sport = 8392; }
+            var scfg = streamable_config_new("/mcp", INADDR_LOOPBACK(), sport);
+            return transport_streamable_run(dispatcher, scfg);
         }
     }
     return transport_stdio_run(dispatcher);

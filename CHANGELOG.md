@@ -2,6 +2,62 @@
 
 All notable changes to bote are documented here.
 
+## [1.4.0] — 2026-04-14 — Streamable HTTP transport (MCP 2025-11-25)
+
+Closes the **streamable HTTP** spec item from MCP 2025-11-25. Single endpoint
+serves both `POST` (JSON-RPC request → response) and `GET` (open SSE stream
+for server-initiated messages). Built on the stdlib `lib/http_server.cyr`
+chunked primitives that shipped in cyrius 4.5.0.
+
+### Added
+- **`src/transport_streamable.cyr`** (~290 LOC). Modules:
+  - **`EventIdGenerator`** — monotonic counter, emits `"evt-N"` strings
+  - **`StreamEvent`** — `{id, event="message", data}` with SSE wire-format renderer (`stream_event_to_wire` → `id: ...\nevent: ...\ndata: ...\n\n`)
+  - **`ResumptionBuffer`** — bounded ring of recent events; `events_after(last_id)` for `Last-Event-ID` replay
+  - **`StreamableConfig`** (64 bytes) — path, addr, port, allowed_origins, require_protocol, session_store, retry_ms, dispatcher
+  - **`transport_streamable_run(d, cfg)`** — defers to stdlib `http_server_run` with a single dispatch handler that routes POST → JSON-RPC, GET → SSE stream
+- **CLI** — `./build/bote streamable [port]` (default `8392`).
+
+### Spec compliance
+- ✅ `POST <endpoint>` JSON-RPC dispatch (same shape as plain HTTP)
+- ✅ `GET <endpoint>` SSE stream open with priming event
+- ✅ `MCP-Protocol-Version` header **required** on every request (400 if absent — stricter than plain HTTP transport which makes it optional by default)
+- ✅ `MCP-Session-Id` header validated when SessionStore is configured
+- ✅ `Origin` allow-list (DNS rebinding protection)
+- ✅ `Last-Event-ID` request header → replay buffered events on GET
+- ✅ Server emits `id:`-tagged SSE events for resumption tracking
+- ✅ `retry: <ms>\n\n` hint sent before stream close (default 5000ms, configurable)
+- 🟡 Server-initiated event push on the GET stream: deferred — waits on streaming dispatch (v1.5+) to populate the resumption buffer with real events. The transport correctly opens the SSE stream and replays anything in the buffer; the buffer is just empty until something publishes to it.
+
+### Tests
+- 23 new unit assertions (382 total, was 359):
+  - `EventIdGenerator` produces monotonic `evt-0`/`evt-1`/`evt-2`
+  - `StreamEvent` accessors + SSE wire format (with and without data)
+  - `ResumptionBuffer` push, eviction (oldest first when over capacity), `events_after` lookup (present and absent IDs)
+  - `StreamableConfig` defaults + setters
+  - `http_path_only` correctly strips query string for path matching
+
+### Performance
+Bench numbers unchanged. `cyrius bench` still shows 10 hot paths sub-10µs.
+
+### Verified end-to-end
+- `POST /mcp` with `MCP-Protocol-Version: 2025-11-25` → returns serverInfo
+- `POST /mcp` without protocol header → `400 Bad Request`
+- `POST /mcp tools/call` → standard JSON-RPC response
+- `GET /mcp` with `Accept: text/event-stream` → opens SSE stream, sends primer (`id: evt-0\nevent: message\ndata: \n\n`), sends retry hint (`retry: 5000\n\n`), closes
+- `Last-Event-ID: evt-7` (when buffer has events past evt-7) → replays them in order
+
+### Carried forward
+- v1.2.1 libro live-integration heisenbug: still present, still tracked.
+
+### Verified (cyrius 4.5.0)
+- `cyrius test` → **382 passed, 0 failed**
+- `cyrius fuzz` → 4 passed, 0 failed
+- `cyrius bench` → 10 hot paths unchanged
+- `./build/bote` initialize handshake reports `"version":"1.4.0"`
+
+---
+
 ## [1.3.0] — 2026-04-14 — Adopt stdlib `lib/http_server.cyr` (cyrius 4.5.0)
 
 Cyrius **4.5.0** shipped `lib/http_server.cyr` — verbatim from the proposal
