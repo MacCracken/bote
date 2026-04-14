@@ -173,7 +173,10 @@ fn _bridge_cors_origin(allowed_origins, request_origin) {
             j = j + 1;
         }
     }
-    return vec_get(allowed_origins, 0);
+    # 1.9.6 audit M3: don't echo allowed_origins[0] on miss. That would
+    # leak the first allowed origin to any cross-origin requester.
+    # `null` is a spec-compliant value — browser will block the response.
+    return "null";
 }
 
 fn _bridge_cors_headers(allowed_origins, request_origin) {
@@ -240,6 +243,13 @@ fn _bridge_handle(config, cfd, buf, n) {
     if (auth_bearer_check(cfd, buf, n,
                           bridge_config_bearer_validator(config),
                           bridge_config_bearer_ctx(config)) != 0) { return 0; }
+
+    # 413 cap on oversized declared bodies (audit M1). 60 KB headroom
+    # keeps us inside the 64 KB recv buffer with room for headers.
+    var declared_clen = http_content_length(buf, n);
+    if (declared_clen > 61440) {
+        http_send_status(cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large"); return 0;
+    }
 
     var body_off = http_body_offset(buf, n);
     if (body_off < 0 || body_off > n) {

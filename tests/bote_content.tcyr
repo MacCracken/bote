@@ -123,6 +123,41 @@ fn main() {
     assert(streq(crb3, "{\"type\":\"resource\",\"resource\":{\"uri\":\"x://b\",\"blob\":\"QkJC\"}}") == 1,
            "blob resource uri+blob (no mime)");
 
+    # ---------------- Annotations — 1.9.6 (audit defer closure) ----------------
+    # No-op: both audience and priority absent → return input unchanged
+    var noop = content_with_annotations(content_text("hi"), 0, 0 - 1);
+    assert(streq(noop, "{\"type\":\"text\",\"text\":\"hi\"}") == 1, "ann no-op when both absent");
+
+    # Audience only
+    var aud = vec_new();
+    vec_push(aud, "user");
+    vec_push(aud, "assistant");
+    var with_aud = content_with_annotations(content_text("hi"), aud, 0 - 1);
+    assert(streq(with_aud,
+        "{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"audience\":[\"user\",\"assistant\"]}}") == 1,
+        "ann audience only");
+
+    # Priority only
+    var with_pri = content_with_annotations(content_text("hi"), 0, 50);
+    assert(streq(with_pri,
+        "{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"priority\":50}}") == 1,
+        "ann priority only");
+
+    # Both
+    var both = content_with_annotations(content_text("hi"), aud, 75);
+    assert(streq(both,
+        "{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"audience\":[\"user\",\"assistant\"],\"priority\":75}}") == 1,
+        "ann both");
+
+    # Annotates an image block too
+    var ann_img = content_with_annotations(content_image("AA==", "image/png"), 0, 100);
+    assert(streq(ann_img,
+        "{\"type\":\"image\",\"data\":\"AA==\",\"mimeType\":\"image/png\",\"annotations\":{\"priority\":100}}") == 1,
+        "ann on image block");
+
+    # Null block → null pass-through
+    assert_eq(content_with_annotations(0, aud, 50), 0, "ann on null block");
+
     return assert_summary();
 }
 

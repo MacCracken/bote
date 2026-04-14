@@ -140,6 +140,10 @@ fn _http_handle(config, cfd, buf, n) {
         return 0;
     }
     var clen = http_content_length(buf, n);
+    # 1.9.6 audit M1: 413 on oversized declared body (before clamp).
+    if (clen > 61440) {
+        http_send_status(cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large"); return 0;
+    }
     if (clen <= 0) { clen = n - bo; }
     if (clen < 0) { clen = 0; }
     # Clamp to the bytes we actually received. Guards against a lying

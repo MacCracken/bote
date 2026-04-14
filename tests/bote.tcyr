@@ -895,7 +895,7 @@ fn main() {
     vec_push(cors_b, "http://localhost:8080");
     assert(streq(_bridge_cors_origin(cors_b, "http://localhost:8080"), "http://localhost:8080") == 1, "cors exact match returned");
     # Unmatched origin → fall back to first allowed origin
-    assert(streq(_bridge_cors_origin(cors_b, "http://evil.com"), "http://localhost:3000") == 1, "cors unmatched -> first");
+    assert(streq(_bridge_cors_origin(cors_b, "http://evil.com"), "null") == 1, "cors unmatched -> null (1.9.6 audit M3)");
     assert_eq(_bridge_cors_origin(0, "http://x"), "*", "cors null vec -> wildcard");
 
     # ---------------- review punch: schema bounds at exact min/max ----------------

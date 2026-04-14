@@ -94,6 +94,10 @@ fn transport_unix_run(dispatcher, path) {
     var addrlen = _unix_sockaddr(addr, path);
     var br = syscall(SYS_BIND, sfd, addr, addrlen);
     if (br < 0) { syscall(SYS_CLOSE, sfd); return 1; }
+    # 1.9.6 audit L1: restrict perms so only the owning UID can connect.
+    # Without this the socket inherits the process umask (typically 0022 →
+    # mode 0755) and any local user can dial it.
+    syscall(SYS_CHMOD, path, 0x180);   # 0o600 = 384 decimal = 0x180
     var lr = syscall(SYS_LISTEN, sfd, 16);
     if (lr < 0) { syscall(SYS_CLOSE, sfd); return 1; }
     while (1 == 1) {

@@ -187,7 +187,46 @@ fn content_resource_blob(uri, mime, b64_data) {
     return str_data(str_builder_build(sb));
 }
 
-# Annotations (MCP spec optional metadata) deferred to a future
-# release. The pre-built-block-splice approach used too many symbols
-# and tipped bote past the cyrius 4.6.2 identifier-buffer ceiling.
-# Will revisit when 4.7.0 lands and there's headroom.
+# Annotations (MCP spec optional metadata): take a pre-built block cstr
+# and splice an `annotations` field in before the closing `}`. Either
+# arg may be null/empty/-1; if both are absent the input is returned
+# unchanged. Caller responsible for valid block input (any of the
+# constructors above produces well-formed JSON).
+fn content_with_annotations(block, audience, priority) {
+    if (block == 0) { return block; }
+    var has_a = 0;
+    if (audience != 0) { if (vec_len(audience) > 0) { has_a = 1; } }
+    var has_p = 0;
+    if (priority >= 0) { has_p = 1; }
+    if (has_a == 0 && has_p == 0) { return block; }
+    var bn = strlen(block);
+    if (bn < 2) { return block; }
+    if (load8(block + bn - 1) != 125) { return block; }   # '}'
+    var sb = str_builder_new();
+    # copy block minus trailing '}' as a single buffer
+    var pre = alloc(bn);
+    memcpy(pre, block, bn - 1);
+    store8(pre + bn - 1, 0);
+    str_builder_add_cstr(sb, pre);
+    str_builder_add_cstr(sb, ",\"annotations\":{");
+    if (has_a == 1) {
+        str_builder_add_cstr(sb, "\"audience\":[");
+        var an = vec_len(audience);
+        var ai = 0;
+        while (ai < an) {
+            if (ai > 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"");
+            _json_emit_escaped(sb, vec_get(audience, ai));
+            str_builder_add_cstr(sb, "\"");
+            ai = ai + 1;
+        }
+        str_builder_add_cstr(sb, "]");
+    }
+    if (has_p == 1) {
+        if (has_a == 1) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"priority\":");
+        str_builder_add_int(sb, priority);
+    }
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}

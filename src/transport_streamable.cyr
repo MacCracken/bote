@@ -273,6 +273,9 @@ fn _strm_handle_post(cfd, buf, n, config) {
         return 0;
     }
     var clen = http_content_length(buf, n);
+    if (clen > 61440) {
+        http_send_status(cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large"); return 0;
+    }
     if (clen <= 0) { clen = n - bo; }
     if (clen < 0) { clen = 0; }
     if (clen > n - bo) { clen = n - bo; }

@@ -2,6 +2,38 @@
 
 All notable changes to bote are documented here.
 
+## [1.9.6] — 2026-04-14 — Final pre-2.0 polish: contained audit items + annotations
+
+Closes the audit items that didn't need a cyrius stdlib helper, plus
+re-lands the `content_with_annotations` work that was reverted from
+1.9.1 / 1.9.4 for cap-headroom reasons. Last 1.9.x patch — next stop is
+**2.0.0** (claims propagation through handler signature).
+
+### Security
+- **M1 — 413 Payload Too Large on oversized declared bodies.** `transport_http`, `transport_streamable`, and `bridge` now reject any request whose `Content-Length` declares more than 60 KB (60 × 1024 = 61440) — well under the 64 KB recv buffer with room for headers. Previous behaviour silently truncated and treated as a malformed 400; new behaviour returns the spec-correct status. Live smoke: 100 KB POST → 413 ✓.
+- **M3 — bridge CORS oracle.** `_bridge_cors_origin` previously returned `vec_get(allowed_origins, 0)` (the first allowed origin) on a miss — leaks the allowed-origin list to any cross-origin requester. New behaviour returns the literal string `"null"` (a spec-compliant value; browser will block the response either way). Existing test updated.
+- **L1 — Unix socket file mode.** `transport_unix_run` now `chmod(path, 0600)` post-bind so only the owning UID can connect. Previous behaviour inherited the process umask (typically 0022 → mode 0755) and let any local user dial the socket. Live smoke: socket file shows `srw-------` ✓.
+
+### Added
+- **`content_with_annotations(block, audience, priority)`** — re-landed from the 1.9.1 / 1.9.4 deferral. Splices an `annotations` field into any pre-built block cstr right before the trailing `}`. Audience is a vec of cstr (e.g. `"user"` / `"assistant"`); priority is an i64 in [0, 100] (`-1` = unset). Either argument may be null/-1; if both are absent the input is returned unchanged. **6 new test assertions** including no-op pass-through, audience-only, priority-only, both, image-block annotation, and null-block guard.
+
+### Audit findings still open after 1.9.6
+- **High — Slowloris recv timeout** (H5). Needs a `sock_set_recv_timeout` helper in `lib/net.cyr`. Workaround: deploy behind nginx/caddy that absorbs slow connections.
+- **Medium — bridge optional protocol-version gate** (M5). Was attempted in 1.9.6 but added 2 new bridge_config_* fns that tipped the test compile unit past the cyrius 4.7.1 cap. Bridge is local-/single-app-scoped in practice; the bearer-token gate already covers production deployments. Will revisit when cyrius 4.8.0 raises the cap.
+- **Medium — WS `Sec-WebSocket-Key` length validation** (M4). Lives in stdlib `lib/ws_server.cyr`; bote can't patch without forking. Tracked upstream.
+
+### Verified (cyrius 4.7.1)
+- All five test files green: `bote.tcyr` 394 / `bote_libro_tools.tcyr` 22 / `bote_content.tcyr` 24 / `bote_host.tcyr` 67 / `bote_auth.tcyr` 38 = **545 total** (was 539 at 1.9.5; +6 annotation assertions).
+- `cyrius bench tests/bote.bcyr` → 10 hot paths within noise of 1.9.5.
+- `cyrlint src/*.cyr` → 0 warnings across all sources.
+- Live HTTP smoke: normal POST 200, 100 KB POST 413; Unix socket created with mode 0600.
+- `./bote` reports `"version":"1.9.6"`.
+
+### Up next: 2.0.0
+- **Claims propagation through handler signature.** Handler currently `fn(args_cstr) → result_cstr`; 2.0 threads the validator's claims through dispatch so handlers can authorize per-tool. ABI break (warrants the major bump).
+- **Final P(-1) hardening sweep.**
+- **Restore `libro_tools` default registration** (was made opt-in in 1.9.4 for cap headroom; cyrius 4.8.0 should give us room).
+
 ## [1.9.5] — 2026-04-14 — Security batch B: SSRF rewrite (3 critical bypasses)
 
 Closes the three Critical findings from the 2026-04-14 audit
