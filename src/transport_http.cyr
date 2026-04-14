@@ -7,7 +7,7 @@
 # `POST <endpoint>` to codec_process_message.
 
 # ================================================================
-# HttpConfig (56 bytes):
+# HttpConfig (72 bytes):
 #   +0  endpoint_path     cstr (e.g. "/mcp")
 #   +8  bind_addr         i64 (network-order IPv4)
 #   +16 port              i64
@@ -15,10 +15,12 @@
 #   +32 require_protocol  0/1
 #   +40 session_store     SessionStore ptr or 0
 #   +48 dispatcher        Dispatcher ptr (set by transport_http_run)
+#   +56 bearer_validator  fn ptr (token, ctx) → claims | 0, or 0 to disable
+#   +64 bearer_ctx        i64 ctx passed verbatim to validator
 # ================================================================
 
 fn http_config_new(path, addr, port) {
-    var c = alloc(56);
+    var c = alloc(72);
     store64(c, path);
     store64(c + 8, addr);
     store64(c + 16, port);
@@ -26,12 +28,19 @@ fn http_config_new(path, addr, port) {
     store64(c + 32, 0);
     store64(c + 40, 0);
     store64(c + 48, 0);
+    store64(c + 56, 0);
+    store64(c + 64, 0);
     return c;
 }
 
 fn http_config_with_allowed_origins(c, vec) { store64(c + 24, vec); return c; }
 fn http_config_with_require_protocol(c, r)  { store64(c + 32, r);   return c; }
 fn http_config_with_session_store(c, st)    { store64(c + 40, st);  return c; }
+fn http_config_with_bearer_validator(c, fp, ctx) {
+    store64(c + 56, fp);
+    store64(c + 64, ctx);
+    return c;
+}
 
 fn http_config_path(c)             { return load64(c); }
 fn http_config_addr(c)             { return load64(c + 8); }
@@ -40,6 +49,8 @@ fn http_config_allowed_origins(c)  { return load64(c + 24); }
 fn http_config_require_protocol(c) { return load64(c + 32); }
 fn http_config_session_store(c)    { return load64(c + 40); }
 fn http_config_dispatcher(c)       { return load64(c + 48); }
+fn http_config_bearer_validator(c) { return load64(c + 56); }
+fn http_config_bearer_ctx(c)       { return load64(c + 64); }
 
 # ================================================================
 # Middleware. Each returns 0 on pass, or the HTTP status code on rejection
@@ -115,6 +126,9 @@ fn _http_handle(config, cfd, buf, n) {
     }
 
     if (_http_check_origin(cfd, buf, n, config) != 0) { return 0; }
+    if (auth_bearer_check(cfd, buf, n,
+                          http_config_bearer_validator(config),
+                          http_config_bearer_ctx(config)) != 0) { return 0; }
     if (_http_check_protocol(cfd, buf, n, config) != 0) { return 0; }
 
     var bo = http_body_offset(buf, n);

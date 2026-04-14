@@ -138,7 +138,7 @@ fn resumption_buffer_events_after(rb, last_event_id) {
 }
 
 # ================================================================
-# StreamableConfig (64 bytes):
+# StreamableConfig (80 bytes):
 #   +0  endpoint_path     cstr (e.g. "/mcp")
 #   +8  bind_addr         i64
 #   +16 port              i64
@@ -147,10 +147,12 @@ fn resumption_buffer_events_after(rb, last_event_id) {
 #   +40 session_store     SessionStore ptr or 0
 #   +48 retry_ms          i64 (SSE retry hint, default 5000)
 #   +56 dispatcher        Dispatcher ptr (set by transport_streamable_run)
+#   +64 bearer_validator  fn ptr (token, ctx) → claims | 0, or 0 to disable
+#   +72 bearer_ctx        i64 ctx passed verbatim to validator
 # ================================================================
 
 fn streamable_config_new(path, addr, port) {
-    var c = alloc(64);
+    var c = alloc(80);
     store64(c, path);
     store64(c + 8, addr);
     store64(c + 16, port);
@@ -159,6 +161,8 @@ fn streamable_config_new(path, addr, port) {
     store64(c + 40, 0);
     store64(c + 48, 5000);
     store64(c + 56, 0);
+    store64(c + 64, 0);
+    store64(c + 72, 0);
     return c;
 }
 
@@ -166,6 +170,11 @@ fn streamable_config_with_allowed_origins(c, vec) { store64(c + 24, vec); return
 fn streamable_config_with_require_protocol(c, r)  { store64(c + 32, r);   return c; }
 fn streamable_config_with_session_store(c, st)    { store64(c + 40, st);  return c; }
 fn streamable_config_with_retry_ms(c, ms)         { store64(c + 48, ms);  return c; }
+fn streamable_config_with_bearer_validator(c, fp, ctx) {
+    store64(c + 64, fp);
+    store64(c + 72, ctx);
+    return c;
+}
 
 fn streamable_config_path(c)             { return load64(c); }
 fn streamable_config_addr(c)             { return load64(c + 8); }
@@ -175,6 +184,8 @@ fn streamable_config_require_protocol(c) { return load64(c + 32); }
 fn streamable_config_session_store(c)    { return load64(c + 40); }
 fn streamable_config_retry_ms(c)         { return load64(c + 48); }
 fn streamable_config_dispatcher(c)       { return load64(c + 56); }
+fn streamable_config_bearer_validator(c) { return load64(c + 64); }
+fn streamable_config_bearer_ctx(c)       { return load64(c + 72); }
 
 # ================================================================
 # Per-process resumption buffer + event-id generator (one per server)
@@ -248,6 +259,9 @@ fn _strm_peek_method(body) {
 
 fn _strm_handle_post(cfd, buf, n, config) {
     if (_strm_check_origin(cfd, buf, n, config) != 0) { return 0; }
+    if (auth_bearer_check(cfd, buf, n,
+                          streamable_config_bearer_validator(config),
+                          streamable_config_bearer_ctx(config)) != 0) { return 0; }
     if (_strm_check_protocol(cfd, buf, n) != 0) { return 0; }
 
     var bo = http_body_offset(buf, n);
@@ -307,6 +321,9 @@ fn _strm_send_retry(cfd, retry_ms) {
 
 fn _strm_handle_get(cfd, buf, n, config) {
     if (_strm_check_origin(cfd, buf, n, config) != 0) { return 0; }
+    if (auth_bearer_check(cfd, buf, n,
+                          streamable_config_bearer_validator(config),
+                          streamable_config_bearer_ctx(config)) != 0) { return 0; }
     if (_strm_check_protocol(cfd, buf, n) != 0) { return 0; }
     if (_strm_check_session(cfd, buf, n, config, "") != 0) { return 0; }
 

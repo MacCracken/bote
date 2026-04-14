@@ -1,0 +1,142 @@
+# bote::auth — bearer-token middleware (RFC 6750).
+#
+# First slice of the roadmap `auth` item. OAuth 2.1 + PKCE follow in
+# later releases; this one delivers the substrate they all sit on:
+# extract `Authorization: Bearer <token>` from an HTTP request, hand
+# the token to a caller-supplied validator function pointer, and emit
+# a spec-compliant 401 if the token is missing or rejected.
+#
+# The middleware is **opt-in**: a transport config with no validator
+# set behaves exactly as it did before this release. A config that
+# does set one calls `auth_bearer_check` on every request and short-
+# circuits with 401 when validation fails. Validator signature:
+#
+#     fn validator(token_cstr, ctx) → claims_ptr | 0
+#
+# A non-zero return is treated as success; the value is opaque to
+# bote (today) — future releases will pass it down to handlers when
+# request-scoped context lands. Returning 0 means "reject".
+#
+# Why fn pointer + ctx instead of a hardcoded scheme? Real deployments
+# vary: static-list dev servers, JWT verifiers (HS256 / RS256), opaque
+# tokens against a backend lookup, OAuth introspection. The shape lets
+# each consumer drop in their own validator without bote knowing the
+# crypto.
+
+# ================================================================
+# Authorization header → token cstr
+# ================================================================
+
+# Return a fresh alloc'd cstr containing the token after "Bearer ", or
+# 0 if the header is absent or doesn't start with "Bearer ".
+# Per RFC 6750 §2.1, the scheme name is case-insensitive.
+fn auth_bearer_extract(buf, blen) {
+    var hdr = http_find_header(buf, blen, "Authorization");
+    if (hdr == 0) { return 0; }
+
+    # Match "Bearer " (7 chars) case-insensitively at the start
+    if (strlen(hdr) < 7) { return 0; }
+    var b0 = load8(hdr);     if (b0 != 66 && b0 != 98)  { return 0; }   # B/b
+    var b1 = load8(hdr + 1); if (b1 != 101 && b1 != 69) { return 0; }   # E/e
+    var b2 = load8(hdr + 2); if (b2 != 97 && b2 != 65)  { return 0; }   # A/a
+    var b3 = load8(hdr + 3); if (b3 != 114 && b3 != 82) { return 0; }   # R/r
+    var b4 = load8(hdr + 4); if (b4 != 101 && b4 != 69) { return 0; }   # E/e
+    var b5 = load8(hdr + 5); if (b5 != 114 && b5 != 82) { return 0; }   # R/r
+    if (load8(hdr + 6) != 32) { return 0; }                              # space
+
+    # Skip leading optional whitespace (some clients double-space)
+    var start = 7;
+    while (load8(hdr + start) == 32) { start = start + 1; }
+    if (load8(hdr + start) == 0) { return 0; }   # empty token
+
+    # Find end of header (NUL).
+    var end = start;
+    while (load8(hdr + end) != 0) { end = end + 1; }
+
+    # Trim trailing OWS (space or tab). http_find_header already stripped
+    # the CR; this guards against a stray space the caller left.
+    var done = 0;
+    while (done == 0 && end > start) {
+        var c = load8(hdr + end - 1);
+        if (c == 32 || c == 9) { end = end - 1; }
+        else { done = 1; }
+    }
+
+    var token_len = end - start;
+    if (token_len <= 0) { return 0; }
+    var out = alloc(token_len + 1);
+    memcpy(out, hdr + start, token_len);
+    store8(out + token_len, 0);
+    return out;
+}
+
+# ================================================================
+# Validators (built-in shapes — consumers provide their own)
+# ================================================================
+
+# Always-pass validator. Only useful for tests / disabling auth checks
+# in dev. ctx is ignored.
+fn auth_validator_allow_all(token, ctx) {
+    if (token == 0) { return 0; }
+    if (load8(token) == 0) { return 0; }
+    return token;
+}
+
+# Static-allowlist validator. ctx is a vec of cstr tokens. Returns the
+# token cstr (truthy) on match, 0 otherwise. Constant-time? No — short
+# allowlists for dev only. Production should use opaque-token-store or
+# a JWT verifier supplied by the consumer.
+fn auth_validator_allowlist(token, allowed_vec) {
+    if (token == 0 || allowed_vec == 0) { return 0; }
+    var n = vec_len(allowed_vec);
+    var i = 0;
+    while (i < n) {
+        if (streq(token, vec_get(allowed_vec, i)) == 1) { return token; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# 401 response builder
+# ================================================================
+
+# Send a spec-compliant 401 with WWW-Authenticate. `realm` is what
+# clients display in their auth prompt (e.g. "mcp" or your app name).
+fn auth_send_unauthorized(cfd, realm) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "WWW-Authenticate: Bearer realm=\"");
+    if (realm == 0) { str_builder_add_cstr(sb, "mcp"); }
+    else { str_builder_add_cstr(sb, realm); }
+    str_builder_add_cstr(sb, "\"\r\n");
+    var hdrs = str_data(str_builder_build(sb));
+    # http_send_response builds: status line + Content-Type + Content-Length
+    # + extra hdrs + blank line + body. We want a 401 with our header.
+    http_send_response(cfd, HTTP_UNAUTHORIZED, "Unauthorized",
+                       "text/plain", "", 0, hdrs);
+    return 0;
+}
+
+# ================================================================
+# Middleware entry — call from each transport handler.
+#
+# Returns 0 on pass (no validator configured, or token validated).
+# Returns HTTP_UNAUTHORIZED (401) on rejection — the response is
+# already on the wire, caller should `return 0;` to its handler frame.
+# ================================================================
+
+fn auth_bearer_check(cfd, buf, blen, validator_fp, validator_ctx) {
+    if (validator_fp == 0) { return 0; }    # auth disabled
+
+    var token = auth_bearer_extract(buf, blen);
+    if (token == 0) {
+        auth_send_unauthorized(cfd, 0);
+        return HTTP_UNAUTHORIZED;
+    }
+    var claims = fncall2(validator_fp, token, validator_ctx);
+    if (claims == 0) {
+        auth_send_unauthorized(cfd, 0);
+        return HTTP_UNAUTHORIZED;
+    }
+    return 0;
+}

@@ -1,0 +1,142 @@
+# bote_auth.tcyr — unit tests for src/auth.cyr (bearer-token middleware).
+#
+# Split out of bote.tcyr for the cyrius 4.6.2 function-table cap —
+# same pattern as bote_content / bote_libro_tools / bote_host.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/http_server.cyr"
+include "lib/assert.cyr"
+
+include "src/auth.cyr"
+
+# Mock validator that only accepts a single hardcoded token.
+fn mock_validator(token, ctx) {
+    if (streq(token, "secret123") == 1) { return 1; }
+    return 0;
+}
+
+# Helper to build a fake HTTP request as a cstr (NUL-terminated buffer
+# we can pass to http_find_header). Caller specifies the Authorization
+# header value (or 0 to omit the header entirely).
+fn _make_req(auth_value) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "GET /mcp HTTP/1.1\r\nHost: x.x\r\n");
+    if (auth_value != 0) {
+        str_builder_add_cstr(sb, "Authorization: ");
+        str_builder_add_cstr(sb, auth_value);
+        str_builder_add_cstr(sb, "\r\n");
+    }
+    str_builder_add_cstr(sb, "\r\n");
+    return str_data(str_builder_build(sb));
+}
+
+fn main() {
+    alloc_init();
+
+    # ================================================================
+    # auth_bearer_extract — header parsing
+    # ================================================================
+    var r1 = _make_req("Bearer secret123");
+    var t1 = auth_bearer_extract(r1, strlen(r1));
+    assert(t1 != 0, "extract returns token");
+    assert(streq(t1, "secret123") == 1, "extracted token correct");
+
+    # Case-insensitive scheme name
+    var r2 = _make_req("bearer secret123");
+    assert(streq(auth_bearer_extract(r2, strlen(r2)), "secret123") == 1, "lowercase bearer");
+    var r3 = _make_req("BEARER secret123");
+    assert(streq(auth_bearer_extract(r3, strlen(r3)), "secret123") == 1, "uppercase BEARER");
+    var r4 = _make_req("BeArEr secret123");
+    assert(streq(auth_bearer_extract(r4, strlen(r4)), "secret123") == 1, "mixed-case scheme");
+
+    # Extra leading whitespace after "Bearer "
+    var r5 = _make_req("Bearer    spaced");
+    assert(streq(auth_bearer_extract(r5, strlen(r5)), "spaced") == 1, "leading WS skipped");
+
+    # Trailing whitespace trimmed (CR is already stripped by http_find_header)
+    var r6 = _make_req("Bearer trim   ");
+    assert(streq(auth_bearer_extract(r6, strlen(r6)), "trim") == 1, "trailing WS trimmed");
+
+    # ---------------- rejections ----------------
+    var no_hdr = _make_req(0);
+    assert_eq(auth_bearer_extract(no_hdr, strlen(no_hdr)), 0, "no Authorization → 0");
+
+    var basic = _make_req("Basic dXNlcjpwYXNz");
+    assert_eq(auth_bearer_extract(basic, strlen(basic)), 0, "Basic scheme → 0");
+
+    var truncated = _make_req("Bearer");
+    assert_eq(auth_bearer_extract(truncated, strlen(truncated)), 0, "no space after Bearer → 0");
+
+    var empty_token = _make_req("Bearer ");
+    assert_eq(auth_bearer_extract(empty_token, strlen(empty_token)), 0, "empty token → 0");
+
+    var only_ws = _make_req("Bearer    ");
+    assert_eq(auth_bearer_extract(only_ws, strlen(only_ws)), 0, "all-whitespace token → 0");
+
+    # ================================================================
+    # auth_validator_allow_all — permissive validator
+    # ================================================================
+    assert(auth_validator_allow_all("anything", 0) != 0, "allow_all passes any token");
+    assert_eq(auth_validator_allow_all(0, 0), 0, "allow_all rejects null");
+    assert_eq(auth_validator_allow_all("", 0), 0, "allow_all rejects empty");
+
+    # ================================================================
+    # auth_validator_allowlist — vec membership
+    # ================================================================
+    var allowed = vec_new();
+    vec_push(allowed, "tok-A");
+    vec_push(allowed, "tok-B");
+    assert(auth_validator_allowlist("tok-A", allowed) != 0, "allowlist accepts tok-A");
+    assert(auth_validator_allowlist("tok-B", allowed) != 0, "allowlist accepts tok-B");
+    assert_eq(auth_validator_allowlist("tok-C", allowed), 0, "allowlist rejects tok-C");
+    assert_eq(auth_validator_allowlist(0, allowed), 0, "allowlist rejects null token");
+    assert_eq(auth_validator_allowlist("tok-A", 0), 0, "allowlist rejects null vec");
+
+    # ================================================================
+    # auth_bearer_check — middleware shape (cfd=0 since we don't read
+    # the response on this path; check returns the status code only)
+    # ================================================================
+    # No validator configured → pass through (returns 0)
+    assert_eq(auth_bearer_check(0, r1, strlen(r1), 0, 0), 0,
+              "no validator → middleware no-op");
+
+    # Validator configured, valid token → pass
+    var fp = &mock_validator;
+    assert_eq(auth_bearer_check(2, r1, strlen(r1), fp, 0), 0,
+              "valid token passes");
+
+    # Validator configured, missing header → 401 (and a 401 byte stream
+    # was written to fd=2; we just check the return code here)
+    assert_eq(auth_bearer_check(2, no_hdr, strlen(no_hdr), fp, 0), HTTP_UNAUTHORIZED,
+              "missing header → 401");
+
+    # Validator configured, wrong token → 401
+    var wrong = _make_req("Bearer nope");
+    assert_eq(auth_bearer_check(2, wrong, strlen(wrong), fp, 0), HTTP_UNAUTHORIZED,
+              "wrong token → 401");
+
+    # ================================================================
+    # Fn-pointer addressability (sanity)
+    # ================================================================
+    assert(&auth_bearer_extract != 0, "extract fp addressable");
+    assert(&auth_bearer_check != 0, "check fp addressable");
+    assert(&auth_validator_allow_all != 0, "allow_all fp addressable");
+    assert(&auth_validator_allowlist != 0, "allowlist fp addressable");
+    assert(&auth_send_unauthorized != 0, "401 builder fp addressable");
+
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

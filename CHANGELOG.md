@@ -2,6 +2,61 @@
 
 All notable changes to bote are documented here.
 
+## [1.9.0] — 2026-04-14 — Bearer-token middleware (RFC 6750)
+
+First slice of the roadmap `auth` item. OAuth 2.1 + PKCE follow in
+later releases; this one delivers the substrate they all sit on:
+extract `Authorization: Bearer <token>` from a request, hand the token
+to a caller-supplied validator function pointer, and emit a spec-
+compliant 401 if the token is missing or rejected. **Opt-in** — a
+transport with no validator configured behaves exactly as before.
+
+### Added
+- **`src/auth.cyr`** (~140 LOC, no AGNOS deps):
+  - `auth_bearer_extract(buf, blen)` — case-insensitive `Bearer ` scheme parse, leading/trailing OWS handling, returns the alloc'd token cstr or 0.
+  - `auth_bearer_check(cfd, buf, blen, validator_fp, validator_ctx)` — middleware entry. Returns 0 on pass / `HTTP_UNAUTHORIZED` on reject (response already on the wire). No-op when `validator_fp == 0`.
+  - `auth_send_unauthorized(cfd, realm)` — 401 with `WWW-Authenticate: Bearer realm="..."`.
+  - `auth_validator_allow_all(token, ctx)` — pass-anything validator (testing / dev only).
+  - `auth_validator_allowlist(token, vec)` — vec membership check; rejects null/empty.
+- Validator signature: `fn validator(token_cstr, ctx) → claims_ptr | 0`. Non-zero return is "valid"; the value is opaque to bote today and will be threaded through to handlers when request-scoped context lands. Returning 0 means "reject".
+
+### Changed
+- All four HTTP-family transport configs now have `bearer_validator` + `bearer_ctx` slots **at the end** of the struct (existing offsets preserved):
+  - **`HttpConfig`** 56 → 72 bytes (`+56` validator, `+64` ctx)
+  - **`BridgeConfig`** 32 → 48 bytes (`+32`, `+40`)
+  - **`StreamableConfig`** 64 → 80 bytes (`+64`, `+72`)
+  - **`WsConfig`** 48 → 64 bytes (`+48`, `+56` — applied to the upgrade HTTP request only, not per-frame)
+- Each gets a corresponding `X_config_with_bearer_validator(c, fp, ctx)` setter and `X_config_bearer_validator(c)` / `X_config_bearer_ctx(c)` accessors.
+- Each transport's per-request handler now calls `auth_bearer_check` right after the Origin check and before the protocol-version check.
+- `src/main.cyr` includes `src/auth.cyr` ahead of the transports that use it.
+
+### Tests
+- **New test file** — `tests/bote_auth.tcyr` (29 assertions). Covers:
+  - Header parsing — exact match, three case variants of the scheme, leading/trailing whitespace handling
+  - Rejections — no header / Basic scheme / `"Bearer"` with no space / empty token / whitespace-only token
+  - `auth_validator_allow_all` accepts any non-empty token, rejects null/empty
+  - `auth_validator_allowlist` accepts on match, rejects misses + null inputs
+  - Middleware: no-validator → pass, valid token → pass, missing/wrong token → 401
+  - Fn-pointer addressability (sanity)
+- **Total assertions: 507** (was 478). Breakdown: `tests/bote.tcyr` 394, `tests/bote_libro_tools.tcyr` 22, `tests/bote_content.tcyr` 15, `tests/bote_host.tcyr` 47, `tests/bote_auth.tcyr` 29.
+
+### Verified (cyrius 4.6.2)
+- All five test files green (394 / 22 / 15 / 47 / 29).
+- `cyrius bench tests/bote.bcyr` → 10 hot paths within noise of 1.8.1 (dispatch_* 1–3µs, jsonx_* 584–877ns, codec_* 789ns–6µs, validate_* 982ns–2µs).
+- `cyrlint src/auth.cyr tests/bote_auth.tcyr src/transport_http.cyr src/transport_streamable.cyr src/transport_ws.cyr src/bridge.cyr` → **0 warnings**.
+- Live HTTP smoke (`./bote http 18900` with no validator): `POST /mcp` returns 200 with serverInfo as before; auth machinery has zero overhead when not configured.
+- `./bote` reports `"version":"1.9.0"`.
+
+### Deferred to v1.9.x / v2.0
+- **OAuth 2.1 + PKCE-S256.** Token *acquisition*, not just *validation*. Will reuse the same validator fn-ptr surface for verification.
+- **Claims propagation to handlers.** Today a successful validate just returns 1; richer claims (subject, scopes) need request-scoped context plumbing into the handler signature, which is a bigger ABI change.
+- **JWT verification helper.** Worth shipping when the first consumer needs it; keeps the validator surface lean for now.
+- **CLI flag to enable bearer auth from the command line.** Programmatic callers can use `X_config_with_bearer_validator` today; CLI wiring follows once we pick a config-file format.
+
+### Carried forward
+- cyrius 4.6.2 function-table cap — fifth split test file added; addressed structurally.
+- v1.2.1 libro-growth heisenbug: unchanged.
+
 ## [1.8.1] — 2026-04-14 — Bump to cyrius 4.6.2
 
 Toolchain bump. No source changes beyond the pin + the test-file comment

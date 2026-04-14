@@ -12,28 +12,41 @@
 # streaming dispatch lands (v1.6+); the WS socket itself is the session.
 
 # ================================================================
-# WsConfig (48 bytes):
+# WsConfig (64 bytes):
 #   +0  endpoint_path     cstr (e.g. "/mcp")
 #   +8  bind_addr         i64 (network-order IPv4)
 #   +16 port              i64
 #   +24 allowed_origins   vec of cstrs or 0
 #   +32 require_protocol  0/1
 #   +40 dispatcher        Dispatcher ptr (set by transport_ws_run)
+#   +48 bearer_validator  fn ptr (token, ctx) → claims | 0, or 0 to disable
+#   +56 bearer_ctx        i64 ctx passed verbatim to validator
+#
+# Bearer auth applies on the upgrade HTTP request only, not per-frame —
+# WS has a single Upgrade and the connection's identity is fixed at
+# that point.
 # ================================================================
 
 fn ws_config_new(path, addr, port) {
-    var c = alloc(48);
+    var c = alloc(64);
     store64(c, path);
     store64(c + 8, addr);
     store64(c + 16, port);
     store64(c + 24, 0);
     store64(c + 32, 0);
     store64(c + 40, 0);
+    store64(c + 48, 0);
+    store64(c + 56, 0);
     return c;
 }
 
 fn ws_config_with_allowed_origins(c, vec) { store64(c + 24, vec); return c; }
 fn ws_config_with_require_protocol(c, r)  { store64(c + 32, r);   return c; }
+fn ws_config_with_bearer_validator(c, fp, ctx) {
+    store64(c + 48, fp);
+    store64(c + 56, ctx);
+    return c;
+}
 
 fn ws_config_path(c)             { return load64(c); }
 fn ws_config_addr(c)             { return load64(c + 8); }
@@ -41,6 +54,8 @@ fn ws_config_port(c)             { return load64(c + 16); }
 fn ws_config_allowed_origins(c)  { return load64(c + 24); }
 fn ws_config_require_protocol(c) { return load64(c + 32); }
 fn ws_config_dispatcher(c)       { return load64(c + 40); }
+fn ws_config_bearer_validator(c) { return load64(c + 48); }
+fn ws_config_bearer_ctx(c)       { return load64(c + 56); }
 
 # ================================================================
 # Middleware — same shape as transport_http, run pre-upgrade
@@ -94,6 +109,9 @@ fn _bote_ws_handler(config, cfd, buf, n) {
     }
 
     if (_ws_check_origin(cfd, buf, n, config) != 0) { return 0; }
+    if (auth_bearer_check(cfd, buf, n,
+                          ws_config_bearer_validator(config),
+                          ws_config_bearer_ctx(config)) != 0) { return 0; }
     if (_ws_check_protocol(cfd, buf, n, config) != 0) { return 0; }
 
     var ws = ws_server_handshake(cfd, buf, n);

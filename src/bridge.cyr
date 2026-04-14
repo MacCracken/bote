@@ -12,28 +12,39 @@
 # wrap_tool_result passes through if the value already has a "content" array.
 
 # ================================================================
-# BridgeConfig (32 bytes):
+# BridgeConfig (48 bytes):
 #   +0  bind_addr        i64 (network-order IPv4)
 #   +8  port             i64
 #   +16 allowed_origins  vec of cstrs or 0 (0 / empty / contains "*" → wildcard)
 #   +24 dispatcher       Dispatcher ptr (set by transport_bridge_run)
+#   +32 bearer_validator fn ptr (token, ctx) → claims | 0, or 0 to disable
+#   +40 bearer_ctx       i64 ctx passed verbatim to validator
 # ================================================================
 
 fn bridge_config_new(addr, port) {
-    var c = alloc(32);
+    var c = alloc(48);
     store64(c, addr);
     store64(c + 8, port);
     store64(c + 16, 0);
     store64(c + 24, 0);
+    store64(c + 32, 0);
+    store64(c + 40, 0);
     return c;
 }
 
 fn bridge_config_with_origins(c, vec)        { store64(c + 16, vec); return c; }
 fn bridge_config_with_dispatcher(c, d)       { store64(c + 24, d);   return c; }
-fn bridge_config_addr(c)       { return load64(c); }
-fn bridge_config_port(c)       { return load64(c + 8); }
-fn bridge_config_origins(c)    { return load64(c + 16); }
-fn bridge_config_dispatcher(c) { return load64(c + 24); }
+fn bridge_config_with_bearer_validator(c, fp, ctx) {
+    store64(c + 32, fp);
+    store64(c + 40, ctx);
+    return c;
+}
+fn bridge_config_addr(c)             { return load64(c); }
+fn bridge_config_port(c)             { return load64(c + 8); }
+fn bridge_config_origins(c)          { return load64(c + 16); }
+fn bridge_config_dispatcher(c)       { return load64(c + 24); }
+fn bridge_config_bearer_validator(c) { return load64(c + 32); }
+fn bridge_config_bearer_ctx(c)       { return load64(c + 40); }
 
 # ================================================================
 # Envelope wrappers
@@ -220,6 +231,11 @@ fn _bridge_handle(config, cfd, buf, n) {
         http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
         return 0;
     }
+
+    # Bearer auth (no-op when no validator configured)
+    if (auth_bearer_check(cfd, buf, n,
+                          bridge_config_bearer_validator(config),
+                          bridge_config_bearer_ctx(config)) != 0) { return 0; }
 
     var body_off = http_body_offset(buf, n);
     if (body_off < 0 || body_off > n) {
