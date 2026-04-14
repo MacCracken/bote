@@ -60,6 +60,12 @@ fi
 
 echo "$OLD -> $NEW"
 echo ""
+echo "Package description (edit cyrius.toml if stale):"
+grep '^description = ' cyrius.toml | sed 's/^/  /'
+echo ""
+echo "cyrius pin:"
+grep '^cyrius = ' cyrius.toml | sed 's/^/  /'
+echo ""
 echo "Updated:"
 echo "  VERSION"
 echo "  cyrius.toml"
