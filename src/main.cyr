@@ -62,6 +62,7 @@ include "src/transport_streamable.cyr"
 include "lib/ws_server.cyr"
 include "src/transport_ws.cyr"
 include "src/libro_tools.cyr"
+include "src/content.cyr"
 fn bote_echo_handler(args) {
     return args;
 }

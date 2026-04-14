@@ -2,6 +2,48 @@
 
 All notable changes to bote are documented here.
 
+## [1.7.0] — 2026-04-14 — Typed content blocks (MCP 2025-11-25)
+
+Handlers can now return **typed content** — `text`, `image`, `audio`,
+`resource` (embedded), and `resource_link` (reference) — instead of
+only plain-text tool results. First piece of the `src/host.cyr`
+roadmap item; host registry + SSRF follow in a later release.
+
+### Added
+- **`src/content.cyr`** (~135 LOC). Constructors for every MCP block type:
+  - `content_text(text)` — `{"type":"text","text":"..."}`
+  - `content_image(b64_data, mime)` / `content_audio(b64_data, mime)` — binary payloads, base64 in-band
+  - `content_resource(uri, mime, text)` — embedded resource; `mime` and `text` are optional and omitted from the emitted object when null
+  - `content_resource_link(uri, name, mime)` — reference only; client fetches by URI
+  - `content_array(blocks)` — `{"content":[...]}` envelope over a vec of pre-built block cstrs
+  - `content_array_error(blocks)` — same, with `"isError":true` (MCP distinguishes tool-execution errors from protocol errors by this flag)
+  - `content_single(block)` and `content_text_response(text)` — shorthand for the single-block case (no vec alloc)
+- Every string argument is a cstr; JSON escaping happens at the boundary via `_json_emit_escaped` (reused from `src/dispatch.cyr`).
+
+### Interop
+- `src/bridge.cyr`'s existing `wrap_tool_result` already detects a ready-made `{"content":[...]}` envelope and passes it through untouched — verified by a new test (`wrap_tool_result passes through a content envelope` in `bote_content.tcyr`). Handlers can opt into typed blocks without any transport-layer changes.
+
+### Tests
+- **New test file** — `tests/bote_content.tcyr` (15 assertions). Split out of `tests/bote.tcyr` for the cyrius 4.5.1 parser identifier-buffer cap — same pattern as `bote_libro_tools.tcyr`. Both will collapse back into the main test file when cyrius 4.6.1 lifts the cap.
+- Coverage: every constructor's exact JSON output (including optional-field omission), JSON escaping of quotes, null-text → empty-string fallback, mixed-type arrays, empty-array case, `isError` flag, and the pass-through interop with `wrap_tool_result`.
+- **Total assertions: 431** (was 416). Breakdown: `tests/bote.tcyr` 394, `tests/bote_libro_tools.tcyr` 22, `tests/bote_content.tcyr` 15.
+
+### Verified (cyrius 4.5.1)
+- `cyrius test tests/bote.tcyr` → **394 passed, 0 failed**
+- `cyrius test tests/bote_libro_tools.tcyr` → **22 passed, 0 failed**
+- `cyrius test tests/bote_content.tcyr` → **15 passed, 0 failed**
+- `cyrius bench tests/bote.bcyr` → all 10 hot paths within noise of the 1.6.0 baseline (dispatch_* 1–3µs, jsonx_* 612–963ns, codec_* 785ns–6µs, validate_* 1–3µs).
+- `cyrlint src/content.cyr tests/bote_content.tcyr` → **0 warnings**.
+- `./bote` — `initialize` → `{"serverInfo":{"name":"bote","version":"1.7.0"}}`.
+
+### Deferred to v1.8+
+- **Annotations** (`audience`, `priority`) on content blocks — MCP spec optional; skipped to keep 1.7.0 focused.
+- **Binary resource contents** (`blob`) — the current `content_resource` handles text; the blob variant needs a base64 decoder surface (or passes through pre-encoded input). Punt until a consumer needs it.
+
+### Known (unchanged)
+- cyrius 4.5.1 identifier-buffer cap — forced the third test file. Tracked for 4.6.1 per `docs/bugs/cyrius-4.5.1-identifier-buffer-cap.md`.
+- v1.2.1 libro-growth heisenbug — unrelated to this release.
+
 ## [1.6.0] — 2026-04-14 — libro_tools (5 built-in MCP audit tools)
 
 Lands the `libro_tools` module from the 1.3 roadmap: five MCP tools that

@@ -58,6 +58,8 @@ include "src/transport_streamable.cyr"
 # the cyrius 4.5.1 parser past its input-buffer cap. Same reason splits
 # libro_tools into tests/bote_libro_tools.tcyr.
 include "src/transport_ws.cyr"
+# NB: src/content.cyr tests live in tests/bote_content.tcyr — same
+# parser-cap reason as bote_libro_tools.tcyr.
 
 # Test handler: echoes its arguments verbatim.
 fn h_echo(args) {
@@ -1187,6 +1189,9 @@ fn main() {
 
     # v1.6.0: libro_tools tests live in tests/bote_libro_tools.tcyr
     # (splitting to stay under the cyrius 4.5.1 parser identifier-buffer cap).
+
+    # v1.7.0: content-block tests live in tests/bote_content.tcyr
+    # (splitting for the same cyrius 4.5.1 parser-cap reason).
 
     return assert_summary();
 }

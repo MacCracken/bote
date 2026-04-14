@@ -1,0 +1,116 @@
+# bote_content.tcyr — unit tests for src/content.cyr (MCP content blocks).
+#
+# Split out of bote.tcyr for the cyrius 4.5.1 parser identifier-buffer
+# cap — same reason as tests/bote_libro_tools.tcyr. Recollapse when
+# 4.6.1 lifts the cap.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
+include "lib/tagged.cyr"
+include "lib/assert.cyr"
+
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/dispatch.cyr"
+include "src/content.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ---------------- text block ----------------
+    var ct = content_text("hello \"world\"");
+    assert(streq(ct, "{\"type\":\"text\",\"text\":\"hello \\\"world\\\"\"}") == 1,
+           "text block with JSON-escaped quote");
+
+    # Null text → empty string body, still valid JSON
+    var ct0 = content_text(0);
+    assert(streq(ct0, "{\"type\":\"text\",\"text\":\"\"}") == 1, "text block null → empty");
+
+    # ---------------- binary blocks (image, audio) ----------------
+    var ci = content_image("AAA=", "image/png");
+    assert(streq(ci, "{\"type\":\"image\",\"data\":\"AAA=\",\"mimeType\":\"image/png\"}") == 1,
+           "image block");
+
+    var ca = content_audio("BBB=", "audio/wav");
+    assert(streq(ca, "{\"type\":\"audio\",\"data\":\"BBB=\",\"mimeType\":\"audio/wav\"}") == 1,
+           "audio block");
+
+    # ---------------- resource (embedded) ----------------
+    var cr = content_resource("file:///x", "text/plain", "body");
+    assert(streq(cr,
+        "{\"type\":\"resource\",\"resource\":{\"uri\":\"file:///x\",\"mimeType\":\"text/plain\",\"text\":\"body\"}}") == 1,
+        "resource block with uri+mime+text");
+
+    # uri-only (optional fields omitted, not rendered)
+    var cr2 = content_resource("x://only", 0, 0);
+    assert(streq(cr2, "{\"type\":\"resource\",\"resource\":{\"uri\":\"x://only\"}}") == 1,
+           "resource block uri-only");
+
+    # uri + text, no mime
+    var cr3 = content_resource("x://t", 0, "payload");
+    assert(streq(cr3, "{\"type\":\"resource\",\"resource\":{\"uri\":\"x://t\",\"text\":\"payload\"}}") == 1,
+           "resource block uri+text");
+
+    # ---------------- resource_link (reference) ----------------
+    var cl = content_resource_link("https://e.x", "name", "text/html");
+    assert(streq(cl,
+        "{\"type\":\"resource_link\",\"uri\":\"https://e.x\",\"name\":\"name\",\"mimeType\":\"text/html\"}") == 1,
+        "resource_link with uri+name+mime");
+
+    # uri-only link
+    var cl2 = content_resource_link("x://only", 0, 0);
+    assert(streq(cl2, "{\"type\":\"resource_link\",\"uri\":\"x://only\"}") == 1,
+           "resource_link uri-only");
+
+    # ---------------- content_array envelope ----------------
+    var blocks = vec_new();
+    vec_push(blocks, content_text("a"));
+    vec_push(blocks, content_text("b"));
+    var arr = content_array(blocks);
+    assert(streq(arr,
+        "{\"content\":[{\"type\":\"text\",\"text\":\"a\"},{\"type\":\"text\",\"text\":\"b\"}]}") == 1,
+        "content_array joins blocks with commas");
+
+    # Mixed-type array
+    var mixed = vec_new();
+    vec_push(mixed, content_text("hi"));
+    vec_push(mixed, content_image("AA==", "image/jpeg"));
+    var mixed_arr = content_array(mixed);
+    assert(jsonx_has(mixed_arr, "content") == 1, "mixed array has content");
+
+    # Empty array (no blocks) is still valid JSON
+    var earr = content_array(vec_new());
+    assert(streq(earr, "{\"content\":[]}") == 1, "empty content_array is {content:[]}");
+
+    # ---------------- error flag ----------------
+    var eblocks = vec_new();
+    vec_push(eblocks, content_text("oops"));
+    var eerr = content_array_error(eblocks);
+    assert(streq(eerr,
+        "{\"content\":[{\"type\":\"text\",\"text\":\"oops\"}],\"isError\":true}") == 1,
+        "content_array_error adds isError:true");
+
+    # ---------------- shorthands ----------------
+    var one = content_single(content_text("hi"));
+    assert(streq(one, "{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}") == 1,
+           "content_single wraps one block");
+
+    var tr = content_text_response("ok");
+    assert(streq(tr, "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}") == 1,
+           "content_text_response matches content_single(content_text(...))");
+
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);
