@@ -1,5 +1,12 @@
 /target/
 Cargo.lock
+
+# Rust build artifacts under rust-old/ (post cyrius port)
+rust-old/target/
+rust-old/**/target/
+
+# Cyrius build artifacts
+/build/
 *.swp
 *.swo
 *~
