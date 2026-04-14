@@ -2,6 +2,62 @@
 
 All notable changes to bote are documented here.
 
+## [1.8.0] — 2026-04-14 — HostRegistry + SSRF guard
+
+Closes out the `host` module started in 1.7.0. The registry gives
+handlers a named list of external hosts bote is permitted to reach;
+the SSRF guard rejects URLs targeting loopback / private / link-local
+/ cloud-metadata endpoints *before* any network call goes out.
+
+### Added
+- **`src/host.cyr`** (~260 LOC, no AGNOS deps):
+  - **`HostEntry`** (32 bytes): `name` / `url` / optional `headers` vec (alternating key/value cstrs) / optional `capabilities` vec. `host_entry_allows(entry, cap)` is an allowlist check — no-caps means "anything allowed" (fail-open for convenience); an explicit vec enforces the allowlist.
+  - **`HostRegistry`** (16 bytes): `name → HostEntry` map backed by stdlib `hashmap`, plus a cached `count` that stays stable on replacement so callers trust it as an O(1) size hint.
+  - `host_registry_new/add/get/has/count/names`.
+- **`ssrf_check(url)`** — returns `SSRF_OK` (0) on pass, or a non-zero reason code:
+
+  | Code | Meaning |
+  |------|---------|
+  | `SSRF_PARSE` | Malformed URL / empty host |
+  | `SSRF_SCHEME` | Scheme isn't `http://` or `https://` |
+  | `SSRF_LOOPBACK` | `127.0.0.0/8`, `localhost` |
+  | `SSRF_LINK_LOCAL` | `169.254.0.0/16` (reserved for link-local generally) |
+  | `SSRF_PRIVATE` | RFC 1918 (`10/8`, `172.16/12`, `192.168/16`) |
+  | `SSRF_METADATA` | `169.254.169.254` (AWS/GCP/Azure), hostname `metadata.google.internal`, bare `metadata` |
+  | `SSRF_UNSPEC` | `0.0.0.0/8` |
+  | `SSRF_MULTICAST` | `224.0.0.0/4` |
+
+  Case-insensitive on scheme + hostname. Strips `user:pass@` userinfo before classifying. Parses dotted-decimal IPv4 literals directly (no DNS). Non-IP hostnames hit a conservative string blocklist — this is defense-in-depth, not the last line; production callers should pair with DNS-level controls.
+- Convenience: `ssrf_is_safe(url)` returns `1`/`0` for call sites that only need a boolean.
+
+### Tests
+- **New test file** — `tests/bote_host.tcyr` (47 assertions). Covers:
+  - `HostEntry` / `HostRegistry` shape, replace-doesn't-double-count semantics, capability allowlist behaviour including the no-caps fail-open default
+  - SSRF pass cases (`api.github.com`, `1.1.1.1`, `8.8.8.8`, port + query, `user:pass@` userinfo)
+  - Every blocklist code path with a representative IPv4 (inc. edge cases: `172.15` & `172.32` public, `172.16` & `172.31` private)
+  - Hostname blocklist (`localhost`, case-insensitive, `metadata.google.internal`, bare `metadata`)
+  - Non-http schemes rejected (`file://`, `gopher://`, `ftp://`)
+  - Null / malformed input
+- **Total assertions: 478** (was 431). Breakdown: `tests/bote.tcyr` 394, `tests/bote_libro_tools.tcyr` 22, `tests/bote_content.tcyr` 15, `tests/bote_host.tcyr` 47.
+
+### Verified (cyrius 4.5.1)
+- `cyrius test tests/bote.tcyr` → **394 passed, 0 failed**
+- `cyrius test tests/bote_libro_tools.tcyr` → **22 passed, 0 failed**
+- `cyrius test tests/bote_content.tcyr` → **15 passed, 0 failed**
+- `cyrius test tests/bote_host.tcyr` → **47 passed, 0 failed**
+- `cyrius bench tests/bote.bcyr` → all 10 hot paths within noise of the 1.7.0 baseline.
+- `cyrlint src/host.cyr tests/bote_host.tcyr` → **0 warnings**.
+- `./bote` — `initialize` → `{"serverInfo":{"name":"bote","version":"1.8.0"}}`.
+
+### Deferred
+- **DNS resolution for hostname classification.** A hostname that resolves to a blocked IP isn't caught today — caller can feed `127.0.0.1.nip.io` and pass. Requires a DNS stub on cyrius that doesn't yet exist; queued for a later release. In the meantime, pair with a network policy that blocks egress to RFC 1918.
+- **IPv6 literal classification** (`::1`, `fe80::/10`, `fc00::/7`). Skipped for 1.8.0 — IPv4 covers today's deployments; IPv6 blocklist is next slice.
+- **Registry persistence / hot-reload.** Registry is built in-process from config; no file watch.
+
+### Known (unchanged)
+- cyrius 4.5.1 identifier-buffer cap — this release needed a *fourth* split test file (`bote_host.tcyr`). All four collapse back into `bote.tcyr` when cyrius 4.6.1 lifts the cap. See `docs/bugs/cyrius-4.5.1-identifier-buffer-cap.md`.
+- v1.2.1 libro-growth heisenbug — unrelated to this release.
+
 ## [1.7.0] — 2026-04-14 — Typed content blocks (MCP 2025-11-25)
 
 Handlers can now return **typed content** — `text`, `image`, `audio`,

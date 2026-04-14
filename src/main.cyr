@@ -63,6 +63,7 @@ include "lib/ws_server.cyr"
 include "src/transport_ws.cyr"
 include "src/libro_tools.cyr"
 include "src/content.cyr"
+include "src/host.cyr"
 fn bote_echo_handler(args) {
     return args;
 }

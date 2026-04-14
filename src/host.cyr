@@ -1,0 +1,287 @@
+# bote::host — HostRegistry + SSRF guard.
+#
+# Second slice of the roadmap `host` module (content blocks landed in
+# 1.7.0). Registry holds named external hosts bote is allowed to route
+# requests to (e.g. for `resource_link` fetches or tool-to-tool proxy);
+# SSRF guard rejects URLs targeting loopback / link-local / private /
+# cloud-metadata endpoints before any network call.
+#
+# Wire shapes:
+#
+#   HostEntry (32 bytes):
+#     +0  name          cstr   logical identifier
+#     +8  url           cstr   base URL (http:// or https://)
+#     +16 headers       vec of cstrs (alternating key/value) or 0
+#     +24 capabilities  vec of cstrs (e.g. "fetch", "tools/call") or 0
+#
+#   HostRegistry (16 bytes):
+#     +0  entries       hashmap: name cstr → HostEntry ptr
+#     +8  count         i64 (cached vec_len of map_keys — O(1) lookup)
+
+# ================================================================
+# HostEntry
+# ================================================================
+
+fn host_entry_new(name, url) {
+    var e = alloc(32);
+    store64(e, name);
+    store64(e + 8, url);
+    store64(e + 16, 0);
+    store64(e + 24, 0);
+    return e;
+}
+
+fn host_entry_with_headers(e, headers) { store64(e + 16, headers); return e; }
+fn host_entry_with_capabilities(e, caps) { store64(e + 24, caps); return e; }
+
+fn host_entry_name(e)         { return load64(e); }
+fn host_entry_url(e)          { return load64(e + 8); }
+fn host_entry_headers(e)      { return load64(e + 16); }
+fn host_entry_capabilities(e) { return load64(e + 24); }
+
+# Capability check: returns 1 if caps is null (no restriction) or if
+# `cap` is present in the vec; 0 if the vec exists and doesn't contain it.
+fn host_entry_allows(e, cap) {
+    var caps = host_entry_capabilities(e);
+    if (caps == 0) { return 1; }
+    var n = vec_len(caps);
+    var i = 0;
+    while (i < n) {
+        if (streq(vec_get(caps, i), cap) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# HostRegistry
+# ================================================================
+
+fn host_registry_new() {
+    var r = alloc(16);
+    store64(r, map_new());
+    store64(r + 8, 0);
+    return r;
+}
+
+fn host_registry_entries(r) { return load64(r); }
+fn host_registry_count(r)   { return load64(r + 8); }
+
+# Insert / replace. Bumps count only on fresh insert (replacement
+# keeps the count stable so callers can trust it as a O(1) size hint).
+fn host_registry_add(r, entry) {
+    var name = host_entry_name(entry);
+    var m = host_registry_entries(r);
+    if (map_has(m, name) == 0) {
+        store64(r + 8, host_registry_count(r) + 1);
+    }
+    map_set(m, name, entry);
+    return 0;
+}
+
+fn host_registry_has(r, name) { return map_has(host_registry_entries(r), name); }
+fn host_registry_get(r, name) { return map_get(host_registry_entries(r), name); }
+
+fn host_registry_names(r) { return map_keys(host_registry_entries(r)); }
+
+# ================================================================
+# SSRF guard
+# ================================================================
+#
+# Return codes (ssrf_ok = pass, anything else = blocked with reason).
+# Callers should treat a non-zero return as "do not make this request"
+# and surface the code so audit logs can distinguish a block reason.
+
+var SSRF_OK         = 0;
+var SSRF_PARSE      = 1;
+var SSRF_SCHEME     = 2;
+var SSRF_LOOPBACK   = 3;
+var SSRF_LINK_LOCAL = 4;
+var SSRF_PRIVATE    = 5;
+var SSRF_METADATA   = 6;
+var SSRF_UNSPEC     = 7;
+var SSRF_MULTICAST  = 8;
+
+# Return 1 if cstr `s` starts with `prefix`, else 0.
+fn _ssrf_starts_with(s, prefix) {
+    if (s == 0 || prefix == 0) { return 0; }
+    var i = 0;
+    while (1 == 1) {
+        var p = load8(prefix + i);
+        if (p == 0) { return 1; }
+        if (load8(s + i) != p) { return 0; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ASCII-lowercase a cstr into a fresh alloc. Caller owns the result.
+fn _ssrf_lower(s) {
+    var n = strlen(s);
+    var out = alloc(n + 1);
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c >= 65 && c <= 90) { c = c + 32; }
+        store8(out + i, c);
+        i = i + 1;
+    }
+    store8(out + n, 0);
+    return out;
+}
+
+# Parse a base-10 octet out of cstr `s` starting at offset `pos`; read
+# up to `end`. Writes the parsed value to *out_val and returns the new
+# offset (past the digits), or 0 - 1 on invalid input.
+fn _ssrf_parse_octet(s, pos, end, out_val) {
+    if (pos >= end) { return 0 - 1; }
+    var v = 0;
+    var p = pos;
+    var digits = 0;
+    while (p < end) {
+        var c = load8(s + p);
+        if (c < 48 || c > 57) { p = end; }
+        else {
+            v = v * 10 + (c - 48);
+            digits = digits + 1;
+            p = p + 1;
+        }
+    }
+    if (digits == 0 || digits > 3 || v > 255) { return 0 - 1; }
+    store64(out_val, v);
+    return pos + digits;
+}
+
+# Classify a dotted-decimal IPv4 host substring s[start..end]. Returns
+# an SSRF_* code: SSRF_OK if the address is public, otherwise the
+# reason category. Returns SSRF_PARSE if not a valid IPv4 literal
+# (caller should fall back to hostname classification).
+fn _ssrf_classify_ipv4(s, start, end) {
+    var a_slot[8]; var b_slot[8]; var c_slot[8]; var d_slot[8];
+    store64(&a_slot, 0); store64(&b_slot, 0);
+    store64(&c_slot, 0); store64(&d_slot, 0);
+
+    # Walk four octets separated by dots
+    var p = start;
+    # Find three dots first to chop s into four ranges
+    var dot1 = 0 - 1; var dot2 = 0 - 1; var dot3 = 0 - 1;
+    var k = start;
+    while (k < end) {
+        var c = load8(s + k);
+        if (c == 46) {
+            if (dot1 < 0) { dot1 = k; }
+            elif (dot2 < 0) { dot2 = k; }
+            elif (dot3 < 0) { dot3 = k; }
+            else { return SSRF_PARSE; }
+        }
+        k = k + 1;
+    }
+    if (dot3 < 0) { return SSRF_PARSE; }
+
+    if (_ssrf_parse_octet(s, start,    dot1, &a_slot) < 0) { return SSRF_PARSE; }
+    if (_ssrf_parse_octet(s, dot1 + 1, dot2, &b_slot) < 0) { return SSRF_PARSE; }
+    if (_ssrf_parse_octet(s, dot2 + 1, dot3, &c_slot) < 0) { return SSRF_PARSE; }
+    if (_ssrf_parse_octet(s, dot3 + 1, end,  &d_slot) < 0) { return SSRF_PARSE; }
+
+    var a = load64(&a_slot);
+    var b = load64(&b_slot);
+
+    # 0.0.0.0/8 — unspecified / "any interface"
+    if (a == 0) { return SSRF_UNSPEC; }
+    # 127.0.0.0/8 — loopback
+    if (a == 127) { return SSRF_LOOPBACK; }
+    # 169.254.0.0/16 — link-local (covers AWS/GCP/Azure metadata at 169.254.169.254)
+    if (a == 169 && b == 254) { return SSRF_METADATA; }
+    # 10.0.0.0/8 — RFC 1918 private
+    if (a == 10) { return SSRF_PRIVATE; }
+    # 172.16.0.0/12
+    if (a == 172 && b >= 16 && b <= 31) { return SSRF_PRIVATE; }
+    # 192.168.0.0/16
+    if (a == 192 && b == 168) { return SSRF_PRIVATE; }
+    # 224.0.0.0/4 — multicast
+    if (a >= 224 && a <= 239) { return SSRF_MULTICAST; }
+    return SSRF_OK;
+}
+
+# Classify a hostname (non-IP string). Conservative blocklist.
+fn _ssrf_classify_hostname(h) {
+    if (streq(h, "localhost") == 1) { return SSRF_LOOPBACK; }
+    # Cloud metadata hostnames
+    if (streq(h, "metadata.google.internal") == 1) { return SSRF_METADATA; }
+    if (streq(h, "metadata") == 1) { return SSRF_METADATA; }
+    return SSRF_OK;
+}
+
+# Extract the host component of a URL. Writes pointers to host start /
+# end into *out_start, *out_end. Returns SSRF_OK on parse success,
+# SSRF_PARSE on malformed input, SSRF_SCHEME if scheme isn't http/https.
+fn _ssrf_extract_host(url, out_start, out_end) {
+    if (url == 0) { return SSRF_PARSE; }
+    var lower = _ssrf_lower(url);
+
+    # Scheme gate — only http:// and https:// are valid for SSRF context
+    var scheme_end = 0;
+    if (_ssrf_starts_with(lower, "http://") == 1) { scheme_end = 7; }
+    elif (_ssrf_starts_with(lower, "https://") == 1) { scheme_end = 8; }
+    else { return SSRF_SCHEME; }
+
+    # Skip optional userinfo (user:pass@)
+    var n = strlen(lower);
+    var host_start = scheme_end;
+    var at = 0 - 1;
+    var i = scheme_end;
+    while (i < n) {
+        var c = load8(lower + i);
+        if (c == 64) { at = i; i = n; }
+        elif (c == 47) { i = n; }   # path start — no @ in authority
+        else { i = i + 1; }
+    }
+    if (at >= 0) { host_start = at + 1; }
+
+    # Host ends at the first ':' (port), '/' (path), '?' (query),
+    # '#' (fragment), or end of string.
+    var host_end = n;
+    var j = host_start;
+    while (j < host_end) {
+        var c = load8(lower + j);
+        if (c == 58 || c == 47 || c == 63 || c == 35) { host_end = j; }
+        else { j = j + 1; }
+    }
+    if (host_end <= host_start) { return SSRF_PARSE; }
+
+    store64(out_start, lower + host_start);
+    store64(out_end,   lower + host_end);
+    return SSRF_OK;
+}
+
+# Public entry: given a URL cstr, return 0 (safe) or an SSRF_* code.
+fn ssrf_check(url) {
+    var start_slot[8]; var end_slot[8];
+    store64(&start_slot, 0); store64(&end_slot, 0);
+    var parse = _ssrf_extract_host(url, &start_slot, &end_slot);
+    if (parse != SSRF_OK) { return parse; }
+
+    var host_ptr = load64(&start_slot);
+    var host_end_ptr = load64(&end_slot);
+    var host_len = host_end_ptr - host_ptr;
+
+    # Copy out the host as its own NUL-terminated cstr so we can feed
+    # it to streq against the string blocklist.
+    var host = alloc(host_len + 1);
+    memcpy(host, host_ptr, host_len);
+    store8(host + host_len, 0);
+
+    # Try IPv4 literal first. _ssrf_classify_ipv4 operates on offsets
+    # into the original lowered buffer; re-use our extracted copy.
+    var v4 = _ssrf_classify_ipv4(host, 0, host_len);
+    if (v4 != SSRF_PARSE) { return v4; }
+
+    # Fall back to hostname blocklist (conservative; does NOT resolve DNS).
+    return _ssrf_classify_hostname(host);
+}
+
+# Convenience: 1 if the URL is safe to fetch, 0 otherwise.
+fn ssrf_is_safe(url) {
+    if (ssrf_check(url) == SSRF_OK) { return 1; }
+    return 0;
+}

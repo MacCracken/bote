@@ -1,0 +1,128 @@
+# bote_host.tcyr — unit tests for src/host.cyr (HostRegistry + SSRF guard).
+#
+# Split out of bote.tcyr for the cyrius 4.5.1 parser identifier-buffer
+# cap — same pattern as bote_content / bote_libro_tools.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/hashmap.cyr"
+include "lib/fnptr.cyr"
+include "lib/assert.cyr"
+
+include "src/host.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ================================================================
+    # HostEntry
+    # ================================================================
+    var e = host_entry_new("github", "https://api.github.com");
+    assert(streq(host_entry_name(e), "github") == 1, "entry name");
+    assert(streq(host_entry_url(e), "https://api.github.com") == 1, "entry url");
+    assert_eq(host_entry_headers(e), 0, "no default headers");
+    assert_eq(host_entry_capabilities(e), 0, "no default capabilities");
+    # No-caps means every cap is allowed (fail-open by design; a caller
+    # that wants allowlist semantics supplies an explicit vec).
+    assert_eq(host_entry_allows(e, "fetch"), 1, "no caps → anything allowed");
+
+    # With capabilities set, enforcement kicks in
+    var caps = vec_new();
+    vec_push(caps, "fetch");
+    vec_push(caps, "resource_link");
+    host_entry_with_capabilities(e, caps);
+    assert_eq(host_entry_allows(e, "fetch"), 1, "fetch allowed");
+    assert_eq(host_entry_allows(e, "resource_link"), 1, "resource_link allowed");
+    assert_eq(host_entry_allows(e, "tools/call"), 0, "tools/call denied");
+
+    # Headers pass-through
+    var hdrs = vec_new();
+    vec_push(hdrs, "Authorization");
+    vec_push(hdrs, "Bearer xxx");
+    host_entry_with_headers(e, hdrs);
+    assert_eq(host_entry_headers(e), hdrs, "headers wired");
+
+    # ================================================================
+    # HostRegistry
+    # ================================================================
+    var r = host_registry_new();
+    assert_eq(host_registry_count(r), 0, "registry starts empty");
+
+    host_registry_add(r, e);
+    assert_eq(host_registry_count(r), 1, "count after add");
+    assert_eq(host_registry_has(r, "github"), 1, "has github");
+    assert_eq(host_registry_has(r, "missing"), 0, "does not have missing");
+
+    var got = host_registry_get(r, "github");
+    assert_eq(got, e, "get returns same entry ptr");
+
+    # Replacement doesn't double-count
+    var e2 = host_entry_new("github", "https://api.github.com/v3");
+    host_registry_add(r, e2);
+    assert_eq(host_registry_count(r), 1, "count stable on replace");
+    assert(streq(host_entry_url(host_registry_get(r, "github")), "https://api.github.com/v3") == 1,
+           "replacement url visible");
+
+    # Second distinct entry bumps count
+    var e3 = host_entry_new("gitlab", "https://gitlab.com");
+    host_registry_add(r, e3);
+    assert_eq(host_registry_count(r), 2, "count=2");
+    var names = host_registry_names(r);
+    assert_eq(vec_len(names), 2, "names vec has 2");
+
+    # ================================================================
+    # SSRF guard — public IPs pass
+    # ================================================================
+    assert_eq(ssrf_check("https://api.github.com/foo"), SSRF_OK, "public DNS OK");
+    assert_eq(ssrf_check("https://1.1.1.1/"), SSRF_OK, "1.1.1.1 OK");
+    assert_eq(ssrf_check("https://8.8.8.8"), SSRF_OK, "8.8.8.8 OK");
+    assert_eq(ssrf_check("http://example.com:8080/path?x=1"), SSRF_OK, "port + query OK");
+    assert_eq(ssrf_check("https://user:pass@example.com/x"), SSRF_OK, "userinfo stripped");
+
+    # Scheme gate — only http/https
+    assert_eq(ssrf_check("file:///etc/passwd"), SSRF_SCHEME, "file:// rejected");
+    assert_eq(ssrf_check("gopher://h.x/"), SSRF_SCHEME, "gopher rejected");
+    assert_eq(ssrf_check("ftp://h.x/"), SSRF_SCHEME, "ftp rejected");
+
+    # IPv4 blocklist
+    assert_eq(ssrf_check("http://127.0.0.1/"), SSRF_LOOPBACK, "loopback blocked");
+    assert_eq(ssrf_check("http://127.255.255.254/"), SSRF_LOOPBACK, "loopback /8 blocked");
+    assert_eq(ssrf_check("http://10.0.0.1/"), SSRF_PRIVATE, "10/8 blocked");
+    assert_eq(ssrf_check("http://192.168.1.1/"), SSRF_PRIVATE, "192.168/16 blocked");
+    assert_eq(ssrf_check("http://172.16.5.4/"), SSRF_PRIVATE, "172.16/12 blocked");
+    assert_eq(ssrf_check("http://172.31.255.255/"), SSRF_PRIVATE, "172.31 blocked");
+    # Edge: 172.15 is public
+    assert_eq(ssrf_check("http://172.15.0.1/"), SSRF_OK, "172.15 OK");
+    assert_eq(ssrf_check("http://172.32.0.1/"), SSRF_OK, "172.32 OK");
+    # Link-local + metadata
+    assert_eq(ssrf_check("http://169.254.169.254/"), SSRF_METADATA, "AWS/GCP metadata blocked");
+    assert_eq(ssrf_check("http://169.254.1.1/"), SSRF_METADATA, "169.254/16 blocked");
+    # Unspecified
+    assert_eq(ssrf_check("http://0.0.0.0/"), SSRF_UNSPEC, "0.0.0.0 blocked");
+    # Multicast
+    assert_eq(ssrf_check("http://224.0.0.1/"), SSRF_MULTICAST, "multicast blocked");
+
+    # Hostname blocklist
+    assert_eq(ssrf_check("http://localhost/"), SSRF_LOOPBACK, "localhost blocked");
+    assert_eq(ssrf_check("HTTP://LocalHost/x"), SSRF_LOOPBACK, "localhost case-insensitive");
+    assert_eq(ssrf_check("http://metadata.google.internal/"), SSRF_METADATA, "gcp metadata hostname");
+    assert_eq(ssrf_check("http://metadata/"), SSRF_METADATA, "bare metadata hostname");
+
+    # Null / malformed input
+    assert_eq(ssrf_check(0), SSRF_PARSE, "null url");
+    assert_eq(ssrf_check("not-a-url"), SSRF_SCHEME, "no scheme");
+    assert_eq(ssrf_check("http:///"), SSRF_PARSE, "empty host");
+
+    # Convenience wrapper
+    assert_eq(ssrf_is_safe("https://api.github.com"), 1, "is_safe public");
+    assert_eq(ssrf_is_safe("http://127.0.0.1"), 0, "is_safe loopback");
+
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);
