@@ -109,6 +109,9 @@ fn _bote_ws_handler(config, cfd, buf, n) {
     }
 
     if (_ws_check_origin(cfd, buf, n, config) != 0) { return 0; }
+    if (http_find_header(buf, n, "Transfer-Encoding") != 0) {
+        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
+    }
     if (auth_bearer_check(cfd, buf, n,
                           ws_config_bearer_validator(config),
                           ws_config_bearer_ctx(config)) != 0) { return 0; }

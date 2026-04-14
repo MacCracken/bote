@@ -1,6 +1,12 @@
 # bote::codec — JSON-RPC parse, serialize, batch dispatch
 # Mirrors rust-old/src/transport/codec.rs
 
+# Hard cap on JSON-RPC batch length. Defends against the 1.9.4 audit's
+# "no batch-size cap" amplification DoS — a 1 MiB body of `[{},{},...]`
+# would otherwise spin allocating per-element responses until OOM.
+# 100 is generous; real clients batch single-digit calls.
+var CODEC_MAX_BATCH = 100;
+
 # ================================================================
 # Helpers
 # ================================================================
@@ -151,6 +157,14 @@ fn codec_process_message(input, dispatcher) {
         var elems = _cdc_split_array(input);
         var n = vec_len(elems);
         if (n == 0) { return _cdc_invalid_request("empty batch"); }
+        # DoS guard: cap batch size. A pathological client sending a
+        # 1 MiB body of `[{},{},...]` (~300k elements) would otherwise
+        # process each, build a per-element response, and accumulate
+        # bump-allocated buffers until OOM. 100 is generous for any
+        # legitimate batch use case (real clients batch <10 calls).
+        if (n > CODEC_MAX_BATCH) {
+            return _cdc_invalid_request("batch too large");
+        }
         var responses = vec_new();
         var ei = 0;
         while (ei < n) {

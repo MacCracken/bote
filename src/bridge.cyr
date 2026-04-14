@@ -232,6 +232,10 @@ fn _bridge_handle(config, cfd, buf, n) {
         return 0;
     }
 
+    # Reject ambiguous Transfer-Encoding (HTTP smuggling guard, RFC 9112)
+    if (http_find_header(buf, n, "Transfer-Encoding") != 0) {
+        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
+    }
     # Bearer auth (no-op when no validator configured)
     if (auth_bearer_check(cfd, buf, n,
                           bridge_config_bearer_validator(config),

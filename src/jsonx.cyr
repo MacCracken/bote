@@ -11,6 +11,12 @@
 # Limitations: no escape decoding inside strings (only \" is honored for
 # detecting closing quote). No whitespace tolerance inside structured values.
 
+# Maximum nesting depth before _jx_skip_struct bails. Audit 1.9.4
+# defensive cap — caps adversarial input from walking a hand-crafted
+# 100k-deep-but-valid-JSON tree. 64 is well above any legitimate
+# protocol message; MCP tool args rarely exceed depth 5.
+var JSONX_MAX_DEPTH = 64;
+
 # Skip whitespace; return new index.
 fn _jx_skip_ws(buf, len, i) {
     while (i < len) {
@@ -55,12 +61,21 @@ fn _jx_skip_value(buf, len, i) {
 }
 
 # Skip a balanced object/array. open=123 close=125 OR open=91 close=93.
+# Bounded by JSONX_MAX_DEPTH (default 64) — pathologically nested input
+# bails to end-of-buffer (caller sees end-of-input) rather than walking
+# an attacker-crafted deep structure. The 64 KB inbound HTTP buffer
+# already caps the absolute worst case, but the explicit guard keeps
+# us safe if anyone ever raises that buffer size.
 fn _jx_skip_struct(buf, len, i, open, close) {
     var depth = 0;
     while (i < len) {
         var c = load8(buf + i);
         if (c == 34) { i = _jx_skip_string(buf, len, i); }
-        elif (c == open) { depth = depth + 1; i = i + 1; }
+        elif (c == open) {
+            depth = depth + 1;
+            if (depth > JSONX_MAX_DEPTH) { return len; }
+            i = i + 1;
+        }
         elif (c == close) {
             depth = depth - 1;
             i = i + 1;

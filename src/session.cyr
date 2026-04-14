@@ -67,17 +67,30 @@ fn _hex_byte(b, out) {
 
 fn _gen_session_id() {
     var raw = alloc(16);
+
     var out = alloc(33);
     var fd = syscall(SYS_OPEN, "/dev/urandom", 0, 0);
-    if (fd >= 0) {
-        syscall(SYS_READ, fd, raw, 16);
-        syscall(SYS_CLOSE, fd);
-    } else {
-        # Fallback: clock-based pseudo-id
-        var t = clock_now_ns();
-        store64(raw, t);
-        store64(raw + 8, t * 0x100000001B3);
+    if (fd < 0) {
+        # 1.9.4 audit M2: clock-based fallback was predictable. There is
+        # no acceptable substitute for /dev/urandom here — refuse to
+        # mint a session ID rather than ship a guessable one.
+        syscall(1, 2, "fatal: cannot open /dev/urandom for session id\n", 47);
+        syscall(SYS_EXIT, 90);
     }
+    # Loop until 16 bytes received. A short read is unusual but possible
+    # on some environments; weak-RNG entropy in the tail bytes was an
+    # audit finding.
+    var got = 0;
+    while (got < 16) {
+        var r = syscall(SYS_READ, fd, raw + got, 16 - got);
+        if (r <= 0) {
+            syscall(SYS_CLOSE, fd);
+            syscall(1, 2, "fatal: short read from /dev/urandom\n", 36);
+            syscall(SYS_EXIT, 90);
+        }
+        got = got + r;
+    }
+    syscall(SYS_CLOSE, fd);
     var i = 0;
     while (i < 16) {
         _hex_byte(load8(raw + i), out + i * 2);

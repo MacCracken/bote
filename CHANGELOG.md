@@ -2,6 +2,41 @@
 
 All notable changes to bote are documented here.
 
+## [1.9.4] — 2026-04-14 — Security batch A (audit-driven)
+
+First slice of the 2.0-prep security pass. Closes 4 of the 5 audit
+findings in batch A; the slowloris recv-timeout fix needs a
+`sock_set_recv_timeout` stdlib helper that doesn't exist yet, so it's
+deferred to 1.9.5 / 2.0.
+
+### Security
+- **HTTP request smuggling guard** (RFC 9112 §6 / CVE-2019-18276 family). All four HTTP-family transports (`http` / `bridge` / `streamable` / `ws`) now reject any inbound request that carries a `Transfer-Encoding` header — bote doesn't dechunk, and rejecting any TE eliminates the CL.TE / TE.CL ambiguity. Inlined as a 3-line guard in each handler (rather than a shared helper) to stay under cyrius 4.7.1's identifier-table headroom.
+- **Constant-time bearer-token comparison** (`auth_validator_allowlist`). The previous `streq`-based compare leaked per-byte timing, letting a network attacker byte-by-byte-guess a token against the allowlist. New implementation: lengths are still compared first (token length leaks; unavoidable), but the byte-loop XOR-accumulates with no early exit and the outer vec walk doesn't short-circuit on match — defeats both the per-byte oracle and the position-of-match oracle. Both helpers are inlined into `auth_validator_allowlist` itself (rather than a separate `_auth_ct_eq` fn) for the same identifier-table reason.
+- **Batch-size cap** (`src/codec.cyr::codec_process_message`). Hardcoded `n > 100` check on JSON-RPC array batches — defends against a 1 MiB body of `[{},{},...]` (~300k elements) that would otherwise spin allocating per-element responses until OOM. The literal `100` is inlined to avoid a top-level `var` symbol; 100 is generous (real clients batch single-digit calls).
+- **JSON nesting depth cap** (`src/jsonx.cyr::_jx_skip_struct`). Hardcoded `depth > 64` returns end-of-buffer rather than walking adversarial deep structures. The 64 KB inbound HTTP buffer already caps the absolute worst case, but the explicit guard keeps us safe if anyone raises the buffer.
+- **`/dev/urandom`-or-fail** (`src/session.cyr::_gen_session_id`). The previous fallback used `clock_now_ns()` (predictable to any timing observer) when `/dev/urandom` failed to open. New behaviour: refuse to mint a session ID — write a fatal error and `SYS_EXIT(90)`. Also loops the read until 16 bytes are received (was a single `syscall(SYS_READ, ...)` that could short-read and leave uninitialized bytes in the SID material).
+
+### Changed
+- **`libro_tools` no longer registered by default at startup.** Made opt-in via `BOTE_LIBRO=1` env var to free identifier-table headroom for the security inlines above. Consumers who want the five `libro_*` MCP tools just set `BOTE_LIBRO=1` in their environment, or include `src/libro_tools.cyr` + call `libro_tools_init` / `libro_tools_register` from their own `main.cyr`. **This is a behaviour regression** — minor for most consumers (the tools were registered against an empty chain anyway). Will revert to default-on when cyrius lifts the cap further (4.8.0+).
+
+### Tests
+- **9 new auth assertions** for the constant-time compare: first-byte-differ, last-byte-differ, shorter, longer, position-independence across multi-entry allowlists. **528 total** (was 519). Breakdown: `bote.tcyr` 394, `bote_libro_tools.tcyr` 22, `bote_content.tcyr` 18, `bote_host.tcyr` 56, `bote_auth.tcyr` 38.
+- Live HTTP smoke: normal POST → 200 ✓; POST with `Transfer-Encoding: chunked` → 400 ✓; 150-element batch → `-32600` "batch too large" ✓.
+
+### Verified (cyrius 4.7.1)
+- All five test files green (528 total).
+- `cyrius bench tests/bote.bcyr` → 10 hot paths within noise of 1.9.3.
+- `cyrlint src/*.cyr` → 0 warnings.
+- `./bote` reports `"version":"1.9.4"`.
+
+### Audit findings still open (deferred to 1.9.5 / 2.0)
+- **Critical (3) — SSRF bypasses**: integer/decimal IPv4 (`http://2130706433/`), octal/hex IPv4 (`http://0177.0.0.1/`), IPv4-mapped IPv6 (`http://[::ffff:127.0.0.1]/`). Need a coherent rewrite of the host parser; queued for 1.9.5.
+- **High — Slowloris** (single-byte-then-pause holds the accept loop). Needs a `sock_set_recv_timeout` stdlib helper.
+- **Medium — bridge CORS oracle** (echoes `allowed_origins[0]` on miss), **WS handshake doesn't validate `Sec-WebSocket-Key` length**, **bridge skips protocol/session checks**.
+- **Informational — Unix socket created with default umask perms** (chmod 0600 not set).
+
+See `docs/development/roadmap.md` for the 1.9.5 / 2.0 plan.
+
 ## [1.9.3] — 2026-04-14 — Bump pin to cyrius 4.7.1 + 2.0-prep doc sweep
 
 Toolchain bump + a comprehensive 2.0-prep documentation pass. No

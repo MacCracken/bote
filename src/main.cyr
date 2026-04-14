@@ -62,7 +62,7 @@ include "src/bridge.cyr"
 include "src/transport_streamable.cyr"
 include "lib/ws_server.cyr"
 include "src/transport_ws.cyr"
-include "src/libro_tools.cyr"
+# DEFERRED: include "src/libro_tools.cyr"
 include "src/content.cyr"
 include "src/host.cyr"
 fn bote_echo_handler(args) {
@@ -136,13 +136,8 @@ fn main() {
     var dispatcher = dispatcher_new(reg);
     dispatcher_handle(dispatcher, "bote_echo", &bote_echo_handler);
 
-    # libro_tools: five built-in MCP tools over a libro audit chain.
-    # The chain starts empty; clients write via the existing audit_libro
-    # sink (wired separately) and read via these tools. If BOTE_LIBRO=0
-    # is set, skip registration (useful for minimal deployments or while
-    # the v1.2.1 libro-growth heisenbug is still outstanding).
-    libro_tools_init(chain_new());
-    libro_tools_register(dispatcher);
+    # libro_tools moved out of the default build for 1.9.4 (cap headroom).
+    # Consumers can opt in by adding the include + registration locally.
 
     # Bearer-token auth wiring (opt-in via env var).
     # Set BOTE_BEARER_TOKENS=tok-a,tok-b,tok-c to require any of those

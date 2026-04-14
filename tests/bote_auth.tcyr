@@ -135,6 +135,30 @@ fn main() {
     assert(&auth_validator_allowlist != 0, "allowlist fp addressable");
     assert(&auth_send_unauthorized != 0, "401 builder fp addressable");
 
+    # ================================================================
+    # 1.9.4: constant-time allowlist comparison
+    # ================================================================
+    # Per-byte mismatch shouldn't short-circuit. Verify via behaviour:
+    # a candidate that differs only in the last byte still gets rejected
+    # exactly like one that differs in the first.
+    var ct = vec_new();
+    vec_push(ct, "abcdefghij");
+    assert(auth_validator_allowlist("abcdefghij", ct) != 0, "ct: exact match");
+    assert_eq(auth_validator_allowlist("Xbcdefghij", ct), 0, "ct: first-byte differ");
+    assert_eq(auth_validator_allowlist("abcdefghiX", ct), 0, "ct: last-byte differ");
+    assert_eq(auth_validator_allowlist("abcdefghi", ct), 0, "ct: shorter");
+    assert_eq(auth_validator_allowlist("abcdefghijK", ct), 0, "ct: longer");
+    # Multi-entry allowlist: position-independent (no early-exit on first
+    # match — tested by behavior, not timing)
+    var multi = vec_new();
+    vec_push(multi, "first");
+    vec_push(multi, "second");
+    vec_push(multi, "third");
+    assert(auth_validator_allowlist("first", multi) != 0, "ct: position 0");
+    assert(auth_validator_allowlist("second", multi) != 0, "ct: position 1");
+    assert(auth_validator_allowlist("third", multi) != 0, "ct: position 2");
+    assert_eq(auth_validator_allowlist("fourth", multi), 0, "ct: not in list");
+
     return assert_summary();
 }
 

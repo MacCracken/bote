@@ -83,17 +83,39 @@ fn auth_validator_allow_all(token, ctx) {
 }
 
 # Static-allowlist validator. ctx is a vec of cstr tokens. Returns the
-# token cstr (truthy) on match, 0 otherwise. Constant-time? No — short
-# allowlists for dev only. Production should use opaque-token-store or
-# a JWT verifier supplied by the consumer.
+# token cstr (truthy) on match, 0 otherwise.
+#
+# Constant-time inner comparison: lengths are checked first (leaks token
+# length, unavoidable), then bytes are XOR-accumulated with no early
+# exit. Outer vec walk also doesn't early-exit on match — defeats both
+# the per-byte timing oracle (byte-by-byte token guessing) AND the
+# match-position oracle (which entry matched). Fix for the 1.9.4 audit's
+# H2 finding.
+#
+# CT-compare and vec walk are inlined here to stay under cyrius 4.7.1's
+# function-table headroom for src/main.cyr.
 fn auth_validator_allowlist(token, allowed_vec) {
     if (token == 0 || allowed_vec == 0) { return 0; }
+    var tlen = strlen(token);
     var n = vec_len(allowed_vec);
+    var matched = 0;
     var i = 0;
     while (i < n) {
-        if (streq(token, vec_get(allowed_vec, i)) == 1) { return token; }
+        var cand = vec_get(allowed_vec, i);
+        if (cand != 0) {
+            if (strlen(cand) == tlen) {
+                var diff = 0;
+                var j = 0;
+                while (j < tlen) {
+                    diff = diff | (load8(token + j) ^ load8(cand + j));
+                    j = j + 1;
+                }
+                if (diff == 0) { matched = 1; }
+            }
+        }
         i = i + 1;
     }
+    if (matched == 1) { return token; }
     return 0;
 }
 
@@ -140,3 +162,10 @@ fn auth_bearer_check(cfd, buf, blen, validator_fp, validator_ctx) {
     }
     return 0;
 }
+
+# HTTP request smuggling mitigation: each HTTP-family transport inlines
+# `if (http_find_header(buf, n, "Transfer-Encoding") != 0) { 400 + return }`
+# right after its Origin check. We don't dechunk; rejecting any inbound
+# Transfer-Encoding eliminates the CL.TE / TE.CL smuggling class
+# (RFC 9112 §6). Inlined rather than helper'd to stay under cyrius
+# 4.7.1's function-table headroom for the production main.cyr build.
