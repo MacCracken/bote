@@ -10,11 +10,24 @@ include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/hashmap.cyr"
 include "lib/json.cyr"
+include "lib/fnptr.cyr"
 include "lib/assert.cyr"
 
 include "src/error.cyr"
 include "src/protocol.cyr"
+include "src/jsonx.cyr"
 include "src/registry.cyr"
+include "src/dispatch.cyr"
+
+# Test handler: echoes its arguments verbatim.
+fn h_echo(args) {
+    return args;
+}
+
+# Test handler: returns a constant.
+fn h_const(args) {
+    return "{\"answer\":42}";
+}
 
 fn main() {
     alloc_init();
@@ -218,6 +231,154 @@ fn main() {
 
     var blank = ann_new();
     assert_eq(ann_read_only_hint(blank), HINT_UNSET, "blank unset");
+
+    # ---------------- jsonx: flat get_str ----------------
+    var jx1 = jsonx_get_str("{\"name\":\"echo\"}", "name");
+    assert(jx1 != 0, "jx flat name found");
+    assert(streq(jx1, "echo") == 1, "jx flat name value");
+    assert_eq(jsonx_get_str("{\"name\":\"echo\"}", "missing"), 0, "jx missing key");
+
+    # ---------------- jsonx: nested raw extraction ----------------
+    var nested = "{\"name\":\"calc\",\"arguments\":{\"a\":1,\"b\":2}}";
+    var jx_name = jsonx_get_str(nested, "name");
+    assert(streq(jx_name, "calc") == 1, "jx nested skip-past name");
+    var jx_args = jsonx_get_raw(nested, "arguments");
+    assert(jx_args != 0, "jx nested args found");
+    assert(streq(jx_args, "{\"a\":1,\"b\":2}") == 1, "jx nested args raw bytes");
+
+    # ---------------- jsonx: deeply nested ----------------
+    var deep = "{\"a\":{\"b\":{\"c\":[1,2,3]}},\"after\":7}";
+    var jx_a = jsonx_get_raw(deep, "a");
+    assert(streq(jx_a, "{\"b\":{\"c\":[1,2,3]}}") == 1, "jx deep nested");
+    var jx_after = jsonx_get_raw(deep, "after");
+    assert(streq(jx_after, "7") == 1, "jx after deep");
+
+    # ---------------- jsonx: array values ----------------
+    var arr = "{\"xs\":[1,{\"k\":\"v\"},3],\"y\":2}";
+    var jx_xs = jsonx_get_raw(arr, "xs");
+    assert(jx_xs != 0, "jx xs found");
+    assert(streq(jx_xs, "[1,{\"k\":\"v\"},3]") == 1, "jx array with nested obj");
+
+    # ---------------- jsonx: predicates ----------------
+    assert_eq(jsonx_has("{\"k\":1}", "k"), 1, "jsonx_has yes");
+    assert_eq(jsonx_has("{\"k\":1}", "x"), 0, "jsonx_has no");
+    assert_eq(jsonx_is_object("{\"k\":1}"), 1, "is_object yes");
+    assert_eq(jsonx_is_object("[1,2]"), 0, "array not object");
+    assert_eq(jsonx_is_object("  {} "), 1, "is_object skips ws");
+    assert_eq(jsonx_is_object("null"), 0, "null not object");
+
+    # ---------------- validate_tool_name ----------------
+    assert_eq(validate_tool_name("good_name"), 0, "valid name");
+    assert_eq(validate_tool_name("a_b_c_1_2"), 0, "valid name with digits");
+    assert(validate_tool_name(0) != 0, "null name fails");
+    assert(validate_tool_name("") != 0, "empty fails");
+    assert(validate_tool_name("noundercore") != 0, "no underscore fails");
+    assert(validate_tool_name("bad-name") != 0, "hyphen fails");
+    assert(validate_tool_name("bad name") != 0, "space fails");
+    assert(validate_tool_name("bad/name") != 0, "slash fails");
+
+    # ---------------- dispatch: initialize ----------------
+    var dreg = registry_new();
+    var d = dispatcher_new(dreg);
+
+    var init_req = req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2024-11-05\"}");
+    var init_resp = dispatcher_dispatch(d, init_req);
+    assert(init_resp != 0, "init not notification");
+    assert(streq(resp_id(init_resp), "1") == 1, "init id");
+    var init_result = resp_result(init_resp);
+    assert(init_result != 0, "init result present");
+    # Body should mention the negotiated version + serverInfo
+    assert_eq(jsonx_has(init_result, "protocolVersion"), 1, "init body has protocolVersion");
+    assert_eq(jsonx_has(init_result, "serverInfo"), 1, "init body has serverInfo");
+    var negotiated = jsonx_get_str(init_result, "protocolVersion");
+    assert(streq(negotiated, "2024-11-05") == 1, "init negotiates supported version");
+
+    # Init with unsupported version → fall back to latest
+    var bad_init = req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"1999-01-01\"}");
+    var bi_resp = dispatcher_dispatch(d, bad_init);
+    var bi_neg = jsonx_get_str(resp_result(bi_resp), "protocolVersion");
+    assert(streq(bi_neg, "2025-11-25") == 1, "init falls back to latest");
+
+    # ---------------- dispatch: tools/list empty ----------------
+    var ll_resp = dispatcher_dispatch(d, req_new("2", "tools/list"));
+    var ll_body = resp_result(ll_resp);
+    assert(streq(ll_body, "{\"tools\":[]}") == 1, "tools/list empty");
+
+    # ---------------- dispatch: tools/list with one tool ----------------
+    var sa = schema_new("object", 0, vec_new());
+    registry_register(dreg, tool_def_new("svc_echo", "echo it", sa));
+    var ll2 = dispatcher_dispatch(d, req_new("2", "tools/list"));
+    var ll2_body = resp_result(ll2);
+    assert_eq(jsonx_has(ll2_body, "tools"), 1, "list has tools");
+    # The tools array is "[{...}]" — get_raw returns the array verbatim
+    var tools_raw = jsonx_get_raw(ll2_body, "tools");
+    assert(tools_raw != 0, "tools array present");
+
+    # ---------------- dispatch: tools/call success ----------------
+    dispatcher_handle(d, "svc_echo", &h_echo);
+    var call_req = req_with_params(req_new("3", "tools/call"),
+        "{\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}");
+    var call_resp = dispatcher_dispatch(d, call_req);
+    var call_result = resp_result(call_resp);
+    assert(call_result != 0, "call has result");
+    assert(streq(call_result, "{\"msg\":\"hi\"}") == 1, "echo handler returned args");
+    assert_eq(resp_error_obj(call_resp), 0, "call success no error");
+
+    # ---------------- dispatch: tools/call with const handler ----------------
+    registry_register(dreg, tool_def_new("svc_const", "constant", sa));
+    dispatcher_handle(d, "svc_const", &h_const);
+    var cc = dispatcher_dispatch(d, req_with_params(req_new("4", "tools/call"),
+        "{\"name\":\"svc_const\",\"arguments\":{}}"));
+    assert(streq(resp_result(cc), "{\"answer\":42}") == 1, "const handler returned constant");
+
+    # ---------------- dispatch: tools/call missing name ----------------
+    var bad_call = dispatcher_dispatch(d, req_with_params(req_new("5", "tools/call"), "{}"));
+    var bc_err = resp_error_obj(bad_call);
+    assert(bc_err != 0, "missing name -> err");
+    assert_eq(rpc_err_code(bc_err), 0 - 32602, "missing name -32602");
+
+    # ---------------- dispatch: tools/call unknown tool ----------------
+    var unk_call = dispatcher_dispatch(d, req_with_params(req_new("6", "tools/call"),
+        "{\"name\":\"nope_x\",\"arguments\":{}}"));
+    var uc_err = resp_error_obj(unk_call);
+    assert(uc_err != 0, "unknown tool -> err");
+    assert_eq(rpc_err_code(uc_err), 0 - 32601, "unknown tool -32601");
+
+    # ---------------- dispatch: unknown method ----------------
+    var um_resp = dispatcher_dispatch(d, req_new("7", "garbage/method"));
+    var um_err = resp_error_obj(um_resp);
+    assert(um_err != 0, "unknown method -> err");
+    assert_eq(rpc_err_code(um_err), 0 - 32601, "unknown method -32601");
+
+    # ---------------- dispatch: notification returns 0 ----------------
+    var notif = req_notification("notifications/initialized");
+    assert_eq(dispatcher_dispatch(d, notif), 0, "notification dispatch returns 0");
+
+    # ---------------- dispatch: dynamic register_tool with bad name ----------------
+    var bad_reg = dispatcher_register_tool(d, tool_def_new("badname", "x", sa), &h_echo);
+    assert(bad_reg != 0, "bad name register fails");
+    assert_eq(bote_err_tag(bad_reg), ERR_INVALID_PARAMS, "bad name -> INVALID_PARAMS");
+
+    # ---------------- dispatch: dynamic register + dispatch ----------------
+    var ok_reg = dispatcher_register_tool(d, tool_def_new("dyn_tool", "dyn", sa), &h_echo);
+    assert_eq(ok_reg, 0, "valid register succeeds");
+    var dyn_call = dispatcher_dispatch(d, req_with_params(req_new("8", "tools/call"),
+        "{\"name\":\"dyn_tool\",\"arguments\":{\"q\":1}}"));
+    assert(streq(resp_result(dyn_call), "{\"q\":1}") == 1, "dyn handler dispatched");
+
+    # ---------------- dispatch: deregister ----------------
+    var dereg_ok = dispatcher_deregister_tool(d, "dyn_tool");
+    assert_eq(dereg_ok, 0, "deregister ok");
+    var dyn_after = dispatcher_dispatch(d, req_with_params(req_new("9", "tools/call"),
+        "{\"name\":\"dyn_tool\",\"arguments\":{}}"));
+    var da_err = resp_error_obj(dyn_after);
+    assert(da_err != 0, "after dereg unknown tool");
+    assert_eq(rpc_err_code(da_err), 0 - 32601, "after dereg -32601");
+
+    # Deregister missing
+    var dereg_miss = dispatcher_deregister_tool(d, "never_existed");
+    assert(dereg_miss != 0, "dereg missing returns err");
+    assert_eq(bote_err_tag(dereg_miss), ERR_TOOL_NOT_FOUND, "dereg missing -> TOOL_NOT_FOUND");
 
     return assert_summary();
 }

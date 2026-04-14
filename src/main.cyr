@@ -14,10 +14,13 @@ include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/hashmap.cyr"
 include "lib/json.cyr"
+include "lib/fnptr.cyr"
 
 include "src/error.cyr"
 include "src/protocol.cyr"
+include "src/jsonx.cyr"
 include "src/registry.cyr"
+include "src/dispatch.cyr"
 
 fn main() {
     alloc_init();
