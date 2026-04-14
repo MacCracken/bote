@@ -2,6 +2,29 @@
 
 All notable changes to bote are documented here.
 
+## [2.3.1] — 2026-04-14 — Cleanup: remove proposal docs that landed upstream
+
+All three of bote's proposal documents have been folded into cyrius
+stdlib. **`base64url_encode` / `base64url_decode` shipped in cyrius
+4.8.1** (the ask in `cyrius-stdlib-base64url.md` from this release
+cycle), joining the earlier two:
+
+| Proposal | Landed in cyrius |
+|---|---|
+| `cyrius-stdlib-http-server.md` (with `lib_http_server.cyr` + example) | 4.5.0 (bote adopted in 1.3.0) |
+| `cyrius-stdlib-ws-server.md` (with `lib_ws_server.cyr` + example) | 4.5.1 (bote adopted in 1.5.0) |
+| `cyrius-stdlib-base64url.md` | **4.8.1** (bote will adopt in 2.4.x) |
+
+### Removed
+- `docs/proposals/` directory contents (all 7 files): the three `*.md` proposals + their companion `lib_*.cyr` reference impls / runnable examples. Workflow is preserved — future proposals will land back under the same path.
+
+### Adoption note (deferred to 2.4.x)
+- `src/jwt.cyr`'s inline `jwt_b64u_decode` (~50 LOC + a few fns) can now be replaced with a call to stdlib `lib/base64.cyr`'s `base64url_decode`. Lifting alongside the cyrius pin bump (4.7.1 → 4.8.x) will free meaningful identifier-table headroom — enough that the 2.3.0-era claims-propagation work (which tipped the test cap and was reverted) can land in 2.4.0.
+
+### Verified
+- All 8 test files green (603 total, unchanged from 2.3.0).
+- `./bote` reports `"version":"2.3.1"`.
+
 ## [2.3.0] — 2026-04-14 — RFC 7636 PKCE-S256 helpers
 
 OAuth 2.1 mandates PKCE on every authorization-code flow; this release
