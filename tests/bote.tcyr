@@ -52,11 +52,13 @@ include "src/discovery.cyr"
 include "src/transport_http.cyr"
 include "src/bridge.cyr"
 include "src/transport_streamable.cyr"
-# NB: lib/ws_server.cyr stays out of this compile unit. On cyrius 4.6.2
-# bote's deps (libro + majra + sigil's 354 fns) already push the total
-# to ~1800 of the 2048-fn table, and ws_server's 16 fns tip it over.
-# The per-module tests/bote_<module>.tcyr split absorbs the overflow
-# and also reads better than one monofile.
+# NB: lib/ws_server.cyr stays out of this compile unit. Even on cyrius
+# 4.7.1 (which raised the function table to 4096 and fixed the
+# BUILD_METHOD_NAME scratch corruption), pulling ws_server.cyr in here
+# still trips the same `lib/assert.cyr:3: expected '=', got string`
+# misleading error — bote's specific overflow path isn't covered by the
+# 4.7.1 fix. The per-module tests/bote_<module>.tcyr split absorbs the
+# overflow and reads cleanly anyway.
 include "src/transport_ws.cyr"
 
 # Test handler: echoes its arguments verbatim.

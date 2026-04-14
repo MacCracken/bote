@@ -2,6 +2,46 @@
 
 All notable changes to bote are documented here.
 
+## [1.9.3] — 2026-04-14 — Bump pin to cyrius 4.7.1 + 2.0-prep doc sweep
+
+Toolchain bump + a comprehensive 2.0-prep documentation pass. No
+behavioral source changes; per-module test-file layout stays because
+even cyrius 4.7.1's `BUILD_METHOD_NAME` scratch-corruption fix doesn't
+cover bote's specific overflow path.
+
+### Changed
+- **cyrius pin** `4.7.0` → `4.7.1` (`cyrius.toml` + `.cyrius-toolchain`).
+- `src/dispatch.cyr` — `_bote_server_version` → `"1.9.3"`.
+
+### Documentation
+- **`README.md`** rewritten for current state — six transports, bearer auth, all built-in tools, full module list, 519 tests, env-driven CLI auth quickstart.
+- **`docs/architecture/overview.md`** rewritten — ASCII diagram updated for six transports + auth/content/host outbound utilities + sinks + libro_tools surface, full module listing, adapter pattern documented.
+- **`docs/development/roadmap.md`** rewritten — shipped-per-release table for 1.0.0 → 1.9.2, explicit "must-have for 2.0" / "nice-to-have for 2.0" / "deferred past 2.0" sections, cyrius-language-dependency status all marked ✅ for items resolved.
+- **`docs/spec-compliance.md`** rewritten — every compliance category extended for 1.4.0+ work (streamable HTTP, WS, content blocks, SSRF, bearer middleware, host registry, env-driven auth, `libro_tools`). Adds a content-block subtable and a host/SSRF subtable.
+- **`docs/benchmarks-rust-v-cyrius.md`** rewritten — Rust v0.92.0 final history-log entry (2026-04-03) vs Cyrius 1.9.2 / cyrius 4.7.0 numbers side-by-side. New "Net call" + "Where Cyrius wins decisively" framing.
+- **`docs/bugs/cyrius-4.5.1-identifier-buffer-cap.md`** updated — 4.7.1 status header documents that bote's case is still uncovered (~1339 fns under the 4096 cap, so the bug is elsewhere — possibly identifier-bytes or a different scratch path).
+
+### What we got from 4.7.1
+- Function-table cap raised 2048 → 4096.
+- `BUILD_METHOD_NAME` scratch corruption fix — directly addresses the misleading-error class we reported.
+
+### What 4.7.1 still doesn't cover (for bote)
+- `tests/bote.tcyr` + `lib/ws_server.cyr` still trips `lib/assert.cyr:3: expected '=', got string`. Re-verified with freshly-bootstrapped `cc3 4.7.1`. Per-module test layout stays.
+
+### Verified (cyrius 4.7.1)
+- All five test files green: `bote.tcyr` 394 / `bote_libro_tools.tcyr` 22 / `bote_content.tcyr` 18 / `bote_host.tcyr` 56 / `bote_auth.tcyr` 29 = **519 total** (unchanged).
+- `cyrius build src/main.cyr bote` → OK; `./bote` reports `"version":"1.9.3"`.
+- `cyrlint src/*.cyr` → 0 warnings.
+
+### Up next (2.0-prep, per the audit)
+1. **1.9.4** — security batch A: HTTP Transfer-Encoding rejection + recv timeouts (smuggling + slowloris), constant-time bearer compare, batch-size cap, jsonx depth cap, `/dev/urandom`-or-fail.
+2. **1.9.5** — SSRF rewrite: canonical-IPv4-only parser (rejects octal/hex/integer/short-form), full IPv6 16-byte classifier with `::ffff:` v4-mapped, optional getaddrinfo single-shot pre-classification.
+3. **2.0.0** — `content_with_annotations`, claims propagation through handler signature, final P(-1) sweep, tag.
+
+### Carried forward
+- Identifier-buffer / scratch-corruption — bote-specific case still uncovered in 4.7.1; tracked in `docs/bugs/`.
+- v1.2.1 libro-growth heisenbug: unchanged.
+
 ## [1.9.2] — 2026-04-14 — Bump pin to cyrius 4.7.0
 
 Toolchain bump only. No source changes — bote doesn't use 4.7.0's

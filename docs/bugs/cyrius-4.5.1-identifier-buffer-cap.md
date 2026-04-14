@@ -1,10 +1,14 @@
 # cyrius 4.5.1 — identifier buffer cap hit at ~64 KB
 
-> **Status on cyrius 4.6.2** (2026-04-14):
-> - ✅ **Identifier buffer** raised — the original 64 KB cap now has ~60 KB headroom per the 4.6.2 CHANGELOG, and the original `docs/bugs/cyrius-4.5.1-repro.cyr` now trips the **function table** (2048 fns) instead, with a clean diagnostic (`error: function table full (2048/2048) — split into separate compilation units`).
-> - 🟡 **Diagnostic fix incomplete** — bote's full compile unit (`tests/bote.tcyr` + `lib/ws_server.cyr`) still reports the misleading `lib/assert.cyr:3: expected '=', got string` on 4.6.2, not the clean `function table full` message. Whatever path the 4.6.1 fix landed for, it doesn't cover this specific overflow point.
-> - 🟡 **Bote still hits the new cap** — per-module includes from `[deps.libro]` (9 modules) + `[deps.majra]` (6 modules) + `lib/sigil.cyr` alone (354 fns) + 15 stdlib modules + 15 bote source modules push the test compile unit to ~1800 of 2048 fns before `ws_server.cyr`'s 16 fns tip it over. Production `src/main.cyr` build stays under the cap.
-> - **Bote workaround**: per-module test files (`tests/bote_<module>.tcyr`) now the permanent layout — cleaner organization anyway. `lib/ws_server.cyr` stays out of the shared `bote.tcyr` compile unit.
+> **Status on cyrius 4.7.1** (2026-04-14):
+> - ✅ **Function table cap raised 2048 → 4096** in 4.7.1.
+> - ✅ **`BUILD_METHOD_NAME` scratch corruption fix** in 4.7.1 (per cyrius CHANGELOG: scratch now starts at `GNPOS(S)` past live identifiers, with `NPOS_GUARD(S, 256)`, lookup-only) — directly addresses the misleading `lib/assert.cyr:3: expected '=', got string` cascade we reported.
+> - ✅ Original `docs/bugs/cyrius-4.5.1-repro.cyr` now trips the function-table cap with a clean diagnostic.
+> - 🟡 **Bote's specific case still trips the misleading error on 4.7.1.** Re-tested after pinning to 4.7.1 with a freshly-bootstrapped `cc3 4.7.1` — including `lib/ws_server.cyr` in `tests/bote.tcyr` still reports `error:lib/assert.cyr:3: expected '=', got string`. Symbol-count math says we're well under the new 4096 cap (bote src 404 + stdlib 728 + libro 131 + majra 76 = ~1339), so something else (identifier-bytes? token table? a different scratch corruption path the 4.7.1 fix didn't cover) is the trigger.
+> - **Bote workaround**: per-module test files (`tests/bote_<module>.tcyr`) — the permanent layout. `lib/ws_server.cyr` stays out of the shared `bote.tcyr` compile unit.
+
+> **Status on cyrius 4.6.2** (2026-04-14, historical):
+> - Identifier buffer raised; original repro tripped the new function-table cap. Bote-specific diagnostic miss persisted.
 >
 > **Original 4.5.1 context (preserved below)**: found while landing bote 1.5.0 (WebSocket transport, which pulls in `lib/ws_server.cyr`). The bug was a hard compile-time ceiling on the identifier/symbol table; real mid-size projects hit it without anything unusual. A companion minimal reproduction lives at `docs/bugs/cyrius-4.5.1-repro.cyr` in this repo.
 
