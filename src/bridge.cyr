@@ -165,26 +165,15 @@ fn _bridge_cors_headers(allowed_origins, request_origin) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "Access-Control-Allow-Origin: ");
     str_builder_add_cstr(sb, _bridge_cors_origin(allowed_origins, request_origin));
-    str_builder_add_cstr(sb, _crlf);
-    str_builder_add_cstr(sb, "Access-Control-Allow-Methods: POST, GET, OPTIONS");
-    str_builder_add_cstr(sb, _crlf);
-    str_builder_add_cstr(sb, "Access-Control-Allow-Headers: content-type");
-    str_builder_add_cstr(sb, _crlf);
+    str_builder_add_cstr(sb, "\r\nAccess-Control-Allow-Methods: POST, GET, OPTIONS\r\nAccess-Control-Allow-Headers: content-type\r\n");
     return str_data(str_builder_build(sb));
 }
 
 fn _bridge_send_health(cfd, allowed_origins, request_origin) {
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 200 OK");
-    str_builder_add_cstr(sb, _crlf);
-    str_builder_add_cstr(sb, "Content-Type: text/plain");
-    str_builder_add_cstr(sb, _crlf);
-    str_builder_add_cstr(sb, "Content-Length: 2");
-    str_builder_add_cstr(sb, _crlf);
+    str_builder_add_cstr(sb, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n");
     str_builder_add_cstr(sb, _bridge_cors_headers(allowed_origins, request_origin));
-    str_builder_add_cstr(sb, "Connection: close");
-    str_builder_add_cstr(sb, _crlfcrlf);
-    str_builder_add_cstr(sb, "ok");
+    str_builder_add_cstr(sb, "Connection: close\r\n\r\nok");
     var s = str_data(str_builder_build(sb));
     sock_send(cfd, s, strlen(s));
     return 0;
@@ -195,7 +184,6 @@ fn _bridge_send_health(cfd, allowed_origins, request_origin) {
 # ================================================================
 
 fn _bridge_handle_connection(cfd, dispatcher, allowed_origins, req_buf, max_buf) {
-    _http_init_crlf();
     var n_r = sock_recv(cfd, req_buf, max_buf - 1);
     if (is_err_result(n_r) == 1) { return 0; }
     var n = payload(n_r);
@@ -266,7 +254,6 @@ var BRIDGE_REQ_BUF_SIZE = 65536;
 var _bridge_req_buf = 0;
 
 fn transport_bridge_run(dispatcher, config) {
-    _http_init_crlf();
     if (_bridge_req_buf == 0) { _bridge_req_buf = alloc(BRIDGE_REQ_BUF_SIZE); }
 
     var sfd_r = tcp_socket();

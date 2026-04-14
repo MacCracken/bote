@@ -703,7 +703,6 @@ fn main() {
     assert_eq(pruned, 2, "pruned 2");
     assert_eq(session_store_active_count(short_store), 0, "after prune empty");
 
-    _http_init_crlf();
     # ---------------- HTTP: header parsing helpers ----------------
     var fake = alloc(512);
     var fake_n = 0;

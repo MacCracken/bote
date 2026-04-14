@@ -1,8 +1,4 @@
 # bote::transport::http — minimal HTTP/1.1 transport for JSON-RPC
-#
-# NOTE: cyrius's `\r` string-literal escape emits byte 114 ('r') instead of
-# byte 13 (CR). All CRLF sequences in this file go through the helpers below
-# (_crlf, _crlfcrlf, _http_emit_crlf) which use store8 to build the bytes.
 # Mirrors rust-old/src/transport/http.rs (sync, single-connection-at-a-time;
 # no SSE, no auth, no streamable HTTP yet).
 #
@@ -94,7 +90,7 @@ fn _http_next_nl(buf, start, end) {
 # Returns alloc'd cstr (trimmed of leading/trailing SP and CR) or 0 if absent.
 fn http_find_header(buf, blen, name) {
     var nlen = strlen(name);
-    var headers_end = _http_find(buf, blen, _crlfcrlf, 4);
+    var headers_end = _http_find(buf, blen, "\r\n\r\n", 4);
     if (headers_end < 0) { headers_end = blen; }
     # Skip the request line.
     var line_start = _http_next_nl(buf, 0, headers_end);
@@ -153,7 +149,7 @@ fn http_get_path(buf, blen) {
 # Get pointer + length of the HTTP body (after \r\n\r\n).
 # Returns 0 / 0 length if no body section.
 fn http_body_offset(buf, blen) {
-    var off = _http_find(buf, blen, _crlfcrlf, 4);
+    var off = _http_find(buf, blen, "\r\n\r\n", 4);
     if (off < 0) { return 0 - 1; }
     return off + 4;
 }
@@ -182,11 +178,7 @@ fn _http_send_status(cfd, code, msg) {
     str_builder_add_int(sb, code);
     str_builder_add_cstr(sb, " ");
     str_builder_add_cstr(sb, msg);
-    str_builder_add_cstr(sb, _crlf);
-    str_builder_add_cstr(sb, "Content-Length: 0");
-    str_builder_add_cstr(sb, _crlf);
-    str_builder_add_cstr(sb, "Connection: close");
-    str_builder_add_cstr(sb, _crlfcrlf);
+    str_builder_add_cstr(sb, "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     var s = str_data(str_builder_build(sb));
     sock_send(cfd, s, strlen(s));
     return 0;
@@ -194,16 +186,11 @@ fn _http_send_status(cfd, code, msg) {
 
 fn _http_send_json_200(cfd, body, body_len, extra_headers) {
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 200 OK");
-    str_builder_add_cstr(sb, _crlf);
-    str_builder_add_cstr(sb, "Content-Type: application/json");
-    str_builder_add_cstr(sb, _crlf);
-    str_builder_add_cstr(sb, "Content-Length: ");
+    str_builder_add_cstr(sb, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ");
     str_builder_add_int(sb, body_len);
-    str_builder_add_cstr(sb, _crlf);
+    str_builder_add_cstr(sb, "\r\n");
     if (extra_headers != 0) { str_builder_add_cstr(sb, extra_headers); }
-    str_builder_add_cstr(sb, "Connection: close");
-    str_builder_add_cstr(sb, _crlfcrlf);
+    str_builder_add_cstr(sb, "Connection: close\r\n\r\n");
     var head = str_data(str_builder_build(sb));
     sock_send(cfd, head, strlen(head));
     if (body_len > 0) { sock_send(cfd, body, body_len); }
@@ -212,13 +199,9 @@ fn _http_send_json_200(cfd, body, body_len, extra_headers) {
 
 fn _http_send_204(cfd, extra_headers) {
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 204 No Content");
-    str_builder_add_cstr(sb, _crlf);
+    str_builder_add_cstr(sb, "HTTP/1.1 204 No Content\r\n");
     if (extra_headers != 0) { str_builder_add_cstr(sb, extra_headers); }
-    str_builder_add_cstr(sb, "Content-Length: 0");
-    str_builder_add_cstr(sb, _crlf);
-    str_builder_add_cstr(sb, "Connection: close");
-    str_builder_add_cstr(sb, _crlfcrlf);
+    str_builder_add_cstr(sb, "Content-Length: 0\r\nConnection: close\r\n\r\n");
     var s = str_data(str_builder_build(sb));
     sock_send(cfd, s, strlen(s));
     return 0;
@@ -349,7 +332,7 @@ fn _http_handle_connection(cfd, dispatcher, config, req_buf, max_buf) {
             var sb = str_builder_new();
             str_builder_add_cstr(sb, "MCP-Session-Id: ");
             str_builder_add_cstr(sb, sid);
-            str_builder_add_cstr(sb, _crlf);
+            str_builder_add_cstr(sb, "\r\n");
             extra = str_data(str_builder_build(sb));
         }
     }
@@ -369,23 +352,8 @@ fn _http_handle_connection(cfd, dispatcher, config, req_buf, max_buf) {
 
 var HTTP_REQ_BUF_SIZE = 65536;
 var _http_req_buf = 0;
-var _crlf = 0;        # cstr _crlf
-var _crlfcrlf = 0;    # cstr _crlfcrlf
-
-fn _http_init_crlf() {
-    if (_crlf == 0) {
-        _crlf = alloc(3);
-        store8(_crlf, 13); store8(_crlf + 1, 10); store8(_crlf + 2, 0);
-        _crlfcrlf = alloc(5);
-        store8(_crlfcrlf, 13); store8(_crlfcrlf + 1, 10);
-        store8(_crlfcrlf + 2, 13); store8(_crlfcrlf + 3, 10);
-        store8(_crlfcrlf + 4, 0);
-    }
-    return 0;
-}
 
 fn transport_http_run(dispatcher, config) {
-    _http_init_crlf();
     if (_http_req_buf == 0) { _http_req_buf = alloc(HTTP_REQ_BUF_SIZE); }
 
     var sfd_r = tcp_socket();

@@ -171,39 +171,35 @@ fn _emit_schema(sb, schema) {
     str_builder_add_cstr(sb, "\"");
 
     var props = schema_properties(schema);
-    if (props != 0) {
-        if (vec_len(props) > 0) {
-            str_builder_add_cstr(sb, ",\"properties\":{");
-            var n = vec_len(props);
-            var i = 0;
-            while (i < n) {
-                if (i > 0) { str_builder_add_cstr(sb, ","); }
-                var p = vec_get(props, i);
-                str_builder_add_cstr(sb, "\"");
-                _json_emit_escaped(sb, schema_prop_key(p));
-                str_builder_add_cstr(sb, "\":");
-                str_builder_add_cstr(sb, schema_prop_value(p));
-                i = i + 1;
-            }
-            str_builder_add_cstr(sb, "}");
+    if (props != 0 && vec_len(props) > 0) {
+        str_builder_add_cstr(sb, ",\"properties\":{");
+        var n = vec_len(props);
+        var i = 0;
+        while (i < n) {
+            if (i > 0) { str_builder_add_cstr(sb, ","); }
+            var p = vec_get(props, i);
+            str_builder_add_cstr(sb, "\"");
+            _json_emit_escaped(sb, schema_prop_key(p));
+            str_builder_add_cstr(sb, "\":");
+            str_builder_add_cstr(sb, schema_prop_value(p));
+            i = i + 1;
         }
+        str_builder_add_cstr(sb, "}");
     }
 
     var req = schema_required(schema);
-    if (req != 0) {
-        if (vec_len(req) > 0) {
-            str_builder_add_cstr(sb, ",\"required\":[");
-            var nr = vec_len(req);
-            var ri = 0;
-            while (ri < nr) {
-                if (ri > 0) { str_builder_add_cstr(sb, ","); }
-                str_builder_add_cstr(sb, "\"");
-                _json_emit_escaped(sb, vec_get(req, ri));
-                str_builder_add_cstr(sb, "\"");
-                ri = ri + 1;
-            }
-            str_builder_add_cstr(sb, "]");
+    if (req != 0 && vec_len(req) > 0) {
+        str_builder_add_cstr(sb, ",\"required\":[");
+        var nr = vec_len(req);
+        var ri = 0;
+        while (ri < nr) {
+            if (ri > 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"");
+            _json_emit_escaped(sb, vec_get(req, ri));
+            str_builder_add_cstr(sb, "\"");
+            ri = ri + 1;
         }
+        str_builder_add_cstr(sb, "]");
     }
     str_builder_add_cstr(sb, "}");
     return 0;
@@ -265,10 +261,7 @@ fn _build_tools_list_result(reg) {
 # Returns cstr (name) or 0; sets *err_out (BoteError ptr) on failure.
 fn _extract_tool_name(params_cstr, err_out) {
     var name = jsonx_get_str(params_cstr, "name");
-    var bad = 0;
-    if (name == 0) { bad = 1; }
-    else { if (strlen(name) == 0) { bad = 1; } }
-    if (bad == 1) {
+    if (name == 0 || strlen(name) == 0) {
         store64(err_out, bote_err_new(ERR_INVALID_PARAMS, "", "missing or empty 'name' field"));
         return 0;
     }
@@ -310,15 +303,13 @@ fn dispatcher_dispatch(d, request) {
 
         # Optional: version negotiation
         var ver = jsonx_get_str(params, "version");
-        if (ver != 0) {
-            if (registry_get_versioned(reg, name, ver) == 0) {
-                var sb = str_builder_new();
-                str_builder_add_cstr(sb, "version '");
-                str_builder_add_cstr(sb, ver);
-                str_builder_add_cstr(sb, "' not found");
-                var verr = bote_err_new(ERR_INVALID_PARAMS, name, str_data(str_builder_build(sb)));
-                return resp_error(id, bote_err_rpc_code(bote_err_tag(verr)), str_data(bote_err_format(verr)));
-            }
+        if (ver != 0 && registry_get_versioned(reg, name, ver) == 0) {
+            var sb = str_builder_new();
+            str_builder_add_cstr(sb, "version '");
+            str_builder_add_cstr(sb, ver);
+            str_builder_add_cstr(sb, "' not found");
+            var verr = bote_err_new(ERR_INVALID_PARAMS, name, str_data(str_builder_build(sb)));
+            return resp_error(id, bote_err_rpc_code(bote_err_tag(verr)), str_data(bote_err_format(verr)));
         }
 
         # Extract arguments (default to "{}" if absent)

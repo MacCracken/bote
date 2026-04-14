@@ -221,7 +221,7 @@ fn registry_get_versioned(r, name, version) {
     while (i < n) {
         var t = vec_get(bucket, i);
         var v = tool_def_version(t);
-        if (v != 0) { if (streq(v, version) == 1) { return t; } }
+        if (v != 0 && streq(v, version) == 1) { return t; }
         i = i + 1;
     }
     return 0;
