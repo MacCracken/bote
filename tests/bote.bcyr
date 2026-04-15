@@ -11,6 +11,7 @@ include "lib/io.cyr"
 include "lib/hashmap.cyr"
 include "lib/json.cyr"
 include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
 include "lib/bench.cyr"
 
 include "src/error.cyr"
