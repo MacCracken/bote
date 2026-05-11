@@ -1,10 +1,10 @@
 # Bote Roadmap
 
-> **Current**: `2.7.0` (cyrius 5.10.34, libro 2.6.2, majra 2.4.3).
-> 8 active test files, **607 unit assertions**, **14 criterion
+> **Current**: `2.7.1` (cyrius 5.10.34, libro 2.6.2, majra 2.4.3).
+> 8 active test files, **653 unit assertions**, **14 criterion
 > benchmarks**, single-file `dist/bote.cyr` consumer bundle, CI
 > capacity gate, annotations-preserving `wrap_tool_result`,
-> 4 fuzz harnesses, 6 transports,
+> HostRegistry hot-reload, 4 fuzz harnesses, 6 transports,
 > handler-claims ABI plumbed end-to-end, JWT HS256 + RFC 7636
 > PKCE, bearer + allowlist + JWT validators, pluggable sandbox
 > runner (kavach 3.0 compatible), typed MCP content blocks
@@ -55,6 +55,7 @@ surfaces. See the **2.6.x modernization arc** section below.
 | **2.6.3** | Ship `dist/bote.cyr` — single-file consumer bundle via `cyrius distlib`. CI freshness gate + release asset. libro/majra-style downstream distribution contract |
 | **2.6.4** | CI capacity gate (`CYRIUS_STATS=1` + 95% fn_table / identifier-buffer threshold). Modernization arc closes. Three documented response paths (upstream cap raise, transport split, `BOTE_FULL_CONFIG` gate) if the gate ever fires |
 | **2.7.0** | Carry-forward cleanup. Annotations propagation through `wrap_tool_result` (single content block lifts into envelope, preserves block-level annotations from 1.9.6). `schema_compile` + `auth_bearer_check` benchmarks (closes the bench-coverage list in `docs/benchmarks-rust-v-cyrius.md`). `## [Unreleased]` CHANGELOG flow adopted |
+| **2.7.1** | HostRegistry hot-reload — `host_entry_from_json` / `host_registry_load_json` / `host_registry_load_from_file` / `host_registry_reload` / `host_registry_clear`. Fail-safe semantics on bad config (registry unchanged on parse error). +46 assertions, total 653. CONTRIBUTING.md rewritten for the Cyrius era |
 
 See [CHANGELOG.md](../../CHANGELOG.md) for the full detail per release.
 
@@ -90,9 +91,14 @@ work belongs.
 
 | Item | Effort | Notes |
 |---|---|---|
-| **`HostRegistry` hot-reload from config file** | Medium | Useful for deployments that rotate allowed upstreams without a restart. Natural fit for 2.7.1. |
-| **CONTRIBUTING.md Cyrius-era cleanup** | Low | Doc still references Rust-era commands (`make check`, `cargo-deny`, MSRV, `src/lib.rs`). Stale since the Cyrius port. Replace with `cyrius build` / `cyrius test` / `cyrius distlib` / `cyrius deps --verify` flow. |
 | **OAuth 2.1 authorization-code flow** (bote-as-AS) | High | Out of scope for MCP core; bote is the resource server. Flagged as explicitly deferred — consumers compose bote with their own AS layer. |
+
+The functional 2.7.x slate from the 2.6.x carry-forward list is
+empty after 2.7.1 (HostRegistry hot-reload + CONTRIBUTING.md both
+shipped). 2.7.x continues opportunistically as new needs surface.
+The next *planned* arc opens at 2.8.x — threaded streaming
+dispatch, still gated on cyrius `lib/thread.cyr` MPSC + `lib/async.cyr`
+cancellation firming up.
 
 ### Blocked on cyrius / external
 

@@ -16,7 +16,117 @@ have per release.
 
 ## [Unreleased]
 
-_(empty — first PRs after 2.7.0 land their entries here)_
+_(empty)_
+
+## [2.7.1] — 2026-05-10 — HostRegistry hot-reload + CONTRIBUTING.md Cyrius-era cleanup
+
+Second 2.7.x patch. Lands the **HostRegistry hot-reload** feature
+the 2.6.x deferred slate promised, plus a long-overdue
+`CONTRIBUTING.md` rewrite that drops the Rust-era references the
+Cyrius port left behind.
+
+No MCP wire-format change, no handler-ABI change. New API surface
+on `HostRegistry`; existing in-memory wire-up unchanged.
+
+### Added
+
+- **HostRegistry JSON config + hot-reload** (`src/host.cyr`).
+  Five new public functions:
+  - `host_entry_from_json(obj_cstr)` — parse a single host-entry
+    object. Required fields: `name`, `url`. Optional:
+    `capabilities` (array of cstrs). Returns 0 on missing
+    required fields or malformed `capabilities`.
+  - `host_registry_load_json(json_cstr)` — parse a JSON array
+    of entry objects into a fresh registry. Empty array is legal
+    (returns empty registry, not an error).
+  - `host_registry_load_from_file(path)` — read `path` into a
+    64 KB buffer (`HOST_CONFIG_BUF_MAX`) and parse. Files larger
+    than the buffer truncate at read time and fail-closed at
+    parse.
+  - `host_registry_reload(r, path)` — read fresh config and swap
+    the entries map in-place. Existing pointers stay valid; the
+    old map is left to the bump allocator. **Fail-safe**:
+    returns `-1` and leaves the registry unchanged on
+    open/read/parse failure, so a malformed live edit cannot
+    drop the running configuration.
+  - `host_registry_clear(r)` — empty the registry in-place;
+    used by `reload`, also exposed for explicit caller use.
+  Plus one internal helper, `_host_parse_str_array`, that walks
+  a JSON array of strings into a `vec<cstr>` (used by the
+  `capabilities` branch of `host_entry_from_json`).
+
+### Config format
+
+```json
+[
+  {"name":"upstream-1","url":"https://api.example.com"},
+  {"name":"upstream-2","url":"https://other.example.com",
+   "capabilities":["fetch","tools_call"]}
+]
+```
+
+`headers` parsing is deferred — header values may carry secrets
+and need a redaction / audit story before they can come through
+file config. The in-memory `host_entry_with_headers` setter is
+still available for callers that need headers in code.
+
+### Changed
+
+- **`CONTRIBUTING.md` rewritten for the Cyrius era.** The
+  pre-port doc referenced `make check` / `cargo fmt` /
+  `cargo-deny` / `src/lib.rs` / `Cargo.toml` / MSRV 1.89.
+  Replaced with the actual cyrius commands the codebase uses
+  today: `cyrius deps` / `cyrius build` / `cyrius test` /
+  `cyrius distlib` / `CYRIUS_STATS=1` / `CYRIUS_DCE=1`. Adds
+  a Common Commands table, an Adding a New Module section
+  that matches the 2.6.3 dist-bundle contract, and a Testing
+  section that documents the 8-file split + the parser quirk
+  workaround (stage 2-arg inner calls into a var when
+  `assert(streq(call(...), "lit") == 1, "msg")` trips
+  `expected ')', got string` on cyrius 5.10.x).
+- **`tests/bote_host.tcyr`** now includes `lib/io.cyr` and
+  `src/jsonx.cyr`. The hot-reload parser piggybacks on jsonx
+  for whitespace / string / struct skipping (same surface bote
+  uses everywhere else for JSON-ish handling); the file
+  roundtrip tests need `file_write_all` from `lib/io.cyr`.
+
+### Verified (cyrius 5.10.x, local)
+
+- **653 unit assertions across 8 test files** — **+46 vs 2.7.0**:
+  - `bote_host.tcyr` **113** (+46) from the new hot-reload
+    coverage: 4 `host_entry_from_json` shape paths,
+    `_host_parse_str_array` empty / two-element / malformed
+    cases, `host_registry_load_json` happy / empty-array /
+    null / non-array / malformed-entry / unterminated paths,
+    `host_registry_load_from_file` roundtrip via `/tmp`,
+    `host_registry_reload` swap + fail-safe + missing-file +
+    null-arg paths, `host_registry_clear`.
+  - Per-file: `bote.tcyr` 398 / `bote_auth.tcyr` 38 /
+    `bote_content.tcyr` 24 / `bote_host.tcyr` **113** /
+    `bote_jwt.tcyr` 28 / `bote_pkce.tcyr` 17 /
+    `bote_sandbox.tcyr` 13 / `bote_libro_tools.tcyr` 22.
+- Default binary capacity: fn_table **89%** (3658/4096) —
+  +6 vs 2.7.0 from the 5 new public functions + helper. Well
+  under the 95% CI gate from 2.6.4.
+- `bote_host.tcyr` compile unit absorbs `lib/io.cyr` +
+  `src/jsonx.cyr` without strain — under the capacity gate
+  comfortably.
+- `dist/bote.cyr` regenerated; header reflects 2.7.1.
+
+### Forward roadmap
+
+Remaining 2.7.x candidates after this patch ship:
+
+| Item | Effort |
+|---|---|
+| OAuth 2.1 AS flow | High — explicitly out of scope, kept on the list as a marker |
+
+The 2.7.x feature slate from the deferred 2.6.x carry-forward
+list is otherwise empty. 2.7.x continues opportunistically; the
+next 2.7.x patch lands when new in-tree needs emerge. The next
+*planned* arc opens at 2.8.x — likely the long-deferred
+threaded streaming dispatch, gated on cyrius
+`lib/thread.cyr` MPSC + `lib/async.cyr` cancellation firming up.
 
 ## [2.7.0] — 2026-05-10 — Annotations through `wrap_tool_result` + bench coverage + `[Unreleased]` flow
 

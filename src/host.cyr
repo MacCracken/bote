@@ -84,6 +84,153 @@ fn host_registry_get(r, name) { return map_get(host_registry_entries(r), name); 
 
 fn host_registry_names(r) { return map_keys(host_registry_entries(r)); }
 
+# Empty the registry in-place. Existing references to the registry
+# pointer stay valid; the underlying entries map is replaced fresh
+# (the old map becomes unreferenced and is left to the bump allocator
+# — bote has no general-purpose free, and config reload is a rare
+# operation; the leak is bounded by reload frequency × config size).
+# Used by host_registry_reload before repopulating.
+fn host_registry_clear(r) {
+    store64(r, map_new());
+    store64(r + 8, 0);
+    return 0;
+}
+
+# ================================================================
+# Hot-reload — JSON config format
+# ================================================================
+#
+# 2.7.1. The wire format is a JSON array of host-entry objects:
+#
+#   [
+#     {"name":"upstream-1","url":"https://api.example.com"},
+#     {"name":"upstream-2","url":"https://other.example.com",
+#      "capabilities":["fetch","tools/call"]}
+#   ]
+#
+# Required fields: `name`, `url`. Optional: `capabilities` (array of
+# cstrs; absent = no restriction, matching the in-memory semantics).
+# `headers` parsing is deferred — header values may carry secrets
+# and need a careful redaction/audit story before they can come
+# through file config. Use the in-memory `host_entry_with_headers`
+# setter for now if headers are needed.
+#
+# Limitations: the jsonx surface used to parse is whitespace-strict
+# inside structured values (matches the rest of bote's JSON
+# handling). Configs emitted by `jq -c` or a one-key-per-line
+# pretty-printer both work; arbitrary indentation may not.
+
+# Buffer size for `host_registry_load_from_file`. 64 KB is well
+# above any plausible host-registry config (each entry is < 500 B
+# typical). Files larger than this are truncated at read time and
+# the parse will fail at the truncation boundary.
+var HOST_CONFIG_BUF_MAX = 65536;
+
+# Parse a single host-entry JSON object (cstr containing `{...}`)
+# into a HostEntry. Returns 0 if the object is missing `name` or
+# `url`, or if `capabilities` is present but malformed.
+fn host_entry_from_json(obj_cstr) {
+    if (obj_cstr == 0) { return 0; }
+    if (jsonx_is_object(obj_cstr) == 0) { return 0; }
+    var name = jsonx_get_str(obj_cstr, "name");
+    var url  = jsonx_get_str(obj_cstr, "url");
+    if (name == 0 || url == 0) { return 0; }
+    var e = host_entry_new(name, url);
+    if (jsonx_has(obj_cstr, "capabilities") == 1) {
+        var caps_raw = jsonx_get_raw(obj_cstr, "capabilities");
+        if (caps_raw == 0) { return 0; }
+        var caps = _host_parse_str_array(caps_raw);
+        if (caps == 0) { return 0; }
+        host_entry_with_capabilities(e, caps);
+    }
+    return e;
+}
+
+# Walk a JSON array of strings and return a vec of cstrs. Each
+# element is decoded into its own freshly-allocated cstr (no
+# quotes). Returns 0 if the input is not an array or any element
+# is not a string. Used by host_entry_from_json.
+fn _host_parse_str_array(arr_cstr) {
+    if (arr_cstr == 0) { return 0; }
+    var len = strlen(arr_cstr);
+    var i = _jx_skip_ws(arr_cstr, len, 0);
+    if (i >= len || load8(arr_cstr + i) != 91) { return 0; }
+    i = _jx_skip_ws(arr_cstr, len, i + 1);
+    var out = vec_new();
+    while (i < len) {
+        var c = load8(arr_cstr + i);
+        if (c == 93) { return out; }
+        if (c != 34) { return 0; }
+        var end = _jx_skip_string(arr_cstr, len, i);
+        var inner = end - i - 2;
+        if (inner < 0) { inner = 0; }
+        var s = alloc(inner + 1);
+        memcpy(s, arr_cstr + i + 1, inner);
+        store8(s + inner, 0);
+        vec_push(out, s);
+        i = _jx_skip_ws(arr_cstr, len, end);
+        if (i < len && load8(arr_cstr + i) == 44) {
+            i = _jx_skip_ws(arr_cstr, len, i + 1);
+        }
+    }
+    return 0;
+}
+
+# Parse a JSON array of host-entry objects into a fresh
+# HostRegistry. Returns 0 on any parse failure.
+fn host_registry_load_json(json_cstr) {
+    if (json_cstr == 0) { return 0; }
+    var len = strlen(json_cstr);
+    var i = _jx_skip_ws(json_cstr, len, 0);
+    if (i >= len || load8(json_cstr + i) != 91) { return 0; }
+    i = _jx_skip_ws(json_cstr, len, i + 1);
+    var r = host_registry_new();
+    while (i < len) {
+        var c = load8(json_cstr + i);
+        if (c == 93) { return r; }
+        if (c != 123) { return 0; }
+        var end = _jx_skip_struct(json_cstr, len, i, 123, 125);
+        if (end > len) { return 0; }
+        var olen = end - i;
+        var obj = alloc(olen + 1);
+        memcpy(obj, json_cstr + i, olen);
+        store8(obj + olen, 0);
+        var entry = host_entry_from_json(obj);
+        if (entry == 0) { return 0; }
+        host_registry_add(r, entry);
+        i = _jx_skip_ws(json_cstr, len, end);
+        if (i < len && load8(json_cstr + i) == 44) {
+            i = _jx_skip_ws(json_cstr, len, i + 1);
+        }
+    }
+    return 0;
+}
+
+# Read path into memory and parse via host_registry_load_json.
+# Returns 0 on open / read / parse failure. Buffer size is
+# HOST_CONFIG_BUF_MAX (64 KB).
+fn host_registry_load_from_file(path) {
+    if (path == 0) { return 0; }
+    var buf = alloc(HOST_CONFIG_BUF_MAX + 1);
+    var n = file_read_all(path, buf, HOST_CONFIG_BUF_MAX);
+    if (n <= 0) { return 0; }
+    store8(buf + n, 0);
+    return host_registry_load_json(buf);
+}
+
+# Reload an existing registry from a config file. On success the
+# registry pointer stays valid; only the underlying entries map
+# is swapped. Returns 0 on success, -1 on failure. The caller's
+# registry is left unchanged on failure (fail-safe).
+fn host_registry_reload(r, path) {
+    if (r == 0 || path == 0) { return 0 - 1; }
+    var fresh = host_registry_load_from_file(path);
+    if (fresh == 0) { return 0 - 1; }
+    store64(r,     host_registry_entries(fresh));
+    store64(r + 8, host_registry_count(fresh));
+    return 0;
+}
+
 # ================================================================
 # SSRF guard
 # ================================================================

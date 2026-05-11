@@ -9,10 +9,15 @@ include "lib/alloc.cyr"
 include "lib/vec.cyr"
 include "lib/str.cyr"
 include "lib/syscalls.cyr"
+include "lib/io.cyr"
 include "lib/hashmap.cyr"
 include "lib/fnptr.cyr"
 include "lib/assert.cyr"
 
+# 2.7.1: hot-reload parser piggybacks on jsonx for whitespace /
+# string / struct skipping — same surface bote uses everywhere else
+# for JSON-ish handling.
+include "src/jsonx.cyr"
 include "src/host.cyr"
 
 fn main() {
@@ -155,6 +160,103 @@ fn main() {
     assert(ssrf_check("http://[::127.0.0.1]/") != SSRF_OK, "::127.0.0.1 blocked");
     # NAT64 well-known prefix
     assert(ssrf_check("http://[64:ff9b::1.2.3.4]/") != SSRF_OK, "NAT64 prefix blocked");
+
+    # ================================================================
+    # 2.7.1 — HostRegistry hot-reload (JSON config)
+    # ================================================================
+    var ej_min = host_entry_from_json("{\"name\":\"a\",\"url\":\"https://a.example\"}");
+    assert(ej_min != 0, "from_json minimal entry");
+    assert(streq(host_entry_name(ej_min), "a") == 1, "from_json name");
+    assert(streq(host_entry_url(ej_min), "https://a.example") == 1, "from_json url");
+    assert_eq(host_entry_capabilities(ej_min), 0, "from_json no caps");
+
+    # With capabilities array
+    var caps_json = "{\"name\":\"b\",\"url\":\"https://b.example\",\"capabilities\":[\"fetch\",\"tools_call\"]}";
+    var ej_caps = host_entry_from_json(caps_json);
+    assert(ej_caps != 0, "from_json with caps");
+    var caps_v = host_entry_capabilities(ej_caps);
+    assert(caps_v != 0, "caps vec present");
+    assert_eq(vec_len(caps_v), 2, "2 capabilities");
+    var cap0 = vec_get(caps_v, 0);
+    var cap1 = vec_get(caps_v, 1);
+    assert(streq(cap0, "fetch") == 1, "cap idx0 is fetch");
+    assert(streq(cap1, "tools_call") == 1, "cap idx1 is tools_call");
+    assert_eq(host_entry_allows(ej_caps, "fetch"), 1, "from_json caps allows fetch");
+    assert_eq(host_entry_allows(ej_caps, "delete"), 0, "from_json caps rejects unlisted");
+
+    # Empty capabilities array = explicit allowlist of nothing
+    var empty_caps_json = "{\"name\":\"c\",\"url\":\"https://c.example\",\"capabilities\":[]}";
+    var ej_empty = host_entry_from_json(empty_caps_json);
+    assert(ej_empty != 0, "from_json empty caps array");
+    assert(host_entry_capabilities(ej_empty) != 0, "empty caps still allocates vec");
+    assert_eq(vec_len(host_entry_capabilities(ej_empty)), 0, "empty caps len 0");
+    assert_eq(host_entry_allows(ej_empty, "fetch"), 0, "empty caps rejects all");
+
+    # Rejections
+    assert_eq(host_entry_from_json(0), 0, "from_json null");
+    assert_eq(host_entry_from_json("not an object"), 0, "from_json non-object");
+    assert_eq(host_entry_from_json("{\"url\":\"https://x\"}"), 0, "from_json missing name");
+    assert_eq(host_entry_from_json("{\"name\":\"x\"}"), 0, "from_json missing url");
+
+    # ---------------- host_registry_load_json ----------------
+    var two_entry_json = "[{\"name\":\"alpha\",\"url\":\"https://a.example\"},{\"name\":\"beta\",\"url\":\"https://b.example\",\"capabilities\":[\"fetch\"]}]";
+    var rj = host_registry_load_json(two_entry_json);
+    assert(rj != 0, "load_json 2-entry array");
+    assert_eq(host_registry_count(rj), 2, "load_json count 2");
+    assert_eq(host_registry_has(rj, "alpha"), 1, "alpha present");
+    assert_eq(host_registry_has(rj, "beta"), 1, "beta present");
+    var bx = host_registry_get(rj, "beta");
+    assert(streq(host_entry_url(bx), "https://b.example") == 1, "beta url roundtrip");
+    assert_eq(host_entry_allows(bx, "fetch"), 1, "beta allows fetch");
+
+    # Empty array → empty registry (legal, not an error)
+    var rj_empty = host_registry_load_json("[]");
+    assert(rj_empty != 0, "load_json empty array OK");
+    assert_eq(host_registry_count(rj_empty), 0, "empty registry count 0");
+
+    # Parse failures → 0
+    assert_eq(host_registry_load_json(0), 0, "load_json null");
+    assert_eq(host_registry_load_json("not json"), 0, "load_json non-array");
+    assert_eq(host_registry_load_json("[{\"name\":\"x\"}]"), 0, "load_json malformed entry");
+
+    # ---------------- host_registry_load_from_file ----------------
+    var tmp_path = "/tmp/bote_host_test.json";
+    var cfg_v1 = "[{\"name\":\"svc-1\",\"url\":\"https://svc1.example\"}]";
+    file_write_all(tmp_path, cfg_v1, strlen(cfg_v1));
+    var rf = host_registry_load_from_file(tmp_path);
+    assert(rf != 0, "load_from_file v1");
+    assert_eq(host_registry_count(rf), 1, "v1 count 1");
+    assert_eq(host_registry_has(rf, "svc-1"), 1, "v1 has svc-1");
+
+    # ---------------- host_registry_reload ----------------
+    var cfg_v2 = "[{\"name\":\"svc-2\",\"url\":\"https://svc2.example\"},{\"name\":\"svc-3\",\"url\":\"https://svc3.example\",\"capabilities\":[\"fetch\"]}]";
+    file_write_all(tmp_path, cfg_v2, strlen(cfg_v2));
+    var rc_reload = host_registry_reload(rf, tmp_path);
+    assert_eq(rc_reload, 0, "reload returns 0 on success");
+    assert_eq(host_registry_count(rf), 2, "post-reload count 2");
+    assert_eq(host_registry_has(rf, "svc-1"), 0, "v1 entry gone after reload");
+    assert_eq(host_registry_has(rf, "svc-2"), 1, "v2 entry present");
+    assert_eq(host_registry_has(rf, "svc-3"), 1, "v3 entry present");
+
+    # Malformed reload → -1, registry unchanged (fail-safe)
+    var bad = "this is not json";
+    file_write_all(tmp_path, bad, strlen(bad));
+    assert_eq(host_registry_reload(rf, tmp_path), 0 - 1, "reload -1 on parse error");
+    assert_eq(host_registry_count(rf), 2, "registry unchanged after failed reload");
+    assert_eq(host_registry_has(rf, "svc-2"), 1, "svc-2 still present after failed reload");
+
+    # Missing file → -1
+    assert_eq(host_registry_reload(rf, "/tmp/does_not_exist_bote.json"), 0 - 1,
+              "reload -1 on missing file");
+
+    # Null args reject
+    assert_eq(host_registry_reload(0, tmp_path), 0 - 1, "reload null registry");
+    assert_eq(host_registry_reload(rf, 0), 0 - 1, "reload null path");
+
+    # ---------------- host_registry_clear ----------------
+    host_registry_clear(rf);
+    assert_eq(host_registry_count(rf), 0, "clear empties count");
+    assert_eq(host_registry_has(rf, "svc-2"), 0, "clear removes entries");
 
     return assert_summary();
 }
