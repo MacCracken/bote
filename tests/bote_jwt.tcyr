@@ -56,8 +56,8 @@ fn main() {
     # Sig (HS256) → SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c
     # This is the canonical jwt.io example — should verify.
     var token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
-    var secret = "your-256-bit-secret";
-    assert_eq(jwt_verify_hs256(token, secret, strlen(secret)), 1, "jwt.io canonical token verifies");
+    var jwt_key = "your-256-bit-secret";
+    assert_eq(jwt_verify_hs256(token, jwt_key, strlen(jwt_key)), 1, "jwt.io canonical token verifies");
 
     # Wrong secret rejects
     assert_eq(jwt_verify_hs256(token, "wrong-secret", 12), 0, "wrong secret rejects");
@@ -67,33 +67,33 @@ fn main() {
     # decode because the low bits drop in a 3-rem tail; flipping a high
     # byte produces a guaranteed-different decoded signature.
     var tampered = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.TflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
-    assert_eq(jwt_verify_hs256(tampered, secret, strlen(secret)), 0, "tampered sig rejects");
+    assert_eq(jwt_verify_hs256(tampered, jwt_key, strlen(jwt_key)), 0, "tampered sig rejects");
 
     # Tampered payload (last char of payload changed) rejects — sig won't match
     var tamp_pl = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIzfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
-    assert_eq(jwt_verify_hs256(tamp_pl, secret, strlen(secret)), 0, "tampered payload rejects");
+    assert_eq(jwt_verify_hs256(tamp_pl, jwt_key, strlen(jwt_key)), 0, "tampered payload rejects");
 
     # Malformed: not enough segments
-    assert_eq(jwt_verify_hs256("a.b", secret, strlen(secret)), 0, "two segments rejects");
-    assert_eq(jwt_verify_hs256("just-a-string", secret, strlen(secret)), 0, "no dots rejects");
+    assert_eq(jwt_verify_hs256("a.b", jwt_key, strlen(jwt_key)), 0, "two segments rejects");
+    assert_eq(jwt_verify_hs256("just-a-string", jwt_key, strlen(jwt_key)), 0, "no dots rejects");
 
     # Null/empty inputs
-    assert_eq(jwt_verify_hs256(0, secret, strlen(secret)), 0, "null token rejects");
+    assert_eq(jwt_verify_hs256(0, jwt_key, strlen(jwt_key)), 0, "null token rejects");
     assert_eq(jwt_verify_hs256(token, 0, 0), 0, "null secret rejects");
-    assert_eq(jwt_verify_hs256(token, secret, 0), 0, "zero-len secret rejects");
+    assert_eq(jwt_verify_hs256(token, jwt_key, 0), 0, "zero-len secret rejects");
 
     # Non-HS256 alg downgrade rejected — header with "alg":"none"
     # Header = {"alg":"none"} → eyJhbGciOiJub25lIn0
     var none_token = "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.";
-    assert_eq(jwt_verify_hs256(none_token, secret, strlen(secret)), 0,
+    assert_eq(jwt_verify_hs256(none_token, jwt_key, strlen(jwt_key)), 0,
               "alg=none downgrade rejected");
 
     # ================================================================
     # JwtSecret handle + validator adapter
     # ================================================================
-    var sh = jwt_secret_new(secret);
+    var sh = jwt_secret_new(jwt_key);
     assert(sh != 0, "secret handle allocates");
-    assert(streq(jwt_secret_data(sh), secret) == 1, "secret data accessor");
+    assert(streq(jwt_secret_data(sh), jwt_key) == 1, "secret data accessor");
     assert_eq(jwt_secret_len(sh), 19, "secret len accessor");
 
     # Validator with the bearer-middleware signature returns the token

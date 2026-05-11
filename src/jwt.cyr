@@ -66,8 +66,8 @@ fn _jwt_dot(s, len, from) {
 }
 
 # Verify a JWT. Returns 1 on valid, 0 otherwise.
-fn jwt_verify_hs256(token, secret, secret_len) {
-    if (token == 0 || secret == 0 || secret_len <= 0) { return 0; }
+fn jwt_verify_hs256(token, key, key_len) {
+    if (token == 0 || key == 0 || key_len <= 0) { return 0; }
     var tlen = strlen(token);
     if (tlen < 16) { return 0; }   # impossibly short
 
@@ -104,7 +104,7 @@ fn jwt_verify_hs256(token, secret, secret_len) {
     # Compute HMAC-SHA256 over `header_b64u . payload_b64u`.
     var sig_input_len = dot2;
     var expected = alloc(32);
-    hmac_sha256(secret, secret_len, token, sig_input_len, expected);
+    hmac_sha256(key, key_len, token, sig_input_len, expected);
 
     # Decode the signature segment.
     var sig_b64u_len = tlen - dot2 - 1;
@@ -124,11 +124,11 @@ fn jwt_verify_hs256(token, secret, secret_len) {
 # Use jwt_secret_new(secret_cstr) to build one.
 # ================================================================
 
-fn jwt_secret_new(secret) {
+fn jwt_secret_new(key) {
     var s = alloc(16);
-    store64(s, secret);
-    if (secret == 0) { store64(s + 8, 0); }
-    else { store64(s + 8, strlen(secret)); }
+    store64(s, key);
+    if (key == 0) { store64(s + 8, 0); }
+    else { store64(s + 8, strlen(key)); }
     return s;
 }
 

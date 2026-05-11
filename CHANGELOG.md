@@ -2,6 +2,172 @@
 
 All notable changes to bote are documented here.
 
+## [2.6.0] — 2026-05-10 — Modernization platform: cyrius 5.10.34, libro 2.6.2, majra 2.4.3
+
+2.6.0 catches bote up to the first-party Cyrius floor and opens
+the **2.6.x modernization arc** (see `docs/development/roadmap.md`).
+No MCP wire-format change, no handler-ABI change; the live
+audit + events integration is byte-identical to 2.5.1 at the
+JSON-RPC boundary. Forward feature work that was slotted for
+2.6.x slides one minor to 2.7.x; 2.6.x is reserved for the
+modernization sequence.
+
+### Changed
+
+- **Cyrius toolchain pin: 4.8.4 → 5.10.34.** Matches the
+  current first-party floor (agnosys 1.2.4, agnostik 1.2.1,
+  libro 2.6.2, majra 2.4.3). Notable upstream changes spanning
+  this range: arch-peer include resolution now expects
+  `~/.cyrius/versions/<V>/lib` (5.10.9+) — CI installer
+  updated accordingly; richer fmt/lint/vet/capacity surfaces;
+  `CYRIUS_DCE=1` available for release binaries; raised fixup
+  cap; stdlib `ct_eq_bytes` family; `secret` promoted to a
+  storage-class keyword (forced a rename in `src/jwt.cyr`);
+  `lib/http_server.cyr` retired from stdlib and folded into
+  the new `lib/sandhi.cyr` HTTP-server surface.
+- **libro 1.0.3 → 2.6.2 via single-file dist bundle.** The
+  consumer contract switched in libro 2.x from `[deps.libro]
+  modules = ["src/error.cyr", "src/hasher.cyr", …]` to
+  `modules = ["dist/libro.cyr"]`. `cyrius deps` copies the
+  upstream `dist/libro.cyr` into `lib/libro.cyr`. All
+  symbol-level call sites bote uses (`chain_new`,
+  `chain_append`, `chain_append_with_agent`, `chain_verify`,
+  `pubsub_*`) are unchanged in the new dist surface — the
+  live audit_libro / events_majra adapters compile clean
+  without source edits.
+- **majra 2.2.0 → 2.4.3 via single-file dist bundle.** Same
+  pattern — `[deps.majra] modules = ["dist/majra.cyr"]`,
+  resolves to `lib/majra.cyr`. The default profile (core
+  pubsub engine without backends) is the bote-appropriate
+  bundle; future transport work can upgrade to
+  `dist/majra-signed.cyr` or `-backends.cyr` if signed
+  envelopes or network backends become bote-side concerns.
+- **`cyrius.toml` → `cyrius.cyml`.** Adopts the first-party
+  manifest layout: `version = "${file:VERSION}"` placeholder
+  (the version is owned by `VERSION`, the manifest pulls it),
+  `[lib]` section enumerating bote's own modules for future
+  `cyrius distlib dist/bote.cyr` (2.6.3), `cyrius = "5.10.34"`
+  toolchain pin in the manifest (no separate
+  `.cyrius-toolchain` file). The release workflow enforces
+  the `${file:VERSION}` placeholder so the version can't drift
+  out of sync at tag time.
+- **`/lib/` is no longer committed.** `.gitignore` covers
+  `/lib/` — `cyrius deps` repopulates it from the
+  version-pinned stdlib snapshot plus the tagged libro / majra
+  dist bundles. Matches agnosys / majra / libro / yukti /
+  patra convention. Prevents stale stubs from prior cyrius
+  versions sitting in tree.
+- **HTTP server surface bridged from `http_server` to `sandhi`
+  via `src/_sandhi_compat.cyr`.** The cyrius 5.10.x stdlib
+  retired `lib/http_server.cyr` and folded its surface into
+  `lib/sandhi.cyr` under a `sandhi_server_` prefix. 2.6.0
+  introduces a thin compat shim re-exporting the ~12 symbols
+  bote uses (`http_send_status`, `http_send_response`,
+  `http_send_chunked_*`, `http_get_method`, `http_get_path`,
+  `http_find_header`, `http_content_length`, `http_body_offset`,
+  `http_path_only`, `http_server_run`) as tail-calls into
+  the sandhi names. Zero call-site churn in 2.6.0; the rename
+  pass and shim retirement land in 2.6.1.
+- **`tls` added to `[deps] stdlib`.** sandhi references
+  `TLS_EARLY_DATA_ACCEPTED` at parse time — without `tls.cyr`
+  in the dep set, cyrius's deps-aware build can't validate
+  the dep graph. Mirrors majra 2.4.2's same addition.
+- **`src/jwt.cyr` — `secret` parameter renamed to `key`.**
+  `secret` is a storage-class keyword in cyrius 5.10
+  (sigil's HMAC ipad/opad buffers use it). Renamed inside
+  `jwt_verify_hs256` and `jwt_secret_new`; the exported
+  function names (`jwt_secret_new`, `jwt_secret_data`,
+  `jwt_secret_len`, `auth_validator_jwt_hs256`) are unchanged
+  — `secret` is reserved only as a bare identifier, not
+  inside compound names. `tests/bote_jwt.tcyr` renamed its
+  local `var secret = "..."` to `var jwt_key = "..."` for the
+  same reason.
+
+### CI / release modernization (matches majra / agnosys)
+
+- **Versioned toolchain installer.** The installer now lays
+  out `~/.cyrius/versions/<V>/{bin,lib}` and symlinks
+  `~/.cyrius/{bin,lib}` to the version-pinned snapshot.
+  Required by cc5 5.10.9+: arch-peer includes
+  (`syscalls_x86_64_linux.cyr` etc.) resolve against the
+  version-pinned `lib/`, so the flat `~/.cyrius/lib` layout
+  the 4.8.x installer used no longer works.
+- **Source-archive fetch for `lib/`.** 5.10.x release
+  tarballs ship `bin/` + `deps/` only — the `lib/` stdlib
+  snapshot is NOT in the tarball. CI now pulls the GitHub
+  source archive at the version tag and copies `lib/` from
+  there. Sanity-checked against `syscalls_x86_64_linux.cyr`
+  + `bin/cc5` to fail fast if either extraction is broken.
+- **`cyrius deps --verify` lockfile gate.** `cyrius.lock`
+  (committed) records SHA-256 of every resolved dep. CI
+  enforces hash match; the gate self-skips on the first push
+  that introduces a new dep before the lockfile lands.
+- **Manifest-completeness gate.** Every
+  `include "src/<file>.cyr"` in `src/main.cyr` must be listed
+  under `[lib]` modules in `cyrius.cyml` (or be in the known
+  excludes — currently `src/_sandhi_compat.cyr`). Prevents
+  `cyrius distlib` from silently shipping a bundle missing a
+  module once 2.6.3 lands.
+- **`CYRIUS_NO_WARN_SHADOW_LIB=1` + `CYRIUS_DCE=1`.** Standard
+  env across CI / release steps — silences the
+  cwd-shadows-version-snapshot informational note and turns
+  on whole-program dead-code elimination. Matches majra /
+  libro / agnosys / agnostik.
+- **Release workflow accepts both `v1.2.3` and `1.2.3` tag
+  styles.** The version-verify step enforces semver shape +
+  exact match against the `VERSION` file + the
+  `${file:VERSION}` placeholder in `cyrius.cyml`. Release
+  notes auto-extracted from the matching `## [VERSION]`
+  section of `CHANGELOG.md`.
+- **Release artifacts.** Source tarball
+  (`bote-<ver>-src.tar.gz`), x86_64-linux binary
+  (`bote-<ver>-x86_64-linux`), `cyrius.lock`, and
+  `SHA256SUMS` over all artifacts. Matches majra's release
+  asset set.
+
+### Deferred
+
+- **`tests/bote_libro_tools.tcyr`** (22 assertions) is parked
+  for 2.6.2 alongside the `src/libro_tools.cyr` port. The
+  libro 2.x dist bundle dropped six entry accessors
+  (`entry_action` / `entry_severity` / `entry_hash` /
+  `entry_source` / `entry_agent_id` / `entry_timestamp`),
+  replaced `merkle_proof` with `merkle_inclusion_proof`,
+  retired `merkle_tree_leaf_count` (now `merkle_canonical_root(tree, size)`
+  with explicit size), and folded
+  `libro_export` into `export_jsonl` over a fd. The
+  libro-tool dispatcher rewrites cleanly against the new
+  surface but is its own focused bite; targeting 2.6.2.
+- **The `_sandhi_compat.cyr` shim retires in 2.6.1.** ~56
+  call sites across `transport_http.cyr` /
+  `transport_streamable.cyr` / `bridge.cyr` /
+  `transport_ws.cyr` / `auth.cyr` flip from `http_*` to
+  `sandhi_server_*`; mechanical pass.
+
+### Verified (cyrius 5.10.x, local)
+
+- **581 unit assertions across 7 test files** —
+  `bote.tcyr` **394** / `bote_auth.tcyr` 38 /
+  `bote_content.tcyr` 24 / `bote_host.tcyr` 67 /
+  `bote_jwt.tcyr` 28 / `bote_pkce.tcyr` 17 /
+  `bote_sandbox.tcyr` 13. (Original 2.5.1 = 603 over 8
+  files; the 22-assertion gap is `bote_libro_tools.tcyr`
+  parked for 2.6.2 — no regression on the live integration.)
+- Production build: `src/main.cyr → build/bote` succeeds
+  cleanly. Function-table utilisation 89% (3663/4096) and
+  identifier buffer 88% (116566/131072) — tracked for 2.6.4
+  if the libro_tools restore pushes us over.
+- Benchmarks: `tests/bote.bcyr → build/bote_bench` builds
+  clean.
+- `cyrius deps` resolves 6 deps and writes `cyrius.lock`;
+  `cyrius deps --verify` round-trips clean.
+
+### Forward roadmap
+
+`docs/development/roadmap.md` rewritten: 2.6.x is now the
+modernization arc (2.6.0–2.6.4 bounded above); the
+previously-2.6.x feature backlog moved to **2.7.x candidates**.
+
 ## [2.5.1] — 2026-04-14 — Restore audit_libro + events_majra tests (cyrius 4.8.4 retag)
 
 The cyrius lang-agent retagged 4.8.4 with the alpha2-that-actually-works

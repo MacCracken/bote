@@ -1,11 +1,13 @@
 # Bote Roadmap
 
-> **Current**: `2.5.1` (cyrius 4.8.4). 8 test files, **603 unit
-> assertions**, 10 benchmarks, 4 fuzz harnesses, 6 transports,
-> handler-claims ABI plumbed end-to-end, JWT HS256 + RFC 7636 PKCE,
-> bearer + allowlist + JWT validators, pluggable sandbox runner
-> (kavach 3.0 compatible), typed MCP content blocks with
-> annotations, HostRegistry + IPv4/IPv6 SSRF guard.
+> **Current**: `2.6.0` (cyrius 5.10.34, libro 2.6.2, majra 2.4.3).
+> 7 active test files, **581 unit assertions** (22 in
+> `bote_libro_tools.tcyr` parked pending the libro 2.6.x API
+> port), 10 benchmarks, 4 fuzz harnesses, 6 transports,
+> handler-claims ABI plumbed end-to-end, JWT HS256 + RFC 7636
+> PKCE, bearer + allowlist + JWT validators, pluggable sandbox
+> runner (kavach 3.0 compatible), typed MCP content blocks
+> with annotations, HostRegistry + IPv4/IPv6 SSRF guard.
 >
 > **Spec**: MCP 2025-11-25 | **Compliance**: [spec-compliance.md](../spec-compliance.md)
 >
@@ -15,6 +17,15 @@
 > Rust archive preserved at git tag `0.92.0` (retired in v1.0.1).
 
 2.0 shipped. 2.x is feature-stable on the handler ABI (fn `(args, claims) → result_cstr`) and the six transports; patch releases add capabilities, not shape changes.
+
+**2.6.x is the modernization arc.** Forward feature work that was
+on the 2.6.x slate has shifted to 2.7.x. The 2.6.x line is reserved
+for catching bote up to the first-party Cyrius floor: the dist-bundle
+dep contract, the cyrius.cyml + `${file:VERSION}` layout, the
+versioned-toolchain CI installer, the `cyrius deps --verify` /
+`cyrius.lock` gates, and the residual libro 2.6.x / majra 2.4.x /
+sandhi-HTTP-server porting that the 5.10.34 toolchain bump
+surfaces. See the **2.6.x modernization arc** section below.
 
 ---
 
@@ -37,12 +48,36 @@
 | **2.4.0** | Bump cyrius 4.8.1 + base64url adoption + compile-unit trim |
 | **2.5.0** | Claims propagation through transports (validator's return threads to handler) |
 | **2.5.1** | Restore audit_libro + events_majra tests after cyrius 4.8.4 retag |
+| **2.6.0** | Modernization platform — cyrius 5.10.34, libro 2.6.2 / majra 2.4.3 via dist bundles, cyrius.cyml + `${file:VERSION}` layout, versioned-toolchain CI installer, sandhi compat shim |
 
 See [CHANGELOG.md](../../CHANGELOG.md) for the full detail per release.
 
 ---
 
-## Forward roadmap
+## 2.6.x modernization arc
+
+The 2.6.x line catches bote up to the first-party Cyrius floor.
+Each patch is a small, well-bounded bite — nothing in this arc
+ships new MCP surface; behaviour is preserved at the wire level.
+
+| Patch | Bite | Notes |
+|---|---|---|
+| **2.6.0** | Toolchain floor + dist-bundle deps | ✅ Shipped. cyrius 5.10.34, libro 2.6.2 / majra 2.4.3 via `dist/<crate>.cyr`, cyrius.cyml + `${file:VERSION}`, lib/ untracked, CI installer matches majra/agnosys, sandhi compat shim. `bote_libro_tools.tcyr` parked. |
+| **2.6.1** | Retire `_sandhi_compat.cyr` | Rename 56 call sites across `transport_http.cyr`, `transport_streamable.cyr`, `bridge.cyr`, `transport_ws.cyr`, `auth.cyr` to the `sandhi_server_*` names; delete the shim. Mechanical pass, no behaviour change. |
+| **2.6.2** | Port `libro_tools.cyr` to libro 2.6.x API | `entry_action` / `entry_severity` / `entry_hash` / `entry_source` / `entry_agent_id` / `entry_timestamp` accessors retired in libro 2.x — replace with the new entry-handle ABI. Replace `merkle_proof` with `merkle_inclusion_proof`. Replace `merkle_tree_leaf_count` with the `(tree, size)` API. Replace `libro_export` with `export_jsonl` over a memory-backed fd. Re-enable `bote_libro_tools.tcyr` (22 assertions). |
+| **2.6.3** | `cyrius distlib` bundle for bote | Emit `dist/bote.cyr` so downstream consumers (phylax / t-ron / sutra / jalwa / rasa / mneme) can `[deps.bote] modules = ["dist/bote.cyr"]` instead of vendoring src/. Mirrors libro / majra. Adds a CI freshness gate. |
+| **2.6.4** | Capacity / split prep | The 5.10.34 full-binary build runs at fn_table ~89% (3663/4096) and identifier buffer ~88%. Either split the WS / streamable transports into their own compilation unit (an opt-in include) or fold the unused-config setters behind a feature gate. Decision depends on whether the 2.6.2 libro_tools restore pushes us past 4096. |
+
+The 2.6.x arc is bounded — once 2.6.4 lands, the modernization
+backlog is empty and 2.7.x picks up the deferred feature work
+below.
+
+---
+
+## Forward roadmap — 2.7.x candidates
+
+The items previously on the 2.6.x slate; deferred one minor to
+make room for the modernization arc above.
 
 ### Next candidates (no blockers)
 
@@ -102,7 +137,7 @@ Some bote work is gated on cyrius. Live language-level friction
 resolved upstream issues bote reported + each fix landed:
 [docs/resolved-lang-issues.md](../resolved-lang-issues.md).
 
-Status against current cyrius (4.8.4):
+Status against current cyrius (5.10.34):
 
 | Issue | Status |
 |---|---|
@@ -122,8 +157,12 @@ Status against current cyrius (4.8.4):
 | Include-once cap 64 → 256 | ✅ Raised in 4.8.4 |
 | `PP_IFDEF_PASS` nested-include fixpoint | ✅ Shipped in 4.8.4 |
 | 4.8.4 release-binary vs alpha2 skew | ✅ Closed by 2026-04-14 retag; bote 2.5.1 restored full dep-graph tests |
+| `lib/http_server.cyr` folded into `lib/sandhi.cyr` (5.10.x) | ✅ Bridged in 2.6.0 via `src/_sandhi_compat.cyr` shim; retire in 2.6.1 |
+| `lib/tls.cyr` required by sandhi for `TLS_EARLY_DATA_ACCEPTED` | ✅ Added to `[deps] stdlib` in 2.6.0 |
+| `secret` is a storage-class keyword in 5.10.x | ✅ jwt.cyr parameter rename in 2.6.0 |
 | Per-thread request buffers (process-global today) | 🟡 Tracked upstream; affects future threaded dispatch |
 | Bump allocator without `fl_free` for general use | 🟡 Tracked; affects WS arena work |
+| fn_table / identifier-buffer headroom at 88-89% with full integration | 🟡 Tracked for 2.6.4 — split / feature-gate decision |
 
 No current open bugs. Future reports land under `docs/bugs/` during
 active triage and move to `docs/resolved-lang-issues.md` when closed.

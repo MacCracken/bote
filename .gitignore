@@ -3,6 +3,18 @@ Cargo.lock
 
 # Cyrius build artifacts
 /build/
+
+# Cyrius dep cache — `cyrius deps` repopulates from the version-pinned
+# stdlib snapshot + tagged libro/majra dist bundles. Matches the
+# agnosys / majra / libro / yukti / patra convention since the 5.10.x
+# toolchain. Don't commit; stale snapshots from prior cyrius versions
+# rot fast.
+/lib/
+
+# Toolchain installer artifacts (CI fetches these into the workspace).
+cyrius-*.tar.gz
+cyrius-*-x86_64-linux/
+cyrius-[0-9]*.[0-9]*.[0-9]*/
 *.swp
 *.swo
 *~

@@ -1,0 +1,102 @@
+[package]
+name = "bote"
+version = "${file:VERSION}"
+description = "MCP core service in Cyrius — stable 2.x. JSON-RPC 2.0, six transports, bearer auth + JWT HS256 + RFC 7636 PKCE, libro audit tools, content blocks (with annotations), host registry + IPv4/IPv6 SSRF guard, pluggable sandbox runner (kavach 3.0)"
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/bote"
+language = "cyrius"
+cyrius = "5.10.34"
+
+[build]
+entry = "src/main.cyr"
+output = "build/bote"
+
+# `[lib]` exists so `cyrius distlib` can concatenate src/ into
+# dist/bote.cyr for downstream consumers (phylax, t-ron, sutra,
+# jalwa, rasa, mneme, etc.) that want the MCP core surface as a
+# single bundle. Order mirrors the include order in src/main.cyr —
+# critical for Cyrius single-pass forward-reference resolution.
+#
+# libro_tools is intentionally NOT in the default bundle — it's
+# parked pending the libro 2.6.x API port (entry_*/merkle_proof/
+# libro_export accessors were retired in libro 2.0). Consumers
+# wanting libro-tool dispatch will pull it back in via a follow-up
+# 2.6.x patch once the port lands.
+[lib]
+modules = [
+    "src/error.cyr",
+    "src/protocol.cyr",
+    "src/jsonx.cyr",
+    "src/registry.cyr",
+    "src/events.cyr",
+    "src/audit.cyr",
+    "src/audit_libro.cyr",
+    "src/events_majra.cyr",
+    "src/dispatch.cyr",
+    "src/codec.cyr",
+    "src/schema.cyr",
+    "src/stream.cyr",
+    "src/session.cyr",
+    "src/discovery.cyr",
+    "src/auth.cyr",
+    "src/transport_stdio.cyr",
+    "src/transport_http.cyr",
+    "src/transport_unix.cyr",
+    "src/bridge.cyr",
+    "src/transport_streamable.cyr",
+    "src/transport_ws.cyr",
+    "src/content.cyr",
+    "src/host.cyr",
+]
+
+# ── Dependencies ─────────────────────────────────────────────────
+# Cyrius-stdlib modules. `cyrius deps` copies these from the
+# version-pinned snapshot into ./lib/ (gitignored). The list mirrors
+# the include order at the top of src/main.cyr so the manifest stays
+# load-bearing.
+[deps]
+stdlib = [
+    "string",
+    "fmt",
+    "alloc",
+    "vec",
+    "str",
+    "syscalls",
+    "io",
+    "args",
+    "hashmap",
+    "json",
+    "fnptr",
+    "chrono",
+    "tagged",
+    "net",
+    "base64",
+    "freelist",
+    "thread",
+    "sakshi",
+    "bigint",
+    "sigil",
+    "tls",
+    "sandhi",
+    "ws_server",
+]
+
+# libro audit chain — single-file dist bundle. cyrius deps clones
+# libro at the tag and copies dist/libro.cyr into lib/libro_libro.cyr.
+# That's the only file we include from main.cyr; the bundle is
+# self-contained (no further includes).
+[deps.libro]
+git = "https://github.com/MacCracken/libro"
+path = "../libro"
+tag = "2.6.2"
+modules = ["dist/libro.cyr"]
+
+# majra pub/sub — same single-file dist bundle pattern. The default
+# profile is bote-appropriate (core pubsub engine without backends);
+# upgrade to `dist/majra-signed.cyr` or `-backends.cyr` if a future
+# bote transport ever needs signed envelopes or network backends.
+[deps.majra]
+git = "https://github.com/MacCracken/majra"
+path = "../majra"
+tag = "2.4.3"
+modules = ["dist/majra.cyr"]

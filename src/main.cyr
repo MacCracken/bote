@@ -1,8 +1,12 @@
 # bote — MCP Core Service (Cyrius port)
 #
-# v1.2.0 wires libro (audit chain, deps.libro tag 1.0.3) and majra
-# (pub/sub, deps.majra tag 2.2.0) via thin adapter modules.
-# See src/audit_libro.cyr + src/events_majra.cyr for the wire-up.
+# 2.6.0 modernization platform release:
+#   - cyrius 5.10.34 toolchain pin (cyrius.cyml)
+#   - libro 2.6.2 via single-file dist bundle (lib/libro_libro.cyr)
+#   - majra 2.4.3 via single-file dist bundle (lib/majra_majra.cyr)
+# Live integration is unchanged at the API surface — audit_libro
+# and events_majra both call into the same chain_*/pubsub_* names
+# they always have. See src/audit_libro.cyr + src/events_majra.cyr.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -21,20 +25,14 @@ include "lib/net.cyr"
 include "lib/base64.cyr"
 include "lib/freelist.cyr"
 include "lib/thread.cyr"
+include "lib/sakshi.cyr"
+include "lib/bigint.cyr"
 include "lib/sigil.cyr"
-include "lib/libro_error.cyr"
-include "lib/libro_hasher.cyr"
-include "lib/libro_entry.cyr"
-include "lib/libro_verify.cyr"
-include "lib/libro_query.cyr"
-include "lib/libro_retention.cyr"
-include "lib/libro_chain.cyr"
-include "lib/majra_error.cyr"
-include "lib/majra_counter.cyr"
-include "lib/majra_envelope.cyr"
-include "lib/majra_namespace.cyr"
-include "lib/majra_queue.cyr"
-include "lib/majra_pubsub.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "src/_sandhi_compat.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
@@ -52,13 +50,16 @@ include "src/discovery.cyr"
 include "src/auth.cyr"
 include "src/transport_stdio.cyr"
 include "src/transport_http.cyr"
-include "lib/libro_export.cyr"
-include "lib/libro_merkle.cyr"
 include "src/transport_unix.cyr"
 include "src/bridge.cyr"
 include "src/transport_streamable.cyr"
 include "lib/ws_server.cyr"
 include "src/transport_ws.cyr"
+# libro_tools.cyr is parked pending the libro 2.6.x API port
+# (entry_action/entry_severity/merkle_proof/libro_export call sites
+# need rewriting against the new dist surface). Tracked as a 2.6.x
+# patch follow-up; consumers needing the libro tools should pin to
+# bote 2.5.1 until the port lands.
 # DEFERRED: include "src/libro_tools.cyr"
 include "src/content.cyr"
 include "src/host.cyr"

@@ -2,10 +2,21 @@ name: Release
 
 on:
   push:
-    tags: ['[0-9]*']
+    # Accept both `v1.2.3` and `1.2.3` tag styles. The version-verify
+    # step below enforces semver shape + match against VERSION file.
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - '[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
   contents: write
+
+env:
+  # See ci.yml — `cyrius deps` shadows the version-pinned snapshot
+  # with cwd lib (identical content); silence the informational note.
+  CYRIUS_NO_WARN_SHADOW_LIB: "1"
+  # Whole-program dead-code elimination — smaller release binary.
+  CYRIUS_DCE: "1"
 
 jobs:
   ci:
@@ -21,33 +32,96 @@ jobs:
 
       - name: Verify version
         run: |
-          FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          TAG_VERSION="${GITHUB_REF_NAME}"
-          test "$FILE_VERSION" = "$TAG_VERSION" || { echo "VERSION ($FILE_VERSION) != tag ($TAG_VERSION)"; exit 1; }
+          FILE_VERSION=$(tr -d '[:space:]' < VERSION)
+          TAG="${GITHUB_REF_NAME#v}"   # strip optional leading 'v' so v2.6.0 == 2.6.0
+          echo "$TAG" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "tag ($TAG) is not semver x.y.z"; exit 1; }
+          [ "$FILE_VERSION" = "$TAG" ] || {
+            echo "VERSION ($FILE_VERSION) != tag ($TAG)"; exit 1; }
+          grep -q '^version = "\${file:VERSION}"' cyrius.cyml || {
+            echo "cyrius.cyml version must be \${file:VERSION}"; exit 1; }
+          echo "Version verified: $TAG (cyrius.cyml pulls from VERSION via \${file:VERSION})"
 
       - name: Install Cyrius toolchain
+        # Version-pinned layout — cc5 5.10.9+ resolves arch-peer
+        # includes under ~/.cyrius/versions/<V>/lib/. 5.10.x release
+        # tarballs ship bin/ + deps/ only, so we also pull the source
+        # archive at the version tag to get lib/ (the stdlib snapshot).
+        # See ci.yml for the rationale.
         run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(cat .cyrius-toolchain | tr -d '[:space:]')}"
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -E '^cyrius[[:space:]]*=' cyrius.cyml | sed -E 's/^cyrius[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')}"
           echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          curl -sL "https://github.com/MacCracken/cyrius/archive/refs/tags/$CYRIUS_VERSION.tar.gz" -o cyrius-src.tar.gz
+          tar xzf cyrius-src.tar.gz
+          CYRIUS_SRC="cyrius-$CYRIUS_VERSION"
+          VERSIONED="$HOME/.cyrius/versions/$CYRIUS_VERSION"
+          mkdir -p "$VERSIONED/bin" "$VERSIONED/lib"
+          cp "$CYRIUS_DIR/bin/"* "$VERSIONED/bin/" 2>/dev/null || true
+          cp "$CYRIUS_DIR/scripts/cyrius" "$VERSIONED/bin/cyrius" 2>/dev/null || true
+          cp -r "$CYRIUS_SRC/lib/"* "$VERSIONED/lib/"
+          if [ -d "$CYRIUS_DIR/deps" ]; then
+            mkdir -p "$HOME/.cyrius/deps"
+            cp -r "$CYRIUS_DIR/deps/"* "$HOME/.cyrius/deps/"
+          fi
+          chmod +x "$VERSIONED/bin/"* 2>/dev/null || true
+          ln -sfn "$VERSIONED/bin" "$HOME/.cyrius/bin"
+          ln -sfn "$VERSIONED/lib" "$HOME/.cyrius/lib"
+          echo "$CYRIUS_VERSION" > "$HOME/.cyrius/current"
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
+      - name: Resolve deps
+        run: cyrius deps
+
+      - name: Verify dep hashes
+        run: |
+          if [ -f cyrius.lock ]; then
+            cyrius deps --verify
+          else
+            echo "::warning::cyrius.lock not committed — skipping hash verification"
+          fi
+
       - name: Build
         run: |
-          cyrius deps
           mkdir -p build
           cyrius build src/main.cyr build/bote
           echo "bote: $(wc -c < build/bote) bytes"
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
+      - name: Smoke test
+        # bote's default entry is the stdio transport — it blocks
+        # waiting on stdin, so we can't just `./build/bote`. Feed it
+        # an MCP `initialize` request via stdin and check for a valid
+        # JSON-RPC response on stdout.
+        run: |
+          out=$(printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n' | timeout 5 ./build/bote || true)
+          echo "$out" | grep -q '"jsonrpc":"2.0"' || { echo "FAIL: bote stdio did not emit a JSON-RPC response"; echo "$out"; exit 1; }
+          echo "OK: bote stdio responded"
+
+      - name: Clean toolchain artifacts
+        run: rm -f cyrius-*.tar.gz
+
+      - name: Archive
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          git archive --format=tar.gz --prefix="bote-${TAG}/" -o "bote-${TAG}-src.tar.gz" HEAD
+          cp build/bote "bote-${TAG}-x86_64-linux"
+          sha256sum bote-*.tar.gz "bote-${TAG}-x86_64-linux" 2>/dev/null > SHA256SUMS
+
+      - name: Extract changelog
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          awk "/^## \\[${TAG}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md > /tmp/body.md
+
+      - uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
-          files: build/bote
+          name: "bote ${{ github.ref_name }}"
+          body_path: /tmp/body.md
+          prerelease: ${{ startsWith(github.ref_name, '0.') || startsWith(github.ref_name, 'v0.') }}
+          files: |
+            bote-*.tar.gz
+            bote-*-linux
+            cyrius.lock
+            SHA256SUMS
