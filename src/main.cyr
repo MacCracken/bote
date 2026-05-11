@@ -1,5 +1,10 @@
 # bote — MCP Core Service (Cyrius port)
 #
+# 2.7.x — feature line. 2.7.0 closes carry-forward items from the
+# 1.9.6 / 2.5.1 eras: annotations preservation through
+# wrap_tool_result; schema_compile + auth_bearer_check benchmarks;
+# CHANGELOG [Unreleased] flow.
+#
 # 2.6.x modernization arc:
 #   - 2.6.0: cyrius 5.10.34 + libro 2.6.2 / majra 2.4.3 dist bundles
 #   - 2.6.1: retired src/_sandhi_compat.cyr; all HTTP-server call

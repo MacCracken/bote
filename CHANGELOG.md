@@ -2,6 +2,106 @@
 
 All notable changes to bote are documented here.
 
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+### Conventions
+
+Adopted in **2.7.0** — the **`## [Unreleased]`** section below
+accumulates entries during the patch cycle. When a release ships,
+the **`## [Unreleased]`** header is renamed to `## [VERSION] —
+DATE — headline` and a fresh, empty `## [Unreleased]` is seeded
+back at the top. Avoids the "TODO" placeholder churn we used to
+have per release.
+
+## [Unreleased]
+
+_(empty — first PRs after 2.7.0 land their entries here)_
+
+## [2.7.0] — 2026-05-10 — Annotations through `wrap_tool_result` + bench coverage + `[Unreleased]` flow
+
+Opens the 2.7.x feature line after the 2.6.x modernization arc
+closed at 2.6.4. Three Low-effort items from the deferred 2.6.x
+candidates list bundled into one carry-forward release; no MCP
+wire-format change, no handler-ABI change. Closes the last loose
+ends from the 1.9.6 (annotations) and bench-coverage eras.
+
+### Added
+
+- **Annotations propagation through `wrap_tool_result`**
+  (`src/bridge.cyr`). A handler returning a single MCP content
+  block (object with a `type` field, possibly carrying
+  `annotations` from `content_with_annotations`) is now lifted
+  into a 1-element `content` array verbatim, preserving the
+  annotations. Previously the block got JSON-escaped into a
+  synthesised `text` payload — annotations survived as
+  characters in a string but became semantically useless to MCP
+  clients. Three input shapes are now distinguished:
+  1. Object with a `content` array → passthrough (unchanged).
+  2. Object with a `type` field → lift into envelope (**new**).
+  3. Anything else → wrap as synthesised text block (unchanged).
+  Four new assertions in `tests/bote.tcyr` cover the lift path
+  for text + image blocks, with and without annotations, plus
+  the non-block-object fallthrough.
+- **`schema_compile_simple` + `schema_compile_nested`
+  benchmarks** in `tests/bote.bcyr`. The existing validation
+  benches measure the compiled artifact's runtime cost; these
+  new ones measure pure compilation cost. Local numbers (cyrius
+  5.10.x, x86_64): `schema_compile_simple` 4µs avg,
+  `schema_compile_nested` 7µs avg.
+- **`auth_bearer_check_unset` + `auth_bearer_check_set`
+  benchmarks** in `tests/bote.bcyr`. Quantifies the no-overhead
+  claim from 1.9.0 — the bearer-middleware fast path
+  (validator fp == 0) is expected to be essentially free.
+  Confirmed: `auth_bearer_check_unset` runs at **1µs avg**
+  versus `auth_bearer_check_set` at 2µs (the full path: parse
+  Authorization header, call allowlist validator, accept/reject).
+- **`## [Unreleased]` section pattern** at the top of
+  `CHANGELOG.md`. From 2.7.0 onward, in-flight entries
+  accumulate under `[Unreleased]` and the header is renamed
+  at release time. Conventions block documents the flow.
+- **Bench compile-unit additions**: `tests/bote.bcyr` now
+  includes `lib/tagged.cyr`, `lib/net.cyr`, `lib/tls.cyr`,
+  `lib/sandhi.cyr`, and `src/auth.cyr` — required by the new
+  `auth_bearer_check_*` benches. Compile unit at fn_table
+  **85%** (3478/4096), identifier buffer **85%**
+  (111806/131072) — under the 95% CI gate from 2.6.4.
+
+### Verified (cyrius 5.10.x, local)
+
+- **607 unit assertions across 8 test files** — **+4 vs 2.6.4**
+  from the four new `wrap_tool_result` lift-path assertions.
+  Per-file: `bote.tcyr` **398** (+4) / `bote_auth.tcyr` 38 /
+  `bote_content.tcyr` 24 / `bote_host.tcyr` 67 / `bote_jwt.tcyr`
+  28 / `bote_pkce.tcyr` 17 / `bote_sandbox.tcyr` 13 /
+  `bote_libro_tools.tcyr` 22.
+- **14 criterion benchmarks** — was 10; +4 from
+  `schema_compile_{simple,nested}` and
+  `auth_bearer_check_{unset,set}`.
+- Default binary: fn_table **89%** (3652/4096), identifier
+  buffer **88%** (116378/131072) — unchanged vs 2.6.4 (the
+  bridge.cyr branch addition adds <5 fns and doesn't move
+  the meter at this resolution). Well under the capacity gate.
+- Bench compile unit: fn_table **85%** (3478/4096), identifier
+  buffer **85%** (111806/131072) — comfortable headroom for
+  the four new bench callbacks and their auth + sandhi
+  includes.
+- `dist/bote.cyr` regenerated; header reflects 2.7.0.
+
+### Forward roadmap
+
+The 2.7.x feature candidates remaining (from the deferred
+2.6.x slate):
+- **HostRegistry hot-reload from config file** (Medium) —
+  useful for deployments that rotate allowed upstreams without
+  a restart.
+- **CONTRIBUTING.md Cyrius-era cleanup** — the current doc
+  still references Rust-era commands (`make check`,
+  `cargo-deny`, `src/lib.rs`). Stale since the Cyrius port.
+- **OAuth 2.1 authorization-code flow** (High) — out of scope
+  for MCP core; bote is the resource server. Explicitly
+  deferred — consumers compose bote with their own AS layer.
+
 ## [2.6.4] — 2026-05-10 — Capacity gate (closes 2.6.x modernization arc)
 
 Last patch in the 2.6.x modernization arc. The 2.6.0 toolchain

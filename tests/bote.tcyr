@@ -832,6 +832,31 @@ fn main() {
     var wr_pt = wrap_tool_result(formatted);
     assert(streq(wr_pt, formatted) == 1, "passthrough preserves bytes");
 
+    # 2.7.0: single content block (object with "type") lifts into a
+    # 1-element content array, preserving annotations. Pre-2.7.0 this
+    # path JSON-escaped the whole block into a `text` payload, losing
+    # the annotations.
+    var wr_block = wrap_tool_result("{\"type\":\"text\",\"text\":\"hi\"}");
+    assert(streq(wr_block, "{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}") == 1,
+              "single block lifts into 1-element content");
+
+    var wr_ann = wrap_tool_result(
+        "{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"priority\":50}}");
+    assert(streq(wr_ann,
+              "{\"content\":[{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"priority\":50}}]}") == 1,
+              "annotations survive the lift");
+
+    var wr_img = wrap_tool_result(
+        "{\"type\":\"image\",\"data\":\"AA==\",\"mimeType\":\"image/png\",\"annotations\":{\"audience\":[\"user\"]}}");
+    assert(streq(wr_img,
+              "{\"content\":[{\"type\":\"image\",\"data\":\"AA==\",\"mimeType\":\"image/png\",\"annotations\":{\"audience\":[\"user\"]}}]}") == 1,
+              "image-block annotations survive");
+
+    # Non-block object (no "type" field) still falls through to the
+    # synthesised text wrap — the block detection is type-tagged.
+    var wr_obj = wrap_tool_result("{\"answer\":42}");
+    assert_eq(jsonx_has(wr_obj, "content"), 1, "non-block object wraps to envelope");
+
     # ---------------- bridge: wrap_error_result ----------------
     var werr = wrap_error_result("something failed");
     assert_eq(jsonx_has(werr, "content"), 1, "err has content");

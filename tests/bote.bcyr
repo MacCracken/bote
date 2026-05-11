@@ -12,6 +12,10 @@ include "lib/hashmap.cyr"
 include "lib/json.cyr"
 include "lib/fnptr.cyr"
 include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
 include "lib/bench.cyr"
 
 include "src/error.cyr"
@@ -23,6 +27,7 @@ include "src/audit.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
+include "src/auth.cyr"
 
 # ================================================================
 # Globals — preallocated state shared by benchmark callbacks
@@ -40,6 +45,22 @@ var _b_compiled_simple = 0;
 var _b_compiled_nested = 0;
 var _b_compiled_simple_params = "{\"count\":5}";
 var _b_compiled_nested_params = "{\"config\":{\"host\":\"localhost\",\"port\":8080}}";
+
+# 2.7.0 — schema_compile bench. The bench callback calls
+# compiled_compile() on a pre-built schema, measuring the
+# compilation step itself (the validate benches measure the
+# resulting compiled artifact's runtime cost).
+var _b_schema_simple = 0;
+var _b_schema_nested = 0;
+
+# 2.7.0 — auth_bearer_check bench. Measures the no-validator
+# fast-path (validator fp == 0 → middleware returns 0 immediately)
+# versus the with-validator path (parse Authorization header +
+# call validator + check return). The buffer is a synthesised
+# HTTP request with a Bearer token.
+var _b_auth_req = "GET /mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer tok-A\r\n\r\n";
+var _b_auth_req_len = 0;
+var _b_auth_allowed = 0;
 
 fn h_echo_b(args) { return args; }
 
@@ -87,6 +108,28 @@ fn b_validate_compiled_nested() {
     return vec_len(compiled_validate(_b_compiled_nested, _b_compiled_nested_params));
 }
 
+fn b_schema_compile_simple() {
+    return compiled_compile(_b_schema_simple);
+}
+
+fn b_schema_compile_nested() {
+    return compiled_compile(_b_schema_nested);
+}
+
+# Validator unset → middleware returns 0 immediately. Validates
+# the no-overhead claim from 1.9.0 (the bearer middleware should
+# vanish when not configured).
+fn b_auth_bearer_check_unset() {
+    return auth_bearer_check(0, _b_auth_req, _b_auth_req_len, 0, 0);
+}
+
+# Validator configured → full path: parse Authorization header,
+# call validator (allowlist), accept/reject.
+fn b_auth_bearer_check_set() {
+    return auth_bearer_check(0, _b_auth_req, _b_auth_req_len,
+                             &auth_validator_allowlist, _b_auth_allowed);
+}
+
 # ================================================================
 # Setup
 # ================================================================
@@ -113,6 +156,24 @@ fn _bench_setup() {
     vec_push(pn, schema_prop_new("config",
         "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"}},\"required\":[\"host\"]}"));
     _b_compiled_nested = compiled_compile(schema_new("object", pn, vec_new()));
+
+    # Fresh (uncompiled) schemas for the schema_compile bench. Built
+    # once at setup so the bench callback measures pure compile cost
+    # against the same schema input each iter (no schema_new overhead).
+    var ps2 = vec_new();
+    vec_push(ps2, schema_prop_new("count", "{\"type\":\"integer\",\"minimum\":1,\"maximum\":10}"));
+    _b_schema_simple = schema_new("object", ps2, vec_new());
+
+    var pn2 = vec_new();
+    vec_push(pn2, schema_prop_new("config",
+        "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"}},\"required\":[\"host\"]}"));
+    _b_schema_nested = schema_new("object", pn2, vec_new());
+
+    # Auth bearer bench setup.
+    _b_auth_req_len = strlen(_b_auth_req);
+    _b_auth_allowed = vec_new();
+    vec_push(_b_auth_allowed, "tok-A");
+    vec_push(_b_auth_allowed, "tok-B");
     return 0;
 }
 
@@ -165,6 +226,22 @@ fn main() {
     var b10 = bench_new("validate_compiled_nested");
     bench_run(b10, &b_validate_compiled_nested, 10000);
     vec_push(benches, b10);
+
+    var b11 = bench_new("schema_compile_simple");
+    bench_run(b11, &b_schema_compile_simple, 10000);
+    vec_push(benches, b11);
+
+    var b12 = bench_new("schema_compile_nested");
+    bench_run(b12, &b_schema_compile_nested, 10000);
+    vec_push(benches, b12);
+
+    var b13 = bench_new("auth_bearer_check_unset");
+    bench_run(b13, &b_auth_bearer_check_unset, 100000);
+    vec_push(benches, b13);
+
+    var b14 = bench_new("auth_bearer_check_set");
+    bench_run(b14, &b_auth_bearer_check_set, 100000);
+    vec_push(benches, b14);
 
     bench_report_all(benches);
     return 0;
