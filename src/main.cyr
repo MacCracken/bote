@@ -14,6 +14,11 @@
 #   - 2.6.3: ships dist/bote.cyr via `cyrius distlib` so downstream
 #     consumers can `[deps.bote] modules = ["dist/bote.cyr"]`.
 #     Mirrors the libro / majra distribution contract.
+#   - 2.6.4: closes the modernization arc. CI capacity gate enforces
+#     fn_table + identifier-buffer utilisation < 95% via
+#     CYRIUS_STATS=1 + a parser step in ci.yml. The split / feature-gate
+#     options stay on the shelf as documented response paths if the
+#     gate ever fires.
 # Live integration is unchanged at the API surface — audit_libro
 # and events_majra both call into the same chain_*/pubsub_* names
 # they always have. See src/audit_libro.cyr + src/events_majra.cyr.

@@ -1,8 +1,9 @@
 # Bote Roadmap
 
-> **Current**: `2.6.3` (cyrius 5.10.34, libro 2.6.2, majra 2.4.3).
-> 8 active test files, **603 unit assertions**, single-file
-> `dist/bote.cyr` consumer bundle, 10 benchmarks, 4 fuzz harnesses, 6 transports,
+> **Current**: `2.6.4` (cyrius 5.10.34, libro 2.6.2, majra 2.4.3).
+> **Modernization arc closed.** 8 active test files, **603 unit
+> assertions**, single-file `dist/bote.cyr` consumer bundle, CI
+> capacity gate, 10 benchmarks, 4 fuzz harnesses, 6 transports,
 > handler-claims ABI plumbed end-to-end, JWT HS256 + RFC 7636
 > PKCE, bearer + allowlist + JWT validators, pluggable sandbox
 > runner (kavach 3.0 compatible), typed MCP content blocks
@@ -51,6 +52,7 @@ surfaces. See the **2.6.x modernization arc** section below.
 | **2.6.1** | Retire `_sandhi_compat.cyr` — 108 call sites flipped to `sandhi_server_*` names; mechanical rename, no behaviour change |
 | **2.6.2** | Port `src/libro_tools.cyr` to libro 2.6.x API (raw struct offsets replace retired `entry_*`/`error_*`/`merkle_*` getters); `bote_libro_tools.tcyr` re-enabled (22 assertions); back to 603-assertion baseline |
 | **2.6.3** | Ship `dist/bote.cyr` — single-file consumer bundle via `cyrius distlib`. CI freshness gate + release asset. libro/majra-style downstream distribution contract |
+| **2.6.4** | CI capacity gate (`CYRIUS_STATS=1` + 95% fn_table / identifier-buffer threshold). Modernization arc closes. Three documented response paths (upstream cap raise, transport split, `BOTE_FULL_CONFIG` gate) if the gate ever fires |
 
 See [CHANGELOG.md](../../CHANGELOG.md) for the full detail per release.
 
@@ -68,11 +70,10 @@ ships new MCP surface; behaviour is preserved at the wire level.
 | **2.6.1** | Retire `_sandhi_compat.cyr` | ✅ Shipped. 108 call sites across `auth.cyr` / `bridge.cyr` / `transport_http.cyr` / `transport_streamable.cyr` / `transport_ws.cyr` + tests flipped to `sandhi_server_*` names. Shim deleted; CI manifest-completeness gate's `EXCLUDES` allowlist gone. |
 | **2.6.2** | Port `libro_tools.cyr` to libro 2.6.x API | ✅ Shipped. Raw struct-offset accessors (`_lt_entry_*`, `_lt_err_*`, `_lt_chain_entries`, `_lt_merkle_leaf_count`) replace the retired `entry_*`/`error_*`/`chain_entries`/`merkle_tree_leaf_count` getters; `merkle_proof` → `merkle_inclusion_proof`. `bote_libro_tools.tcyr` re-enabled (22 assertions); 8-file matrix in CI. libro_tools is still opt-in for the default binary (fn_table headroom). |
 | **2.6.3** | `cyrius distlib` bundle for bote | ✅ Shipped. `dist/bote.cyr` (4615 lines, committed) generated from `cyrius.cyml [lib] modules`; CI freshness gate enforces byte-clean diff vs the committed bundle; release ships it as `bote-<ver>.cyr` next to source tarball + binary + lockfile + SHA256SUMS. `libro_tools.cyr` stays out of the default bundle (opt-in). |
-| **2.6.4** | Capacity / split prep | The 5.10.34 full-binary build runs at fn_table ~89% (3663/4096) and identifier buffer ~88%. Either split the WS / streamable transports into their own compilation unit (an opt-in include) or fold the unused-config setters behind a feature gate. Decision depends on whether the 2.6.2 libro_tools restore pushes us past 4096. |
+| **2.6.4** | Capacity / split prep | ✅ Shipped. CI capacity gate enforces fn_table + identifier-buffer utilisation < 95% via `CYRIUS_STATS=1` + a parser step in `.github/workflows/ci.yml`. Current util 89% / 88% (no source-side split needed yet). `CYRIUS_DCE=1` measured to be a no-op for the cap counters (compile-time vs emitted bytes). Three documented response paths if the gate fires: upstream cap raise (preferred — has happened before), opt-in transport split (mirrors libro_tools), or `#ifdef BOTE_FULL_CONFIG` feature gate on the ~30 unused config setters. |
 
-The 2.6.x arc is bounded — once 2.6.4 lands, the modernization
-backlog is empty and 2.7.x picks up the deferred feature work
-below.
+✅ **Modernization arc closed at 2.6.4.** The 2.7.x feature
+backlog below is now unblocked.
 
 ---
 

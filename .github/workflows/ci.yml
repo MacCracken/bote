@@ -121,11 +121,58 @@ jobs:
       - name: Build
         run: |
           mkdir -p build
-          cyrius build src/main.cyr build/bote
+          # CYRIUS_STATS=1 emits a machine-parseable capacity report
+          # at the tail of stdout — feeds the capacity gate below.
+          CYRIUS_STATS=1 cyrius build src/main.cyr build/bote 2>&1 | tee build/build.log
           echo "bote: $(wc -c < build/bote) bytes"
 
       - name: Verify ELF
         run: xxd -l 4 build/bote | grep -q "7f45 4c46"
+
+      - name: Capacity gate
+        # Compile-time resource gate. Cyrius prints utilisation under
+        # `cyrius stats:` when CYRIUS_STATS=1 (see the build step).
+        # We fail CI if fn_table or identifiers cross 95% — the cyrius
+        # compiler itself warns at 85%, but the warning isn't load-bearing
+        # so something has to enforce. 95% leaves ~5% headroom for a
+        # mid-PR feature add before forcing the split conversation.
+        #
+        # If this gate fires, the response is one of:
+        #   1. Land the cyrius cap raise upstream (preferred; the cap
+        #      has moved before — 2048→4096 in cyrius 4.7.1).
+        #   2. Split a transport into an opt-in compile unit (e.g.
+        #      keep stdio + http in the default binary; ws / streamable
+        #      / bridge pulled in via separate `include "src/transport_ws.cyr"`
+        #      at the consumer's main.cyr).
+        #   3. Feature-gate the unused config-setter surface behind
+        #      `#ifdef BOTE_FULL_CONFIG` so the lean profile sheds
+        #      ~30 setters that no in-tree consumer calls.
+        # Inspect locally with `CYRIUS_STATS=1 cyrius build src/main.cyr
+        # build/bote` — the `cyrius stats:` block at the tail of stdout
+        # shows current utilisation.
+        run: |
+          if ! grep -q "^cyrius stats:" build/build.log; then
+            echo "::warning::cyrius stats: line not found — CYRIUS_STATS may be unsupported on this toolchain. Skipping gate."
+            exit 0
+          fi
+          fn_used=$(grep "^  fn_table:" build/build.log    | awk '{print $2}')
+          fn_cap=$(grep  "^  fn_table:" build/build.log    | awk '{print $4}')
+          id_used=$(grep "^  identifiers:" build/build.log | awk '{print $2}')
+          id_cap=$(grep  "^  identifiers:" build/build.log | awk '{print $4}')
+          fn_pct=$(( fn_used * 100 / fn_cap ))
+          id_pct=$(( id_used * 100 / id_cap ))
+          echo "fn_table:    $fn_used / $fn_cap  (${fn_pct}%)"
+          echo "identifiers: $id_used / $id_cap  (${id_pct}%)"
+          fail=0
+          if [ "$fn_pct" -ge 95 ]; then
+            echo "::error::fn_table at ${fn_pct}% — split / cap-raise required (gate threshold 95%)"
+            fail=1
+          fi
+          if [ "$id_pct" -ge 95 ]; then
+            echo "::error::identifier buffer at ${id_pct}% — split / cap-raise required (gate threshold 95%)"
+            fail=1
+          fi
+          exit $fail
 
       - name: dist bundle is up-to-date
         # `cyrius distlib` reads cyrius.cyml [lib] modules and emits

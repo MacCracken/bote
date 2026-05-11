@@ -2,6 +2,97 @@
 
 All notable changes to bote are documented here.
 
+## [2.6.4] — 2026-05-10 — Capacity gate (closes 2.6.x modernization arc)
+
+Last patch in the 2.6.x modernization arc. The 2.6.0 toolchain
+bump pushed the default-binary compile-time fn_table to 89%
+(3652/4096) and the identifier buffer to 88% (116370/131072) —
+both above cyrius's own 85% in-compiler warning threshold but
+neither blocking. 2.6.4 lands a CI gate so the situation can't
+quietly drift past the cap during 2.7.x feature work without
+forcing the split / cap-raise conversation.
+
+No source-side architectural change; the split / feature-gate
+options are documented as response paths if the gate fires.
+The 2.7.x feature backlog (deferred from the original 2.6.x
+slate by 2.6.0) is now unblocked.
+
+### Added
+
+- **CI capacity gate** (`.github/workflows/ci.yml`). The
+  `cyrius build` step now runs under `CYRIUS_STATS=1`, which
+  emits a machine-parseable `cyrius stats:` block at the
+  tail of stdout:
+  ```
+  cyrius stats:
+    fn_table:    3652 / 4096
+    identifiers: 116370 / 131072
+    var_table:   1890 / 8192
+    fixup_table: 12331 / 262144
+    string_data: 30735 / 2097152
+    code_size:   1220568 / 1048576
+  ```
+  A follow-up step parses `fn_table` and `identifiers`,
+  computes utilisation, and fails the build if either crosses
+  **95%**. Threshold rationale: cyrius itself warns at 85%
+  (advisory only); 95% leaves ~5% headroom (~205 fn slots,
+  ~7350 ident bytes) for a mid-PR feature add before the
+  gate trips. Current util is 89% / 88% — well under the
+  gate.
+- **Three documented response paths** for when the gate
+  ever fires (inline in `.github/workflows/ci.yml` and
+  echoed in `docs/development/roadmap.md`):
+  1. **Land the cyrius cap raise upstream.** Preferred —
+     the cap has moved before (fn_table 2048→4096 in
+     cyrius 4.7.1, identifier buffer raised to 131072 in
+     4.6.2). File against `cyrius-feedback.md`.
+  2. **Split a transport into an opt-in compile unit.**
+     Keep stdio + http in the default binary; ws /
+     streamable / bridge / unix pulled in via a separate
+     `include "src/transport_ws.cyr"` at the consumer's
+     `main.cyr`. Mirrors the `libro_tools.cyr` opt-in
+     pattern from 2.6.2.
+  3. **Feature-gate the unused config-setter surface**
+     behind `#ifdef BOTE_FULL_CONFIG`. The lean profile
+     would shed ~30 setters that no in-tree consumer calls
+     (`bridge_config_with_*`, `streamable_config_with_*`,
+     `ws_config_with_*` etc.).
+
+### Verified (cyrius 5.10.x, local)
+
+- **Capacity gate simulation** — local run with the same
+  parser CI uses reports `fn_table: 3652 / 4096 (89%)`,
+  `identifiers: 116370 / 131072 (88%)`. `GATE: pass`.
+- **`CYRIUS_DCE=1` impact measured**: zero. DCE only
+  affects emitted code bytes; the fn_table / identifier
+  counters are compile-time resource consumption, eaten
+  by every `fn` declaration regardless of whether it gets
+  emitted. (Captured in the gate's inline rationale so the
+  next person doesn't re-test this.)
+- **603 unit assertions across 8 test files** — unchanged.
+- Build: `src/main.cyr → build/bote` at fn_table 89%
+  (3652/4096), identifier buffer 88% (116370/131072) —
+  no change vs 2.6.3.
+- `dist/bote.cyr` regenerated; header reflects 2.6.4.
+
+### Modernization arc — done
+
+The 2.6.x arc opened at 2.6.0 with the cyrius 5.10.34 /
+libro 2.6.2 / majra 2.4.3 floor bump and closes at 2.6.4
+with the capacity gate. Five patches, each a contained
+bite, no behaviour drift:
+
+| Patch | Bite |
+|---|---|
+| 2.6.0 | cyrius / libro / majra floor bump + cyrius.cyml + dist-bundle deps + CI installer modernization + sandhi compat shim |
+| 2.6.1 | Retire `_sandhi_compat.cyr` — 108 call sites flipped to `sandhi_server_*` |
+| 2.6.2 | Port `libro_tools.cyr` to libro 2.6.x API; re-enable `bote_libro_tools.tcyr`; back to 603-assertion baseline |
+| 2.6.3 | Ship `dist/bote.cyr` consumer bundle via `cyrius distlib`; CI freshness gate; release asset |
+| 2.6.4 | CI capacity gate (95% fn_table / identifier threshold); modernization arc closed |
+
+2.7.x picks up the deferred feature backlog — see
+`docs/development/roadmap.md`.
+
 ## [2.6.3] — 2026-05-10 — Ship `dist/bote.cyr` for downstream consumers
 
 Fourth patch in the 2.6.x modernization arc. Brings bote onto
