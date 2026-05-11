@@ -87,11 +87,12 @@ narrows to one functional feature, one doc cleanup, and one
 out-of-scope marker. 2.7.x is where MCP-spec-aligned capability
 work belongs.
 
-### Next candidates (no blockers)
+### Next candidates
 
-| Item | Effort | Notes |
-|---|---|---|
-| **OAuth 2.1 authorization-code flow** (bote-as-AS) | High | Out of scope for MCP core; bote is the resource server. Flagged as explicitly deferred — consumers compose bote with their own AS layer. |
+| Item | Priority | Effort | Notes |
+|---|---|---|---|
+| **Opt-in transport profile** — ship `dist/bote-core.cyr` alongside the monolithic `dist/bote.cyr` (9-module core: error / protocol / jsonx / registry / events / audit / dispatch / codec / schema; excludes transports / auth / session / discovery / content / host). See [`issues/2026-05-10-opt-in-transport-profile.md`](issues/2026-05-10-opt-in-transport-profile.md) | **P1 — current arc** | Medium | Trigger: t-ron 2.1.x is currently per-module-pulling 9 bote files because `dist/bote.cyr` + `dist/libro.cyr` together exceed cyrius's 2 MB compile-source-size cap. Companion cyrius cap-raise proposal at `cyrius/docs/development/proposals/2026-05-10-raise-compile-source-cap.md`; landing either unblocks t-ron, landing both gives consumers the choice. Mechanical split — no source change to transports. CI gains a `tests/bote_core_only_smoke.tcyr` to guard against core/transport entanglement |
+| **OAuth 2.1 authorization-code flow** (bote-as-AS) | Deferred | High | Out of scope for MCP core; bote is the resource server. Flagged as explicitly deferred — consumers compose bote with their own AS layer. |
 
 The functional 2.7.x slate from the 2.6.x carry-forward list is
 empty after 2.7.1 (HostRegistry hot-reload + CONTRIBUTING.md both
