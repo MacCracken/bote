@@ -207,11 +207,11 @@ fn _strm_init() {
 fn _strm_check_origin(cfd, buf, blen, config) {
     var allowed = streamable_config_allowed_origins(config);
     if (allowed == 0) { return 0; }
-    var origin = http_find_header(buf, blen, "Origin");
+    var origin = sandhi_server_find_header(buf, blen, "Origin");
     var orig = origin;
     if (orig == 0) { orig = ""; }
     if (validate_origin(orig, allowed) != 0) {
-        http_send_status(cfd, HTTP_FORBIDDEN, "Forbidden");
+        sandhi_server_send_status(cfd, HTTP_FORBIDDEN, "Forbidden");
         return HTTP_FORBIDDEN;
     }
     return 0;
@@ -219,13 +219,13 @@ fn _strm_check_origin(cfd, buf, blen, config) {
 
 # Streamable spec REQUIRES MCP-Protocol-Version on every request.
 fn _strm_check_protocol(cfd, buf, blen) {
-    var v = http_find_header(buf, blen, "MCP-Protocol-Version");
+    var v = sandhi_server_find_header(buf, blen, "MCP-Protocol-Version");
     if (v == 0) {
-        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
         return HTTP_BAD_REQUEST;
     }
     if (validate_protocol_version(v) != 0) {
-        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
         return HTTP_BAD_REQUEST;
     }
     return 0;
@@ -234,14 +234,14 @@ fn _strm_check_protocol(cfd, buf, blen) {
 fn _strm_check_session(cfd, buf, blen, config, method) {
     var st = streamable_config_session_store(config);
     if (st == 0) { return 0; }
-    var sid = http_find_header(buf, blen, "MCP-Session-Id");
+    var sid = sandhi_server_find_header(buf, blen, "MCP-Session-Id");
     if (sid == 0) {
         if (streq(method, "initialize") == 1) { return 0; }
-        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        sandhi_server_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
         return HTTP_NOT_FOUND;
     }
     if (session_store_validate(st, sid) == 0) {
-        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        sandhi_server_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
         return HTTP_NOT_FOUND;
     }
     return 0;
@@ -260,8 +260,8 @@ fn _strm_peek_method(body) {
 fn _strm_handle_post(cfd, buf, n, config) {
     var claims_slot[8]; store64(&claims_slot, 0);
     if (_strm_check_origin(cfd, buf, n, config) != 0) { return 0; }
-    if (http_find_header(buf, n, "Transfer-Encoding") != 0) {
-        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
+    if (sandhi_server_find_header(buf, n, "Transfer-Encoding") != 0) {
+        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
     }
     if (auth_bearer_check(cfd, buf, n,
                           streamable_config_bearer_validator(config),
@@ -269,14 +269,14 @@ fn _strm_handle_post(cfd, buf, n, config) {
                           &claims_slot) != 0) { return 0; }
     if (_strm_check_protocol(cfd, buf, n) != 0) { return 0; }
 
-    var bo = http_body_offset(buf, n);
+    var bo = sandhi_server_body_offset(buf, n);
     if (bo < 0 || bo > n) {
-        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
         return 0;
     }
-    var clen = http_content_length(buf, n);
+    var clen = sandhi_server_content_length(buf, n);
     if (clen > 61440) {
-        http_send_status(cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large"); return 0;
+        sandhi_server_send_status(cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large"); return 0;
     }
     if (clen <= 0) { clen = n - bo; }
     if (clen < 0) { clen = 0; }
@@ -306,7 +306,7 @@ fn _strm_handle_post(cfd, buf, n, config) {
         http_send_204(cfd, extra);
         return 0;
     }
-    http_send_response(cfd, HTTP_OK, "OK", "application/json",
+    sandhi_server_send_response(cfd, HTTP_OK, "OK", "application/json",
                        resp, strlen(resp), extra);
     return 0;
 }
@@ -323,14 +323,14 @@ fn _strm_send_retry(cfd, retry_ms) {
     str_builder_add_int(sb, retry_ms);
     str_builder_add_cstr(sb, "\n\n");
     var s = str_data(str_builder_build(sb));
-    http_send_chunk(cfd, s, strlen(s));
+    sandhi_server_send_chunk(cfd, s, strlen(s));
     return 0;
 }
 
 fn _strm_handle_get(cfd, buf, n, config) {
     if (_strm_check_origin(cfd, buf, n, config) != 0) { return 0; }
-    if (http_find_header(buf, n, "Transfer-Encoding") != 0) {
-        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
+    if (sandhi_server_find_header(buf, n, "Transfer-Encoding") != 0) {
+        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
     }
     if (auth_bearer_check(cfd, buf, n,
                           streamable_config_bearer_validator(config),
@@ -340,16 +340,16 @@ fn _strm_handle_get(cfd, buf, n, config) {
     if (_strm_check_session(cfd, buf, n, config, "") != 0) { return 0; }
 
     # Open the SSE stream
-    http_send_chunked_start(cfd, HTTP_OK, "text/event-stream", 0);
+    sandhi_server_send_chunked_start(cfd, HTTP_OK, "text/event-stream", 0);
 
     # Priming event — confirms the stream is up, gives client an event ID
     # baseline for reconnection.
     var primer = stream_event_primer(event_id_gen_next(_strm_event_ids));
     var primer_wire = stream_event_to_wire(primer);
-    http_send_chunk(cfd, primer_wire, strlen(primer_wire));
+    sandhi_server_send_chunk(cfd, primer_wire, strlen(primer_wire));
 
     # Replay buffered events past Last-Event-ID, if provided.
-    var last_id = http_find_header(buf, n, "Last-Event-ID");
+    var last_id = sandhi_server_find_header(buf, n, "Last-Event-ID");
     if (last_id != 0) {
         var replay = resumption_buffer_events_after(_strm_resumption, last_id);
         var ri = 0;
@@ -357,7 +357,7 @@ fn _strm_handle_get(cfd, buf, n, config) {
         while (ri < rn) {
             var ev = vec_get(replay, ri);
             var wire = stream_event_to_wire(ev);
-            http_send_chunk(cfd, wire, strlen(wire));
+            sandhi_server_send_chunk(cfd, wire, strlen(wire));
             ri = ri + 1;
         }
     }
@@ -366,28 +366,28 @@ fn _strm_handle_get(cfd, buf, n, config) {
     # streaming dispatch (v1.5+); for now the GET stream is open just long
     # enough to deliver the primer + any buffered replay.
     _strm_send_retry(cfd, streamable_config_retry_ms(config));
-    http_send_chunked_end(cfd);
+    sandhi_server_send_chunked_end(cfd);
     return 0;
 }
 
 # ================================================================
-# Top-level handler — dispatched by stdlib http_server_run
+# Top-level handler — dispatched by stdlib sandhi_server_run
 # ================================================================
 
 fn _strm_handle(config, cfd, buf, n) {
-    var method = http_get_method(buf, n);
-    var path   = http_get_path(buf, n);
+    var method = sandhi_server_get_method(buf, n);
+    var path   = sandhi_server_get_path(buf, n);
 
     # Path must match the configured endpoint (strip query first).
-    if (streq(http_path_only(path), streamable_config_path(config)) == 0) {
-        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+    if (streq(sandhi_server_path_only(path), streamable_config_path(config)) == 0) {
+        sandhi_server_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
         return 0;
     }
 
     if (streq(method, "POST") == 1) { return _strm_handle_post(cfd, buf, n, config); }
     if (streq(method, "GET") == 1)  { return _strm_handle_get(cfd, buf, n, config); }
 
-    http_send_status(cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed");
+    sandhi_server_send_status(cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed");
     return 0;
 }
 
@@ -398,7 +398,7 @@ fn _strm_handle(config, cfd, buf, n) {
 fn transport_streamable_run(dispatcher, config) {
     _strm_init();
     store64(config + 56, dispatcher);
-    return http_server_run(streamable_config_addr(config),
+    return sandhi_server_run(streamable_config_addr(config),
                            streamable_config_port(config),
                            &_strm_handle,
                            config);

@@ -110,10 +110,7 @@ jobs:
             | sed -E 's/.*"(src\/[^"]+\.cyr)".*/\1/' | sort -u)
           MANIFEST=$(awk '/^\[lib\]/{flag=1;next} /^\[/{flag=0} flag' cyrius.cyml \
             | grep -oE '"src/[^"]+\.cyr"' | tr -d '"' | sort -u)
-          # Known excludes — modules included by main.cyr but
-          # intentionally not in [lib] (compat shims, etc.).
-          EXCLUDES="src/_sandhi_compat.cyr"
-          MISSING=$(comm -23 <(echo "$INCLUDES") <(echo "$MANIFEST" | cat - <(echo "$EXCLUDES" | tr ' ' '\n') | sort -u))
+          MISSING=$(comm -23 <(echo "$INCLUDES") <(echo "$MANIFEST"))
           if [ -n "$MISSING" ]; then
             echo "FAIL: src/ files included from main.cyr but not in cyrius.cyml [lib] modules:"
             echo "$MISSING"
@@ -143,7 +140,8 @@ jobs:
                       tests/bote_host.tcyr \
                       tests/bote_jwt.tcyr \
                       tests/bote_pkce.tcyr \
-                      tests/bote_sandbox.tcyr; do
+                      tests/bote_sandbox.tcyr \
+                      tests/bote_libro_tools.tcyr; do
             echo "--- $tcyr ---"
             out=$(cyrius test "$tcyr" 2>&1)
             tail=$(echo "$out" | tail -3)

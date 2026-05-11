@@ -16,6 +16,17 @@
 # All libro boundaries expect Str (fat string {data, len}); MCP args
 # arrive as cstr. Every cross-boundary pass wraps with str_from() — the
 # same pattern that fixed the v1.2.1 audit_libro cstr/Str heisenbug.
+#
+# 2.6.2 port: libro 2.x dropped the public `entry_action` /
+# `entry_severity` / `entry_hash` / `entry_source` / `entry_agent_id` /
+# `entry_timestamp` accessors, the `chain_entries` getter, the
+# `error_code` / `error_index` / `error_msg` getters, the
+# `merkle_tree_leaf_count` accessor, and renamed `merkle_proof` to
+# `merkle_inclusion_proof`. All of those are now field reads on
+# struct-typed handles. We re-introduce the thin accessor names
+# below as module-local `_lt_*` helpers so the handler bodies stay
+# readable — matches the entry struct layout at lib/libro.cyr:200
+# (raw offsets are documented inline).
 
 # ================================================================
 # Module state: the chain we're wrapping, set once at init
@@ -27,6 +38,36 @@ fn libro_tools_init(chain) {
     _libro_tools_chain = chain;
     return 0;
 }
+
+# ================================================================
+# libro 2.x struct-field accessors (used to be public; raw offsets
+# now). Layout reference: lib/libro.cyr:200 (entry), :28 (error),
+# :1079 (chain), :2046 (merkle_tree).
+# ================================================================
+
+# struct entry — +0 uuid_hi, +8 uuid_lo, +16 timestamp, +24 severity,
+# +32 source(Str), +40 action(Str), +48 details(Str),
+# +56 agent_id(Str|0), +64 prev_hash(Str), +72 hash(Str),
+# +80 hash_algorithm.
+fn _lt_entry_timestamp(e) { return load64(e + 16); }
+fn _lt_entry_severity(e)  { return load64(e + 24); }
+fn _lt_entry_source(e)    { return load64(e + 32); }
+fn _lt_entry_action(e)    { return load64(e + 40); }
+fn _lt_entry_agent_id(e)  { return load64(e + 56); }
+fn _lt_entry_hash(e)      { return load64(e + 72); }
+
+# struct chain — +0 entries(vec), +8 prev_hash(Str), +16 max_capacity,
+# +24 overflow(vec).
+fn _lt_chain_entries(c)   { return load64(c); }
+
+# struct error — +0 code, +8 msg(cstr), +16 field_name, +24 index,
+# +32 expected, +40 actual.
+fn _lt_err_code(err)      { return load64(err);      }
+fn _lt_err_msg(err)       { return load64(err + 8);  }
+fn _lt_err_index(err)     { return load64(err + 24); }
+
+# struct merkle_tree — +0 nodes(vec), +8 leaf_count.
+fn _lt_merkle_leaf_count(t) { return load64(t + 8); }
 
 # ================================================================
 # Small helpers
@@ -53,17 +94,18 @@ fn _lt_error(msg) {
 # Emit one entry as a JSON object into sb.
 fn _lt_emit_entry(sb, e) {
     str_builder_add_cstr(sb, "{\"timestamp\":");
-    str_builder_add_int(sb, entry_timestamp(e));
+    str_builder_add_int(sb, _lt_entry_timestamp(e));
     str_builder_add_cstr(sb, ",\"severity\":");
-    str_builder_add_int(sb, entry_severity(e));
+    str_builder_add_int(sb, _lt_entry_severity(e));
     str_builder_add_cstr(sb, ",\"source\":\"");
-    _json_emit_escaped(sb, str_data(entry_source(e)));
+    _json_emit_escaped(sb, str_data(_lt_entry_source(e)));
     str_builder_add_cstr(sb, "\",\"action\":\"");
-    _json_emit_escaped(sb, str_data(entry_action(e)));
+    _json_emit_escaped(sb, str_data(_lt_entry_action(e)));
     str_builder_add_cstr(sb, "\",\"agent_id\":\"");
-    _json_emit_escaped(sb, str_data(entry_agent_id(e)));
+    var aid = _lt_entry_agent_id(e);
+    if (aid != 0) { _json_emit_escaped(sb, str_data(aid)); }
     str_builder_add_cstr(sb, "\",\"hash\":\"");
-    _json_emit_escaped(sb, str_data(entry_hash(e)));
+    _json_emit_escaped(sb, str_data(_lt_entry_hash(e)));
     str_builder_add_cstr(sb, "\"}");
     return 0;
 }
@@ -114,7 +156,7 @@ fn libro_tool_query(args, claims) {
         query_before(q, _lt_get_int(args, "before"));
     }
 
-    var matched = query_apply(q, chain_entries(_libro_tools_chain));
+    var matched = query_apply(q, _lt_chain_entries(_libro_tools_chain));
 
     # Pagination: offset + limit slice the matched vec.
     var offset = _lt_get_int(args, "offset");
@@ -154,12 +196,12 @@ fn libro_tool_verify(args, claims) {
 
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"ok\":false,\"code\":");
-    str_builder_add_int(sb, error_code(err));
+    str_builder_add_int(sb, _lt_err_code(err));
     str_builder_add_cstr(sb, ",\"index\":");
-    str_builder_add_int(sb, error_index(err));
+    str_builder_add_int(sb, _lt_err_index(err));
     str_builder_add_cstr(sb, ",\"message\":\"");
-    var m = error_msg(err);
-    if (m != 0) { _json_emit_escaped(sb, str_data(m)); }
+    var m = _lt_err_msg(err);
+    if (m != 0) { _json_emit_escaped(sb, m); }
     str_builder_add_cstr(sb, "\"}");
     return str_data(str_builder_build(sb));
 }
@@ -173,7 +215,7 @@ fn libro_tool_verify(args, claims) {
 
 fn libro_tool_export(args, claims) {
     if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
-    var entries = chain_entries(_libro_tools_chain);
+    var entries = _lt_chain_entries(_libro_tools_chain);
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"ok\":true,\"count\":");
     str_builder_add_int(sb, vec_len(entries));
@@ -201,19 +243,19 @@ fn libro_tool_proof(args, claims) {
     if (jsonx_has(args, "index") == 0) { return _lt_error("missing 'index'"); }
     var idx = _lt_get_int(args, "index");
 
-    var entries = chain_entries(_libro_tools_chain);
+    var entries = _lt_chain_entries(_libro_tools_chain);
     if (idx < 0 || idx >= vec_len(entries)) { return _lt_error("index out of range"); }
 
     var tree = merkle_build(entries);
     if (tree == 0) { return _lt_error("empty chain"); }
-    var proof = merkle_proof(tree, idx);
+    var proof = merkle_inclusion_proof(tree, idx);
     if (proof == 0) { return _lt_error("proof unavailable"); }
 
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"ok\":true,\"index\":");
     str_builder_add_int(sb, idx);
     str_builder_add_cstr(sb, ",\"leaf_count\":");
-    str_builder_add_int(sb, merkle_tree_leaf_count(tree));
+    str_builder_add_int(sb, _lt_merkle_leaf_count(tree));
     str_builder_add_cstr(sb, ",\"root\":\"");
     var root = merkle_tree_root(tree);
     if (root != 0) { _json_emit_escaped(sb, str_data(root)); }
@@ -253,9 +295,9 @@ fn libro_tool_retention(args, claims) {
         return _lt_error("unknown policy");
     }
 
-    var before = vec_len(chain_entries(_libro_tools_chain));
+    var before = vec_len(_lt_chain_entries(_libro_tools_chain));
     chain_apply_retention(_libro_tools_chain, policy);
-    var after = vec_len(chain_entries(_libro_tools_chain));
+    var after = vec_len(_lt_chain_entries(_libro_tools_chain));
     var archived = before - after;
     if (archived < 0) { archived = 0; }
 

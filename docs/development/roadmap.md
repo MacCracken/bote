@@ -1,9 +1,9 @@
 # Bote Roadmap
 
-> **Current**: `2.6.0` (cyrius 5.10.34, libro 2.6.2, majra 2.4.3).
-> 7 active test files, **581 unit assertions** (22 in
-> `bote_libro_tools.tcyr` parked pending the libro 2.6.x API
-> port), 10 benchmarks, 4 fuzz harnesses, 6 transports,
+> **Current**: `2.6.2` (cyrius 5.10.34, libro 2.6.2, majra 2.4.3).
+> 8 active test files, **603 unit assertions** (back to the
+> 2.5.1 baseline after the 2.6.2 libro_tools port re-enabled
+> `bote_libro_tools.tcyr`), 10 benchmarks, 4 fuzz harnesses, 6 transports,
 > handler-claims ABI plumbed end-to-end, JWT HS256 + RFC 7636
 > PKCE, bearer + allowlist + JWT validators, pluggable sandbox
 > runner (kavach 3.0 compatible), typed MCP content blocks
@@ -49,6 +49,8 @@ surfaces. See the **2.6.x modernization arc** section below.
 | **2.5.0** | Claims propagation through transports (validator's return threads to handler) |
 | **2.5.1** | Restore audit_libro + events_majra tests after cyrius 4.8.4 retag |
 | **2.6.0** | Modernization platform — cyrius 5.10.34, libro 2.6.2 / majra 2.4.3 via dist bundles, cyrius.cyml + `${file:VERSION}` layout, versioned-toolchain CI installer, sandhi compat shim |
+| **2.6.1** | Retire `_sandhi_compat.cyr` — 108 call sites flipped to `sandhi_server_*` names; mechanical rename, no behaviour change |
+| **2.6.2** | Port `src/libro_tools.cyr` to libro 2.6.x API (raw struct offsets replace retired `entry_*`/`error_*`/`merkle_*` getters); `bote_libro_tools.tcyr` re-enabled (22 assertions); back to 603-assertion baseline |
 
 See [CHANGELOG.md](../../CHANGELOG.md) for the full detail per release.
 
@@ -63,8 +65,8 @@ ships new MCP surface; behaviour is preserved at the wire level.
 | Patch | Bite | Notes |
 |---|---|---|
 | **2.6.0** | Toolchain floor + dist-bundle deps | ✅ Shipped. cyrius 5.10.34, libro 2.6.2 / majra 2.4.3 via `dist/<crate>.cyr`, cyrius.cyml + `${file:VERSION}`, lib/ untracked, CI installer matches majra/agnosys, sandhi compat shim. `bote_libro_tools.tcyr` parked. |
-| **2.6.1** | Retire `_sandhi_compat.cyr` | Rename 56 call sites across `transport_http.cyr`, `transport_streamable.cyr`, `bridge.cyr`, `transport_ws.cyr`, `auth.cyr` to the `sandhi_server_*` names; delete the shim. Mechanical pass, no behaviour change. |
-| **2.6.2** | Port `libro_tools.cyr` to libro 2.6.x API | `entry_action` / `entry_severity` / `entry_hash` / `entry_source` / `entry_agent_id` / `entry_timestamp` accessors retired in libro 2.x — replace with the new entry-handle ABI. Replace `merkle_proof` with `merkle_inclusion_proof`. Replace `merkle_tree_leaf_count` with the `(tree, size)` API. Replace `libro_export` with `export_jsonl` over a memory-backed fd. Re-enable `bote_libro_tools.tcyr` (22 assertions). |
+| **2.6.1** | Retire `_sandhi_compat.cyr` | ✅ Shipped. 108 call sites across `auth.cyr` / `bridge.cyr` / `transport_http.cyr` / `transport_streamable.cyr` / `transport_ws.cyr` + tests flipped to `sandhi_server_*` names. Shim deleted; CI manifest-completeness gate's `EXCLUDES` allowlist gone. |
+| **2.6.2** | Port `libro_tools.cyr` to libro 2.6.x API | ✅ Shipped. Raw struct-offset accessors (`_lt_entry_*`, `_lt_err_*`, `_lt_chain_entries`, `_lt_merkle_leaf_count`) replace the retired `entry_*`/`error_*`/`chain_entries`/`merkle_tree_leaf_count` getters; `merkle_proof` → `merkle_inclusion_proof`. `bote_libro_tools.tcyr` re-enabled (22 assertions); 8-file matrix in CI. libro_tools is still opt-in for the default binary (fn_table headroom). |
 | **2.6.3** | `cyrius distlib` bundle for bote | Emit `dist/bote.cyr` so downstream consumers (phylax / t-ron / sutra / jalwa / rasa / mneme) can `[deps.bote] modules = ["dist/bote.cyr"]` instead of vendoring src/. Mirrors libro / majra. Adds a CI freshness gate. |
 | **2.6.4** | Capacity / split prep | The 5.10.34 full-binary build runs at fn_table ~89% (3663/4096) and identifier buffer ~88%. Either split the WS / streamable transports into their own compilation unit (an opt-in include) or fold the unused-config setters behind a feature gate. Decision depends on whether the 2.6.2 libro_tools restore pushes us past 4096. |
 

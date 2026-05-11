@@ -190,12 +190,12 @@ fn _bridge_cors_headers(allowed_origins, request_origin) {
 
 fn _bridge_send_health(cfd, allowed_origins, request_origin) {
     var cors = _bridge_cors_headers(allowed_origins, request_origin);
-    http_send_response(cfd, HTTP_OK, "OK", "text/plain", "ok", 2, cors);
+    sandhi_server_send_response(cfd, HTTP_OK, "OK", "text/plain", "ok", 2, cors);
     return 0;
 }
 
 # ================================================================
-# Per-connection handler — invoked per connection by http_server_run
+# Per-connection handler — invoked per connection by sandhi_server_run
 # ================================================================
 #
 # BridgeConfig now carries the dispatcher in the +24 slot (see
@@ -205,9 +205,9 @@ fn _bridge_handle(config, cfd, buf, n) {
     var allowed_origins = bridge_config_origins(config);
     var dispatcher      = bridge_config_dispatcher(config);
 
-    var method = http_get_method(buf, n);
-    var path   = http_get_path(buf, n);
-    var origin = http_find_header(buf, n, "Origin");
+    var method = sandhi_server_get_method(buf, n);
+    var path   = sandhi_server_get_path(buf, n);
+    var origin = sandhi_server_find_header(buf, n, "Origin");
     var cors   = _bridge_cors_headers(allowed_origins, origin);
 
     # OPTIONS preflight
@@ -217,27 +217,27 @@ fn _bridge_handle(config, cfd, buf, n) {
     }
     # GET /health
     if (streq(method, "GET") == 1) {
-        if (streq(http_path_only(path), "/health") == 1) {
+        if (streq(sandhi_server_path_only(path), "/health") == 1) {
             _bridge_send_health(cfd, allowed_origins, origin);
             return 0;
         }
-        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        sandhi_server_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
         return 0;
     }
     # Anything other than POST is rejected.
     if (streq(method, "POST") == 0) {
-        http_send_status(cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed");
+        sandhi_server_send_status(cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed");
         return 0;
     }
     # Only "/" is the bridge endpoint.
-    if (streq(http_path_only(path), "/") == 0) {
-        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+    if (streq(sandhi_server_path_only(path), "/") == 0) {
+        sandhi_server_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
         return 0;
     }
 
     # Reject ambiguous Transfer-Encoding (HTTP smuggling guard, RFC 9112)
-    if (http_find_header(buf, n, "Transfer-Encoding") != 0) {
-        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
+    if (sandhi_server_find_header(buf, n, "Transfer-Encoding") != 0) {
+        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
     }
     # Bearer auth (no-op when no validator configured)
     var claims_slot[8]; store64(&claims_slot, 0);
@@ -248,17 +248,17 @@ fn _bridge_handle(config, cfd, buf, n) {
 
     # 413 cap on oversized declared bodies (audit M1). 60 KB headroom
     # keeps us inside the 64 KB recv buffer with room for headers.
-    var declared_clen = http_content_length(buf, n);
+    var declared_clen = sandhi_server_content_length(buf, n);
     if (declared_clen > 61440) {
-        http_send_status(cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large"); return 0;
+        sandhi_server_send_status(cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large"); return 0;
     }
 
-    var body_off = http_body_offset(buf, n);
+    var body_off = sandhi_server_body_offset(buf, n);
     if (body_off < 0 || body_off > n) {
-        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
         return 0;
     }
-    var clen = http_content_length(buf, n);
+    var clen = sandhi_server_content_length(buf, n);
     if (clen <= 0) { clen = n - body_off; }
     if (clen < 0) { clen = 0; }
     if (clen > n - body_off) { clen = n - body_off; }
@@ -271,18 +271,18 @@ fn _bridge_handle(config, cfd, buf, n) {
         http_send_204(cfd, cors);
         return 0;
     }
-    http_send_response(cfd, HTTP_OK, "OK", "application/json",
+    sandhi_server_send_response(cfd, HTTP_OK, "OK", "application/json",
                        resp, strlen(resp), cors);
     return 0;
 }
 
 # ================================================================
-# Server entry — defers to stdlib http_server_run
+# Server entry — defers to stdlib sandhi_server_run
 # ================================================================
 
 fn transport_bridge_run(dispatcher, config) {
     bridge_config_with_dispatcher(config, dispatcher);
-    return http_server_run(bridge_config_addr(config),
+    return sandhi_server_run(bridge_config_addr(config),
                            bridge_config_port(config),
                            &_bridge_handle,
                            config);

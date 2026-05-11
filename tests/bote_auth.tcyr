@@ -19,7 +19,6 @@ include "lib/tls.cyr"
 include "lib/sandhi.cyr"
 include "lib/assert.cyr"
 
-include "src/_sandhi_compat.cyr"
 include "src/auth.cyr"
 
 # Mock validator that only accepts a single hardcoded token.
@@ -29,7 +28,7 @@ fn mock_validator(token, ctx) {
 }
 
 # Helper to build a fake HTTP request as a cstr (NUL-terminated buffer
-# we can pass to http_find_header). Caller specifies the Authorization
+# we can pass to sandhi_server_find_header). Caller specifies the Authorization
 # header value (or 0 to omit the header entirely).
 fn _make_req(auth_value) {
     var sb = str_builder_new();
@@ -66,7 +65,7 @@ fn main() {
     var r5 = _make_req("Bearer    spaced");
     assert(streq(auth_bearer_extract(r5, strlen(r5)), "spaced") == 1, "leading WS skipped");
 
-    # Trailing whitespace trimmed (CR is already stripped by http_find_header)
+    # Trailing whitespace trimmed (CR is already stripped by sandhi_server_find_header)
     var r6 = _make_req("Bearer trim   ");
     assert(streq(auth_bearer_extract(r6, strlen(r6)), "trim") == 1, "trailing WS trimmed");
 

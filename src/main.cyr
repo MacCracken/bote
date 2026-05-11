@@ -1,9 +1,16 @@
 # bote — MCP Core Service (Cyrius port)
 #
-# 2.6.0 modernization platform release:
-#   - cyrius 5.10.34 toolchain pin (cyrius.cyml)
-#   - libro 2.6.2 via single-file dist bundle (lib/libro_libro.cyr)
-#   - majra 2.4.3 via single-file dist bundle (lib/majra_majra.cyr)
+# 2.6.x modernization arc:
+#   - 2.6.0: cyrius 5.10.34 + libro 2.6.2 / majra 2.4.3 dist bundles
+#   - 2.6.1: retired src/_sandhi_compat.cyr; all HTTP-server call
+#     sites now use the direct sandhi_server_* names from lib/sandhi.cyr
+#   - 2.6.2: src/libro_tools.cyr ported to libro 2.6.x (raw struct
+#     offsets for the retired entry_*/error_*/merkle_* getters);
+#     tests/bote_libro_tools.tcyr (22 assertions) re-enabled. Note:
+#     libro_tools is still NOT included in main.cyr by default —
+#     it remains an opt-in module that consumers wire locally if
+#     they want libro audit-tool dispatch (kept out for fn_table
+#     headroom; the main binary is at 89% util).
 # Live integration is unchanged at the API surface — audit_libro
 # and events_majra both call into the same chain_*/pubsub_* names
 # they always have. See src/audit_libro.cyr + src/events_majra.cyr.
@@ -32,7 +39,6 @@ include "lib/tls.cyr"
 include "lib/sandhi.cyr"
 include "lib/libro.cyr"
 include "lib/majra.cyr"
-include "src/_sandhi_compat.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
@@ -55,12 +61,12 @@ include "src/bridge.cyr"
 include "src/transport_streamable.cyr"
 include "lib/ws_server.cyr"
 include "src/transport_ws.cyr"
-# libro_tools.cyr is parked pending the libro 2.6.x API port
-# (entry_action/entry_severity/merkle_proof/libro_export call sites
-# need rewriting against the new dist surface). Tracked as a 2.6.x
-# patch follow-up; consumers needing the libro tools should pin to
-# bote 2.5.1 until the port lands.
-# DEFERRED: include "src/libro_tools.cyr"
+# libro_tools.cyr is opt-in — not in the default binary build to
+# keep fn_table headroom under the 4096 cap. Consumers wanting libro
+# audit-tool dispatch include + call libro_tools_init(chain) +
+# libro_tools_register(dispatcher) locally. Ported to the libro 2.6.x
+# API in bote 2.6.2; covered by tests/bote_libro_tools.tcyr.
+# OPT-IN: include "src/libro_tools.cyr"
 include "src/content.cyr"
 include "src/host.cyr"
 fn bote_echo_handler(args, claims) {

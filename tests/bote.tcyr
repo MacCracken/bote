@@ -26,7 +26,6 @@ include "lib/libro.cyr"
 include "lib/majra.cyr"
 include "lib/assert.cyr"
 
-include "src/_sandhi_compat.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
@@ -760,14 +759,14 @@ fn main() {
     memcpy(fake + fake_n, "hello", 5); fake_n = fake_n + 5;
     store8(fake + fake_n, 0);
 
-    assert(streq(http_get_method(fake, fake_n), "POST") == 1, "http method");
-    assert(streq(http_get_path(fake, fake_n), "/mcp") == 1, "http path");
-    assert_eq(http_content_length(fake, fake_n), 5, "content-length 5");
-    assert(streq(http_find_header(fake, fake_n, "Origin"), "http://x") == 1, "origin parsed");
-    assert(streq(http_find_header(fake, fake_n, "Host"), "localhost:9999") == 1, "host parsed");
-    assert(streq(http_find_header(fake, fake_n, "content-length"), "5") == 1, "case-insensitive");
-    assert_eq(http_find_header(fake, fake_n, "Missing"), 0, "missing header -> 0");
-    var bo = http_body_offset(fake, fake_n);
+    assert(streq(sandhi_server_get_method(fake, fake_n), "POST") == 1, "http method");
+    assert(streq(sandhi_server_get_path(fake, fake_n), "/mcp") == 1, "http path");
+    assert_eq(sandhi_server_content_length(fake, fake_n), 5, "content-length 5");
+    assert(streq(sandhi_server_find_header(fake, fake_n, "Origin"), "http://x") == 1, "origin parsed");
+    assert(streq(sandhi_server_find_header(fake, fake_n, "Host"), "localhost:9999") == 1, "host parsed");
+    assert(streq(sandhi_server_find_header(fake, fake_n, "content-length"), "5") == 1, "case-insensitive");
+    assert_eq(sandhi_server_find_header(fake, fake_n, "Missing"), 0, "missing header -> 0");
+    var bo = sandhi_server_body_offset(fake, fake_n);
     assert(bo > 0, "body offset > 0");
     assert(memeq(fake + bo, "hello", 5) == 1, "body bytes match");
 
@@ -1148,10 +1147,10 @@ fn main() {
     streamable_config_with_retry_ms(scfg, 1000);
     assert_eq(streamable_config_retry_ms(scfg), 1000, "scfg custom retry_ms");
 
-    # ---------------- POST/GET path matching uses http_path_only ----------------
+    # ---------------- POST/GET path matching uses sandhi_server_path_only ----------------
     # Sanity that the transport's path check ignores the query string —
     # exercises the same stdlib helper but at our usage site.
-    assert(streq(http_path_only("/mcp?lastEventId=evt-7"), "/mcp") == 1,
+    assert(streq(sandhi_server_path_only("/mcp?lastEventId=evt-7"), "/mcp") == 1,
            "path strips query for routing");
 
     # ---------------- events_majra: EventSink wire-up shape ----------------

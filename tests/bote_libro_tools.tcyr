@@ -1,9 +1,11 @@
-# bote_libro_tools.tcyr — unit tests for src/libro_tools.cyr
+# bote_libro_tools.tcyr — unit tests for src/libro_tools.cyr.
 #
-# Split out of bote.tcyr because including the libro_tools dependency
-# graph (all 9 libro modules + bote's schema/registry/dispatch) in
-# addition to the full bote test surface trips the cyrius 4.5.1
-# parser identifier-buffer cap. See docs/bugs/cyrius-4.5.1-...
+# Split out of bote.tcyr because the full bote test surface + libro
+# 2.6.x dist bundle exceeds the cyrius identifier-buffer cap when
+# compiled as one unit. 2.6.2: re-enabled after the libro_tools
+# port from libro 1.0.3 → 2.6.2 (raw struct-offset accessors
+# replace the retired entry_*/merkle_*/error_* getters; see
+# src/libro_tools.cyr:38).
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -12,6 +14,7 @@ include "lib/vec.cyr"
 include "lib/str.cyr"
 include "lib/syscalls.cyr"
 include "lib/io.cyr"
+include "lib/fs.cyr"
 include "lib/hashmap.cyr"
 include "lib/json.cyr"
 include "lib/fnptr.cyr"
@@ -21,16 +24,12 @@ include "lib/freelist.cyr"
 include "lib/thread.cyr"
 include "lib/sakshi.cyr"
 include "lib/bigint.cyr"
+include "lib/ct.cyr"
+include "lib/keccak.cyr"
+include "lib/process.cyr"
+include "lib/random.cyr"
 include "lib/sigil.cyr"
-include "lib/libro_error.cyr"
-include "lib/libro_hasher.cyr"
-include "lib/libro_entry.cyr"
-include "lib/libro_verify.cyr"
-include "lib/libro_query.cyr"
-include "lib/libro_retention.cyr"
-include "lib/libro_chain.cyr"
-include "lib/libro_export.cyr"
-include "lib/libro_merkle.cyr"
+include "lib/libro.cyr"
 include "lib/assert.cyr"
 
 include "src/error.cyr"
@@ -61,36 +60,36 @@ fn main() {
     # ---------------- Handler shape on empty chain ----------------
     # Each tool must return a JSON cstr (not 0, starts with '{').
 
-    var qr = libro_tool_query("{}");
+    var qr = libro_tool_query("{}", 0);
     assert(qr != 0, "query returns non-null");
     assert_eq(load8(qr), 123, "query returns '{'");
 
-    var vr = libro_tool_verify("{}");
+    var vr = libro_tool_verify("{}", 0);
     assert(vr != 0, "verify returns non-null");
     assert_eq(load8(vr), 123, "verify returns '{'");
 
-    var er = libro_tool_export("{}");
+    var er = libro_tool_export("{}", 0);
     assert(er != 0, "export returns non-null");
     assert_eq(load8(er), 123, "export returns '{'");
 
     # libro_proof requires {"index": N}
-    var pr_missing = libro_tool_proof("{}");
+    var pr_missing = libro_tool_proof("{}", 0);
     assert(pr_missing != 0, "proof missing index returns non-null");
 
-    var pr_oor = libro_tool_proof("{\"index\":99}");
+    var pr_oor = libro_tool_proof("{\"index\":99}", 0);
     assert(pr_oor != 0, "proof OOR returns non-null");
 
     # libro_retention requires {"policy": "..."}
-    var rr_missing = libro_tool_retention("{}");
+    var rr_missing = libro_tool_retention("{}", 0);
     assert(rr_missing != 0, "retention missing policy returns non-null");
 
-    var rr_bad = libro_tool_retention("{\"policy\":\"not_a_policy\"}");
+    var rr_bad = libro_tool_retention("{\"policy\":\"not_a_policy\"}", 0);
     assert(rr_bad != 0, "retention bad policy returns non-null");
 
     # Each preset policy is addressable (empty chain → 0 archived, 0 retained)
-    var rr_pci = libro_tool_retention("{\"policy\":\"pci_dss\"}");
+    var rr_pci = libro_tool_retention("{\"policy\":\"pci_dss\"}", 0);
     assert(rr_pci != 0, "retention pci_dss returns non-null");
-    var rr_kc = libro_tool_retention("{\"policy\":\"keep_count\",\"value\":10}");
+    var rr_kc = libro_tool_retention("{\"policy\":\"keep_count\",\"value\":10}", 0);
     assert(rr_kc != 0, "retention keep_count returns non-null");
 
     # ---------------- Handler fn pointers are addressable ----------------

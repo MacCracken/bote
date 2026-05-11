@@ -64,53 +64,53 @@ fn ws_config_bearer_ctx(c)       { return load64(c + 56); }
 fn _ws_check_origin(cfd, buf, blen, config) {
     var allowed = ws_config_allowed_origins(config);
     if (allowed == 0) { return 0; }
-    var origin = http_find_header(buf, blen, "Origin");
+    var origin = sandhi_server_find_header(buf, blen, "Origin");
     var orig = origin;
     if (orig == 0) { orig = ""; }
     if (validate_origin(orig, allowed) != 0) {
-        http_send_status(cfd, HTTP_FORBIDDEN, "Forbidden");
+        sandhi_server_send_status(cfd, HTTP_FORBIDDEN, "Forbidden");
         return HTTP_FORBIDDEN;
     }
     return 0;
 }
 
 fn _ws_check_protocol(cfd, buf, blen, config) {
-    var v = http_find_header(buf, blen, "MCP-Protocol-Version");
+    var v = sandhi_server_find_header(buf, blen, "MCP-Protocol-Version");
     if (v == 0) {
         if (ws_config_require_protocol(config) == 1) {
-            http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+            sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
             return HTTP_BAD_REQUEST;
         }
         return 0;
     }
     if (validate_protocol_version(v) != 0) {
-        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
         return HTTP_BAD_REQUEST;
     }
     return 0;
 }
 
 # ================================================================
-# Upgrade handler — invoked per connection by http_server_run
+# Upgrade handler — invoked per connection by sandhi_server_run
 # ================================================================
 
 fn _bote_ws_handler(config, cfd, buf, n) {
-    var method = http_get_method(buf, n);
-    var path   = http_get_path(buf, n);
+    var method = sandhi_server_get_method(buf, n);
+    var path   = sandhi_server_get_path(buf, n);
 
     # Only GET on the configured endpoint is valid for a WS upgrade.
     if (streq(method, "GET") == 0) {
-        http_send_status(cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed");
+        sandhi_server_send_status(cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed");
         return 0;
     }
-    if (streq(http_path_only(path), ws_config_path(config)) == 0) {
-        http_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+    if (streq(sandhi_server_path_only(path), ws_config_path(config)) == 0) {
+        sandhi_server_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
         return 0;
     }
 
     if (_ws_check_origin(cfd, buf, n, config) != 0) { return 0; }
-    if (http_find_header(buf, n, "Transfer-Encoding") != 0) {
-        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
+    if (sandhi_server_find_header(buf, n, "Transfer-Encoding") != 0) {
+        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
     }
     var claims_slot[8]; store64(&claims_slot, 0);
     if (auth_bearer_check(cfd, buf, n,
@@ -121,7 +121,7 @@ fn _bote_ws_handler(config, cfd, buf, n) {
 
     var ws = ws_server_handshake(cfd, buf, n);
     if (ws == 0) {
-        http_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
         return 0;
     }
     var ws_claims = load64(&claims_slot);
@@ -140,12 +140,12 @@ fn _bote_ws_handler(config, cfd, buf, n) {
 }
 
 # ================================================================
-# Server entry — defers to stdlib http_server_run
+# Server entry — defers to stdlib sandhi_server_run
 # ================================================================
 
 fn transport_ws_run(dispatcher, config) {
     store64(config + 40, dispatcher);
-    return http_server_run(ws_config_addr(config),
+    return sandhi_server_run(ws_config_addr(config),
                            ws_config_port(config),
                            &_bote_ws_handler,
                            config);

@@ -2,6 +2,160 @@
 
 All notable changes to bote are documented here.
 
+## [2.6.2] — 2026-05-10 — Port libro_tools.cyr to libro 2.6.x
+
+Third patch in the 2.6.x modernization arc. The 2.6.0 release
+deferred `src/libro_tools.cyr` (the five built-in MCP tools that
+expose the libro audit chain) because libro 2.x retired the
+public `entry_*` / `error_*` / `merkle_*` accessors that the
+2.5.1 source assumed. 2.6.2 lands the port and re-enables
+`tests/bote_libro_tools.tcyr` — bote is now back to **603
+passing assertions** across 8 active test files, matching the
+2.5.1 baseline.
+
+Still no MCP wire-format change, no handler-ABI change; the
+five tool handlers emit byte-identical JSON for byte-identical
+input. The port is internal-only.
+
+### Changed
+
+- **`src/libro_tools.cyr` ported to the libro 2.6.x API**:
+  - Replaced six retired entry accessors (`entry_timestamp` /
+    `entry_severity` / `entry_source` / `entry_action` /
+    `entry_agent_id` / `entry_hash`) with raw struct-offset
+    reads via local helpers `_lt_entry_timestamp` etc. The
+    libro 2.x entry struct layout is documented inline at
+    `src/libro_tools.cyr:46-58` and tracks
+    `lib/libro.cyr:200-205`.
+  - Replaced the retired `chain_entries(c)` getter with a
+    one-line `_lt_chain_entries(c) { return load64(c); }` —
+    the libro chain struct keeps the entries vec at +0 and
+    is unlikely to drift.
+  - Replaced the retired `error_code` / `error_index` /
+    `error_msg` getters with raw-offset helpers (`_lt_err_code`
+    / `_lt_err_index` / `_lt_err_msg`). The libro 2.x error
+    struct is 6 fields wide (`code`, `msg`, `field_name`,
+    `index`, `expected`, `actual`) and the message field is
+    now a cstr rather than a Str — the wrapper drops the
+    `str_data` unwrap.
+  - Renamed `merkle_proof(tree, idx)` →
+    `merkle_inclusion_proof(tree, idx)`.
+  - Replaced the retired `merkle_tree_leaf_count(tree)` with
+    `_lt_merkle_leaf_count(t) { return load64(t + 8); }` —
+    the libro 2.x merkle_tree struct is `{nodes, leaf_count}`
+    so leaf_count sits at +8.
+- **`tests/bote_libro_tools.tcyr` re-enabled and updated for
+  the 2.6.0 dist-bundle layout**:
+  - Nine individual `lib/libro_*.cyr` includes collapsed to
+    a single `include "lib/libro.cyr"` (the dist bundle).
+  - Added `lib/fs.cyr` / `lib/ct.cyr` / `lib/keccak.cyr` /
+    `lib/process.cyr` / `lib/random.cyr` to the include set
+    — libro 2.6.x consumes these transitively at parse time
+    (`file_open`, `ct_eq`, `random_bytes` etc.).
+  - Updated all 9 handler invocations to pass the
+    2-arg `(args, claims)` ABI (was 1-arg in the 2.5.1
+    source; the second slot landed in 2.0.0 but the test
+    file never caught up).
+- **`.github/workflows/ci.yml`**: `bote_libro_tools.tcyr`
+  added to the test matrix. 8th test file is now mandatory.
+- **`src/main.cyr` header comment**: the `DEFERRED:` marker
+  on the `include "src/libro_tools.cyr"` line is now an
+  `OPT-IN:` marker — the module compiles cleanly, and
+  consumers that want libro audit-tool dispatch can include
+  + wire it locally without touching the bote default binary.
+  Kept out of the default build because the main binary is
+  at 89% fn_table utilisation; the libro_tools handlers
+  would tip the build over.
+
+### Verified (cyrius 5.10.x, local)
+
+- **603 unit assertions across 8 test files** — back to the
+  2.5.1 baseline:
+  - `bote.tcyr` **394** / `bote_auth.tcyr` 38 /
+    `bote_content.tcyr` 24 / `bote_host.tcyr` 67 /
+    `bote_jwt.tcyr` 28 / `bote_pkce.tcyr` 17 /
+    `bote_sandbox.tcyr` 13 / `bote_libro_tools.tcyr` **22**.
+- Default binary build: `src/main.cyr → build/bote` still at
+  fn_table 89% (3652/4096) — no change vs 2.6.1 (libro_tools
+  stays out of main).
+- `bote_libro_tools.tcyr` compile unit: fn_table 85%
+  (3485/4096), identifier buffer 85% (111665/131072) —
+  comfortable headroom.
+
+### Forward roadmap
+
+- 2.6.3: emit `dist/bote.cyr` via `cyrius distlib`.
+- 2.6.4: capacity / split prep.
+
+## [2.6.1] — 2026-05-10 — Retire the sandhi compat shim
+
+Second patch in the 2.6.x modernization arc. The 2.6.0 release
+bridged `lib/http_server.cyr` (retired in cyrius 5.10.x) to the
+new `lib/sandhi.cyr` HTTP-server surface via a thin compat shim
+(`src/_sandhi_compat.cyr`) so the version bump didn't churn
+every transport file. 2.6.1 retires the shim with a mechanical
+rename pass — bote now calls into sandhi directly.
+
+No wire-format change, no handler-ABI change, no behaviour
+drift; this is a name-only refactor.
+
+### Changed
+
+- **108 HTTP-server call sites renamed.** Across
+  `src/auth.cyr`, `src/bridge.cyr`, `src/transport_http.cyr`,
+  `src/transport_streamable.cyr`, `src/transport_ws.cyr`, plus
+  `tests/bote.tcyr` + `tests/bote_auth.tcyr`. Twelve symbols
+  flipped from the pre-5.10 `http_*` family to the
+  `sandhi_server_*` names that landed in cyrius 5.10's
+  `lib/sandhi.cyr`:
+  - `http_send_status`         → `sandhi_server_send_status`
+  - `http_send_response`       → `sandhi_server_send_response`
+  - `http_send_chunked_start`  → `sandhi_server_send_chunked_start`
+  - `http_send_chunk`          → `sandhi_server_send_chunk`
+  - `http_send_chunked_end`    → `sandhi_server_send_chunked_end`
+  - `http_get_method`          → `sandhi_server_get_method`
+  - `http_get_path`            → `sandhi_server_get_path`
+  - `http_find_header`         → `sandhi_server_find_header`
+  - `http_content_length`      → `sandhi_server_content_length`
+  - `http_body_offset`         → `sandhi_server_body_offset`
+  - `http_path_only`           → `sandhi_server_path_only`
+  - `http_server_run`          → `sandhi_server_run`
+  `HTTP_*` status-code constants (`HTTP_OK`, `HTTP_BAD_REQUEST`,
+  `HTTP_UNAUTHORIZED`, etc.) are unchanged — sandhi exports them
+  under the same names.
+
+### Removed
+
+- **`src/_sandhi_compat.cyr` deleted.** The 2.6.0 shim
+  (~50 LoC, 12 tail-call wrappers) was a transition aid only;
+  with all call sites renamed the file has no callers left.
+- **The CI manifest-completeness gate's `EXCLUDES` list** (.github/workflows/ci.yml)
+  is gone — `[lib]` modules in `cyrius.cyml` now exactly equal
+  the set of `src/<file>.cyr` includes in `main.cyr`. No
+  exceptions to track.
+
+### Verified (cyrius 5.10.x, local)
+
+- **581 unit assertions** across 7 active test files — same
+  counts as 2.6.0; no regression.
+  - `bote.tcyr` 394 / `bote_auth.tcyr` 38 /
+    `bote_content.tcyr` 24 / `bote_host.tcyr` 67 /
+    `bote_jwt.tcyr` 28 / `bote_pkce.tcyr` 17 /
+    `bote_sandbox.tcyr` 13.
+- Production build: `src/main.cyr → build/bote` succeeds.
+  Function-table util 89% (3652/4096, -11 vs 2.6.0 from
+  removing the 12 shim wrappers); identifier buffer 88%
+  (116370/131072, -196 bytes).
+- Smoke test: `initialize` round-trips clean,
+  `serverInfo.version == "2.6.1"`.
+
+### Forward roadmap
+
+- 2.6.2: port `src/libro_tools.cyr` to the libro 2.6.x API
+  and re-enable `tests/bote_libro_tools.tcyr` (22 assertions).
+- 2.6.3: emit `dist/bote.cyr` via `cyrius distlib`.
+- 2.6.4: capacity / split prep.
+
 ## [2.6.0] — 2026-05-10 — Modernization platform: cyrius 5.10.34, libro 2.6.2, majra 2.4.3
 
 2.6.0 catches bote up to the first-party Cyrius floor and opens

@@ -31,7 +31,7 @@
 # 0 if the header is absent or doesn't start with "Bearer ".
 # Per RFC 6750 §2.1, the scheme name is case-insensitive.
 fn auth_bearer_extract(buf, blen) {
-    var hdr = http_find_header(buf, blen, "Authorization");
+    var hdr = sandhi_server_find_header(buf, blen, "Authorization");
     if (hdr == 0) { return 0; }
 
     # Match "Bearer " (7 chars) case-insensitively at the start
@@ -53,7 +53,7 @@ fn auth_bearer_extract(buf, blen) {
     var end = start;
     while (load8(hdr + end) != 0) { end = end + 1; }
 
-    # Trim trailing OWS (space or tab). http_find_header already stripped
+    # Trim trailing OWS (space or tab). sandhi_server_find_header already stripped
     # the CR; this guards against a stray space the caller left.
     var done = 0;
     while (done == 0 && end > start) {
@@ -132,9 +132,9 @@ fn auth_send_unauthorized(cfd, realm) {
     else { str_builder_add_cstr(sb, realm); }
     str_builder_add_cstr(sb, "\"\r\n");
     var hdrs = str_data(str_builder_build(sb));
-    # http_send_response builds: status line + Content-Type + Content-Length
+    # sandhi_server_send_response builds: status line + Content-Type + Content-Length
     # + extra hdrs + blank line + body. We want a 401 with our header.
-    http_send_response(cfd, HTTP_UNAUTHORIZED, "Unauthorized",
+    sandhi_server_send_response(cfd, HTTP_UNAUTHORIZED, "Unauthorized",
                        "text/plain", "", 0, hdrs);
     return 0;
 }
@@ -166,7 +166,7 @@ fn auth_bearer_check(cfd, buf, blen, validator_fp, validator_ctx, claims_out) {
 }
 
 # HTTP request smuggling mitigation: each HTTP-family transport inlines
-# `if (http_find_header(buf, n, "Transfer-Encoding") != 0) { 400 + return }`
+# `if (sandhi_server_find_header(buf, n, "Transfer-Encoding") != 0) { 400 + return }`
 # right after its Origin check. We don't dechunk; rejecting any inbound
 # Transfer-Encoding eliminates the CL.TE / TE.CL smuggling class
 # (RFC 9112 §6). Inlined rather than helper'd to stay under cyrius
