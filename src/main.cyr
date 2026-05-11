@@ -11,6 +11,9 @@
 #     it remains an opt-in module that consumers wire locally if
 #     they want libro audit-tool dispatch (kept out for fn_table
 #     headroom; the main binary is at 89% util).
+#   - 2.6.3: ships dist/bote.cyr via `cyrius distlib` so downstream
+#     consumers can `[deps.bote] modules = ["dist/bote.cyr"]`.
+#     Mirrors the libro / majra distribution contract.
 # Live integration is unchanged at the API surface — audit_libro
 # and events_majra both call into the same chain_*/pubsub_* names
 # they always have. See src/audit_libro.cyr + src/events_majra.cyr.

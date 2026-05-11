@@ -90,6 +90,24 @@ jobs:
           cyrius build src/main.cyr build/bote
           echo "bote: $(wc -c < build/bote) bytes"
 
+      - name: Regenerate dist bundle (consumer distribution artifact)
+        # Downstream consumers (phylax / t-ron / sutra / jalwa / rasa /
+        # mneme) pull `dist/bote.cyr` via `[deps.bote] modules =
+        # ["dist/bote.cyr"]`. A tagged release without dist/bote.cyr
+        # = broken `cyrius deps` for every consumer. Mirrors
+        # libro / majra release flow.
+        run: |
+          cyrius distlib || true
+          test -s dist/bote.cyr || { echo "FAIL: dist/bote.cyr not produced"; exit 1; }
+          echo "dist/bote.cyr: $(wc -l < dist/bote.cyr) lines, $(wc -c < dist/bote.cyr) bytes"
+
+      - name: Verify dist bundle matches committed copy
+        run: |
+          if ! git diff --exit-code dist/bote.cyr; then
+            echo "FAIL: dist/bote.cyr is stale. Regenerate via 'cyrius distlib' and commit before tagging."
+            exit 1
+          fi
+
       - name: Smoke test
         # bote's default entry is the stdio transport — it blocks
         # waiting on stdin, so we can't just `./build/bote`. Feed it
@@ -107,8 +125,9 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           git archive --format=tar.gz --prefix="bote-${TAG}/" -o "bote-${TAG}-src.tar.gz" HEAD
-          cp build/bote "bote-${TAG}-x86_64-linux"
-          sha256sum bote-*.tar.gz "bote-${TAG}-x86_64-linux" 2>/dev/null > SHA256SUMS
+          cp build/bote     "bote-${TAG}-x86_64-linux"
+          cp dist/bote.cyr  "bote-${TAG}.cyr"
+          sha256sum bote-*.tar.gz "bote-${TAG}-x86_64-linux" "bote-${TAG}.cyr" 2>/dev/null > SHA256SUMS
 
       - name: Extract changelog
         run: |
@@ -123,5 +142,6 @@ jobs:
           files: |
             bote-*.tar.gz
             bote-*-linux
+            bote-*.cyr
             cyrius.lock
             SHA256SUMS

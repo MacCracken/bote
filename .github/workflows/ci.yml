@@ -127,6 +127,25 @@ jobs:
       - name: Verify ELF
         run: xxd -l 4 build/bote | grep -q "7f45 4c46"
 
+      - name: dist bundle is up-to-date
+        # `cyrius distlib` reads cyrius.cyml [lib] modules and emits
+        # dist/bote.cyr deterministically. The committed bundle must
+        # match the regenerated bundle byte-for-byte; otherwise a
+        # downstream consumer cloning at our tag gets stale code
+        # under `cyrius deps`. Mirrors libro / majra freshness gate.
+        # cyrius emits an informational note about unresolved symbols
+        # in consumer-included bundles (expected — stdlib is supplied
+        # by the consumer); the bundle is still emitted, we only fail
+        # on a stale diff.
+        run: |
+          cyrius distlib || true
+          test -s dist/bote.cyr || { echo "FAIL: dist/bote.cyr not produced"; exit 1; }
+          if ! git diff --exit-code dist/bote.cyr; then
+            echo "FAIL: dist/bote.cyr is stale. Run 'cyrius distlib' and commit."
+            exit 1
+          fi
+          echo "dist/bote.cyr matches src/ ($(wc -l < dist/bote.cyr) lines)"
+
       - name: Run tests
         # Test files split across compilation units (bote.tcyr, plus
         # per-module bote_<mod>.tcyr) to stay under the cyrius
