@@ -3,6 +3,10 @@
 # Built on stdlib lib/http_server.cyr (HTTP routing, 4.5.0+) and
 # lib/ws_server.cyr (WS upgrade + frame I/O, 4.5.1+).
 #
+# ws_server is pulled out of [deps] stdlib auto-inject so other test
+# files don't carry its weight — include it here directly. 2.7.2.
+include "lib/ws_server.cyr"
+
 # Wire format: each WebSocket TEXT frame is one JSON-RPC 2.0 message.
 # Control frames (ping/pong/close) are handled transparently by
 # ws_server_recv; this file is just the MCP-specific wire-up.

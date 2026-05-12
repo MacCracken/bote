@@ -28,30 +28,8 @@
 # and events_majra both call into the same chain_*/pubsub_* names
 # they always have. See src/audit_libro.cyr + src/events_majra.cyr.
 
-include "lib/string.cyr"
-include "lib/fmt.cyr"
-include "lib/alloc.cyr"
-include "lib/vec.cyr"
-include "lib/str.cyr"
-include "lib/syscalls.cyr"
-include "lib/io.cyr"
-include "lib/args.cyr"
-include "lib/hashmap.cyr"
-include "lib/json.cyr"
-include "lib/fnptr.cyr"
-include "lib/chrono.cyr"
-include "lib/tagged.cyr"
-include "lib/net.cyr"
-include "lib/base64.cyr"
-include "lib/freelist.cyr"
-include "lib/thread.cyr"
-include "lib/sakshi.cyr"
-include "lib/bigint.cyr"
-include "lib/sigil.cyr"
-include "lib/tls.cyr"
-include "lib/sandhi.cyr"
-include "lib/libro.cyr"
-include "lib/majra.cyr"
+# stdlib + libro + majra includes are auto-injected by cyrius from
+# cyrius.cyml [deps] — no manual lib/ includes needed (2.7.2).
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
@@ -71,9 +49,14 @@ include "src/transport_stdio.cyr"
 include "src/transport_http.cyr"
 include "src/transport_unix.cyr"
 include "src/bridge.cyr"
-include "src/transport_streamable.cyr"
-include "lib/ws_server.cyr"
-include "src/transport_ws.cyr"
+# transport_streamable.cyr and transport_ws.cyr are NOT in this entry.
+# 2.7.2 (cyrius 5.10.x): the 2MB compile-source cap forces a
+# per-transport binary split — streamable HTTP and WebSocket live in
+# their own entries (src/main_streamable.cyr / src/main_ws.cyr,
+# producing build/bote-streamable / build/bote-ws). When bote migrates
+# to cyrius 5.11.x (cap raised to 4 MB per the companion proposal),
+# fold these back into src/main.cyr and retire the per-transport
+# entries.
 # libro_tools.cyr is opt-in — not in the default binary build to
 # keep fn_table headroom under the 4096 cap. Consumers wanting libro
 # audit-tool dispatch include + call libro_tools_init(chain) +
@@ -82,76 +65,13 @@ include "src/transport_ws.cyr"
 # OPT-IN: include "src/libro_tools.cyr"
 include "src/content.cyr"
 include "src/host.cyr"
-fn bote_echo_handler(args, claims) {
-    return args;
-}
-
-# Parse a positive decimal integer from a cstr; returns 0 on bad input.
-fn _parse_uint(s) {
-    if (s == 0) { return 0; }
-    var n = 0;
-    var i = 0;
-    while (load8(s + i) != 0) {
-        var c = load8(s + i);
-        if (c < 48) { return n; }
-        if (c > 57) { return n; }
-        n = n * 10 + (c - 48);
-        i = i + 1;
-    }
-    return n;
-}
-
-# Build a bearer-token allowlist vec from a comma-separated env value.
-# Returns a vec of cstr tokens (possibly empty), never null.
-fn _split_csv_tokens(csv) {
-    var out = vec_new();
-    if (csv == 0) { return out; }
-    var n = strlen(csv);
-    var start = 0;
-    var i = 0;
-    while (i <= n) {
-        var c = 0;
-        if (i < n) { c = load8(csv + i); }
-        if (i == n || c == 44) {
-            var len = i - start;
-            if (len > 0) {
-                var tok = alloc(len + 1);
-                memcpy(tok, csv + start, len);
-                store8(tok + len, 0);
-                vec_push(out, tok);
-            }
-            start = i + 1;
-        }
-        i = i + 1;
-    }
-    return out;
-}
-
-# If BOTE_BEARER_TOKENS env var is set (comma-separated tokens), wire an
-# allowlist validator onto every config setter the caller owns. Returns
-# the validator fp + ctx (vec of allowed tokens) so the caller can apply
-# them to whichever transport configs they construct.
-# Returns 0/0 (via *out_fp / *out_ctx) when the env var is unset/empty —
-# caller should leave the config's bearer slots alone.
-fn _bote_bearer_from_env(out_fp, out_ctx) {
-    var csv = getenv("BOTE_BEARER_TOKENS");
-    if (csv == 0) { store64(out_fp, 0); store64(out_ctx, 0); return 0; }
-    var allowed = _split_csv_tokens(csv);
-    if (vec_len(allowed) == 0) { store64(out_fp, 0); store64(out_ctx, 0); return 0; }
-    store64(out_fp, &auth_validator_allowlist);
-    store64(out_ctx, allowed);
-    return 1;
-}
+include "src/main_common.cyr"
 
 fn main() {
     alloc_init();
     args_init();
 
-    var reg = registry_new();
-    var ok_schema = schema_new("object", 0, vec_new());
-    registry_register(reg, tool_def_new("bote_echo", "echo arguments back", ok_schema));
-    var dispatcher = dispatcher_new(reg);
-    dispatcher_handle(dispatcher, "bote_echo", &bote_echo_handler);
+    var dispatcher = bote_dispatcher_with_echo();
 
     # libro_tools moved out of the default build for 1.9.4 (cap headroom).
     # Consumers can opt in by adding the include + registration locally.
@@ -171,8 +91,11 @@ fn main() {
     #   bote http [port]         — HTTP transport (default 8390)
     #   bote unix <path>         — Unix socket transport
     #   bote bridge [port]       — TS bridge with CORS (default 8391)
-    #   bote streamable [port]   — Streamable HTTP / SSE (default 8392)
-    #   bote ws [port]           — WebSocket MCP transport (default 8393)
+    # Streamable HTTP / WebSocket transports moved to separate
+    # binaries in 2.7.2 (cyrius 5.10.x cap workaround):
+    #   bote-streamable [port]   — Streamable HTTP / SSE (default 8392)
+    #   bote-ws [port]           — WebSocket MCP transport (default 8393)
+    # Consolidates back into this binary on cyrius 5.11.x migration.
     if (argc() >= 2) {
         if (streq(argv(1), "http") == 1) {
             var port = 8390;
@@ -197,22 +120,8 @@ fn main() {
             if (bearer_fp != 0) { bridge_config_with_bearer_validator(bcfg, bearer_fp, bearer_ctx); }
             return transport_bridge_run(dispatcher, bcfg);
         }
-        if (streq(argv(1), "streamable") == 1) {
-            var sport = 8392;
-            if (argc() >= 3) { sport = _parse_uint(argv(2)); }
-            if (sport == 0) { sport = 8392; }
-            var scfg = streamable_config_new("/mcp", INADDR_LOOPBACK(), sport);
-            if (bearer_fp != 0) { streamable_config_with_bearer_validator(scfg, bearer_fp, bearer_ctx); }
-            return transport_streamable_run(dispatcher, scfg);
-        }
-        if (streq(argv(1), "ws") == 1) {
-            var wport = 8393;
-            if (argc() >= 3) { wport = _parse_uint(argv(2)); }
-            if (wport == 0) { wport = 8393; }
-            var wcfg = ws_config_new("/mcp", INADDR_LOOPBACK(), wport);
-            if (bearer_fp != 0) { ws_config_with_bearer_validator(wcfg, bearer_fp, bearer_ctx); }
-            return transport_ws_run(dispatcher, wcfg);
-        }
+        # streamable + ws moved to bote-streamable / bote-ws binaries
+        # (see comment above; reconsolidates on cyrius 5.11.x).
     }
     return transport_stdio_run(dispatcher);
 }

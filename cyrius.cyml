@@ -5,7 +5,7 @@ description = "MCP core service in Cyrius — stable 2.x. JSON-RPC 2.0, six tran
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/bote"
 language = "cyrius"
-cyrius = "5.10.34"
+cyrius = "5.10.44"
 
 [build]
 entry = "src/main.cyr"
@@ -61,9 +61,11 @@ stdlib = [
     "alloc",
     "vec",
     "str",
+    "slice",
     "syscalls",
     "io",
     "args",
+    "assert",
     "hashmap",
     "json",
     "fnptr",
@@ -78,7 +80,19 @@ stdlib = [
     "sigil",
     "tls",
     "sandhi",
-    "ws_server",
+    # ws_server lives only in src/transport_ws.cyr + tests/bote_ws.tcyr
+    # — auto-injecting it would burn compile-source budget in every
+    # other test file. Kept out of [deps] stdlib; pulled in manually by
+    # the ws-specific entry/test files only. 2.7.2 cyrius 5.10.x cap fix.
+    # Transitive deps from sigil 3.x (pulled in by libro 2.6.3) —
+    # ct (constant-time primitives), keccak (SHA-3 / SHAKE / Keccak-f1600
+    # for ML-DSA), random (getrandom for keygen / nonces). bote itself
+    # only consumes sha256_hex; the linker needs these declared even if
+    # DCE prunes most call sites. See phylax 1.1.1 CHANGELOG for the
+    # original write-up of this pull-through.
+    "ct",
+    "keccak",
+    "random",
 ]
 
 # libro audit chain — single-file dist bundle. cyrius deps clones
@@ -88,7 +102,7 @@ stdlib = [
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
 path = "../libro"
-tag = "2.6.2"
+tag = "2.6.3"
 modules = ["dist/libro.cyr"]
 
 # majra pub/sub — same single-file dist bundle pattern. The default
@@ -98,5 +112,5 @@ modules = ["dist/libro.cyr"]
 [deps.majra]
 git = "https://github.com/MacCracken/majra"
 path = "../majra"
-tag = "2.4.3"
+tag = "2.4.4"
 modules = ["dist/majra.cyr"]

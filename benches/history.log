@@ -1,0 +1,16 @@
+
+## 2026-05-12T00:15:44Z  v2.7.2 (8fdfe3b)
+  dispatch_initialize: 2us avg (min=978ns max=18us) [10000 iters]
+  dispatch_tools_list: 3us avg (min=1us max=17us) [10000 iters]
+  dispatch_tools_call: 6us avg (min=4us max=23us) [10000 iters]
+  jsonx_get_str_flat: 1us avg (min=907ns max=43us) [100000 iters]
+  jsonx_get_raw_nested: 1us avg (min=907ns max=23us) [100000 iters]
+  codec_parse_request: 2us avg (min=1us max=15us) [10000 iters]
+  codec_serialize_response: 1us avg (min=907ns max=31us) [10000 iters]
+  codec_process_message: 8us avg (min=6us max=65us) [10000 iters]
+  validate_compiled_simple: 1us avg (min=908ns max=110us) [10000 iters]
+  validate_compiled_nested: 3us avg (min=2us max=224us) [10000 iters]
+  schema_compile_simple: 4us avg (min=2us max=217us) [10000 iters]
+  schema_compile_nested: 7us avg (min=5us max=222us) [10000 iters]
+  auth_bearer_check_unset: 1us avg (min=838ns max=23us) [100000 iters]
+  auth_bearer_check_set: 2us avg (min=907ns max=207us) [100000 iters]

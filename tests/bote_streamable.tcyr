@@ -1,0 +1,124 @@
+# bote_streamable.tcyr — Streamable HTTP / SSE transport data layer
+# (EventIdGenerator + StreamEvent + ResumptionBuffer + StreamableConfig)
+#
+# Run: cyrius test tests/bote_streamable.tcyr
+#
+# 2.7.2: extracted from tests/bote.tcyr to fit under the cyrius 5.10.x
+# 2 MB compile-source cap. Reconsolidates on cyrius 5.11.x migration.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/base64.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/sakshi.cyr"
+include "lib/bigint.cyr"
+include "lib/sigil.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/transport_streamable.cyr"
+
+fn main() {
+    alloc_init();
+    fl_init();
+
+    # ---------------- EventIdGenerator ----------------
+    var gen = event_id_gen_new();
+    var id0 = event_id_gen_next(gen);
+    var id1 = event_id_gen_next(gen);
+    var id2 = event_id_gen_next(gen);
+    assert(streq(id0, "evt-0") == 1, "first id evt-0");
+    assert(streq(id1, "evt-1") == 1, "second id evt-1");
+    assert(streq(id2, "evt-2") == 1, "third id evt-2");
+
+    # ---------------- StreamEvent + wire format ----------------
+    var ev1 = stream_event_new("evt-7", "{\"hello\":\"world\"}");
+    assert(streq(stream_event_id(ev1), "evt-7") == 1, "ev id");
+    assert(streq(stream_event_type(ev1), "message") == 1, "ev type default");
+    assert(streq(stream_event_data(ev1), "{\"hello\":\"world\"}") == 1, "ev data");
+    var wire = stream_event_to_wire(ev1);
+    assert(streq(wire, "id: evt-7\nevent: message\ndata: {\"hello\":\"world\"}\n\n") == 1,
+           "ev wire format");
+
+    var primer = stream_event_primer("evt-0");
+    var primer_wire = stream_event_to_wire(primer);
+    assert(streq(primer_wire, "id: evt-0\nevent: message\ndata: \n\n") == 1,
+           "primer wire (empty data)");
+
+    # ---------------- ResumptionBuffer ----------------
+    var rb = resumption_buffer_new(3);
+    assert_eq(resumption_buffer_len(rb), 0, "buffer empty");
+    resumption_buffer_push(rb, stream_event_new("evt-1", "a"));
+    resumption_buffer_push(rb, stream_event_new("evt-2", "b"));
+    resumption_buffer_push(rb, stream_event_new("evt-3", "c"));
+    assert_eq(resumption_buffer_len(rb), 3, "buffer 3");
+    # Push one more — evicts evt-1
+    resumption_buffer_push(rb, stream_event_new("evt-4", "d"));
+    assert_eq(resumption_buffer_len(rb), 3, "buffer still 3 (capped)");
+    var first = vec_get(resumption_buffer_events(rb), 0);
+    assert(streq(stream_event_id(first), "evt-2") == 1, "evt-1 evicted, head = evt-2");
+
+    # events_after — present id
+    var after2 = resumption_buffer_events_after(rb, "evt-2");
+    assert_eq(vec_len(after2), 2, "after evt-2 → 2 events");
+    assert(streq(stream_event_id(vec_get(after2, 0)), "evt-3") == 1, "next is evt-3");
+    assert(streq(stream_event_id(vec_get(after2, 1)), "evt-4") == 1, "then evt-4");
+
+    # events_after — absent id (returns empty, caller must full-resync)
+    var after_missing = resumption_buffer_events_after(rb, "evt-99");
+    assert_eq(vec_len(after_missing), 0, "missing id → empty");
+
+    # events_after — defensive guards (p(-1) hardening)
+    assert_eq(vec_len(resumption_buffer_events_after(rb, 0)), 0, "null id → empty (no segfault)");
+    assert_eq(vec_len(resumption_buffer_events_after(rb, "")), 0, "empty id → empty");
+
+    # ---------------- StreamableConfig ----------------
+    var scfg = streamable_config_new("/mcp", 0x0100007F, 8392);
+    assert(streq(streamable_config_path(scfg), "/mcp") == 1, "scfg path");
+    assert_eq(streamable_config_addr(scfg), 0x0100007F, "scfg addr");
+    assert_eq(streamable_config_port(scfg), 8392, "scfg port");
+    assert_eq(streamable_config_retry_ms(scfg), 5000, "scfg default retry_ms");
+    assert_eq(streamable_config_session_store(scfg), 0, "scfg no default session");
+
+    streamable_config_with_retry_ms(scfg, 1000);
+    assert_eq(streamable_config_retry_ms(scfg), 1000, "scfg custom retry_ms");
+
+    # ---------------- POST/GET path matching uses sandhi_server_path_only ----------------
+    # Sanity that the transport's path check ignores the query string —
+    # exercises the same stdlib helper but at our usage site.
+    assert(streq(sandhi_server_path_only("/mcp?lastEventId=evt-7"), "/mcp") == 1,
+           "path strips query for routing");
+
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

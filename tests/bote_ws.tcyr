@@ -1,0 +1,78 @@
+# bote_ws.tcyr — WebSocket transport (RFC 6455) config + handler wire-up
+#
+# Run: cyrius test tests/bote_ws.tcyr
+#
+# 2.7.2: extracted from tests/bote.tcyr to fit under the cyrius 5.10.x
+# 2 MB compile-source cap. Reconsolidates on cyrius 5.11.x migration.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/json.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/base64.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/sakshi.cyr"
+include "lib/bigint.cyr"
+include "lib/sigil.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/transport_ws.cyr"
+
+fn main() {
+    alloc_init();
+    fl_init();
+
+    # ---------------- WebSocket transport — config + handler wire-up ----------------
+    var wcfg = ws_config_new("/mcp", 0x0100007F, 8393);
+    assert(streq(ws_config_path(wcfg), "/mcp") == 1, "wcfg path");
+    assert_eq(ws_config_addr(wcfg), 0x0100007F, "wcfg addr");
+    assert_eq(ws_config_port(wcfg), 8393, "wcfg port");
+    assert_eq(ws_config_allowed_origins(wcfg), 0, "wcfg no default origins");
+    assert_eq(ws_config_require_protocol(wcfg), 0, "wcfg protocol not required");
+    assert_eq(ws_config_dispatcher(wcfg), 0, "wcfg dispatcher unset pre-run");
+
+    var worigins = vec_new();
+    vec_push(worigins, "http://localhost");
+    ws_config_with_allowed_origins(wcfg, worigins);
+    assert_eq(ws_config_allowed_origins(wcfg), worigins, "wcfg origins wired");
+
+    ws_config_with_require_protocol(wcfg, 1);
+    assert_eq(ws_config_require_protocol(wcfg), 1, "wcfg require_protocol");
+
+    assert(&_bote_ws_handler != 0, "_bote_ws_handler fp");
+    var wdisp = dispatcher_new(registry_new());
+    store64(wcfg + 40, wdisp);
+    assert_eq(ws_config_dispatcher(wcfg), wdisp, "wcfg dispatcher wired");
+
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

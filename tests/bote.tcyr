@@ -42,15 +42,11 @@ include "src/session.cyr"
 include "src/discovery.cyr"
 include "src/transport_http.cyr"
 include "src/bridge.cyr"
-include "src/transport_streamable.cyr"
-# NB: lib/ws_server.cyr stays out of this compile unit. Even on cyrius
-# 4.7.1 (which raised the function table to 4096 and fixed the
-# BUILD_METHOD_NAME scratch corruption), pulling ws_server.cyr in here
-# still trips the same `lib/assert.cyr:3: expected '=', got string`
-# misleading error — bote's specific overflow path isn't covered by the
-# 4.7.1 fix. The per-module tests/bote_<module>.tcyr split absorbs the
-# overflow and reads cleanly anyway.
-include "src/transport_ws.cyr"
+# 2.7.2: Streamable HTTP + WebSocket transports moved to their own
+# test files (tests/bote_streamable.tcyr + tests/bote_ws.tcyr) — the
+# combined compile unit exceeded the cyrius 5.10.x 2 MB cap once
+# libro 2.6.3 + cyrius 5.10.44 stdlib growth landed. Reconsolidates
+# on cyrius 5.11.x migration.
 
 # Test handler: echoes its arguments verbatim.
 fn h_echo(args, claims) {
@@ -1107,101 +1103,13 @@ fn main() {
     # despite the freed function-count budget — see CHANGELOG. Adapter
     # itself is correct (proved in isolated probes).
 
-    # ================================================================
-    # v1.4.0: streamable HTTP transport — data layer
-    # ================================================================
-
-    # ---------------- EventIdGenerator ----------------
-    var gen = event_id_gen_new();
-    var id0 = event_id_gen_next(gen);
-    var id1 = event_id_gen_next(gen);
-    var id2 = event_id_gen_next(gen);
-    assert(streq(id0, "evt-0") == 1, "first id evt-0");
-    assert(streq(id1, "evt-1") == 1, "second id evt-1");
-    assert(streq(id2, "evt-2") == 1, "third id evt-2");
-
-    # ---------------- StreamEvent + wire format ----------------
-    var ev1 = stream_event_new("evt-7", "{\"hello\":\"world\"}");
-    assert(streq(stream_event_id(ev1), "evt-7") == 1, "ev id");
-    assert(streq(stream_event_type(ev1), "message") == 1, "ev type default");
-    assert(streq(stream_event_data(ev1), "{\"hello\":\"world\"}") == 1, "ev data");
-    var wire = stream_event_to_wire(ev1);
-    assert(streq(wire, "id: evt-7\nevent: message\ndata: {\"hello\":\"world\"}\n\n") == 1,
-           "ev wire format");
-
-    var primer = stream_event_primer("evt-0");
-    var primer_wire = stream_event_to_wire(primer);
-    assert(streq(primer_wire, "id: evt-0\nevent: message\ndata: \n\n") == 1,
-           "primer wire (empty data)");
-
-    # ---------------- ResumptionBuffer ----------------
-    var rb = resumption_buffer_new(3);
-    assert_eq(resumption_buffer_len(rb), 0, "buffer empty");
-    resumption_buffer_push(rb, stream_event_new("evt-1", "a"));
-    resumption_buffer_push(rb, stream_event_new("evt-2", "b"));
-    resumption_buffer_push(rb, stream_event_new("evt-3", "c"));
-    assert_eq(resumption_buffer_len(rb), 3, "buffer 3");
-    # Push one more — evicts evt-1
-    resumption_buffer_push(rb, stream_event_new("evt-4", "d"));
-    assert_eq(resumption_buffer_len(rb), 3, "buffer still 3 (capped)");
-    var first = vec_get(resumption_buffer_events(rb), 0);
-    assert(streq(stream_event_id(first), "evt-2") == 1, "evt-1 evicted, head = evt-2");
-
-    # events_after — present id
-    var after2 = resumption_buffer_events_after(rb, "evt-2");
-    assert_eq(vec_len(after2), 2, "after evt-2 → 2 events");
-    assert(streq(stream_event_id(vec_get(after2, 0)), "evt-3") == 1, "next is evt-3");
-    assert(streq(stream_event_id(vec_get(after2, 1)), "evt-4") == 1, "then evt-4");
-
-    # events_after — absent id (returns empty, caller must full-resync)
-    var after_missing = resumption_buffer_events_after(rb, "evt-99");
-    assert_eq(vec_len(after_missing), 0, "missing id → empty");
-
-    # events_after — defensive guards (p(-1) hardening)
-    assert_eq(vec_len(resumption_buffer_events_after(rb, 0)), 0, "null id → empty (no segfault)");
-    assert_eq(vec_len(resumption_buffer_events_after(rb, "")), 0, "empty id → empty");
-
-    # ---------------- StreamableConfig ----------------
-    var scfg = streamable_config_new("/mcp", 0x0100007F, 8392);
-    assert(streq(streamable_config_path(scfg), "/mcp") == 1, "scfg path");
-    assert_eq(streamable_config_addr(scfg), 0x0100007F, "scfg addr");
-    assert_eq(streamable_config_port(scfg), 8392, "scfg port");
-    assert_eq(streamable_config_retry_ms(scfg), 5000, "scfg default retry_ms");
-    assert_eq(streamable_config_session_store(scfg), 0, "scfg no default session");
-
-    streamable_config_with_retry_ms(scfg, 1000);
-    assert_eq(streamable_config_retry_ms(scfg), 1000, "scfg custom retry_ms");
-
-    # ---------------- POST/GET path matching uses sandhi_server_path_only ----------------
-    # Sanity that the transport's path check ignores the query string —
-    # exercises the same stdlib helper but at our usage site.
-    assert(streq(sandhi_server_path_only("/mcp?lastEventId=evt-7"), "/mcp") == 1,
-           "path strips query for routing");
-
     # ---------------- events_majra: EventSink wire-up shape ----------------
+    # (Streamable + WS tests moved to tests/bote_streamable.tcyr and
+    # tests/bote_ws.tcyr in 2.7.2 — cyrius 5.10.x 2 MB cap fix.)
     var majra_fp = &majra_events_publish;
     assert(majra_fp != 0, "majra events fp addressable");
     var majra_sink = event_sink_new(majra_fp, 0);     # ctx=0 → adapter no-ops
     event_sink_publish(majra_sink, "any/topic", "{}");  # safe with ctx=0
-
-    # v1.5.0: WebSocket transport — config + handler wire-up
-    var wcfg = ws_config_new("/mcp", 0x0100007F, 8393);
-    assert(streq(ws_config_path(wcfg), "/mcp") == 1, "wcfg path");
-    assert_eq(ws_config_addr(wcfg), 0x0100007F, "wcfg addr");
-    assert_eq(ws_config_port(wcfg), 8393, "wcfg port");
-    assert_eq(ws_config_allowed_origins(wcfg), 0, "wcfg no default origins");
-    assert_eq(ws_config_require_protocol(wcfg), 0, "wcfg protocol not required");
-    assert_eq(ws_config_dispatcher(wcfg), 0, "wcfg dispatcher unset pre-run");
-    var worigins = vec_new();
-    vec_push(worigins, "http://localhost");
-    ws_config_with_allowed_origins(wcfg, worigins);
-    assert_eq(ws_config_allowed_origins(wcfg), worigins, "wcfg origins wired");
-    ws_config_with_require_protocol(wcfg, 1);
-    assert_eq(ws_config_require_protocol(wcfg), 1, "wcfg require_protocol");
-    assert(&_bote_ws_handler != 0, "_bote_ws_handler fp");
-    var wdisp = dispatcher_new(registry_new());
-    store64(wcfg + 40, wdisp);
-    assert_eq(ws_config_dispatcher(wcfg), wdisp, "wcfg dispatcher wired");
 
     # v1.6.0: libro_tools tests live in tests/bote_libro_tools.tcyr
     # (splitting to stay under the cyrius 4.5.1 parser identifier-buffer cap).

@@ -1,0 +1,54 @@
+# bote-streamable — Streamable HTTP / SSE transport binary
+#
+# 2.7.2 (cyrius 5.10.x): per-transport binary split workaround.
+# The Streamable HTTP transport lives in its own binary because the
+# default `bote` binary's expanded source exceeds the cyrius 2 MB
+# compile cap once transport_streamable.cyr is added.
+#
+# When bote migrates to cyrius 5.11.x (cap raised to 4 MB), fold this
+# back into src/main.cyr and retire this file. See companion proposal
+# in cyrius/docs/development/proposals/2026-05-10-raise-compile-source-cap.md.
+
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/transport_streamable.cyr"
+include "src/content.cyr"
+include "src/host.cyr"
+include "src/main_common.cyr"
+
+fn main() {
+    alloc_init();
+    args_init();
+
+    var dispatcher = bote_dispatcher_with_echo();
+
+    var auth_fp_slot[8]; var auth_ctx_slot[8];
+    store64(&auth_fp_slot, 0); store64(&auth_ctx_slot, 0);
+    _bote_bearer_from_env(&auth_fp_slot, &auth_ctx_slot);
+    var bearer_fp = load64(&auth_fp_slot);
+    var bearer_ctx = load64(&auth_ctx_slot);
+
+    # Usage: bote-streamable [port]   (default 8392)
+    var port = 8392;
+    if (argc() >= 2) { port = _parse_uint(argv(1)); }
+    if (port == 0) { port = 8392; }
+    var cfg = streamable_config_new("/mcp", INADDR_LOOPBACK(), port);
+    if (bearer_fp != 0) { streamable_config_with_bearer_validator(cfg, bearer_fp, bearer_ctx); }
+    return transport_streamable_run(dispatcher, cfg);
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

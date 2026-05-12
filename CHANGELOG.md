@@ -18,6 +18,130 @@ have per release.
 
 _(empty)_
 
+## [2.7.2] — 2026-05-11 — cyrius 5.10.44 + libro 2.6.3 + majra 2.4.4; per-transport binary split for 5.10.x cap
+
+Toolchain + dep refresh, plus a structural workaround for the
+cyrius 5.10.x 2 MB compile-source cap that the upgraded deps push
+bote past. No MCP wire-format change, no handler-ABI change. The
+default `bote` binary's CLI surface shrinks (streamable / ws moved
+to siblings); the API surface in `src/*.cyr` is unchanged.
+
+### Changed
+
+- **Cyrius toolchain pin: 5.10.34 → 5.10.44.** Picks up the
+  5.10.x stdlib + frontend deltas. Notable for bote: pulls
+  `lib/slice.cyr` (now required transitively by libro 2.6.3 →
+  agnosys for slice subscripts) and `lib/assert.cyr` (used by
+  libro / majra).
+
+- **First-party dep pins, all bumped to latest released:**
+  - **libro 2.6.2 → 2.6.3** — `dist/libro.cyr` fixes the bare
+    `ct_eq` call at the old call site (links against
+    `ct_eq_bytes_lens` now). Closes the libro-side blocker
+    phylax 1.1.1 documented from the consumer side.
+  - **majra 2.4.3 → 2.4.4** — minor refresh; pubsub / counter
+    surface unchanged at bote's `events_majra` adapter call sites.
+
+- **Stdlib additions: `slice`, `assert`, `ct`, `keccak`, `random`.**
+  Required by libro 2.6.3 + sigil 3.1.1 (PQ / AES-GCM surfaces).
+  bote itself only consumes `sha256_hex`; the linker needs the
+  symbols declared even if DCE prunes most call sites. See phylax
+  1.1.1 CHANGELOG for the original pull-through write-up.
+
+- **`ws_server` removed from `[deps] stdlib` auto-inject.** It
+  lives in `src/transport_ws.cyr` + `tests/bote_ws.tcyr` and gets
+  pulled in via manual `include "lib/ws_server.cyr"` from those
+  files only. Keeps every other test / binary from carrying the
+  11 KB ws-frame machinery they don't use.
+
+### Added
+
+- **Per-transport binary split** (cyrius 5.10.x cap workaround):
+  - `build/bote` — default. stdio + http + unix + bridge.
+  - `build/bote-streamable` (new) — Streamable HTTP / SSE on
+    port 8392 default. Built from `src/main_streamable.cyr`.
+  - `build/bote-ws` (new) — WebSocket MCP on port 8393 default.
+    Built from `src/main_ws.cyr`.
+  Shared helpers (echo handler, env-driven bearer wiring, CSV
+  token split, dispatcher constructor) live in
+  `src/main_common.cyr`. `scripts/build-all.sh` builds the trio.
+  Folds back into a single `build/bote` binary when bote migrates
+  to cyrius 5.11.x (cap raised to 4 MB; see companion proposal in
+  `cyrius/docs/development/proposals/2026-05-10-raise-compile-source-cap.md`).
+
+- **Per-module test split** (Streamable HTTP / WS): the
+  `tests/bote.tcyr` catch-all was hitting the 2 MB cap once the
+  cyrius / libro / majra refresh landed. Streamable + WebSocket
+  test sections extracted into:
+  - `tests/bote_streamable.tcyr` — 25 assertions (EventIdGenerator,
+    StreamEvent wire format, ResumptionBuffer eviction, events_after
+    edge cases, StreamableConfig retry_ms, sandhi path-strip sanity).
+  - `tests/bote_ws.tcyr` — 10 assertions (WsConfig path / addr /
+    port / allowed_origins / require_protocol / dispatcher wire-up,
+    `_bote_ws_handler` fp addressable).
+  `tests/bote.tcyr` keeps 363 assertions; full test count across
+  all 10 `tests/*.tcyr` files is **653**. Pattern mirrors phylax
+  1.1.1's per-module test split.
+
+### Fixed
+
+- **`scripts/bench-log.sh` ported from `cargo bench` to `cyrius bench`.**
+  The script was a Rust-era stale and had never run successfully
+  against the Cyrius port. Output captured from `cyrius bench
+  tests/bote.bcyr` (14 criterion benches: dispatch_initialize /
+  dispatch_tools_list / dispatch_tools_call / jsonx_get_str_flat
+  / jsonx_get_raw_nested / codec_parse_request /
+  codec_serialize_response / codec_process_message /
+  validate_compiled_simple / validate_compiled_nested /
+  schema_compile_simple / schema_compile_nested /
+  auth_bearer_check_unset / auth_bearer_check_set).
+
+### Performance
+
+Benchmark snapshot at v2.7.2 (full block in
+`benches/history.log`). Per-iteration averages:
+
+| Bench | avg | iters |
+|-------|-----|-------|
+| dispatch_initialize       | 2 µs  | 10 000  |
+| dispatch_tools_list       | 3 µs  | 10 000  |
+| dispatch_tools_call       | 6 µs  | 10 000  |
+| jsonx_get_str_flat        | 1 µs  | 100 000 |
+| jsonx_get_raw_nested      | 1 µs  | 100 000 |
+| codec_parse_request       | 2 µs  | 10 000  |
+| codec_serialize_response  | 1 µs  | 10 000  |
+| codec_process_message     | 8 µs  | 10 000  |
+| validate_compiled_simple  | 1 µs  | 10 000  |
+| validate_compiled_nested  | 3 µs  | 10 000  |
+| schema_compile_simple     | 4 µs  | 10 000  |
+| schema_compile_nested     | 7 µs  | 10 000  |
+| auth_bearer_check_unset   | 1 µs  | 100 000 |
+| auth_bearer_check_set     | 2 µs  | 100 000 |
+
+No regressions vs. 2.7.1 (within measurement noise — all benches
+were already at the sub-10-µs floor).
+
+### Breaking
+
+- **`bote streamable [port]`** and **`bote ws [port]`** CLI modes
+  removed from the default `bote` binary. Callers must invoke
+  `bote-streamable [port]` / `bote-ws [port]` instead. The
+  invocation matrix:
+
+  | Transport      | 2.7.1                    | 2.7.2                          |
+  |----------------|--------------------------|--------------------------------|
+  | stdio (default)| `bote`                   | `bote` (unchanged)             |
+  | HTTP           | `bote http [port]`       | `bote http [port]` (unchanged) |
+  | Unix socket    | `bote unix <path>`       | `bote unix <path>` (unchanged) |
+  | TS bridge      | `bote bridge [port]`     | `bote bridge [port]` (unchanged) |
+  | Streamable     | `bote streamable [port]` | `bote-streamable [port]`       |
+  | WebSocket      | `bote ws [port]`         | `bote-ws [port]`               |
+
+  This is purely a CLI surface change — the underlying transport
+  modules (`src/transport_streamable.cyr` / `src/transport_ws.cyr`)
+  and their public API are unchanged. Consolidates back into a
+  single binary on cyrius 5.11.x migration.
+
 ## [2.7.1] — 2026-05-10 — HostRegistry hot-reload + CONTRIBUTING.md Cyrius-era cleanup
 
 Second 2.7.x patch. Lands the **HostRegistry hot-reload** feature
