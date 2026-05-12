@@ -22,6 +22,8 @@ output = "build/bote"
 # libro_export accessors were retired in libro 2.0). Consumers
 # wanting libro-tool dispatch will pull it back in via a follow-up
 # 2.6.x patch once the port lands.
+#   cyrius distlib       → dist/bote.cyr      (default [lib], full bundle — 23 modules)
+#   cyrius distlib core  → dist/bote-core.cyr ([lib.core], 9 transport-free modules)
 [lib]
 modules = [
     "src/error.cyr",
@@ -47,6 +49,29 @@ modules = [
     "src/transport_ws.cyr",
     "src/content.cyr",
     "src/host.cyr",
+]
+
+# Core-only opt-in bundle (2.7.2). Nine transport-free modules for
+# consumers that wrap bote's Dispatcher / Registry / Audit surface
+# but supply their own transport — e.g. t-ron 2.1.x's SecurityGate
+# middleware. Excludes the transports (stdio/http/unix/bridge/
+# streamable/ws), auth, session, discovery, content, host, audit_libro,
+# events_majra. Keeps consumers off the cyrius 2 MB compile-source cap
+# while still allowing the single-bundle DEPS-PATTERN.
+#
+# See docs/development/issues/2026-05-10-opt-in-transport-profile.md
+# for the rationale and split derivation.
+[lib.core]
+modules = [
+    "src/error.cyr",
+    "src/protocol.cyr",
+    "src/jsonx.cyr",
+    "src/registry.cyr",
+    "src/events.cyr",
+    "src/audit.cyr",
+    "src/dispatch.cyr",
+    "src/codec.cyr",
+    "src/schema.cyr",
 ]
 
 # ── Dependencies ─────────────────────────────────────────────────
@@ -77,6 +102,15 @@ stdlib = [
     "thread",
     "sakshi",
     "bigint",
+    # ct / keccak / random must precede sigil — cyrius is single-pass
+    # and sigil 3.x's ML-DSA + AES-GCM surfaces reference ct_eq_bytes_lens,
+    # ct_select, _keccak_*, shake256, random_bytes. bote itself only
+    # consumes sha256_hex; the linker needs these declared even if DCE
+    # prunes most call sites. See phylax 1.1.1 CHANGELOG for the
+    # original write-up of this pull-through.
+    "ct",
+    "keccak",
+    "random",
     "sigil",
     "tls",
     "sandhi",
@@ -84,15 +118,6 @@ stdlib = [
     # — auto-injecting it would burn compile-source budget in every
     # other test file. Kept out of [deps] stdlib; pulled in manually by
     # the ws-specific entry/test files only. 2.7.2 cyrius 5.10.x cap fix.
-    # Transitive deps from sigil 3.x (pulled in by libro 2.6.3) —
-    # ct (constant-time primitives), keccak (SHA-3 / SHAKE / Keccak-f1600
-    # for ML-DSA), random (getrandom for keygen / nonces). bote itself
-    # only consumes sha256_hex; the linker needs these declared even if
-    # DCE prunes most call sites. See phylax 1.1.1 CHANGELOG for the
-    # original write-up of this pull-through.
-    "ct",
-    "keccak",
-    "random",
 ]
 
 # libro audit chain — single-file dist bundle. cyrius deps clones

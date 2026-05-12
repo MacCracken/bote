@@ -1,0 +1,55 @@
+# bote_core_only_smoke.tcyr — drift guard for the opt-in core bundle.
+#
+# Includes ONLY dist/bote-core.cyr (the 9-module transport-free profile)
+# plus the minimal stdlib auto-injected by cyrius. If a future bote
+# change wires a core-module symbol against a transport-module helper,
+# the core bundle silently regresses and consumers that adopted the
+# opt-in profile break. This test catches that drift at CI time.
+#
+# Run: cyrius test tests/bote_core_only_smoke.tcyr
+#
+# 2.7.2: lands with the opt-in profile. See
+# docs/development/issues/2026-05-10-opt-in-transport-profile.md.
+
+include "dist/bote-core.cyr"
+
+# Test handler: echoes args verbatim.
+fn h_echo(args, claims) {
+    return args;
+}
+
+fn main() {
+    alloc_init();
+    fl_init();
+
+    # Exercise every public surface that consumers of the opt-in core
+    # bundle reach for: registry_new, schema_new, tool_def_new,
+    # registry_register, dispatcher_new, dispatcher_handle. (Drift
+    # detection here is "did it link", not "did it dispatch a JSON-RPC
+    # round-trip" — dispatcher_dispatch pulls in codec/jsonx paths
+    # that exercise more of the bundle but also depend on stdlib
+    # finalisers we don't want to touch in a smoke test.)
+    var reg = registry_new();
+    if (reg == 0) { return 1; }
+
+    var sch = schema_new("object", 0, vec_new());
+    if (sch == 0) { return 2; }
+
+    registry_register(reg, tool_def_new("echo", "echo handler", sch));
+    if (registry_contains(reg, "echo") == 0) { return 3; }
+
+    var disp = dispatcher_new(reg);
+    if (disp == 0) { return 4; }
+
+    dispatcher_handle(disp, "echo", &h_echo);
+
+    # Inline exit to avoid stdlib finalisers (libro / majra are
+    # auto-injected by cyrius.cyml [deps] even though the core bundle
+    # doesn't reference them, and their teardown trips the heap
+    # heisenbug documented in tests/bote.tcyr).
+    syscall(SYS_EXIT, 0);
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

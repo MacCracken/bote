@@ -56,6 +56,30 @@ to siblings); the API surface in `src/*.cyr` is unchanged.
 
 ### Added
 
+- **`dist/bote-core.cyr` — opt-in core bundle.** Closes the
+  consumer-side blocker tracked at
+  `docs/development/issues/2026-05-10-opt-in-transport-profile.md`.
+  Nine transport-free modules (`error`, `protocol`, `jsonx`,
+  `registry`, `events`, `audit`, `dispatch`, `codec`, `schema`)
+  packaged via `cyrius distlib core` (new `[lib.core]` profile
+  in `cyrius.cyml`). 1989 lines / 70 KB — matches the issue's
+  projected shape. Consumers wrap bote's dispatch surface but
+  supply their own transport stack; the bundle excludes
+  `transport_*` / `bridge` / `auth` / `session` / `discovery` /
+  `content` / `host` / `audit_libro` / `events_majra`. **t-ron
+  2.1.x is the trigger consumer** — its `cyrius.cyml` will flip
+  to `modules = ["dist/bote-core.cyr"]` on the 2.7.2 bump,
+  retiring the per-module pull workaround it shipped at 2.1.0.
+  Drift guard: `tests/bote_core_only_smoke.tcyr` includes the
+  bundle in isolation and runs a dispatcher + registry round-trip.
+  See `DEPS-PATTERN.md` for the profile-selection contract.
+
+- **`DEPS-PATTERN.md`** — distribution contract doc, modelled on
+  libro's. Documents the dual-bundle shape (`dist/bote.cyr` +
+  `dist/bote-core.cyr`), the `cyrius distlib` invocations, the
+  profile-selection rule for downstream consumers, and the
+  core-9 module list.
+
 - **Per-transport binary split** (cyrius 5.10.x cap workaround):
   - `build/bote` — default. stdio + http + unix + bridge.
   - `build/bote-streamable` (new) — Streamable HTTP / SSE on

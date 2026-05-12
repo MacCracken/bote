@@ -174,24 +174,37 @@ jobs:
           fi
           exit $fail
 
-      - name: dist bundle is up-to-date
-        # `cyrius distlib` reads cyrius.cyml [lib] modules and emits
-        # dist/bote.cyr deterministically. The committed bundle must
-        # match the regenerated bundle byte-for-byte; otherwise a
-        # downstream consumer cloning at our tag gets stale code
-        # under `cyrius deps`. Mirrors libro / majra freshness gate.
+      - name: dist bundles are up-to-date
+        # `cyrius distlib` reads cyrius.cyml [lib] / [lib.<profile>]
+        # modules and emits dist/bote.cyr (default, full bundle) and
+        # dist/bote-core.cyr (opt-in core profile, 2.7.2+)
+        # deterministically. Both committed bundles must match the
+        # regenerated bundles byte-for-byte; otherwise a downstream
+        # consumer cloning at our tag gets stale code under
+        # `cyrius deps`. Mirrors libro / majra freshness gate.
         # cyrius emits an informational note about unresolved symbols
         # in consumer-included bundles (expected — stdlib is supplied
         # by the consumer); the bundle is still emitted, we only fail
         # on a stale diff.
         run: |
+          fail=0
           cyrius distlib || true
           test -s dist/bote.cyr || { echo "FAIL: dist/bote.cyr not produced"; exit 1; }
           if ! git diff --exit-code dist/bote.cyr; then
             echo "FAIL: dist/bote.cyr is stale. Run 'cyrius distlib' and commit."
-            exit 1
+            fail=1
+          else
+            echo "dist/bote.cyr matches src/ ($(wc -l < dist/bote.cyr) lines)"
           fi
-          echo "dist/bote.cyr matches src/ ($(wc -l < dist/bote.cyr) lines)"
+          cyrius distlib core || true
+          test -s dist/bote-core.cyr || { echo "FAIL: dist/bote-core.cyr not produced"; exit 1; }
+          if ! git diff --exit-code dist/bote-core.cyr; then
+            echo "FAIL: dist/bote-core.cyr is stale. Run 'cyrius distlib core' and commit."
+            fail=1
+          else
+            echo "dist/bote-core.cyr matches src/ ($(wc -l < dist/bote-core.cyr) lines)"
+          fi
+          exit $fail
 
       - name: Run tests
         # Test files split across compilation units (bote.tcyr, plus
@@ -207,7 +220,10 @@ jobs:
                       tests/bote_jwt.tcyr \
                       tests/bote_pkce.tcyr \
                       tests/bote_sandbox.tcyr \
-                      tests/bote_libro_tools.tcyr; do
+                      tests/bote_libro_tools.tcyr \
+                      tests/bote_streamable.tcyr \
+                      tests/bote_ws.tcyr \
+                      tests/bote_core_only_smoke.tcyr; do
             echo "--- $tcyr ---"
             out=$(cyrius test "$tcyr" 2>&1)
             tail=$(echo "$out" | tail -3)
