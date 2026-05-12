@@ -102,21 +102,36 @@ jobs:
       - name: Manifest completeness ([lib] modules ⊇ main.cyr src/ includes)
         run: |
           # Every `include "src/<file>.cyr"` in src/main.cyr must be
-          # listed under cyrius.cyml [lib] modules (or be in the
-          # known-excluded set). Otherwise `cyrius distlib` silently
-          # ships a bundle missing a module. Mirrors libro / majra.
+          # listed under cyrius.cyml [lib] modules OR be in the
+          # known-excluded set below. Otherwise `cyrius distlib`
+          # silently ships a bundle missing a module. Mirrors
+          # libro / majra.
+          #
+          # Excluded — entry-only helpers that belong to the binary,
+          # not the public library surface. Including them in [lib]
+          # modules would publish internal CLI / dispatcher-setup
+          # helpers into dist/bote.cyr where consumers don't want
+          # them.
+          EXCLUDES=$(printf '%s\n' \
+            "src/main_common.cyr" \
+            | sort -u)
           INCLUDES=$(grep -E 'include "src/[^"]+\.cyr"' src/main.cyr \
             | grep -v "^#" \
             | sed -E 's/.*"(src\/[^"]+\.cyr)".*/\1/' | sort -u)
           MANIFEST=$(awk '/^\[lib\]/{flag=1;next} /^\[/{flag=0} flag' cyrius.cyml \
             | grep -oE '"src/[^"]+\.cyr"' | tr -d '"' | sort -u)
-          MISSING=$(comm -23 <(echo "$INCLUDES") <(echo "$MANIFEST"))
+          REQUIRED=$(comm -23 <(echo "$INCLUDES") <(echo "$EXCLUDES"))
+          MISSING=$(comm -23 <(echo "$REQUIRED") <(echo "$MANIFEST"))
           if [ -n "$MISSING" ]; then
             echo "FAIL: src/ files included from main.cyr but not in cyrius.cyml [lib] modules:"
             echo "$MISSING"
+            echo
+            echo "If this is a new entry-only helper (like main_common.cyr),"
+            echo "add it to EXCLUDES above. Otherwise add it to [lib] modules."
             exit 1
           fi
           echo "Manifest covers all main.cyr src/ includes."
+          echo "Excluded (entry-only): $(echo "$EXCLUDES" | tr '\n' ' ')"
 
       - name: Build
         run: |

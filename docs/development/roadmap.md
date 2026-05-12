@@ -1,9 +1,13 @@
 # Bote Roadmap
 
-> **Current**: `2.7.1` (cyrius 5.10.34, libro 2.6.2, majra 2.4.3).
-> 8 active test files, **653 unit assertions**, **14 criterion
-> benchmarks**, single-file `dist/bote.cyr` consumer bundle, CI
-> capacity gate, annotations-preserving `wrap_tool_result`,
+> **Current**: `2.7.2` (cyrius 5.10.44, libro 2.6.3, majra 2.4.4).
+> 11 active test files, **653 unit assertions** + 1 drift-guard
+> smoke, **14 criterion benchmarks**, **dual** consumer bundles
+> (`dist/bote.cyr` full + `dist/bote-core.cyr` opt-in core via
+> `[lib.core]` profile), per-transport binary trio
+> (`bote` / `bote-streamable` / `bote-ws` — 5.10.x cap
+> workaround; reconsolidates on 5.11.x), CI capacity + dual
+> dist-freshness gates, annotations-preserving `wrap_tool_result`,
 > HostRegistry hot-reload, 4 fuzz harnesses, 6 transports,
 > handler-claims ABI plumbed end-to-end, JWT HS256 + RFC 7636
 > PKCE, bearer + allowlist + JWT validators, pluggable sandbox
@@ -56,6 +60,7 @@ surfaces. See the **2.6.x modernization arc** section below.
 | **2.6.4** | CI capacity gate (`CYRIUS_STATS=1` + 95% fn_table / identifier-buffer threshold). Modernization arc closes. Three documented response paths (upstream cap raise, transport split, `BOTE_FULL_CONFIG` gate) if the gate ever fires |
 | **2.7.0** | Carry-forward cleanup. Annotations propagation through `wrap_tool_result` (single content block lifts into envelope, preserves block-level annotations from 1.9.6). `schema_compile` + `auth_bearer_check` benchmarks (closes the bench-coverage list in `docs/benchmarks-rust-v-cyrius.md`). `## [Unreleased]` CHANGELOG flow adopted |
 | **2.7.1** | HostRegistry hot-reload — `host_entry_from_json` / `host_registry_load_json` / `host_registry_load_from_file` / `host_registry_reload` / `host_registry_clear`. Fail-safe semantics on bad config (registry unchanged on parse error). +46 assertions, total 653. CONTRIBUTING.md rewritten for the Cyrius era |
+| **2.7.2** | Toolchain + dep refresh (cyrius 5.10.34 → 5.10.44, libro 2.6.2 → 2.6.3, majra 2.4.3 → 2.4.4); stdlib + `slice` / `assert` / `ct` / `keccak` / `random` for sigil 3.x transitives. **`dist/bote-core.cyr` opt-in profile** (9 modules, 70 KB, `cyrius distlib core`) closes the t-ron consumer blocker and lands `DEPS-PATTERN.md` + `tests/bote_core_only_smoke.tcyr` drift guard + dual dist-freshness CI. **Per-transport binary split** (`bote` / `bote-streamable` / `bote-ws`) — interim 5.10.x cap workaround; reconsolidates on 5.11.x. Per-module test split: `bote_streamable.tcyr` (25) + `bote_ws.tcyr` (10) extracted from the monolithic `bote.tcyr`. `scripts/bench-log.sh` ported from `cargo bench` to `cyrius bench` |
 
 See [CHANGELOG.md](../../CHANGELOG.md) for the full detail per release.
 
@@ -91,15 +96,16 @@ work belongs.
 
 | Item | Priority | Effort | Notes |
 |---|---|---|---|
-| **Opt-in transport profile** — ship `dist/bote-core.cyr` alongside the monolithic `dist/bote.cyr` (9-module core: error / protocol / jsonx / registry / events / audit / dispatch / codec / schema; excludes transports / auth / session / discovery / content / host). See [`issues/2026-05-10-opt-in-transport-profile.md`](issues/2026-05-10-opt-in-transport-profile.md) | **P1 — current arc** | Medium | Trigger: t-ron 2.1.x is currently per-module-pulling 9 bote files because `dist/bote.cyr` + `dist/libro.cyr` together exceed cyrius's 2 MB compile-source-size cap. Companion cyrius cap-raise proposal at `cyrius/docs/development/proposals/2026-05-10-raise-compile-source-cap.md`; landing either unblocks t-ron, landing both gives consumers the choice. Mechanical split — no source change to transports. CI gains a `tests/bote_core_only_smoke.tcyr` to guard against core/transport entanglement |
+| **Opt-in transport profile** — `dist/bote-core.cyr` alongside `dist/bote.cyr` | ✅ **Shipped 2.7.2** | Medium | Resolved per [`issues/2026-05-10-opt-in-transport-profile.md`](issues/2026-05-10-opt-in-transport-profile.md). `cyrius.cyml [lib.core]` profile, 9-module 70 KB bundle, `DEPS-PATTERN.md`, `tests/bote_core_only_smoke.tcyr` drift guard, dual dist-freshness CI. t-ron 2.1.x flips its [deps.bote] to `dist/bote-core.cyr` in next patch. |
+| **Reconsolidate per-transport binaries** — fold `bote-streamable` + `bote-ws` back into single `bote` binary | **P2 — gated** | Small | Blocked on cyrius 5.11.x migration (cap raise 2 MB → 4 MB per the companion proposal at `cyrius/docs/development/proposals/2026-05-10-raise-compile-source-cap.md`). When that lands, retire `src/main_streamable.cyr` / `src/main_ws.cyr` / `src/main_common.cyr` and restore the streamable / ws CLI branches in `src/main.cyr`. The `dist/bote-core.cyr` profile stays — still useful for transport-less consumers. |
 | **OAuth 2.1 authorization-code flow** (bote-as-AS) | Deferred | High | Out of scope for MCP core; bote is the resource server. Flagged as explicitly deferred — consumers compose bote with their own AS layer. |
 
 The functional 2.7.x slate from the 2.6.x carry-forward list is
-empty after 2.7.1 (HostRegistry hot-reload + CONTRIBUTING.md both
-shipped). 2.7.x continues opportunistically as new needs surface.
-The next *planned* arc opens at 2.8.x — threaded streaming
-dispatch, still gated on cyrius `lib/thread.cyr` MPSC + `lib/async.cyr`
-cancellation firming up.
+empty after 2.7.2 (HostRegistry hot-reload + CONTRIBUTING.md + the
+opt-in core profile all shipped). 2.7.x continues opportunistically
+as new needs surface. The next *planned* arc opens at 2.8.x —
+threaded streaming dispatch, still gated on cyrius `lib/thread.cyr`
+MPSC + `lib/async.cyr` cancellation firming up.
 
 ### Blocked on cyrius / external
 
