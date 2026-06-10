@@ -6,8 +6,8 @@
 
 - **Language**: Cyrius (ported from Rust at v1.0.1; Rust archive preserved at tag `0.92.0`)
 - **License**: GPL-3.0-only
-- **Cyrius pin**: 5.10.44 (see `cyrius.cyml`; migration to 5.11.x planned)
-- **Version**: SemVer 2.x stable on the handler ABI; 2.7.2 current
+- **Cyrius pin**: 6.1.24 (see `cyrius.cyml`; major jump from 5.10.x landed at 2.7.3)
+- **Version**: SemVer 2.x stable on the handler ABI; 2.7.3 current
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -17,8 +17,8 @@
 
 | Dep | Role |
 |-------|------|
-| libro 2.6.3 | Hash-linked audit chain (`[deps.libro]` git pin) |
-| majra 2.4.4 | Pub/sub event publishing (`[deps.majra]` git pin) |
+| libro 2.7.2 | Hash-linked audit chain (`[deps.libro]` git pin) |
+| majra 2.4.5 | Pub/sub event publishing (`[deps.majra]` git pin) |
 | kavach 3.0  | Tool sandboxing (pluggable runner via fn-pointer + ctx adapter) |
 
 All AGNOS deps pinned in `cyrius.cyml [deps.<name>]` with `git` + `tag` (+ `path` for local dev). `lib/` is gitignored — `cyrius deps` rehydrates from the pinned tags. The contract is the pin, not the bytes on disk.
@@ -94,7 +94,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 
 0. Read roadmap, CHANGELOG, and open issues — know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cyrius fmt --check src/*.cyr`, `cyrius lint src/main.cyr`, `cyrius audit`, `cyrius deny src/main.cyr`
+2. Cleanliness check: `for f in src/*.cyr; do cyrius fmt --check "$f"; done`, `cyrius lint src/main.cyr`, `cyrius vet src/main.cyr`, `cyrius deny src/main.cyr` (6.1.x: `fmt` takes one file at a time; `cyrius audit` was repurposed to the toolchain self-host gate — use `cyrius vet` for the include-dependency audit)
 3. Get baseline benchmarks (`./scripts/bench-log.sh`)
 4. Initial refactor + audit (performance, memory, security, edge cases)
 5. Cleanliness check — must be clean after audit
@@ -106,7 +106,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 ### Development Loop (continuous)
 
 1. Work phase — new features, roadmap items, bug fixes
-2. Cleanliness check: `cyrius fmt --check src/*.cyr`, `cyrius lint src/main.cyr`, `cyrius audit`, `cyrius deny src/main.cyr`
+2. Cleanliness check: `for f in src/*.cyr; do cyrius fmt --check "$f"; done`, `cyrius lint src/main.cyr`, `cyrius vet src/main.cyr`, `cyrius deny src/main.cyr` (6.1.x: `fmt` takes one file at a time; `cyrius audit` was repurposed to the toolchain self-host gate — use `cyrius vet` for the include-dependency audit)
 3. Test + benchmark additions for new code
 4. Run benchmarks (`./scripts/bench-log.sh`)
 5. Audit phase — review performance, memory, security, throughput, correctness
@@ -139,8 +139,8 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 - **Own the stack.** If an AGNOS dep wraps an external lib, depend on the AGNOS dep — don't reach around it.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **Cyrius is single-pass.** Include order matters. New stdlib transitive deps go BEFORE the modules that reference them in `cyrius.cyml [deps] stdlib` (see the `ct` / `keccak` / `random` → `sigil` ordering for the worked example).
-- **Compile-source budget.** The cyrius 5.10.x parser has a 2 MB cap on expanded source. Watch the `cyrius build` output for `expanded source exceeds 2MB`. Three response paths (mirroring 2.6.4 / 2.7.2): upstream cap raise (preferred — landed before), per-transport binary split (current 2.7.2 path), opt-in module split for consumers (`dist/bote-core.cyr`).
-- **Function-table cap.** CI gates fn_table + identifier-buffer utilisation at < 95% (`CYRIUS_STATS=1`). At 2.7.2 we're at 93% / 92% on `src/main.cyr` — comfortable but bears watching.
+- **Compile-source budget.** The cyrius 5.10.x parser had a 2 MB cap on expanded source that forced the per-transport binary split. **6.1.24 (2.7.3) raised it** — `src/main.cyr` builds clean and the cap is no longer the binding constraint. Still watch the `cyrius build` output for `expanded source exceeds`. Three response paths remain on record if it ever fires again: upstream cap raise (the 6.1.x path), per-transport binary split (the 2.7.2 path, still in place), opt-in module split for consumers (`dist/bote-core.cyr`).
+- **Function-table cap.** CI gates fn_table + identifier-buffer utilisation at < 95% (`CYRIUS_STATS=1`). At 2.7.3 (cyrius 6.1.24) we're at **52% / 52%** on `src/main.cyr` (`fn_table 4250/8192`, `identifiers 137635/262144`) — the 6.1.x caps are much larger than 5.10.x, down from 93% / 92% at 2.7.2.
 - **No `unwrap()` / `panic!()` analog.** Library code returns 0 / -1 / error tags; consumer decides.
 - **Feature-shape via `[lib.<profile>]`.** Don't invent feature flags in Cyrius — produce a separate dist bundle if a consumer subset is worth supporting.
 - **`tracing` analog via libro / majra.** Audit goes to libro chain; events to majra pubsub. Wire via `dispatcher_set_audit` / `dispatcher_set_events`.

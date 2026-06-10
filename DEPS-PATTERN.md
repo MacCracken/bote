@@ -122,12 +122,12 @@ transport deps) and consumer-side documentation in t-ron's own
 `cyrius.cyml` flips to `modules = ["dist/bote-core.cyr"]` on
 the 2.7.2 bump.
 
-When bote migrates to cyrius 5.11.x (cap raised to 4 MB per the
-companion proposal), the core profile **stays** — it's still a
-smaller compile-source footprint and a faster CI for consumers
-that don't need the transports. The migration just removes the
-per-transport binary split inside bote itself (see CHANGELOG
-2.7.2).
+The cyrius major jump to 6.1.24 (bote 2.7.3) raised the cap and
+the core profile **stays** — it's still a smaller compile-source
+footprint and a faster CI for consumers that don't need the
+transports. The jump unblocks removing the per-transport binary
+split inside bote itself (still in place at 2.7.3; reconsolidation
+tracked as a follow-up — see CHANGELOG 2.7.3).
 
 ## What lives in the core 9?
 

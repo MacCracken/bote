@@ -18,6 +18,52 @@ have per release.
 
 _(empty)_
 
+## [2.7.3] — 2026-06-10 — cyrius 6.1.24 + libro 2.7.2 + majra 2.4.5; major-toolchain jump relieves the 5.10.x compile cap
+
+Toolchain + dep refresh. The headline is the **cyrius major-version
+jump (5.10.44 → 6.1.24)** — the 5.11.x migration that the 2.7.2
+notes flagged as "planned" landed as 6.1.x instead. No MCP
+wire-format change, no handler-ABI change, no `src/*.cyr` change.
+All 653 assertions (+ 1 drift smoke) pass unchanged on the new
+toolchain; the 14 criterion benchmarks show no regression
+(`benches/history.log`, v2.7.3).
+
+### Changed
+
+- **Cyrius toolchain pin: 5.10.44 → 6.1.24.** Major-version jump.
+  The expanded-source compile cap that forced the 2.7.2
+  per-transport binary split is no longer the binding constraint —
+  `src/main.cyr` builds clean. Function-table + identifier-buffer
+  utilisation dropped from 93% / 92% (5.10.x) to **52% / 52%**
+  (`CYRIUS_STATS=1`: `fn_table 4250/8192`, `identifiers
+  137635/262144`) on the raised 6.1.x caps. The per-transport
+  binary split (`bote` / `bote-streamable` / `bote-ws`) is retained
+  for this release — reconsolidation to a single binary is now
+  unblocked and tracked for a follow-up.
+
+- **First-party dep pins, all bumped to latest released:**
+  - **libro 2.6.3 → 2.7.2** — `dist/libro.cyr` refresh; audit-chain
+    + `sha256_hex` surface unchanged at bote's `audit_libro` /
+    `libro_tools` call sites.
+  - **majra 2.4.4 → 2.4.5** — minor refresh; pubsub / counter
+    surface unchanged at bote's `events_majra` adapter call sites.
+
+- **`cyrius.lock` now carries full stdlib hashes (6 → 40 entries).**
+  6.1.24's `cyrius deps` locks every resolved `lib/*.cyr`, not just
+  the first-party dist bundles. CI's byte-clean lock gate covers the
+  whole resolved set now.
+
+### Removed
+
+- **`cyrius audit` dropped from the cleanliness sequence.** Under
+  6.1.x `cyrius audit` is the *toolchain* self-host gate
+  (self-host + test + fmt + lint over the compiler), not a project
+  dependency audit, and it fails outside the cyrius repo. The
+  project-policy + dependency checks now run as `cyrius deny
+  src/main.cyr` (policy) + the new `cyrius vet src/main.cyr`
+  (include-dependency audit); `cyrius fmt --check` + `cyrius lint`
+  are unchanged.
+
 ## [2.7.2] — 2026-05-11 — cyrius 5.10.44 + libro 2.6.3 + majra 2.4.4; per-transport binary split for 5.10.x cap
 
 Toolchain + dep refresh, plus a structural workaround for the

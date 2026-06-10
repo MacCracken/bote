@@ -1,12 +1,12 @@
 # Bote Roadmap
 
-> **Current**: `2.7.2` (cyrius 5.10.44, libro 2.6.3, majra 2.4.4).
+> **Current**: `2.7.3` (cyrius 6.1.24, libro 2.7.2, majra 2.4.5).
 > 11 active test files, **653 unit assertions** + 1 drift-guard
 > smoke, **14 criterion benchmarks**, **dual** consumer bundles
 > (`dist/bote.cyr` full + `dist/bote-core.cyr` opt-in core via
 > `[lib.core]` profile), per-transport binary trio
-> (`bote` / `bote-streamable` / `bote-ws` — 5.10.x cap
-> workaround; reconsolidates on 5.11.x), CI capacity + dual
+> (`bote` / `bote-streamable` / `bote-ws` — retained from the
+> 5.10.x cap workaround; reconsolidation unblocked on 6.1.x), CI capacity + dual
 > dist-freshness gates, annotations-preserving `wrap_tool_result`,
 > HostRegistry hot-reload, 4 fuzz harnesses, 6 transports,
 > handler-claims ABI plumbed end-to-end, JWT HS256 + RFC 7636
@@ -61,6 +61,7 @@ surfaces. See the **2.6.x modernization arc** section below.
 | **2.7.0** | Carry-forward cleanup. Annotations propagation through `wrap_tool_result` (single content block lifts into envelope, preserves block-level annotations from 1.9.6). `schema_compile` + `auth_bearer_check` benchmarks (closes the bench-coverage list in `docs/benchmarks-rust-v-cyrius.md`). `## [Unreleased]` CHANGELOG flow adopted |
 | **2.7.1** | HostRegistry hot-reload — `host_entry_from_json` / `host_registry_load_json` / `host_registry_load_from_file` / `host_registry_reload` / `host_registry_clear`. Fail-safe semantics on bad config (registry unchanged on parse error). +46 assertions, total 653. CONTRIBUTING.md rewritten for the Cyrius era |
 | **2.7.2** | Toolchain + dep refresh (cyrius 5.10.34 → 5.10.44, libro 2.6.2 → 2.6.3, majra 2.4.3 → 2.4.4); stdlib + `slice` / `assert` / `ct` / `keccak` / `random` for sigil 3.x transitives. **`dist/bote-core.cyr` opt-in profile** (9 modules, 70 KB, `cyrius distlib core`) closes the t-ron consumer blocker and lands `DEPS-PATTERN.md` + `tests/bote_core_only_smoke.tcyr` drift guard + dual dist-freshness CI. **Per-transport binary split** (`bote` / `bote-streamable` / `bote-ws`) — interim 5.10.x cap workaround; reconsolidates on 5.11.x. Per-module test split: `bote_streamable.tcyr` (25) + `bote_ws.tcyr` (10) extracted from the monolithic `bote.tcyr`. `scripts/bench-log.sh` ported from `cargo bench` to `cyrius bench` |
+| **2.7.3** | **Cyrius major-version jump (5.10.44 → 6.1.24)** — the planned 5.11.x migration landed as 6.1.x. libro 2.6.3 → 2.7.2, majra 2.4.4 → 2.4.5. No `src/*.cyr` change; all 653 assertions + drift smoke pass, 14 benchmarks no-regression. Compile cap relieved: fn_table / identifier utilisation 93% / 92% → **52% / 52%** on raised 6.1.x caps — per-transport split reconsolidation now unblocked. `cyrius.lock` full-hash format (6 → 40 entries). Cleanliness sequence drops repurposed `cyrius audit`; adds `cyrius vet` (include-dependency audit) alongside `cyrius deny` |
 
 See [CHANGELOG.md](../../CHANGELOG.md) for the full detail per release.
 
