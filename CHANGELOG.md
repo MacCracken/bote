@@ -53,6 +53,15 @@ toolchain; the 14 criterion benchmarks show no regression
   the first-party dist bundles. CI's byte-clean lock gate covers the
   whole resolved set now.
 
+- **CI / release toolchain installer rewritten for 6.x.** The
+  hand-rolled two-tarball extraction in `.github/workflows/{ci,release}.yml`
+  probed for `bin/cc5` — renamed to `cycc` in the 6.x toolchain, so the
+  install gate failed outright. Both workflows now delegate to the
+  upstream `scripts/install.sh` keyed on the `cyrius.cyml` pin (the
+  pattern patra / agnosys already run on 6.x), which lays out
+  `$HOME/.cyrius/{bin,lib}` including the stdlib snapshot. Toolchain
+  verify step `cc5 --version` → `cyrius --version`.
+
 ### Removed
 
 - **`cyrius audit` dropped from the cleanliness sequence.** Under
