@@ -13,18 +13,16 @@ include "lib/str.cyr"
 include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/hashmap.cyr"
-include "lib/json.cyr"
+include "lib/bayan.cyr"
 include "lib/fnptr.cyr"
 include "lib/chrono.cyr"
 include "lib/tagged.cyr"
 include "lib/net.cyr"
-include "lib/base64.cyr"
 include "lib/tls.cyr"
 include "lib/sandhi.cyr"
 include "lib/freelist.cyr"
 include "lib/thread.cyr"
 include "lib/sakshi.cyr"
-include "lib/bigint.cyr"
 include "lib/sigil.cyr"
 include "lib/libro.cyr"
 include "lib/majra.cyr"
@@ -67,7 +65,7 @@ fn main() {
     assert_eq(ws_config_require_protocol(wcfg), 1, "wcfg require_protocol");
 
     assert(&_bote_ws_handler != 0, "_bote_ws_handler fp");
-    var wdisp = dispatcher_new(registry_new());
+    var wdisp = dispatcher_new(tool_registry_new());
     store64(wcfg + 40, wdisp);
     assert_eq(ws_config_dispatcher(wcfg), wdisp, "wcfg dispatcher wired");
 

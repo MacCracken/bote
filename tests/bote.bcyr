@@ -9,7 +9,7 @@ include "lib/str.cyr"
 include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/hashmap.cyr"
-include "lib/json.cyr"
+include "lib/bayan.cyr"
 include "lib/fnptr.cyr"
 include "lib/chrono.cyr"
 include "lib/tagged.cyr"
@@ -135,7 +135,7 @@ fn b_auth_bearer_check_set() {
 # ================================================================
 
 fn _bench_setup() {
-    var reg = registry_new();
+    var reg = tool_registry_new();
     var s = schema_new("object", 0, vec_new());
     registry_register(reg, tool_def_new("svc_echo", "echo", s));
     _b_dispatcher = dispatcher_new(reg);

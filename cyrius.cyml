@@ -5,7 +5,7 @@ description = "MCP core service in Cyrius — stable 2.x. JSON-RPC 2.0, six tran
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/bote"
 language = "cyrius"
-cyrius = "6.1.24"
+cyrius = "6.1.41"
 
 [build]
 entry = "src/main.cyr"
@@ -92,16 +92,23 @@ stdlib = [
     "args",
     "assert",
     "hashmap",
-    "json",
+    # bayan = the 6.1.x consolidated data module: JSON (json_parse /
+    # json_get back-compat shims over bayan_json_*), base64 / base64url,
+    # csv, u128. Subsumes the pre-6.1 `json` + `base64` stdlib modules,
+    # which no longer ship as standalone files. bote consumes json_parse /
+    # json_get (registry.cyr) and base64url_decode (jwt.cyr).
+    "bayan",
     "fnptr",
     "chrono",
     "tagged",
     "net",
-    "base64",
     "freelist",
     "thread",
     "sakshi",
-    "bigint",
+    # NOTE: the pre-6.1 `bigint` stdlib module was retired — sigil 3.x
+    # bundles its own u256/u384 (`bigint_ext`) inline, and bote has no
+    # direct big-integer use, so no replacement entry is needed. (`ganita`
+    # in 6.1.x is an unrelated linear-algebra / matrix module, not bigint.)
     # ct / keccak / random must precede sigil — cyrius is single-pass
     # and sigil 3.x's ML-DSA + AES-GCM surfaces reference ct_eq_bytes_lens,
     # ct_select, _keccak_*, shake256, random_bytes. bote itself only

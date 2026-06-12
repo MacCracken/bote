@@ -71,7 +71,7 @@ fn _bote_bearer_from_env(out_fp, out_ctx) {
 
 # Register the bote_echo demo tool on a fresh dispatcher.
 fn bote_dispatcher_with_echo() {
-    var reg = registry_new();
+    var reg = tool_registry_new();
     var ok_schema = schema_new("object", 0, vec_new());
     registry_register(reg, tool_def_new("bote_echo", "echo arguments back", ok_schema));
     var dispatcher = dispatcher_new(reg);

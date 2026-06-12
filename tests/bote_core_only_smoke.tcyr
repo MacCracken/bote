@@ -23,13 +23,13 @@ fn main() {
     fl_init();
 
     # Exercise every public surface that consumers of the opt-in core
-    # bundle reach for: registry_new, schema_new, tool_def_new,
+    # bundle reach for: tool_registry_new, schema_new, tool_def_new,
     # registry_register, dispatcher_new, dispatcher_handle. (Drift
     # detection here is "did it link", not "did it dispatch a JSON-RPC
     # round-trip" — dispatcher_dispatch pulls in codec/jsonx paths
     # that exercise more of the bundle but also depend on stdlib
     # finalisers we don't want to touch in a smoke test.)
-    var reg = registry_new();
+    var reg = tool_registry_new();
     if (reg == 0) { return 1; }
 
     var sch = schema_new("object", 0, vec_new());

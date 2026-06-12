@@ -6,8 +6,8 @@
 
 - **Language**: Cyrius (ported from Rust at v1.0.1; Rust archive preserved at tag `0.92.0`)
 - **License**: GPL-3.0-only
-- **Cyrius pin**: 6.1.24 (see `cyrius.cyml`; major jump from 5.10.x landed at 2.7.3)
-- **Version**: SemVer 2.x stable on the handler ABI; 2.7.3 current
+- **Cyrius pin**: 6.1.41 (see `cyrius.cyml`; major jump from 5.10.x landed at 2.7.3)
+- **Version**: SemVer 2.x stable on the handler ABI; 2.7.4 current
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -140,7 +140,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **Cyrius is single-pass.** Include order matters. New stdlib transitive deps go BEFORE the modules that reference them in `cyrius.cyml [deps] stdlib` (see the `ct` / `keccak` / `random` → `sigil` ordering for the worked example).
 - **Compile-source budget.** The cyrius 5.10.x parser had a 2 MB cap on expanded source that forced the per-transport binary split. **6.1.24 (2.7.3) raised it** — `src/main.cyr` builds clean and the cap is no longer the binding constraint. Still watch the `cyrius build` output for `expanded source exceeds`. Three response paths remain on record if it ever fires again: upstream cap raise (the 6.1.x path), per-transport binary split (the 2.7.2 path, still in place), opt-in module split for consumers (`dist/bote-core.cyr`).
-- **Function-table cap.** CI gates fn_table + identifier-buffer utilisation at < 95% (`CYRIUS_STATS=1`). At 2.7.3 (cyrius 6.1.24) we're at **52% / 52%** on `src/main.cyr` (`fn_table 4250/8192`, `identifiers 137635/262144`) — the 6.1.x caps are much larger than 5.10.x, down from 93% / 92% at 2.7.2.
+- **Function-table cap.** CI gates fn_table + identifier-buffer utilisation at < 95% (`CYRIUS_STATS=1`). At 2.7.4 (cyrius 6.1.41) we're at **58% / 60%** on `src/main.cyr` (`fn_table 4740/8192`, `identifiers 156646/262144`) — up from 52% / 52% at 2.7.3 because the 6.1.x `bayan` module consolidates json + base64 + csv + u128 (replacing the smaller standalone `json`/`base64` stdlib modules), but still well under the 95% gate and far below the 93% / 92% peak at 2.7.2.
 - **No `unwrap()` / `panic!()` analog.** Library code returns 0 / -1 / error tags; consumer decides.
 - **Feature-shape via `[lib.<profile>]`.** Don't invent feature flags in Cyrius — produce a separate dist bundle if a consumer subset is worth supporting.
 - **`tracing` analog via libro / majra.** Audit goes to libro chain; events to majra pubsub. Wire via `dispatcher_set_audit` / `dispatcher_set_events`.

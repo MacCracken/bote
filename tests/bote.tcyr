@@ -9,18 +9,16 @@ include "lib/str.cyr"
 include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/hashmap.cyr"
-include "lib/json.cyr"
+include "lib/bayan.cyr"
 include "lib/fnptr.cyr"
 include "lib/chrono.cyr"
 include "lib/tagged.cyr"
 include "lib/net.cyr"
-include "lib/base64.cyr"
 include "lib/tls.cyr"
 include "lib/sandhi.cyr"
 include "lib/freelist.cyr"
 include "lib/thread.cyr"
 include "lib/sakshi.cyr"
-include "lib/bigint.cyr"
 include "lib/sigil.cyr"
 include "lib/libro.cyr"
 include "lib/majra.cyr"
@@ -174,7 +172,7 @@ fn main() {
     assert(streq(resp_id(rid), "\"abc-123\"") == 1, "string id preserved");
 
     # ---------------- registry: empty ----------------
-    var reg = registry_new();
+    var reg = tool_registry_new();
     assert_eq(registry_is_empty(reg), 1, "new reg empty");
     assert_eq(registry_len(reg), 0, "new reg len 0");
     assert_eq(registry_get(reg, "anything"), 0, "get on empty returns 0");
@@ -211,7 +209,7 @@ fn main() {
     assert(streq(tool_def_description(registry_get(reg, "scan")), "updated") == 1, "description updated");
 
     # ---------------- registry: validate_params ok with required field ----------------
-    var reg2 = registry_new();
+    var reg2 = tool_registry_new();
     var rp2 = vec_new();
     vec_push(rp2, "path");
     var schema_p = schema_new("object", 0, rp2);
@@ -243,7 +241,7 @@ fn main() {
     assert(nob5 != 0, "string rejected");
 
     # ---------------- registry: validate passes with no required ----------------
-    var reg3 = registry_new();
+    var reg3 = tool_registry_new();
     registry_register(reg3, tool_def_new("open", "no required", schema_new("object", 0, vec_new())));
     assert_eq(registry_validate_params(reg3, "open", "{}"), 0, "empty ok no required");
 
@@ -255,7 +253,7 @@ fn main() {
     assert_eq(registry_deregister(reg2, "scan"), 0, "dereg twice returns 0");
 
     # ---------------- registry: versioned ----------------
-    var regv = registry_new();
+    var regv = tool_registry_new();
     var ts = schema_new("object", 0, vec_new());
     registry_register(regv, tool_def_with_version(tool_def_new("calc", "v1", ts), "1.0"));
     registry_register(regv, tool_def_with_version(tool_def_new("calc", "v2", ts), "2.0"));
@@ -344,7 +342,7 @@ fn main() {
     assert(validate_tool_name("bad/name") != 0, "slash fails");
 
     # ---------------- dispatch: initialize ----------------
-    var dreg = registry_new();
+    var dreg = tool_registry_new();
     var d = dispatcher_new(dreg);
 
     var init_req = req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2024-11-05\"}");
@@ -487,7 +485,7 @@ fn main() {
     assert(streq(sesc, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"a \\\"b\\\" \\\\ c\\nd\"}}") == 1, "serialize escapes");
 
     # ---------------- codec: process_message single ----------------
-    var dreg2 = registry_new();
+    var dreg2 = tool_registry_new();
     var d2 = dispatcher_new(dreg2);
     var sa2 = schema_new("object", 0, vec_new());
     registry_register(dreg2, tool_def_new("svc_echo", "echo", sa2));
@@ -638,7 +636,7 @@ fn main() {
     assert_eq(vec_len(compiled_validate(c_str, "\"not object\"")), 1, "non-object rejected");
 
     # ---------------- registry: validate uses compiled when attached ----------------
-    var rcompiled = registry_new();
+    var rcompiled = tool_registry_new();
     var p_compiled = vec_new();
     vec_push(p_compiled, schema_prop_new("count", "{\"type\":\"integer\",\"minimum\":1,\"maximum\":10}"));
     var s_compiled = schema_new("object", p_compiled, vec_new());
@@ -861,7 +859,7 @@ fn main() {
     assert(streq(is_err_v, "true") == 1, "isError true");
 
     # ---------------- bridge: process_message wraps tools/call ----------------
-    var bdreg = registry_new();
+    var bdreg = tool_registry_new();
     var bs = schema_new("object", 0, vec_new());
     registry_register(bdreg, tool_def_new("svc_echo", "echo", bs));
     var bd = dispatcher_new(bdreg);
@@ -985,7 +983,7 @@ fn main() {
     # ---------------- dispatcher: wire-up audit + events ----------------
     _ev_reset();
     _audit_reset();
-    var wreg = registry_new();
+    var wreg = tool_registry_new();
     registry_register(wreg, tool_def_new("svc_echo", "echo", schema_new("object", 0, vec_new())));
     var wd = dispatcher_new(wreg);
     dispatcher_handle(wd, "svc_echo", &h_echo);
@@ -1068,7 +1066,7 @@ fn main() {
     assert(streq(jsonx_get_str(vec_get(_ev_payloads, 0), "message"), "use svc_new instead") == 1, "deprecation message");
 
     # ---------------- dispatcher: noop sinks (default) don't break anything ----------------
-    var bare = dispatcher_new(registry_new());
+    var bare = dispatcher_new(tool_registry_new());
     registry_register(dispatcher_registry(bare),
         tool_def_new("svc_bare", "bare", schema_new("object", 0, vec_new())));
     dispatcher_handle(bare, "svc_bare", &h_echo);

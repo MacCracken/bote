@@ -10,7 +10,6 @@ include "lib/io.cyr"
 include "lib/fnptr.cyr"
 include "lib/freelist.cyr"
 include "lib/sakshi.cyr"
-include "lib/bigint.cyr"
 include "lib/sigil.cyr"
 include "lib/assert.cyr"
 

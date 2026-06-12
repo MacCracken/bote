@@ -7,7 +7,7 @@
 #   2. Required-field-present check via lib/json.cyr (flat parse)
 
 include "lib/hashmap.cyr"
-include "lib/json.cyr"
+include "lib/bayan.cyr"
 
 # ================================================================
 # ToolAnnotations — tri-state hint flags (MCP 2025-11-25)
@@ -145,7 +145,7 @@ fn tool_def_compiled(d) { return load64(d + 48); }
 #   +8  versions hashmap: name_cstr -> vec of ToolDef ptrs
 #   +16 names    vec of name_cstr (insertion order, for list())
 
-fn registry_new() {
+fn tool_registry_new() {
     var r = alloc(24);
     store64(r, map_new());
     store64(r + 8, map_new());

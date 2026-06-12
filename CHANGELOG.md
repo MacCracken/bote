@@ -18,6 +18,67 @@ have per release.
 
 _(empty)_
 
+## [2.7.4] — 2026-06-11 — cyrius 6.1.41; tool-registry constructor renamed to resolve the ai-hwaccel `registry_new` collision
+
+Toolchain patch refresh + a targeted breaking rename to unblock
+multi-library consumers (szal, mihi, hoosh) that include both a bote
+bundle and `dist/ai-hwaccel.cyr` in one compile unit. All 653
+assertions (+ 1 drift smoke) that exercise the registry surface pass
+on the renamed constructor.
+
+### Breaking
+
+- **`registry_new()` → `tool_registry_new()`.** bote's `ToolRegistry`
+  constructor collided with ai-hwaccel's 32-byte profile-registry
+  constructor of the same name (both export `fn registry_new()` with
+  incompatible struct layouts — 24 vs 32 bytes). Cyrius include
+  semantics are textual paste + last-definition-wins, so any consumer
+  including both bundles silently got one `registry_new` and corrupted
+  memory on the other's call sites. There is no include order that
+  fixes it because ai-hwaccel's detection path calls its own
+  `registry_new` internally. bote takes the rename to a lib-descriptive
+  name — `tool_registry_new` parallels the existing `host_registry_new`
+  (HostRegistry) constructor. Only the constructor changed; every other
+  `registry_*` accessor keeps its name (none of them collide).
+
+  **Migration:** replace `registry_new()` with `tool_registry_new()`.
+  The struct layout, all accessors (`registry_register`, `registry_get`,
+  `registry_list`, …), and the dispatcher wire-up are unchanged.
+
+  See `docs/development/issues/2026-06-11-registry-new-collision.md`.
+
+### Changed
+
+- **Cyrius toolchain pin: 6.1.24 → 6.1.41.** Patch-series bump within
+  the 6.1.x line. No MCP wire-format, handler-ABI, or compile-cap
+  change.
+
+- **Stdlib dep migration for the 6.1.x consolidation
+  (`[deps] stdlib`).** The 6.1.x toolchain folded the standalone
+  `json` and `base64` stdlib modules into a single consolidated
+  **`bayan`** module (JSON via `json_parse` / `json_get` back-compat
+  shims, plus `base64` / `base64url`, csv, u128) and retired the
+  standalone `bigint` module (sigil 3.x now bundles its own `u256` /
+  `u384` inline; bote has no direct big-integer use). bote's
+  `[deps] stdlib` and the test-file include headers moved
+  `json` + `base64` → `bayan`, dropped `bigint`, and `src/registry.cyr`
+  now `include`s `lib/bayan.cyr`. **This was the binding correctness
+  fix:** the previous pin bump left a stale `lib/` (pre-6.1 `json.cyr` /
+  `base64.cyr` / `bigint.cyr` snapshots) shadowing the version-matched
+  toolchain libs — `cyrius deps` against 6.1.41 errors out on the
+  removed module names until the manifest is migrated. (`ganita` in
+  6.1.x is an unrelated linear-algebra module, **not** the bigint
+  successor.)
+
+- **Function-table + identifier-buffer utilisation: 52% / 52% →
+  **58% / 60%** (`CYRIUS_STATS=1`: `fn_table 4740/8192`,
+  `identifiers 156646/262144`) on `src/main.cyr`.** The rise is the
+  `bayan` consolidation pulling in more surface than the old split
+  `json` + `base64` modules; still well under the 95% CI gate.
+
+- **`dist/bote.cyr` + `dist/bote-core.cyr` regenerated** for the
+  constructor rename (`cyrius distlib` / `cyrius distlib core`).
+
 ## [2.7.3] — 2026-06-10 — cyrius 6.1.24 + libro 2.7.2 + majra 2.4.5; major-toolchain jump relieves the 5.10.x compile cap
 
 Toolchain + dep refresh. The headline is the **cyrius major-version
