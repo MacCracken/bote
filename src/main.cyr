@@ -11,11 +11,13 @@
 #     sites now use the direct sandhi_server_* names from lib/sandhi.cyr
 #   - 2.6.2: src/libro_tools.cyr ported to libro 2.6.x (raw struct
 #     offsets for the retired entry_*/error_*/merkle_* getters);
-#     tests/bote_libro_tools.tcyr (22 assertions) re-enabled. Note:
-#     libro_tools is still NOT included in main.cyr by default —
-#     it remains an opt-in module that consumers wire locally if
-#     they want libro audit-tool dispatch (kept out for fn_table
-#     headroom; the main binary is at 89% util).
+#     tests/bote_libro_tools.tcyr (22 assertions) re-enabled. At this
+#     point libro_tools was still held out of main.cyr by default —
+#     an opt-in module, kept out for fn_table headroom (89% util).
+#   - 2.7.5: libro_tools folded back into the default binary and the
+#     dist/bote.cyr bundle. The 6.1.x cap raise dropped fn_table util
+#     to 58%/60%, so the headroom argument no longer holds. main()
+#     now stands up a libro chain and registers all five audit tools.
 #   - 2.6.3: ships dist/bote.cyr via `cyrius distlib` so downstream
 #     consumers can `[deps.bote] modules = ["dist/bote.cyr"]`.
 #     Mirrors the libro / majra distribution contract.
@@ -57,14 +59,17 @@ include "src/bridge.cyr"
 # to cyrius 5.11.x (cap raised to 4 MB per the companion proposal),
 # fold these back into src/main.cyr and retire the per-transport
 # entries.
-# libro_tools.cyr is opt-in — not in the default binary build to
-# keep fn_table headroom under the 4096 cap. Consumers wanting libro
-# audit-tool dispatch include + call libro_tools_init(chain) +
-# libro_tools_register(dispatcher) locally. Ported to the libro 2.6.x
-# API in bote 2.6.2; covered by tests/bote_libro_tools.tcyr.
-# OPT-IN: include "src/libro_tools.cyr"
+# libro_tools.cyr — five built-in MCP audit tools (libro_query /
+# verify / export / proof / retention) over a live libro chain.
+# Folded back into the default binary at 2.7.5: the fn_table-headroom
+# reason it was held out (89% util at 2.6.2) evaporated under the
+# 6.1.x cap raise — src/main.cyr now sits at 58%/60%, far under the
+# 95% gate. Ported to the libro 2.x API at 2.6.2 (raw struct offsets
+# for the retired entry_*/error_*/merkle_* getters); covered by
+# tests/bote_libro_tools.tcyr.
 include "src/content.cyr"
 include "src/host.cyr"
+include "src/libro_tools.cyr"
 include "src/main_common.cyr"
 
 fn main() {
@@ -73,8 +78,14 @@ fn main() {
 
     var dispatcher = bote_dispatcher_with_echo();
 
-    # libro_tools moved out of the default build for 1.9.4 (cap headroom).
-    # Consumers can opt in by adding the include + registration locally.
+    # libro audit tools (2.7.5): stand up an in-memory libro chain and
+    # register libro_query / verify / export / proof / retention on the
+    # dispatcher. Held out of the default build from 1.9.4 for fn_table
+    # headroom; folded back in once the 6.1.x cap raise made the headroom
+    # argument moot (see the include comment above).
+    var libro_chain = chain_new();
+    libro_tools_init(libro_chain);
+    libro_tools_register(dispatcher);
 
     # Bearer-token auth wiring (opt-in via env var).
     # Set BOTE_BEARER_TOKENS=tok-a,tok-b,tok-c to require any of those

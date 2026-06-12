@@ -18,6 +18,30 @@ have per release.
 
 _(empty)_
 
+## [2.7.5] — 2026-06-11 — libro_tools folded back into the default binary + full bundle
+
+### Added
+
+- **libro audit tools in the default binary + full bundle.** The five
+  `libro_*` MCP tools (`libro_query` / `libro_verify` / `libro_export` /
+  `libro_proof` / `libro_retention`) are now registered on `build/bote`
+  by default — `main()` stands up an in-memory libro chain via
+  `chain_new()` and calls `libro_tools_init` + `libro_tools_register`.
+  `src/libro_tools.cyr` also joins the `[lib]` profile, so it ships in
+  `dist/bote.cyr` (now 24 modules). It is deliberately **not** in
+  `dist/bote-core.cyr`: like `audit_libro` it depends on a live libro
+  chain, which the transport-free core profile excludes.
+
+### Changed
+
+- Reverted the 1.9.4 cap-headroom decision that held `libro_tools` out
+  of the default build. The 6.1.x function-table cap raise dropped
+  `src/main.cyr` util to 58% / 60% (`fn_table 4764/8192`,
+  `identifiers 157278/262144`), well under the 95% CI gate, so the
+  headroom argument no longer applies. All 653 assertions (+ 1 drift
+  smoke) pass; `tests/bote_libro_tools.tcyr` (22) exercises the
+  re-included surface.
+
 ## [2.7.4] — 2026-06-11 — cyrius 6.1.41; tool-registry constructor renamed to resolve the ai-hwaccel `registry_new` collision
 
 Toolchain patch refresh + a targeted breaking rename to unblock

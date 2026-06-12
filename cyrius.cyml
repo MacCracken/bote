@@ -17,12 +17,17 @@ output = "build/bote"
 # single bundle. Order mirrors the include order in src/main.cyr —
 # critical for Cyrius single-pass forward-reference resolution.
 #
-# libro_tools is intentionally NOT in the default bundle — it's
-# parked pending the libro 2.6.x API port (entry_*/merkle_proof/
-# libro_export accessors were retired in libro 2.0). Consumers
-# wanting libro-tool dispatch will pull it back in via a follow-up
-# 2.6.x patch once the port lands.
-#   cyrius distlib       → dist/bote.cyr      (default [lib], full bundle — 23 modules)
+# libro_tools is now part of the default bundle (2.7.5). It was
+# parked through the 2.6.x line — first pending the libro 2.x API
+# port (the entry_*/merkle_proof/libro_export accessors retired in
+# libro 2.0, re-implemented as raw struct-offset helpers at 2.6.2),
+# then held out for fn_table headroom. The 6.1.x cap raise (fn_table
+# at 58%/60% on src/main.cyr, well under the 95% gate) makes the
+# headroom argument moot, so it folds back into the full bundle and
+# the default binary. It is NOT in dist/bote-core.cyr: like
+# audit_libro, it depends on a live libro chain, which the
+# transport-free core profile deliberately excludes.
+#   cyrius distlib       → dist/bote.cyr      (default [lib], full bundle — 24 modules)
 #   cyrius distlib core  → dist/bote-core.cyr ([lib.core], 9 transport-free modules)
 [lib]
 modules = [
@@ -49,6 +54,7 @@ modules = [
     "src/transport_ws.cyr",
     "src/content.cyr",
     "src/host.cyr",
+    "src/libro_tools.cyr",
 ]
 
 # Core-only opt-in bundle (2.7.2). Nine transport-free modules for
