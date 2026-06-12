@@ -146,3 +146,21 @@ git = "https://github.com/MacCracken/majra"
 path = "../majra"
 tag = "2.4.5"
 modules = ["dist/majra.cyr"]
+
+# sigil crypto — pinned explicitly to the self-contained single-file
+# dist bundle (same pattern as libro / majra). The 6.1.x stdlib
+# registry still resolves `sigil` to 3.7.10, whose `dist/sigil.cyr`
+# is NOT self-contained — it carries a guarded
+# `include "src/sha_ni.cyr"` / `include "src/aes_ni.cyr"` that dangles
+# for single-file consumers (CI fails: `cannot open include file:
+# src/sha_ni.cyr`). 3.7.12 fixed the bundle by inlining the SHA-NI /
+# AES-NI banks, so the explicit pin both upgrades to the fixed bundle
+# and stops `cyrius deps` from clobbering lib/sigil.cyr with the broken
+# registry version. bote consumes sha256 / hmac_sha256 / ed25519_init
+# (src/jwt.cyr, src/pkce.cyr); ct / keccak / random still precede it
+# via [deps] stdlib for the single-pass forward refs.
+[deps.sigil]
+git = "https://github.com/MacCracken/sigil"
+path = "../sigil"
+tag = "3.7.12"
+modules = ["dist/sigil.cyr"]

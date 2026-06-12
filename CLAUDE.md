@@ -19,9 +19,10 @@
 |-------|------|
 | libro 2.7.2 | Hash-linked audit chain (`[deps.libro]` git pin) |
 | majra 2.4.5 | Pub/sub event publishing (`[deps.majra]` git pin) |
+| sigil 3.7.12 | Crypto (sha256 / hmac_sha256 / ed25519) — **`[deps.sigil]` git pin**, NOT the bare `sigil` stdlib entry. The 6.1.x registry resolves `sigil` to 3.7.10, whose `dist/sigil.cyr` dangles `include "src/sha_ni.cyr"`; 3.7.12 inlined the SHA-NI/AES-NI banks. The pin overrides the registry so `cyrius deps` gets the self-contained bundle. |
 | kavach 3.0  | Tool sandboxing (pluggable runner via fn-pointer + ctx adapter) |
 
-All AGNOS deps pinned in `cyrius.cyml [deps.<name>]` with `git` + `tag` (+ `path` for local dev). `lib/` is gitignored — `cyrius deps` rehydrates from the pinned tags. The contract is the pin, not the bytes on disk.
+All AGNOS deps pinned in `cyrius.cyml [deps.<name>]` with `git` + `tag` (+ `path` for local dev). `lib/` is gitignored — `cyrius deps` rehydrates from the pinned tags. The contract is the pin, not the bytes on disk. `cyrius deps` resolves the bare `[deps] stdlib` names from the 6.1.x registry, which can lag the toolchain snapshot — when a stdlib crate's registry version is broken for single-file consumption (see sigil), pin it explicitly in `[deps.<name>]` to override.
 
 ## Distribution
 

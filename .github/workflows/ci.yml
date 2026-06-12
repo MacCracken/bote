@@ -108,6 +108,12 @@ jobs:
 
       - name: Build
         run: |
+          # pipefail is load-bearing: `cyrius build ... | tee` otherwise
+          # masks a failed compile behind tee's exit 0, so a broken build
+          # sailed through this step and only tripped the later "Verify
+          # ELF" step with a confusing `build/bote: No such file`. With
+          # pipefail the compile's non-zero status fails the step here.
+          set -o pipefail
           mkdir -p build
           # CYRIUS_STATS=1 emits a machine-parseable capacity report
           # at the tail of stdout — feeds the capacity gate below.

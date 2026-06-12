@@ -76,6 +76,32 @@ on the renamed constructor.
   `bayan` consolidation pulling in more surface than the old split
   `json` + `base64` modules; still well under the 95% CI gate.
 
+- **sigil pinned explicitly via `[deps.sigil]` at tag 3.7.12** (git +
+  `../sigil` path, single-file `dist/sigil.cyr` — same pattern as
+  libro / majra), and `.cyrius-toolchain` marker corrected `4.8.4` →
+  `6.1.41`.
+
+### Fixed
+
+- **CI build broke with `cannot open include file: src/sha_ni.cyr`.**
+  The 6.1.x stdlib registry resolves the bare `sigil` stdlib dep to
+  **3.7.10**, whose `dist/sigil.cyr` is *not* self-contained — it
+  carries guarded `include "src/sha_ni.cyr"` / `include "src/aes_ni.cyr"`
+  directives that dangle for single-file consumers (the toolchain
+  *snapshot* ships the fixed 3.7.12, but `cyrius deps` pulls the
+  registry version and ignores the lock for version selection).
+  Pinning sigil to **3.7.12** via `[deps.sigil]` (which overrides the
+  stdlib registry resolution) restores a self-contained bundle.
+  Verified: `cyrius build src/main.cyr build/bote` → ELF, all 653
+  assertions + drift smoke pass from a clean `cyrius deps`.
+
+- **CI Build step masked compile failures.**
+  `cyrius build … | tee build/build.log` returned `tee`'s exit 0 even
+  when the compile failed, so a broken build passed the Build step and
+  only surfaced two steps later as a confusing `build/bote: No such
+  file`. Added `set -o pipefail` so the compile's status fails the step
+  at its source.
+
 - **`dist/bote.cyr` + `dist/bote-core.cyr` regenerated** for the
   constructor rename (`cyrius distlib` / `cyrius distlib core`).
 
