@@ -45,7 +45,7 @@ on the renamed constructor.
   The struct layout, all accessors (`registry_register`, `registry_get`,
   `registry_list`, …), and the dispatcher wire-up are unchanged.
 
-  See `docs/development/issues/2026-06-11-registry-new-collision.md`.
+  See `docs/development/issues/archive/2026-06-11-registry-new-collision.md`.
 
 ### Changed
 
