@@ -6,8 +6,8 @@
 
 - **Language**: Cyrius (ported from Rust at v1.0.1; Rust archive preserved at tag `0.92.0`)
 - **License**: GPL-3.0-only
-- **Cyrius pin**: 6.1.41 (see `cyrius.cyml`; major jump from 5.10.x landed at 2.7.3)
-- **Version**: SemVer 2.x stable on the handler ABI; 2.7.5 current
+- **Cyrius pin**: 6.2.11 (see `cyrius.cyml`; first move onto the 6.2.x line landed at 2.7.6; major jump from 5.10.x landed at 2.7.3)
+- **Version**: SemVer 2.x stable on the handler ABI; 2.7.6 current
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -17,9 +17,9 @@
 
 | Dep | Role |
 |-------|------|
-| libro 2.7.2 | Hash-linked audit chain (`[deps.libro]` git pin) |
-| majra 2.4.5 | Pub/sub event publishing (`[deps.majra]` git pin) |
-| sigil 3.7.12 | Crypto (sha256 / hmac_sha256 / ed25519) — **`[deps.sigil]` git pin**, NOT the bare `sigil` stdlib entry. The 6.1.x registry resolves `sigil` to 3.7.10, whose `dist/sigil.cyr` dangles `include "src/sha_ni.cyr"`; 3.7.12 inlined the SHA-NI/AES-NI banks. The pin overrides the registry so `cyrius deps` gets the self-contained bundle. |
+| libro 2.7.4 | Hash-linked audit chain (`[deps.libro]` git pin) |
+| majra 2.4.7 | Pub/sub event publishing (`[deps.majra]` git pin) |
+| sigil 3.7.14 | Crypto (sha256 / hmac_sha256 / ed25519) — **`[deps.sigil]` git pin**, NOT the bare `sigil` stdlib entry. The stdlib registry has historically lagged the self-contained bundle (the 6.1.x registry resolved `sigil` to 3.7.10, whose `dist/sigil.cyr` dangled `include "src/sha_ni.cyr"`); 3.7.12 inlined the SHA-NI/AES-NI banks and 3.7.14 keeps the bundle self-contained. The pin overrides the registry so `cyrius deps` gets the self-contained bundle. **`thread_local` must precede `sigil`** in `[deps] stdlib` — 3.7.14's `crypto_scratch` exercises the TLS path and SIGILLs at runtime without it. |
 | kavach 3.0  | Tool sandboxing (pluggable runner via fn-pointer + ctx adapter) |
 
 All AGNOS deps pinned in `cyrius.cyml [deps.<name>]` with `git` + `tag` (+ `path` for local dev). `lib/` is gitignored — `cyrius deps` rehydrates from the pinned tags. The contract is the pin, not the bytes on disk. `cyrius deps` resolves the bare `[deps] stdlib` names from the 6.1.x registry, which can lag the toolchain snapshot — when a stdlib crate's registry version is broken for single-file consumption (see sigil), pin it explicitly in `[deps.<name>]` to override.
@@ -95,7 +95,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 
 0. Read roadmap, CHANGELOG, and open issues — know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `for f in src/*.cyr; do cyrius fmt --check "$f"; done`, `cyrius lint src/main.cyr`, `cyrius vet src/main.cyr`, `cyrius deny src/main.cyr` (6.1.x: `fmt` takes one file at a time; `cyrius audit` was repurposed to the toolchain self-host gate — use `cyrius vet` for the include-dependency audit)
+2. Cleanliness check: `for f in src/*.cyr; do cyrius fmt "$f" --check; done`, `cyrius lint src/main.cyr`, `cyrius vet src/main.cyr`, `cyrius deny src/main.cyr` (6.2.x: `fmt` takes one file at a time AND the flag now follows the file — `cyrius fmt <file> --check`, was `fmt --check <file>` on 6.1.x; `cyrius audit` was repurposed to the toolchain self-host gate — use `cyrius vet` for the include-dependency audit)
 3. Get baseline benchmarks (`./scripts/bench-log.sh`)
 4. Initial refactor + audit (performance, memory, security, edge cases)
 5. Cleanliness check — must be clean after audit
@@ -107,7 +107,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 ### Development Loop (continuous)
 
 1. Work phase — new features, roadmap items, bug fixes
-2. Cleanliness check: `for f in src/*.cyr; do cyrius fmt --check "$f"; done`, `cyrius lint src/main.cyr`, `cyrius vet src/main.cyr`, `cyrius deny src/main.cyr` (6.1.x: `fmt` takes one file at a time; `cyrius audit` was repurposed to the toolchain self-host gate — use `cyrius vet` for the include-dependency audit)
+2. Cleanliness check: `for f in src/*.cyr; do cyrius fmt "$f" --check; done`, `cyrius lint src/main.cyr`, `cyrius vet src/main.cyr`, `cyrius deny src/main.cyr` (6.2.x: `fmt` takes one file at a time AND the flag now follows the file — `cyrius fmt <file> --check`, was `fmt --check <file>` on 6.1.x; `cyrius audit` was repurposed to the toolchain self-host gate — use `cyrius vet` for the include-dependency audit)
 3. Test + benchmark additions for new code
 4. Run benchmarks (`./scripts/bench-log.sh`)
 5. Audit phase — review performance, memory, security, throughput, correctness
@@ -139,9 +139,9 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 - **Tests + benchmarks are the way.** Aim to keep every public function exercised by `tests/bote_<module>.tcyr` or `tests/bote.tcyr`.
 - **Own the stack.** If an AGNOS dep wraps an external lib, depend on the AGNOS dep — don't reach around it.
 - **No magic.** Every operation is measurable, auditable, traceable.
-- **Cyrius is single-pass.** Include order matters. New stdlib transitive deps go BEFORE the modules that reference them in `cyrius.cyml [deps] stdlib` (see the `ct` / `keccak` / `random` → `sigil` ordering for the worked example).
+- **Cyrius is single-pass.** Include order matters. New stdlib transitive deps go BEFORE the modules that reference them in `cyrius.cyml [deps] stdlib` (see the `ct` / `keccak` / `random` → `sigil` ordering for the worked example, and `thread` → `thread_local` → `sigil` for the 3.7.14 TLS-storage SIGILL guard added at 2.7.6).
 - **Compile-source budget.** The cyrius 5.10.x parser had a 2 MB cap on expanded source that forced the per-transport binary split. **6.1.24 (2.7.3) raised it** — `src/main.cyr` builds clean and the cap is no longer the binding constraint. Still watch the `cyrius build` output for `expanded source exceeds`. Three response paths remain on record if it ever fires again: upstream cap raise (the 6.1.x path), per-transport binary split (the 2.7.2 path, still in place), opt-in module split for consumers (`dist/bote-core.cyr`).
-- **Function-table cap.** CI gates fn_table + identifier-buffer utilisation at < 95% (`CYRIUS_STATS=1`). At 2.7.5 (cyrius 6.1.41) we're at **58% / 60%** on `src/main.cyr` (`fn_table 4764/8192`, `identifiers 157278/262144`) — the small bump over 2.7.4's `4740/156646` is the libro_tools fold-in (5 audit tools back in the default binary; the 6.1.x cap raise is what made re-including them safe). Still up from 52% / 52% at 2.7.3 because the 6.1.x `bayan` module consolidates json + base64 + csv + u128 (replacing the smaller standalone `json`/`base64` stdlib modules), but well under the 95% gate and far below the 93% / 92% peak at 2.7.2.
+- **Function-table cap.** CI gates fn_table + identifier-buffer utilisation at < 95% (`CYRIUS_STATS=1`). At 2.7.6 (cyrius 6.2.11) we're at **58% / 60%** on `src/main.cyr` (`fn_table 4770/8192`, `identifiers 157633/262144`) — the small bump over 2.7.5's `4764/157278` is the `thread_local` pull-through (the sigil 3.7.14 TLS-path SIGILL guard). Still up from 52% / 52% at 2.7.3 because the 6.1.x `bayan` module consolidates json + base64 + csv + u128 (replacing the smaller standalone `json`/`base64` stdlib modules), but well under the 95% gate and far below the 93% / 92% peak at 2.7.2.
 - **No `unwrap()` / `panic!()` analog.** Library code returns 0 / -1 / error tags; consumer decides.
 - **Feature-shape via `[lib.<profile>]`.** Don't invent feature flags in Cyrius — produce a separate dist bundle if a consumer subset is worth supporting.
 - **`tracing` analog via libro / majra.** Audit goes to libro chain; events to majra pubsub. Wire via `dispatcher_set_audit` / `dispatcher_set_events`.

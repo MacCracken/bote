@@ -11,6 +11,8 @@ include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/fnptr.cyr"
 include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
 include "lib/sakshi.cyr"
 include "lib/bayan.cyr"
 include "lib/sigil.cyr"
@@ -85,7 +87,7 @@ fn main() {
     # Header = {"alg":"none"} → eyJhbGciOiJub25lIn0
     var none_token = "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.";
     assert_eq(jwt_verify_hs256(none_token, jwt_key, strlen(jwt_key)), 0,
-              "alg=none downgrade rejected");
+    "alg=none downgrade rejected");
 
     # ================================================================
     # JwtSecret handle + validator adapter

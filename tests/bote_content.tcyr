@@ -30,7 +30,7 @@ fn main() {
     # ---------------- text block ----------------
     var ct = content_text("hello \"world\"");
     assert(streq(ct, "{\"type\":\"text\",\"text\":\"hello \\\"world\\\"\"}") == 1,
-           "text block with JSON-escaped quote");
+    "text block with JSON-escaped quote");
 
     # Null text → empty string body, still valid JSON
     var ct0 = content_text(0);
@@ -39,38 +39,38 @@ fn main() {
     # ---------------- binary blocks (image, audio) ----------------
     var ci = content_image("AAA=", "image/png");
     assert(streq(ci, "{\"type\":\"image\",\"data\":\"AAA=\",\"mimeType\":\"image/png\"}") == 1,
-           "image block");
+    "image block");
 
     var ca = content_audio("BBB=", "audio/wav");
     assert(streq(ca, "{\"type\":\"audio\",\"data\":\"BBB=\",\"mimeType\":\"audio/wav\"}") == 1,
-           "audio block");
+    "audio block");
 
     # ---------------- resource (embedded) ----------------
     var cr = content_resource("file:///x", "text/plain", "body");
     assert(streq(cr,
-        "{\"type\":\"resource\",\"resource\":{\"uri\":\"file:///x\",\"mimeType\":\"text/plain\",\"text\":\"body\"}}") == 1,
-        "resource block with uri+mime+text");
+    "{\"type\":\"resource\",\"resource\":{\"uri\":\"file:///x\",\"mimeType\":\"text/plain\",\"text\":\"body\"}}") == 1,
+    "resource block with uri+mime+text");
 
     # uri-only (optional fields omitted, not rendered)
     var cr2 = content_resource("x://only", 0, 0);
     assert(streq(cr2, "{\"type\":\"resource\",\"resource\":{\"uri\":\"x://only\"}}") == 1,
-           "resource block uri-only");
+    "resource block uri-only");
 
     # uri + text, no mime
     var cr3 = content_resource("x://t", 0, "payload");
     assert(streq(cr3, "{\"type\":\"resource\",\"resource\":{\"uri\":\"x://t\",\"text\":\"payload\"}}") == 1,
-           "resource block uri+text");
+    "resource block uri+text");
 
     # ---------------- resource_link (reference) ----------------
     var cl = content_resource_link("https://e.x", "name", "text/html");
     assert(streq(cl,
-        "{\"type\":\"resource_link\",\"uri\":\"https://e.x\",\"name\":\"name\",\"mimeType\":\"text/html\"}") == 1,
-        "resource_link with uri+name+mime");
+    "{\"type\":\"resource_link\",\"uri\":\"https://e.x\",\"name\":\"name\",\"mimeType\":\"text/html\"}") == 1,
+    "resource_link with uri+name+mime");
 
     # uri-only link
     var cl2 = content_resource_link("x://only", 0, 0);
     assert(streq(cl2, "{\"type\":\"resource_link\",\"uri\":\"x://only\"}") == 1,
-           "resource_link uri-only");
+    "resource_link uri-only");
 
     # ---------------- content_array envelope ----------------
     var blocks = vec_new();
@@ -78,8 +78,8 @@ fn main() {
     vec_push(blocks, content_text("b"));
     var arr = content_array(blocks);
     assert(streq(arr,
-        "{\"content\":[{\"type\":\"text\",\"text\":\"a\"},{\"type\":\"text\",\"text\":\"b\"}]}") == 1,
-        "content_array joins blocks with commas");
+    "{\"content\":[{\"type\":\"text\",\"text\":\"a\"},{\"type\":\"text\",\"text\":\"b\"}]}") == 1,
+    "content_array joins blocks with commas");
 
     # Mixed-type array
     var mixed = vec_new();
@@ -97,31 +97,31 @@ fn main() {
     vec_push(eblocks, content_text("oops"));
     var eerr = content_array_error(eblocks);
     assert(streq(eerr,
-        "{\"content\":[{\"type\":\"text\",\"text\":\"oops\"}],\"isError\":true}") == 1,
-        "content_array_error adds isError:true");
+    "{\"content\":[{\"type\":\"text\",\"text\":\"oops\"}],\"isError\":true}") == 1,
+    "content_array_error adds isError:true");
 
     # ---------------- shorthands ----------------
     var one = content_single(content_text("hi"));
     assert(streq(one, "{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}") == 1,
-           "content_single wraps one block");
+    "content_single wraps one block");
 
     var tr = content_text_response("ok");
     assert(streq(tr, "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}") == 1,
-           "content_text_response matches content_single(content_text(...))");
+    "content_text_response matches content_single(content_text(...))");
 
     # ---------------- Binary resource (blob) variant — 1.9.1 ----------------
     var crb = content_resource_blob("file:///bin", "application/octet-stream", "AAA=");
     assert(streq(crb,
-        "{\"type\":\"resource\",\"resource\":{\"uri\":\"file:///bin\",\"mimeType\":\"application/octet-stream\",\"blob\":\"AAA=\"}}") == 1,
-        "blob resource with uri+mime+blob");
+    "{\"type\":\"resource\",\"resource\":{\"uri\":\"file:///bin\",\"mimeType\":\"application/octet-stream\",\"blob\":\"AAA=\"}}") == 1,
+    "blob resource with uri+mime+blob");
 
     var crb2 = content_resource_blob("x://only", 0, 0);
     assert(streq(crb2, "{\"type\":\"resource\",\"resource\":{\"uri\":\"x://only\"}}") == 1,
-           "blob resource uri-only");
+    "blob resource uri-only");
 
     var crb3 = content_resource_blob("x://b", 0, "QkJC");
     assert(streq(crb3, "{\"type\":\"resource\",\"resource\":{\"uri\":\"x://b\",\"blob\":\"QkJC\"}}") == 1,
-           "blob resource uri+blob (no mime)");
+    "blob resource uri+blob (no mime)");
 
     # ---------------- Annotations — 1.9.6 (audit defer closure) ----------------
     # No-op: both audience and priority absent → return input unchanged
@@ -134,26 +134,26 @@ fn main() {
     vec_push(aud, "assistant");
     var with_aud = content_with_annotations(content_text("hi"), aud, 0 - 1);
     assert(streq(with_aud,
-        "{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"audience\":[\"user\",\"assistant\"]}}") == 1,
-        "ann audience only");
+    "{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"audience\":[\"user\",\"assistant\"]}}") == 1,
+    "ann audience only");
 
     # Priority only
     var with_pri = content_with_annotations(content_text("hi"), 0, 50);
     assert(streq(with_pri,
-        "{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"priority\":50}}") == 1,
-        "ann priority only");
+    "{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"priority\":50}}") == 1,
+    "ann priority only");
 
     # Both
     var both = content_with_annotations(content_text("hi"), aud, 75);
     assert(streq(both,
-        "{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"audience\":[\"user\",\"assistant\"],\"priority\":75}}") == 1,
-        "ann both");
+    "{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"audience\":[\"user\",\"assistant\"],\"priority\":75}}") == 1,
+    "ann both");
 
     # Annotates an image block too
     var ann_img = content_with_annotations(content_image("AA==", "image/png"), 0, 100);
     assert(streq(ann_img,
-        "{\"type\":\"image\",\"data\":\"AA==\",\"mimeType\":\"image/png\",\"annotations\":{\"priority\":100}}") == 1,
-        "ann on image block");
+    "{\"type\":\"image\",\"data\":\"AA==\",\"mimeType\":\"image/png\",\"annotations\":{\"priority\":100}}") == 1,
+    "ann on image block");
 
     # Null block → null pass-through
     assert_eq(content_with_annotations(0, aud, 50), 0, "ann on null block");

@@ -320,28 +320,28 @@ fn libro_tools_register(dispatcher) {
     var obj_schema = schema_new("object", 0, empty);
 
     registry_register(reg, tool_def_new(
-        "libro_query", "Search the libro audit chain (filter by source/agent/severity/time + paginate)",
-        obj_schema));
+    "libro_query", "Search the libro audit chain (filter by source/agent/severity/time + paginate)",
+    obj_schema));
     dispatcher_handle(dispatcher, "libro_query", &libro_tool_query);
 
     registry_register(reg, tool_def_new(
-        "libro_verify", "Verify the libro chain's hash-link integrity",
-        obj_schema));
+    "libro_verify", "Verify the libro chain's hash-link integrity",
+    obj_schema));
     dispatcher_handle(dispatcher, "libro_verify", &libro_tool_verify);
 
     registry_register(reg, tool_def_new(
-        "libro_export", "Return every entry on the libro chain as a JSON array",
-        obj_schema));
+    "libro_export", "Return every entry on the libro chain as a JSON array",
+    obj_schema));
     dispatcher_handle(dispatcher, "libro_export", &libro_tool_export);
 
     registry_register(reg, tool_def_new(
-        "libro_proof", "Generate a Merkle inclusion proof for the entry at the given index",
-        obj_schema));
+    "libro_proof", "Generate a Merkle inclusion proof for the entry at the given index",
+    obj_schema));
     dispatcher_handle(dispatcher, "libro_proof", &libro_tool_proof);
 
     registry_register(reg, tool_def_new(
-        "libro_retention", "Apply a retention policy to the libro chain, archive old entries",
-        obj_schema));
+    "libro_retention", "Apply a retention policy to the libro chain, archive old entries",
+    obj_schema));
     dispatcher_handle(dispatcher, "libro_retention", &libro_tool_retention);
     return 0;
 }

@@ -263,9 +263,9 @@ fn _bridge_handle(config, cfd, buf, n) {
     # Bearer auth (no-op when no validator configured)
     var claims_slot[8]; store64(&claims_slot, 0);
     if (auth_bearer_check(cfd, buf, n,
-                          bridge_config_bearer_validator(config),
-                          bridge_config_bearer_ctx(config),
-                          &claims_slot) != 0) { return 0; }
+    bridge_config_bearer_validator(config),
+    bridge_config_bearer_ctx(config),
+    &claims_slot) != 0) { return 0; }
 
     # 413 cap on oversized declared bodies (audit M1). 60 KB headroom
     # keeps us inside the 64 KB recv buffer with room for headers.
@@ -293,7 +293,7 @@ fn _bridge_handle(config, cfd, buf, n) {
         return 0;
     }
     sandhi_server_send_response(cfd, HTTP_OK, "OK", "application/json",
-                       resp, strlen(resp), cors);
+    resp, strlen(resp), cors);
     return 0;
 }
 
@@ -304,7 +304,7 @@ fn _bridge_handle(config, cfd, buf, n) {
 fn transport_bridge_run(dispatcher, config) {
     bridge_config_with_dispatcher(config, dispatcher);
     return sandhi_server_run(bridge_config_addr(config),
-                           bridge_config_port(config),
-                           &_bridge_handle,
-                           config);
+    bridge_config_port(config),
+    &_bridge_handle,
+    config);
 }

@@ -70,7 +70,7 @@ fn main() {
     host_registry_add(r, e2);
     assert_eq(host_registry_count(r), 1, "count stable on replace");
     assert(streq(host_entry_url(host_registry_get(r, "github")), "https://api.github.com/v3") == 1,
-           "replacement url visible");
+    "replacement url visible");
 
     # Second distinct entry bumps count
     var e3 = host_entry_new("gitlab", "https://gitlab.com");
@@ -247,7 +247,7 @@ fn main() {
 
     # Missing file → -1
     assert_eq(host_registry_reload(rf, "/tmp/does_not_exist_bote.json"), 0 - 1,
-              "reload -1 on missing file");
+    "reload -1 on missing file");
 
     # Null args reject
     assert_eq(host_registry_reload(0, tmp_path), 0 - 1, "reload null registry");

@@ -127,7 +127,7 @@ fn b_auth_bearer_check_unset() {
 # call validator (allowlist), accept/reject.
 fn b_auth_bearer_check_set() {
     return auth_bearer_check(0, _b_auth_req, _b_auth_req_len,
-                             &auth_validator_allowlist, _b_auth_allowed);
+    &auth_validator_allowlist, _b_auth_allowed);
 }
 
 # ================================================================
@@ -144,7 +144,7 @@ fn _bench_setup() {
     _b_init_req = req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}");
     _b_list_req = req_new("2", "tools/list");
     _b_call_req = req_with_params(req_new("3", "tools/call"),
-        "{\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}");
+    "{\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}");
     _b_call_resp = resp_success("3", "{\"msg\":\"hi\"}");
 
     # Compiled schemas
@@ -154,7 +154,7 @@ fn _bench_setup() {
 
     var pn = vec_new();
     vec_push(pn, schema_prop_new("config",
-        "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"}},\"required\":[\"host\"]}"));
+    "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"}},\"required\":[\"host\"]}"));
     _b_compiled_nested = compiled_compile(schema_new("object", pn, vec_new()));
 
     # Fresh (uncompiled) schemas for the schema_compile bench. Built
@@ -166,7 +166,7 @@ fn _bench_setup() {
 
     var pn2 = vec_new();
     vec_push(pn2, schema_prop_new("config",
-        "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"}},\"required\":[\"host\"]}"));
+    "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"}},\"required\":[\"host\"]}"));
     _b_schema_nested = schema_new("object", pn2, vec_new());
 
     # Auth bearer bench setup.

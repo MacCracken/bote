@@ -1,6 +1,6 @@
 # Bote Roadmap
 
-> **Current**: `2.7.5` (cyrius 6.1.41, libro 2.7.2, majra 2.4.5).
+> **Current**: `2.7.6` (cyrius 6.2.11, libro 2.7.4, majra 2.4.7, sigil 3.7.14).
 > 11 active test files, **653 unit assertions** + 1 drift-guard
 > smoke, **14 criterion benchmarks**, **dual** consumer bundles
 > (`dist/bote.cyr` full + `dist/bote-core.cyr` opt-in core via
@@ -64,6 +64,7 @@ surfaces. See the **2.6.x modernization arc** section below.
 | **2.7.3** | **Cyrius major-version jump (5.10.44 → 6.1.24)** — the planned 5.11.x migration landed as 6.1.x. libro 2.6.3 → 2.7.2, majra 2.4.4 → 2.4.5. No `src/*.cyr` change; all 653 assertions + drift smoke pass, 14 benchmarks no-regression. Compile cap relieved: fn_table / identifier utilisation 93% / 92% → **52% / 52%** on raised 6.1.x caps — per-transport split reconsolidation now unblocked. `cyrius.lock` full-hash format (6 → 40 entries). Cleanliness sequence drops repurposed `cyrius audit`; adds `cyrius vet` (include-dependency audit) alongside `cyrius deny` |
 | **2.7.4** | Toolchain patch refresh (cyrius 6.1.41); **breaking** tool-registry constructor rename to resolve the ai-hwaccel `registry_new` collision for multi-library consumers (szal, mihi, hoosh). All 653 assertions (+ drift smoke) pass on the renamed constructor |
 | **2.7.5** | **`libro_tools` folded back into the default binary + `dist/bote.cyr`** (now 24 modules) — reverts the 1.9.4 cap-headroom decision now that the 6.1.x cap raise puts `src/main.cyr` at 58% / 60% (`fn_table 4764/8192`). `main()` stands up an in-memory libro chain and registers the five `libro_*` audit tools by default. Stays out of `dist/bote-core.cyr` (depends on a live libro chain, like `audit_libro`). All 653 assertions (+ drift smoke) pass |
+| **2.7.6** | **Cyrius 6.1.41 → 6.2.11** (first move onto the 6.2.x line) + dep refresh (libro 2.7.2 → 2.7.4, majra 2.4.5 → 2.4.7, sigil 3.7.12 → 3.7.14). **sigil 3.7.14 TLS-path SIGILL guard**: `thread_local` added to `[deps] stdlib` (before `sigil`) and to all six sigil-using test files — without it the crypto path links clean but SIGILLs at runtime (exit 132). 6.2.11 formatter reflow (whitespace) across `src/` + `tests/`; `dist/*` regenerated at v2.7.6. `fn_table 4770/8192` (58% / 60%). All 653 assertions (+ drift smoke) pass, 14 benchmarks no-regression |
 
 See [CHANGELOG.md](../../CHANGELOG.md) for the full detail per release.
 

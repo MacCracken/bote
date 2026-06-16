@@ -22,6 +22,7 @@ include "lib/chrono.cyr"
 include "lib/tagged.cyr"
 include "lib/freelist.cyr"
 include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
 include "lib/sakshi.cyr"
 include "lib/ct.cyr"
 include "lib/keccak.cyr"

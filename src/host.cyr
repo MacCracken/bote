@@ -423,10 +423,10 @@ fn _ssrf_classify_ipv6(h, hlen) {
     # ::ffff:* — IPv4-mapped. Block as PRIVATE (worst case is loopback;
     # a permissive bypass would let `::ffff:127.0.0.1` slip through).
     if (hlen >= 7
-        && load8(h) == 58 && load8(h + 1) == 58
-        && load8(h + 2) == 102 && load8(h + 3) == 102
-        && load8(h + 4) == 102 && load8(h + 5) == 102
-        && load8(h + 6) == 58) {
+    && load8(h) == 58 && load8(h + 1) == 58
+    && load8(h + 2) == 102 && load8(h + 3) == 102
+    && load8(h + 4) == 102 && load8(h + 5) == 102
+    && load8(h + 6) == 58) {
         return SSRF_PRIVATE;
     }
 
@@ -466,16 +466,16 @@ fn _ssrf_classify_ipv6(h, hlen) {
 
     # fe80::/10 link-local
     if (hlen >= 5
-        && load8(h) == 102 && load8(h + 1) == 101
-        && load8(h + 2) == 56 && load8(h + 3) == 48
-        && load8(h + 4) == 58) {
+    && load8(h) == 102 && load8(h + 1) == 101
+    && load8(h + 2) == 56 && load8(h + 3) == 48
+    && load8(h + 4) == 58) {
         return SSRF_LINK_LOCAL;
     }
 
     # fc00::/7 ULA private (fc or fd)
     if (hlen >= 2
-        && load8(h) == 102
-        && (load8(h + 1) == 99 || load8(h + 1) == 100)) {
+    && load8(h) == 102
+    && (load8(h + 1) == 99 || load8(h + 1) == 100)) {
         return SSRF_PRIVATE;
     }
 

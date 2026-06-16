@@ -135,7 +135,7 @@ fn auth_send_unauthorized(cfd, realm) {
     # sandhi_server_send_response builds: status line + Content-Type + Content-Length
     # + extra hdrs + blank line + body. We want a 401 with our header.
     sandhi_server_send_response(cfd, HTTP_UNAUTHORIZED, "Unauthorized",
-                       "text/plain", "", 0, hdrs);
+    "text/plain", "", 0, hdrs);
     return 0;
 }
 

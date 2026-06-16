@@ -46,7 +46,7 @@ fn main() {
     # ---------------- run() invokes the fp ----------------
     var r1 = sandbox_run(s, "echo hi", 1000);
     assert(streq(r1, "{\"exit_code\":42,\"stdout\":\"mock\",\"stderr\":\"\",\"duration_ms\":7,\"timed_out\":0}") == 1,
-           "run dispatches to mock runner");
+    "run dispatches to mock runner");
 
     # ---------------- null-runner safety ----------------
     var rnull = sandbox_run(0, "anything", 0);
@@ -57,7 +57,7 @@ fn main() {
     assert(noop != 0, "noop runner addressable");
     var rn = sandbox_run(noop, "ls -la", 5000);
     assert(streq(rn, "{\"exit_code\":0,\"stdout\":\"ls -la\",\"stderr\":\"\",\"duration_ms\":0,\"timed_out\":0}") == 1,
-           "noop echoes command as stdout, exit 0");
+    "noop echoes command as stdout, exit 0");
 
     # Noop with null command — graceful
     var rn0 = sandbox_run(noop, 0, 0);
@@ -66,7 +66,7 @@ fn main() {
     # Noop escapes JSON properly in echoed command
     var rn_quote = sandbox_run(noop, "echo \"hi\"", 0);
     assert(streq(rn_quote, "{\"exit_code\":0,\"stdout\":\"echo \\\"hi\\\"\",\"stderr\":\"\",\"duration_ms\":0,\"timed_out\":0}") == 1,
-           "noop JSON-escapes the command");
+    "noop JSON-escapes the command");
 
     # ---------------- fp addressability ----------------
     assert(&sandbox_runner_new != 0, "runner_new fp addressable");

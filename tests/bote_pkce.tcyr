@@ -9,6 +9,8 @@ include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/fnptr.cyr"
 include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
 include "lib/sakshi.cyr"
 include "lib/sigil.cyr"
 include "lib/assert.cyr"
@@ -61,7 +63,7 @@ fn main() {
     assert(c != 0, "challenge returns non-null");
     assert_eq(strlen(c), 43, "challenge length 43");
     assert(streq(c, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM") == 1,
-           "RFC 7636 Appendix B challenge matches");
+    "RFC 7636 Appendix B challenge matches");
 
     # Determinism — same input → same output
     var c2 = pkce_code_challenge_s256(ref_v);

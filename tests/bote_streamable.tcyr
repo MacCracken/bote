@@ -23,6 +23,7 @@ include "lib/tls.cyr"
 include "lib/sandhi.cyr"
 include "lib/freelist.cyr"
 include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
 include "lib/sakshi.cyr"
 include "lib/sigil.cyr"
 include "lib/libro.cyr"
@@ -64,12 +65,12 @@ fn main() {
     assert(streq(stream_event_data(ev1), "{\"hello\":\"world\"}") == 1, "ev data");
     var wire = stream_event_to_wire(ev1);
     assert(streq(wire, "id: evt-7\nevent: message\ndata: {\"hello\":\"world\"}\n\n") == 1,
-           "ev wire format");
+    "ev wire format");
 
     var primer = stream_event_primer("evt-0");
     var primer_wire = stream_event_to_wire(primer);
     assert(streq(primer_wire, "id: evt-0\nevent: message\ndata: \n\n") == 1,
-           "primer wire (empty data)");
+    "primer wire (empty data)");
 
     # ---------------- ResumptionBuffer ----------------
     var rb = resumption_buffer_new(3);
@@ -113,7 +114,7 @@ fn main() {
     # Sanity that the transport's path check ignores the query string —
     # exercises the same stdlib helper but at our usage site.
     assert(streq(sandhi_server_path_only("/mcp?lastEventId=evt-7"), "/mcp") == 1,
-           "path strips query for routing");
+    "path strips query for routing");
 
     return assert_summary();
 }

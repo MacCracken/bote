@@ -110,22 +110,22 @@ fn main() {
     # ================================================================
     # No validator configured → pass through (returns 0)
     assert_eq(auth_bearer_check(0, r1, strlen(r1), 0, 0), 0,
-              "no validator → middleware no-op");
+    "no validator → middleware no-op");
 
     # Validator configured, valid token → pass
     var fp = &mock_validator;
     assert_eq(auth_bearer_check(2, r1, strlen(r1), fp, 0), 0,
-              "valid token passes");
+    "valid token passes");
 
     # Validator configured, missing header → 401 (and a 401 byte stream
     # was written to fd=2; we just check the return code here)
     assert_eq(auth_bearer_check(2, no_hdr, strlen(no_hdr), fp, 0), HTTP_UNAUTHORIZED,
-              "missing header → 401");
+    "missing header → 401");
 
     # Validator configured, wrong token → 401
     var wrong = _make_req("Bearer nope");
     assert_eq(auth_bearer_check(2, wrong, strlen(wrong), fp, 0), HTTP_UNAUTHORIZED,
-              "wrong token → 401");
+    "wrong token → 401");
 
     # ================================================================
     # Fn-pointer addressability (sanity)

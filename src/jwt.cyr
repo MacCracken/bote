@@ -139,7 +139,7 @@ fn jwt_secret_len(s)  { return load64(s + 8); }
 fn auth_validator_jwt_hs256(token, jwt_secret) {
     if (jwt_secret == 0) { return 0; }
     if (jwt_verify_hs256(token, jwt_secret_data(jwt_secret),
-                                 jwt_secret_len(jwt_secret)) == 1) {
+    jwt_secret_len(jwt_secret)) == 1) {
         return token;   # opaque claims = the validated token
     }
     return 0;

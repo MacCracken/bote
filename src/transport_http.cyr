@@ -131,9 +131,9 @@ fn _http_handle(config, cfd, buf, n) {
     }
     var claims_slot[8]; store64(&claims_slot, 0);
     if (auth_bearer_check(cfd, buf, n,
-                          http_config_bearer_validator(config),
-                          http_config_bearer_ctx(config),
-                          &claims_slot) != 0) { return 0; }
+    http_config_bearer_validator(config),
+    http_config_bearer_ctx(config),
+    &claims_slot) != 0) { return 0; }
     if (_http_check_protocol(cfd, buf, n, config) != 0) { return 0; }
 
     var bo = sandhi_server_body_offset(buf, n);
@@ -179,7 +179,7 @@ fn _http_handle(config, cfd, buf, n) {
         return 0;
     }
     sandhi_server_send_response(cfd, HTTP_OK, "OK", "application/json",
-                       resp, strlen(resp), extra);
+    resp, strlen(resp), extra);
     return 0;
 }
 
@@ -190,7 +190,7 @@ fn _http_handle(config, cfd, buf, n) {
 fn transport_http_run(dispatcher, config) {
     store64(config + 48, dispatcher);
     return sandhi_server_run(http_config_addr(config),
-                           http_config_port(config),
-                           &_http_handle,
-                           config);
+    http_config_port(config),
+    &_http_handle,
+    config);
 }

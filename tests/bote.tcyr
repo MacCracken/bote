@@ -18,6 +18,7 @@ include "lib/tls.cyr"
 include "lib/sandhi.cyr"
 include "lib/freelist.cyr"
 include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
 include "lib/sakshi.cyr"
 include "lib/sigil.cyr"
 include "lib/libro.cyr"
@@ -381,7 +382,7 @@ fn main() {
     # ---------------- dispatch: tools/call success ----------------
     dispatcher_handle(d, "svc_echo", &h_echo);
     var call_req = req_with_params(req_new("3", "tools/call"),
-        "{\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}");
+    "{\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}");
     var call_resp = dispatcher_dispatch(d, call_req, 0);
     var call_result = resp_result(call_resp);
     assert(call_result != 0, "call has result");
@@ -392,7 +393,7 @@ fn main() {
     registry_register(dreg, tool_def_new("svc_const", "constant", sa));
     dispatcher_handle(d, "svc_const", &h_const);
     var cc = dispatcher_dispatch(d, req_with_params(req_new("4", "tools/call"),
-        "{\"name\":\"svc_const\",\"arguments\":{}}"), 0);
+    "{\"name\":\"svc_const\",\"arguments\":{}}"), 0);
     assert(streq(resp_result(cc), "{\"answer\":42}") == 1, "const handler returned constant");
 
     # ---------------- dispatch: tools/call missing name ----------------
@@ -403,7 +404,7 @@ fn main() {
 
     # ---------------- dispatch: tools/call unknown tool ----------------
     var unk_call = dispatcher_dispatch(d, req_with_params(req_new("6", "tools/call"),
-        "{\"name\":\"nope_x\",\"arguments\":{}}"), 0);
+    "{\"name\":\"nope_x\",\"arguments\":{}}"), 0);
     var uc_err = resp_error_obj(unk_call);
     assert(uc_err != 0, "unknown tool -> err");
     assert_eq(rpc_err_code(uc_err), 0 - 32601, "unknown tool -32601");
@@ -427,14 +428,14 @@ fn main() {
     var ok_reg = dispatcher_register_tool(d, tool_def_new("dyn_tool", "dyn", sa), &h_echo);
     assert_eq(ok_reg, 0, "valid register succeeds");
     var dyn_call = dispatcher_dispatch(d, req_with_params(req_new("8", "tools/call"),
-        "{\"name\":\"dyn_tool\",\"arguments\":{\"q\":1}}"), 0);
+    "{\"name\":\"dyn_tool\",\"arguments\":{\"q\":1}}"), 0);
     assert(streq(resp_result(dyn_call), "{\"q\":1}") == 1, "dyn handler dispatched");
 
     # ---------------- dispatch: deregister ----------------
     var dereg_ok = dispatcher_deregister_tool(d, "dyn_tool");
     assert_eq(dereg_ok, 0, "deregister ok");
     var dyn_after = dispatcher_dispatch(d, req_with_params(req_new("9", "tools/call"),
-        "{\"name\":\"dyn_tool\",\"arguments\":{}}"), 0);
+    "{\"name\":\"dyn_tool\",\"arguments\":{}}"), 0);
     var da_err = resp_error_obj(dyn_after);
     assert(da_err != 0, "after dereg unknown tool");
     assert_eq(rpc_err_code(da_err), 0 - 32601, "after dereg -32601");
@@ -514,22 +515,22 @@ fn main() {
 
     # ---------------- codec: process_message batch ----------------
     var pmb = codec_process_message(
-        "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"},{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}]",
-        d2);
+    "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"},{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}]",
+    d2);
     assert(pmb != 0, "batch returns array");
     # Should be an array
     assert_eq(load8(pmb), 91, "batch starts with [");
 
     # batch with notification (only one response back)
     var pmbn = codec_process_message(
-        "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"},{\"jsonrpc\":\"2.0\",\"method\":\"notify\"}]",
-        d2);
+    "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"},{\"jsonrpc\":\"2.0\",\"method\":\"notify\"}]",
+    d2);
     assert(pmbn != 0, "mixed batch returns");
 
     # all-notifications batch → 0
     var pmbz = codec_process_message(
-        "[{\"jsonrpc\":\"2.0\",\"method\":\"a\"},{\"jsonrpc\":\"2.0\",\"method\":\"b\"}]",
-        d2);
+    "[{\"jsonrpc\":\"2.0\",\"method\":\"a\"},{\"jsonrpc\":\"2.0\",\"method\":\"b\"}]",
+    d2);
     assert_eq(pmbz, 0, "all-notif batch -> 0");
 
     # empty batch → invalid request
@@ -576,7 +577,7 @@ fn main() {
     # ---------------- schema: nested object ----------------
     var ps_o = vec_new();
     vec_push(ps_o, schema_prop_new("config",
-        "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"}},\"required\":[\"host\"]}"));
+    "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"}},\"required\":[\"host\"]}"));
     var c_obj = compiled_compile(schema_new("object", ps_o, vec_new()));
     assert_eq(vec_len(compiled_validate(c_obj, "{\"config\":{\"host\":\"localhost\",\"port\":8080}}")), 0, "nested ok");
     assert_eq(vec_len(compiled_validate(c_obj, "{\"config\":{\"port\":8080}}")), 1, "nested missing required");
@@ -641,7 +642,7 @@ fn main() {
     vec_push(p_compiled, schema_prop_new("count", "{\"type\":\"integer\",\"minimum\":1,\"maximum\":10}"));
     var s_compiled = schema_new("object", p_compiled, vec_new());
     var t_compiled = tool_def_with_compiled(tool_def_new("svc_count", "compiled", s_compiled),
-                                            compiled_compile(s_compiled));
+    compiled_compile(s_compiled));
     registry_register(rcompiled, t_compiled);
     assert_eq(registry_validate_params(rcompiled, "svc_count", "{\"count\":5}"), 0, "compiled validate ok");
     var bv = registry_validate_params(rcompiled, "svc_count", "{\"count\":99}");
@@ -832,19 +833,19 @@ fn main() {
     # the annotations.
     var wr_block = wrap_tool_result("{\"type\":\"text\",\"text\":\"hi\"}");
     assert(streq(wr_block, "{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}") == 1,
-              "single block lifts into 1-element content");
+    "single block lifts into 1-element content");
 
     var wr_ann = wrap_tool_result(
-        "{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"priority\":50}}");
+    "{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"priority\":50}}");
     assert(streq(wr_ann,
-              "{\"content\":[{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"priority\":50}}]}") == 1,
-              "annotations survive the lift");
+    "{\"content\":[{\"type\":\"text\",\"text\":\"hi\",\"annotations\":{\"priority\":50}}]}") == 1,
+    "annotations survive the lift");
 
     var wr_img = wrap_tool_result(
-        "{\"type\":\"image\",\"data\":\"AA==\",\"mimeType\":\"image/png\",\"annotations\":{\"audience\":[\"user\"]}}");
+    "{\"type\":\"image\",\"data\":\"AA==\",\"mimeType\":\"image/png\",\"annotations\":{\"audience\":[\"user\"]}}");
     assert(streq(wr_img,
-              "{\"content\":[{\"type\":\"image\",\"data\":\"AA==\",\"mimeType\":\"image/png\",\"annotations\":{\"audience\":[\"user\"]}}]}") == 1,
-              "image-block annotations survive");
+    "{\"content\":[{\"type\":\"image\",\"data\":\"AA==\",\"mimeType\":\"image/png\",\"annotations\":{\"audience\":[\"user\"]}}]}") == 1,
+    "image-block annotations survive");
 
     # Non-block object (no "type" field) still falls through to the
     # synthesised text wrap — the block detection is type-tagged.
@@ -866,8 +867,8 @@ fn main() {
     dispatcher_handle(bd, "svc_echo", &h_echo);
 
     var bp_call = bridge_process_message(
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"svc_echo\",\"arguments\":{\"k\":\"v\"}}}",
-        bd);
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"svc_echo\",\"arguments\":{\"k\":\"v\"}}}",
+    bd);
     assert(bp_call != 0, "bridge tools/call returns json");
     var bp_result = jsonx_get_raw(bp_call, "result");
     assert(bp_result != 0, "result present");
@@ -875,7 +876,7 @@ fn main() {
 
     # Non-tools-call methods pass through unchanged.
     var bp_init = bridge_process_message(
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}", bd);
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}", bd);
     assert(bp_init != 0, "init returns json");
     var bp_init_result = jsonx_get_raw(bp_init, "result");
     assert_eq(jsonx_has(bp_init_result, "protocolVersion"), 1, "init has protocolVersion (not wrapped)");
@@ -883,8 +884,8 @@ fn main() {
 
     # Tool-call error → wrapped as success + isError.
     var bp_unknown = bridge_process_message(
-        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"missing_tool\",\"arguments\":{}}}",
-        bd);
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"missing_tool\",\"arguments\":{}}}",
+    bd);
     assert(bp_unknown != 0, "unknown returns json");
     var bp_un_result = jsonx_get_raw(bp_unknown, "result");
     assert(bp_un_result != 0, "error mapped to result");
@@ -893,7 +894,7 @@ fn main() {
 
     # Notification still produces no response.
     assert_eq(bridge_process_message("{\"jsonrpc\":\"2.0\",\"method\":\"notify\"}", bd), 0,
-              "bridge notif -> 0");
+    "bridge notif -> 0");
 
     # ---------------- bridge: cors origin selection ----------------
     var cors_a = vec_new();
@@ -919,8 +920,8 @@ fn main() {
 
     # ---------------- review punch: codec pure-notification batch -> 0 ----------------
     var pure_notifs = codec_process_message(
-        "[{\"jsonrpc\":\"2.0\",\"method\":\"a\"},{\"jsonrpc\":\"2.0\",\"method\":\"b\"},{\"jsonrpc\":\"2.0\",\"method\":\"c\"}]",
-        bd);
+    "[{\"jsonrpc\":\"2.0\",\"method\":\"a\"},{\"jsonrpc\":\"2.0\",\"method\":\"b\"},{\"jsonrpc\":\"2.0\",\"method\":\"c\"}]",
+    bd);
     assert_eq(pure_notifs, 0, "pure-notification batch returns 0");
 
     # ================================================================
@@ -992,7 +993,7 @@ fn main() {
 
     # tools/call success → audit + bote/tool/completed
     var w_call = req_with_params(req_new("1", "tools/call"),
-        "{\"name\":\"svc_echo\",\"arguments\":{\"k\":\"v\"},\"caller_id\":\"agent-x\"}");
+    "{\"name\":\"svc_echo\",\"arguments\":{\"k\":\"v\"},\"caller_id\":\"agent-x\"}");
     var w_resp = dispatcher_dispatch(wd, w_call, 0);
     assert(w_resp != 0, "wire call returns response");
     assert_eq(vec_len(_audit_events), 1, "1 audit event");
@@ -1009,9 +1010,9 @@ fn main() {
     _ev_reset();
     _audit_reset();
     registry_register(wreg, tool_def_new("svc_unhandled", "no handler",
-                                         schema_new("object", 0, vec_new())));
+    schema_new("object", 0, vec_new())));
     var w_unk = dispatcher_dispatch(wd, req_with_params(req_new("2", "tools/call"),
-        "{\"name\":\"svc_unhandled\",\"arguments\":{}}"), 0);
+    "{\"name\":\"svc_unhandled\",\"arguments\":{}}"), 0);
     assert(resp_error_obj(w_unk) != 0, "unhandled tool returns error");
     assert_eq(vec_len(_audit_events), 1, "fail logged");
     assert_eq(tool_call_event_success(vec_get(_audit_events, 0)), 0, "fail success=0");
@@ -1023,7 +1024,7 @@ fn main() {
     _ev_reset();
     _audit_reset();
     var w_miss = dispatcher_dispatch(wd, req_with_params(req_new("2b", "tools/call"),
-        "{\"name\":\"never_existed\",\"arguments\":{}}"), 0);
+    "{\"name\":\"never_existed\",\"arguments\":{}}"), 0);
     assert(resp_error_obj(w_miss) != 0, "missing tool returns error");
     assert_eq(vec_len(_audit_events), 0, "validate-stage err: no audit");
     assert_eq(vec_len(_ev_topics), 0, "validate-stage err: no event");
@@ -1039,7 +1040,7 @@ fn main() {
     # ---------------- dispatcher: register/deregister emit topics ----------------
     _ev_reset();
     var ok_reg2 = dispatcher_register_tool(wd,
-        tool_def_new("svc_dyn", "dyn", schema_new("object", 0, vec_new())), &h_echo);
+    tool_def_new("svc_dyn", "dyn", schema_new("object", 0, vec_new())), &h_echo);
     assert_eq(ok_reg2, 0, "dyn register ok");
     assert_eq(vec_len(_ev_topics), 1, "register emitted");
     assert(streq(vec_get(_ev_topics, 0), "bote/tool/registered") == 1, "registered topic");
@@ -1054,11 +1055,11 @@ fn main() {
     _ev_reset();
     _audit_reset();
     registry_register(wreg, tool_def_with_deprecated(
-        tool_def_new("svc_old", "old", schema_new("object", 0, vec_new())),
-        "use svc_new instead"));
+    tool_def_new("svc_old", "old", schema_new("object", 0, vec_new())),
+    "use svc_new instead"));
     dispatcher_handle(wd, "svc_old", &h_echo);
     dispatcher_dispatch(wd, req_with_params(req_new("5", "tools/call"),
-        "{\"name\":\"svc_old\",\"arguments\":{}}"), 0);
+    "{\"name\":\"svc_old\",\"arguments\":{}}"), 0);
     # Expect: bote/tool/deprecated then bote/tool/completed
     assert_eq(vec_len(_ev_topics), 2, "two events on deprecated call");
     assert(streq(vec_get(_ev_topics, 0), "bote/tool/deprecated") == 1, "deprecated first");
@@ -1068,10 +1069,10 @@ fn main() {
     # ---------------- dispatcher: noop sinks (default) don't break anything ----------------
     var bare = dispatcher_new(tool_registry_new());
     registry_register(dispatcher_registry(bare),
-        tool_def_new("svc_bare", "bare", schema_new("object", 0, vec_new())));
+    tool_def_new("svc_bare", "bare", schema_new("object", 0, vec_new())));
     dispatcher_handle(bare, "svc_bare", &h_echo);
     var bare_resp = dispatcher_dispatch(bare, req_with_params(req_new("9", "tools/call"),
-        "{\"name\":\"svc_bare\",\"arguments\":{\"x\":1}}"), 0);
+    "{\"name\":\"svc_bare\",\"arguments\":{\"x\":1}}"), 0);
     assert(bare_resp != 0, "bare dispatch still works");
     assert_eq(resp_error_obj(bare_resp), 0, "bare success no error");
 

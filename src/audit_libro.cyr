@@ -76,7 +76,7 @@ fn libro_audit_log(ctx, event) {
 
     if (agent_cstr != 0) {
         chain_append_with_agent(chain, severity, source_str, action_str,
-                                details_str, str_from(agent_cstr));
+        details_str, str_from(agent_cstr));
     } else {
         chain_append(chain, severity, source_str, action_str, details_str);
     }

@@ -18,6 +18,68 @@ have per release.
 
 _(empty)_
 
+## [2.7.6] — 2026-06-15 — cyrius 6.2.11 (first move onto the 6.2.x line) + dependency refresh
+
+Toolchain + dependency refresh, ecosystem-wide 6.2.x sweep. No bote
+source *logic* changed — pins, a required `thread_local` include guard,
+and the 6.2.11 formatter reflow. All 653 assertions (+ 1 drift smoke)
+pass on the new stack; all 14 benchmarks run clean; `dist/bote.cyr` /
+`dist/bote-core.cyr` regenerated at v2.7.6.
+
+### Changed
+
+- **Cyrius pin `6.1.41` → `6.2.11`** (`cyrius.cyml [package].cyrius`).
+  First step onto the 6.2.x maintenance line. The installed toolchain
+  was already 6.2.11; this aligns the manifest pin and clears the drift
+  warning.
+- **Dependencies bumped to current tags:**
+  - **libro `2.7.2` → `2.7.4`** (`[deps.libro]`) — toolchain refresh;
+    `dist/libro.cyr` body byte-identical apart from the version header.
+  - **majra `2.4.5` → `2.4.7`** (`[deps.majra]`) — toolchain refresh;
+    bundle bodies byte-identical to 2.4.5.
+  - **sigil `3.7.12` → `3.7.14`** (`[deps.sigil]`) — self-contained
+    `dist/sigil.cyr` retained; transitive agnosys `1.3.2` → `1.4.3`.
+- **`dist/bote.cyr` / `dist/bote-core.cyr` regenerated at v2.7.6.** The
+  only body change is the 6.2.11 formatter's continuation-line reflow
+  (whitespace) — no module moved, no symbol changed.
+- **fn_table / identifier utilisation on `src/main.cyr`: 58% / 60%**
+  (`fn_table 4770/8192`, `identifiers 157633/262144`) — the small bump
+  over 2.7.5's `4764/157278` is the `thread_local` pull-through. Well
+  under the 95% CI gate.
+
+### Fixed
+
+- **sigil 3.7.14 TLS-path SIGILL guard (latent CI landmine).** sigil
+  3.7.14's `crypto_scratch` exercises the thread-local-storage path that
+  3.7.12 never hit. Without `lib/thread_local.cyr` ahead of
+  `lib/sigil.cyr`, the binaries and crypto tests link clean but **SIGILL
+  at first crypto use (exit 132, `Illegal instruction`)** — a build-only
+  check misses it; the harness must be *run*. Added `thread_local` to
+  `[deps] stdlib` (immediately after `thread`, before `sigil`) so the
+  three binaries pick it up via auto-injection, and an explicit
+  `include "lib/thread_local.cyr"` after `lib/thread.cyr` in every
+  sigil-using test file (`bote.tcyr`, `bote_jwt.tcyr`, `bote_pkce.tcyr`,
+  `bote_libro_tools.tcyr`, `bote_streamable.tcyr`, `bote_ws.tcyr`).
+  `bote_jwt` / `bote_pkce` also gained the `thread` include they
+  previously did without. All 653 assertions pass exit-0; jwt (28) and
+  pkce (17) confirm the crypto path runs clean. This is the exact
+  failure mode libro 2.7.4's CHANGELOG documents.
+
+### Notes
+
+- **New benign 6.2.11 linker diagnostics.** The 6.2.11 linker now warns
+  on duplicate global symbols — `duplicate symbol 'ERR_IO' / 'ERR_UNKNOWN'`
+  (`lib/libro.cyr` / `lib/agnosys.cyr`) and `duplicate fn '_sub_new'`
+  (`lib/majra.cyr`). Pre-existing name collisions between the bundled
+  deps' error enums; harmless (last-definition-wins, all tests pass),
+  simply silent before 6.2.11 began diagnosing them. Not a bote
+  regression.
+- **`cyrius fmt` CLI changed in 6.2.x.** The flag now follows the file:
+  `cyrius fmt <file> --check` (was `cyrius fmt --check <file>` on 6.1.x).
+  The 6.2.11 formatter also reflows deep continuation-line indentation to
+  a fixed indent — hence the whitespace-only churn across `src/` and
+  `tests/` in this release.
+
 ## [2.7.5] — 2026-06-11 — libro_tools folded back into the default binary + full bundle
 
 ### Added

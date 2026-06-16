@@ -264,9 +264,9 @@ fn _strm_handle_post(cfd, buf, n, config) {
         sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
     }
     if (auth_bearer_check(cfd, buf, n,
-                          streamable_config_bearer_validator(config),
-                          streamable_config_bearer_ctx(config),
-                          &claims_slot) != 0) { return 0; }
+    streamable_config_bearer_validator(config),
+    streamable_config_bearer_ctx(config),
+    &claims_slot) != 0) { return 0; }
     if (_strm_check_protocol(cfd, buf, n) != 0) { return 0; }
 
     var bo = sandhi_server_body_offset(buf, n);
@@ -307,7 +307,7 @@ fn _strm_handle_post(cfd, buf, n, config) {
         return 0;
     }
     sandhi_server_send_response(cfd, HTTP_OK, "OK", "application/json",
-                       resp, strlen(resp), extra);
+    resp, strlen(resp), extra);
     return 0;
 }
 
@@ -333,9 +333,9 @@ fn _strm_handle_get(cfd, buf, n, config) {
         sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
     }
     if (auth_bearer_check(cfd, buf, n,
-                          streamable_config_bearer_validator(config),
-                          streamable_config_bearer_ctx(config),
-                          0) != 0) { return 0; }
+    streamable_config_bearer_validator(config),
+    streamable_config_bearer_ctx(config),
+    0) != 0) { return 0; }
     if (_strm_check_protocol(cfd, buf, n) != 0) { return 0; }
     if (_strm_check_session(cfd, buf, n, config, "") != 0) { return 0; }
 
@@ -399,7 +399,7 @@ fn transport_streamable_run(dispatcher, config) {
     _strm_init();
     store64(config + 56, dispatcher);
     return sandhi_server_run(streamable_config_addr(config),
-                           streamable_config_port(config),
-                           &_strm_handle,
-                           config);
+    streamable_config_port(config),
+    &_strm_handle,
+    config);
 }
