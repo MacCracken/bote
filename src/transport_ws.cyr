@@ -5,6 +5,19 @@
 #
 # ws_server is pulled out of [deps] stdlib auto-inject so other test
 # files don't carry its weight — include it here directly. 2.7.2.
+#
+# COMPAT SHIM (cyrius 6.3.x): lib/ws_server.cyr still calls the pre-6.x
+# name `http_find_header`, but the stdlib's http_* header helpers were
+# renamed to sandhi_server_* and ws_server.cyr was missed in the sweep,
+# so the symbol dangles undefined. sandhi_server_find_header has the
+# identical (buf, blen, name) → allocated-cstr-or-0 contract, so forward
+# to it. Must precede the ws_server include (cyrius is single-pass).
+# Upstream fix needed: stdlib lib/ws_server.cyr should call
+# sandhi_server_find_header directly (cyrius bug — the http_*→sandhi_*
+# rename missed it). Remove this shim once that lands.
+fn http_find_header(buf, blen, name): i64 {
+    return sandhi_server_find_header(buf, blen, name);
+}
 include "lib/ws_server.cyr"
 
 # Wire format: each WebSocket TEXT frame is one JSON-RPC 2.0 message.

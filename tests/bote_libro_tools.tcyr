@@ -29,6 +29,7 @@ include "lib/keccak.cyr"
 include "lib/process.cyr"
 include "lib/random.cyr"
 include "lib/sigil.cyr"
+include "lib/patra.cyr"
 include "lib/libro.cyr"
 include "lib/assert.cyr"
 

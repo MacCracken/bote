@@ -18,6 +18,49 @@ have per release.
 
 _(empty)_
 
+## [2.7.7] — 2026-06-30 — cyrius 6.3.15 base-stack migration + 6.3.x stdlib rename reconciliation
+
+Tier-3 step of the coordinated base-security-stack migration to cyrius
+**6.3.15** (sakshi 2.4.3 → sigil 3.9.8 → majra 2.5.0 → libro 2.7.9 →
+**bote 2.7.7** → the five consumers). Toolchain pin + dependency refresh
+plus the stdlib boundary/rename reconciliation the 6.3.x line requires.
+No bote runtime *logic* changed. All 653 assertions pass across all 11
+test files on the new stack; `dist/bote.cyr` / `dist/bote-core.cyr`
+regenerated at v2.7.7.
+
+### Changed
+
+- **Toolchain**: pinned to cyrius **6.3.15** (was 6.2.11).
+- **Dependencies**: libro **2.7.9** (was 2.7.4), majra **2.5.0** (was
+  2.4.7), sigil **3.9.8** (was 3.7.14) — the migrated tiers below bote.
+- **`[deps] stdlib`**: added `atomic` + `sync` (patra's transitive
+  `lib/sync.cyr` requirement surfaces through the libro chain on 6.3.x)
+  and `dynlib` (6.3.x's `fdlopen.cyr` references `dynlib_auxv_get` /
+  `dynlib_read_auxv`; `dynlib` must precede `fdlopen` — single-pass).
+- **`http_send_204` → `sandhi_server_send_204`** (transport_http /
+  bridge / transport_streamable): the retired bote-local `http_*` shim
+  alias was still referenced at three 204-response sites; renamed to the
+  canonical sandhi export (identical `(cfd, extra_headers)` signature).
+- **`_bote_server_version()`**: corrected stale literal `2.7.1` → `2.7.7`
+  (the MCP `initialize` handshake now reports the true release again).
+
+### Fixed
+
+- **`auth_bearer_check` undefined** in `tests/bote.tcyr`,
+  `bote_streamable.tcyr`, `bote_ws.tcyr`: these files include the
+  transports that call it but omitted `src/auth.cyr`, which compiled at
+  6.2.x only because DCE treated the call site as unreachable. 6.3.x's
+  reachability marks it live; added the `src/auth.cyr` include before the
+  transport include in each (mirrors `src/main.cyr`).
+- **`http_find_header` undefined** (WS handshake, via stdlib
+  `lib/ws_server.cyr`): the 6.3.x stdlib renamed its `http_*` header
+  helpers to `sandhi_server_*` but missed `ws_server.cyr`, leaving the
+  symbol dangling. Added a bote-local compat shim in `src/transport_ws.cyr`
+  forwarding `http_find_header(buf, blen, name)` →
+  `sandhi_server_find_header(buf, blen, name)` (identical contract).
+  Filed upstream against cyrius; remove the shim once `ws_server.cyr` is
+  fixed.
+
 ## [2.7.6] — 2026-06-15 — cyrius 6.2.11 (first move onto the 6.2.x line) + dependency refresh
 
 Toolchain + dependency refresh, ecosystem-wide 6.2.x sweep. No bote

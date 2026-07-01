@@ -233,7 +233,7 @@ fn _bridge_handle(config, cfd, buf, n) {
 
     # OPTIONS preflight
     if (streq(method, "OPTIONS") == 1) {
-        http_send_204(cfd, cors);
+        sandhi_server_send_204(cfd, cors);
         return 0;
     }
     # GET /health
@@ -289,7 +289,7 @@ fn _bridge_handle(config, cfd, buf, n) {
 
     var resp = bridge_process_message(body, dispatcher, load64(&claims_slot));
     if (resp == 0) {
-        http_send_204(cfd, cors);
+        sandhi_server_send_204(cfd, cors);
         return 0;
     }
     sandhi_server_send_response(cfd, HTTP_OK, "OK", "application/json",

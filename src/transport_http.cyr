@@ -175,7 +175,7 @@ fn _http_handle(config, cfd, buf, n) {
 
     var resp = codec_process_message(body, http_config_dispatcher(config), load64(&claims_slot));
     if (resp == 0) {
-        http_send_204(cfd, extra);
+        sandhi_server_send_204(cfd, extra);
         return 0;
     }
     sandhi_server_send_response(cfd, HTTP_OK, "OK", "application/json",

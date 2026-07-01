@@ -5,7 +5,7 @@ description = "MCP core service in Cyrius — stable 2.x. JSON-RPC 2.0, six tran
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/bote"
 language = "cyrius"
-cyrius = "6.2.11"
+cyrius = "6.3.15"
 
 [build]
 entry = "src/main.cyr"
@@ -108,8 +108,17 @@ stdlib = [
     "chrono",
     "tagged",
     "net",
+    "async",
+    # dynlib MUST precede fdlopen: 6.3.x's fdlopen.cyr references
+    # dynlib_auxv_get / dynlib_read_auxv (auxv-based loader base
+    # resolution), and cyrius is single-pass. dynlib pulls fnptr +
+    # result via its own includes.
+    "dynlib",
+    "fdlopen",
     "freelist",
     "thread",
+    "atomic",
+    "sync",
     # thread_local MUST follow thread and precede sigil. sigil 3.7.14's
     # crypto_scratch exercises the TLS path; without thread_local's
     # storage the binaries link clean but SIGILL at first crypto use
@@ -147,7 +156,7 @@ stdlib = [
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
 path = "../libro"
-tag = "2.7.4"
+tag = "2.7.9"
 modules = ["dist/libro.cyr"]
 
 # majra pub/sub — same single-file dist bundle pattern. The default
@@ -157,7 +166,7 @@ modules = ["dist/libro.cyr"]
 [deps.majra]
 git = "https://github.com/MacCracken/majra"
 path = "../majra"
-tag = "2.4.7"
+tag = "2.5.0"
 modules = ["dist/majra.cyr"]
 
 # sigil crypto — pinned explicitly to the self-contained single-file
@@ -176,5 +185,5 @@ modules = ["dist/majra.cyr"]
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil"
 path = "../sigil"
-tag = "3.7.14"
+tag = "3.9.8"
 modules = ["dist/sigil.cyr"]
