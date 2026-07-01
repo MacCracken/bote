@@ -18,6 +18,21 @@ have per release.
 
 _(empty)_
 
+## [2.7.8] — 2026-07-01 — AF_UNIX transport fail-closes on agnos
+
+AGNOS cross-build readiness. bote-core was already `--agnos`-clean; this
+closes the full-server transport surface so the `bote` binary itself
+compiles under `cyrius build --agnos`.
+
+### Fixed
+
+- **`--agnos` build**: `transport_unix_run` (`src/transport_unix.cyr`) is
+  guarded with `#ifdef CYRIUS_TARGET_AGNOS` and fail-closes on agnos, which
+  has no AF_UNIX domain sockets. Guarding the entry drops the whole AF_UNIX
+  subtree (`SYS_SOCKET` / `BIND` / `CHMOD` / `LISTEN` / `ACCEPT` — unrelated
+  syscall numbers on agnos) off the agnos target; bote's TCP / streamable / ws
+  transports carry traffic there. Mirrors majra's ipc AF_UNIX guard.
+
 ## [2.7.7] — 2026-06-30 — cyrius 6.3.15 base-stack migration + 6.3.x stdlib rename reconciliation
 
 Tier-3 step of the coordinated base-security-stack migration to cyrius
