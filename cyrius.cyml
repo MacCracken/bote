@@ -156,7 +156,7 @@ stdlib = [
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
 path = "../libro"
-tag = "2.7.9"
+tag = "2.7.10"
 modules = ["dist/libro.cyr"]
 
 # majra pub/sub — same single-file dist bundle pattern. The default

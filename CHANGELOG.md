@@ -18,6 +18,37 @@ have per release.
 
 _(empty)_
 
+## [2.7.9] — 2026-07-02 — filesystem tools on the `bote` binary
+
+The `bote` binary now serves three filesystem tools alongside the `bote_echo`
+demo tool and the five `libro_*` audit tools, so an MCP client (e.g. thoth,
+via daimon) can create a small file-based project end to end. Additive and
+binary-only: the tools are registered in `src/main.cyr` after
+`bote_dispatcher_with_echo()`; the protocol core (`dist/bote-core.cyr`) is
+unchanged, and no existing tool or ABI moved.
+
+### Added
+
+- **`fs_write` / `fs_read` / `fs_mkdir`** (`src/fs_tools.cyr`) — MCP tools
+  for writing, reading, and creating directories. `fs_write` creates missing
+  parent directories and returns the bytes written; all three return proper
+  MCP content blocks (`{"content":[{"type":"text",…}],"isError":…}`) so a
+  client renders the result directly. `fs_write` JSON-unescapes its `content`
+  argument (`\n`/`\t`/`\"`/`\\`/`\uXXXX`→UTF-8) so multi-line source files
+  land byte-correct on disk.
+- **`tests/bote_fs_tools.tcyr`** — 26 assertions covering the path-safety
+  guard, the JSON unescaper (incl. `\u` → UTF-8), tool registration, and the
+  handler's refusal path.
+
+### Security
+
+- Filesystem access is **confined to a root** (`BOTE_FS_ROOT`, default `.`):
+  an argument path that is absolute or contains a `..` segment is **refused**
+  (`isError:true`, no I/O) — defense-in-depth beneath t-ron's per-tool
+  authorization. This is a demo capability; the root confinement is a floor,
+  not a full sandbox, and the tools are only registered on the standalone
+  `bote` binary, never in the embeddable core bundle.
+
 ## [2.7.8] — 2026-07-01 — AF_UNIX transport fail-closes on agnos
 
 AGNOS cross-build readiness. bote-core was already `--agnos`-clean; this

@@ -70,6 +70,7 @@ include "src/bridge.cyr"
 include "src/content.cyr"
 include "src/host.cyr"
 include "src/libro_tools.cyr"
+include "src/fs_tools.cyr"
 include "src/main_common.cyr"
 
 fn main() {
@@ -86,6 +87,10 @@ fn main() {
     var libro_chain = chain_new();
     libro_tools_init(libro_chain);
     libro_tools_register(dispatcher);
+
+    # Filesystem tools (fs_write / fs_read / fs_mkdir), confined to
+    # BOTE_FS_ROOT (default "."). Additive; see src/fs_tools.cyr.
+    fs_tools_register(dispatcher);
 
     # Bearer-token auth wiring (opt-in via env var).
     # Set BOTE_BEARER_TOKENS=tok-a,tok-b,tok-c to require any of those
