@@ -27,7 +27,7 @@ output = "build/bote"
 # the default binary. It is NOT in dist/bote-core.cyr: like
 # audit_libro, it depends on a live libro chain, which the
 # transport-free core profile deliberately excludes.
-#   cyrius distlib       → dist/bote.cyr      (default [lib], full bundle — 24 modules)
+#   cyrius distlib       → dist/bote.cyr      (default [lib], full bundle — 25 modules)
 #   cyrius distlib core  → dist/bote-core.cyr ([lib.core], 9 transport-free modules)
 [lib]
 modules = [
@@ -55,6 +55,7 @@ modules = [
     "src/content.cyr",
     "src/host.cyr",
     "src/libro_tools.cyr",
+    "src/fs_tools.cyr",
 ]
 
 # Core-only opt-in bundle (2.7.2). Nine transport-free modules for

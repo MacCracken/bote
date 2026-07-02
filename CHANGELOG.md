@@ -18,14 +18,15 @@ have per release.
 
 _(empty)_
 
-## [2.7.9] — 2026-07-02 — filesystem tools on the `bote` binary
+## [2.8.0] — 2026-07-02 — filesystem tools (`fs_write` / `fs_read` / `fs_mkdir`)
 
-The `bote` binary now serves three filesystem tools alongside the `bote_echo`
-demo tool and the five `libro_*` audit tools, so an MCP client (e.g. thoth,
-via daimon) can create a small file-based project end to end. Additive and
-binary-only: the tools are registered in `src/main.cyr` after
-`bote_dispatcher_with_echo()`; the protocol core (`dist/bote-core.cyr`) is
-unchanged, and no existing tool or ABI moved.
+A new `src/fs_tools.cyr` module adds three filesystem tools so an MCP client
+(e.g. thoth, via daimon) can create a small file-based project end to end.
+Registered on the `bote` binary alongside `bote_echo` and the five `libro_*`
+audit tools and — like `libro_tools` — folded into the full `dist/bote.cyr`
+bundle (`[lib] modules`), so downstream consumers can opt in by calling
+`fs_tools_register()`. NOT in the transport-free `dist/bote-core.cyr`, and no
+existing tool or ABI moved (minor: additive surface only).
 
 ### Added
 
@@ -36,6 +37,8 @@ unchanged, and no existing tool or ABI moved.
   client renders the result directly. `fs_write` JSON-unescapes its `content`
   argument (`\n`/`\t`/`\"`/`\\`/`\uXXXX`→UTF-8) so multi-line source files
   land byte-correct on disk.
+- **`src/fs_tools.cyr` added to `[lib] modules`** — the tool module ships in
+  the full `dist/bote.cyr` bundle (25 modules), mirroring `libro_tools`.
 - **`tests/bote_fs_tools.tcyr`** — 26 assertions covering the path-safety
   guard, the JSON unescaper (incl. `\u` → UTF-8), tool registration, and the
   handler's refusal path.
@@ -45,9 +48,9 @@ unchanged, and no existing tool or ABI moved.
 - Filesystem access is **confined to a root** (`BOTE_FS_ROOT`, default `.`):
   an argument path that is absolute or contains a `..` segment is **refused**
   (`isError:true`, no I/O) — defense-in-depth beneath t-ron's per-tool
-  authorization. This is a demo capability; the root confinement is a floor,
-  not a full sandbox, and the tools are only registered on the standalone
-  `bote` binary, never in the embeddable core bundle.
+  authorization. The root confinement is a floor, not a full sandbox;
+  registration is **opt-in** (`fs_tools_register`), so embedding the bundle
+  does not expose filesystem writes until a consumer wires the tools in.
 
 ## [2.7.8] — 2026-07-01 — AF_UNIX transport fail-closes on agnos
 
