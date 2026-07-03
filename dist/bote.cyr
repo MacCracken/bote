@@ -2963,18 +2963,28 @@ fn _gen_session_id() {
 }
 
 # ================================================================
-# McpSession (32 bytes):
+# McpSession (40 bytes):
 #   +0  session_id        cstr
 #   +8  protocol_version  cstr
 #   +16 created_at_ns     i64 (monotonic)
 #   +24 last_active_ns    i64
+#   +32 outbound          OPAQUE ptr or 0 — a per-session server→client
+#                         notification bundle. session.cyr treats it as an
+#                         opaque i64 and never dereferences or frees it: the
+#                         buffer types (ResumptionBuffer / EventIdGenerator)
+#                         live in transport_streamable.cyr, which is only in
+#                         the bote-streamable binary — session.cyr is in all
+#                         three, so it must stay type-agnostic. The streamable
+#                         transport lazily allocs the bundle (see
+#                         _strm_session_outbound); it drops with the session.
 # ================================================================
 fn mcp_session_new(sid, protocol_version, now_ns) {
-    var s = alloc(32);
+    var s = alloc(40);
     store64(s, sid);
     store64(s + 8, protocol_version);
     store64(s + 16, now_ns);
     store64(s + 24, now_ns);
+    store64(s + 32, 0);
     return s;
 }
 
@@ -2983,6 +2993,8 @@ fn mcp_session_protocol_version(s) { return load64(s + 8); }
 fn mcp_session_created_at(s) { return load64(s + 16); }
 fn mcp_session_last_active(s) { return load64(s + 24); }
 fn mcp_session_touch(s, now_ns) { store64(s + 24, now_ns); return 0; }
+fn mcp_session_outbound(s) { return load64(s + 32); }
+fn mcp_session_set_outbound(s, ptr) { store64(s + 32, ptr); return 0; }
 
 # ================================================================
 # SessionStore (24 bytes):
@@ -4231,6 +4243,41 @@ fn resumption_buffer_events_after(rb, last_event_id) {
         j = j + 1;
     }
     return out;
+}
+
+# ================================================================
+# SessionOutbound (16 bytes) — per-session server→client push state:
+#   +0  buffer  ResumptionBuffer ptr (this session's pending notifications)
+#   +8  id_gen  EventIdGenerator ptr — PER SESSION on purpose. IDs must never
+#               straddle another session's: resumption_buffer_events_after
+#               matches an EXACT id and returns empty on a miss, so a shared
+#               global generator would let one session's Last-Event-ID land in
+#               a gap (an id consumed by a different session) and silently
+#               resume nothing. A per-session counter keeps each buffer's ids
+#               dense and self-contained.
+# ================================================================
+
+fn session_outbound_new() {
+    var so = alloc(16);
+    store64(so, resumption_buffer_default());
+    store64(so + 8, event_id_gen_new());
+    return so;
+}
+
+fn session_outbound_buffer(so) { return load64(so); }
+fn session_outbound_id_gen(so) { return load64(so + 8); }
+
+# Lazily get (or create) the SessionOutbound bundle for an McpSession,
+# stashing it in the session's opaque outbound slot (session.cyr keeps that
+# slot type-agnostic). Returns the bundle. Wired into the GET drain (a later
+# bite); ships unused so the buffer sits empty until a producer feeds it.
+fn _strm_session_outbound(session) {
+    var so = mcp_session_outbound(session);
+    if (so == 0) {
+        so = session_outbound_new();
+        mcp_session_set_outbound(session, so);
+    }
+    return so;
 }
 
 # ================================================================

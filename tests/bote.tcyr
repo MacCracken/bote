@@ -1013,6 +1013,17 @@ fn main() {
     assert_eq(session_store_remove(store, sid_b), 1, "remove last");
     assert_eq(session_store_active_count(store), 0, "store empty");
 
+    # ---------------- session: opaque outbound slot ----------------
+    # McpSession carries a type-agnostic +32 slot for a per-session push
+    # bundle; session.cyr never dereferences it. Defaults to 0; round-trips.
+    var sess_ob = mcp_session_new("sid0", "2025-11-25", 1000);
+    assert_eq(mcp_session_outbound(sess_ob), 0, "outbound defaults to 0");
+    mcp_session_set_outbound(sess_ob, 4242);
+    assert_eq(mcp_session_outbound(sess_ob), 4242, "outbound set/get round-trips");
+    # Other fields unshifted by the widen.
+    assert(streq(mcp_session_id(sess_ob), "sid0") == 1, "id intact after widen");
+    assert_eq(mcp_session_created_at(sess_ob), 1000, "created_at intact after widen");
+
     # ---------------- session: prune_expired ----------------
     var short_store = session_store_new(1);
     session_store_create(short_store, "2025-11-25");

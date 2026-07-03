@@ -17,6 +17,24 @@ have per release.
 ## [Unreleased]
 
 ### Added
+- **Per-session outbound notification buffer** — bite 2 of the server→client
+  push path. `McpSession` gains an **opaque** `+32 outbound` slot (32 → 40
+  bytes; `mcp_session_outbound` / `mcp_session_set_outbound`) that `session.cyr`
+  never dereferences — the buffer types live in `transport_streamable.cyr`
+  (streamable binary only) while `session.cyr` is in all three binaries, so the
+  slot stays type-agnostic. The streamable transport adds a `SessionOutbound`
+  bundle (a `ResumptionBuffer` + its **own** `EventIdGenerator`) and a lazy
+  `_strm_session_outbound(session)` accessor that stashes it in the slot. The
+  per-session id generator is the fix for a real resumption bug: event IDs must
+  not straddle sessions, since `resumption_buffer_events_after` matches an exact
+  id and returns empty on a miss — a shared global counter would let one
+  session's `Last-Event-ID` land in another's gap and silently resume nothing.
+  No free path needed (`session.cyr` never frees `McpSession`; the bundle drops
+  with the session). Ships unused — the buffer stays empty until the producer
+  bite. Full-bundle-only (neither module is in `[lib.core]`), so
+  `dist/bote-core.cyr` is unchanged. +4 assertions in `tests/bote.tcyr`
+  (410 → 414), +11 in `tests/bote_streamable.tcyr` (25 → 36) covering per-session
+  independence + id continuity.
 - **Notification wire builders** (`src/stream.cyr`) — the first bite of the
   server→client push path. A generic `notification_wire(method, params)` emits
   the JSON-RPC notification envelope `{"jsonrpc":"2.0","method":…,"params":…}`

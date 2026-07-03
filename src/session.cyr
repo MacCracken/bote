@@ -101,18 +101,28 @@ fn _gen_session_id() {
 }
 
 # ================================================================
-# McpSession (32 bytes):
+# McpSession (40 bytes):
 #   +0  session_id        cstr
 #   +8  protocol_version  cstr
 #   +16 created_at_ns     i64 (monotonic)
 #   +24 last_active_ns    i64
+#   +32 outbound          OPAQUE ptr or 0 — a per-session server→client
+#                         notification bundle. session.cyr treats it as an
+#                         opaque i64 and never dereferences or frees it: the
+#                         buffer types (ResumptionBuffer / EventIdGenerator)
+#                         live in transport_streamable.cyr, which is only in
+#                         the bote-streamable binary — session.cyr is in all
+#                         three, so it must stay type-agnostic. The streamable
+#                         transport lazily allocs the bundle (see
+#                         _strm_session_outbound); it drops with the session.
 # ================================================================
 fn mcp_session_new(sid, protocol_version, now_ns) {
-    var s = alloc(32);
+    var s = alloc(40);
     store64(s, sid);
     store64(s + 8, protocol_version);
     store64(s + 16, now_ns);
     store64(s + 24, now_ns);
+    store64(s + 32, 0);
     return s;
 }
 
@@ -121,6 +131,8 @@ fn mcp_session_protocol_version(s) { return load64(s + 8); }
 fn mcp_session_created_at(s) { return load64(s + 16); }
 fn mcp_session_last_active(s) { return load64(s + 24); }
 fn mcp_session_touch(s, now_ns) { store64(s + 24, now_ns); return 0; }
+fn mcp_session_outbound(s) { return load64(s + 32); }
+fn mcp_session_set_outbound(s, ptr) { store64(s + 32, ptr); return 0; }
 
 # ================================================================
 # SessionStore (24 bytes):

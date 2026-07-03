@@ -105,6 +105,34 @@ fn main() {
     assert_eq(vec_len(resumption_buffer_events_after(rb, 0)), 0, "null id → empty (no segfault)");
     assert_eq(vec_len(resumption_buffer_events_after(rb, "")), 0, "empty id → empty");
 
+    # ---------------- SessionOutbound: per-session buffer + id gen ----------------
+    var so1 = session_outbound_new();
+    assert(session_outbound_buffer(so1) != 0, "outbound has a buffer");
+    assert(session_outbound_id_gen(so1) != 0, "outbound has an id gen");
+    assert(streq(event_id_gen_next(session_outbound_id_gen(so1)), "evt-0") == 1,
+    "per-session id gen starts at evt-0");
+
+    # _strm_session_outbound lazily allocs into the McpSession slot, idempotent.
+    var so_sess = mcp_session_new("s1", "2025-11-25", 1000);
+    assert_eq(mcp_session_outbound(so_sess), 0, "session outbound starts empty");
+    var got1 = _strm_session_outbound(so_sess);
+    assert(got1 != 0, "lazy-alloc returns a bundle");
+    assert(mcp_session_outbound(so_sess) == got1, "bundle stashed in session slot");
+    assert(_strm_session_outbound(so_sess) == got1, "second call returns the same bundle");
+
+    # Two sessions → independent, non-cross-talking buffers + id spaces.
+    var sess_a = mcp_session_new("a", "2025-11-25", 1000);
+    var sess_b = mcp_session_new("b", "2025-11-25", 1000);
+    var oa = _strm_session_outbound(sess_a);
+    var ob = _strm_session_outbound(sess_b);
+    assert(oa != ob, "distinct sessions → distinct bundles");
+    resumption_buffer_push(session_outbound_buffer(oa),
+    stream_event_new(event_id_gen_next(session_outbound_id_gen(oa)), "dA"));
+    assert_eq(resumption_buffer_len(session_outbound_buffer(oa)), 1, "A has 1 event");
+    assert_eq(resumption_buffer_len(session_outbound_buffer(ob)), 0, "B empty (no cross-talk)");
+    assert(streq(event_id_gen_next(session_outbound_id_gen(ob)), "evt-0") == 1,
+    "B id gen independent — also starts evt-0, no straddle");
+
     # ---------------- StreamableConfig ----------------
     var scfg = streamable_config_new("/mcp", 0x0100007F, 8392);
     assert(streq(streamable_config_path(scfg), "/mcp") == 1, "scfg path");
