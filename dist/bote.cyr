@@ -4470,6 +4470,19 @@ fn _strm_send_retry(cfd, retry_ms) {
     return 0;
 }
 
+# Select the events to drain for a GET: strictly after a non-empty
+# Last-Event-ID cursor, else everything currently buffered (the "deliver on
+# next GET" model). Pure — returns a vec of StreamEvent ptrs; the handler
+# renders + sends them. Split out so the drain is unit-testable without a
+# live socket. An empty Last-Event-ID is treated as absent (drain-all) rather
+# than passed to events_after, which would return empty on the empty string.
+fn _strm_drain_events(rbuf, last_id) {
+    if (last_id != 0 && load8(last_id) != 0) {
+        return resumption_buffer_events_after(rbuf, last_id);
+    }
+    return resumption_buffer_events(rbuf);
+}
+
 fn _strm_handle_get(cfd, buf, n, config) {
     if (_strm_check_origin(cfd, buf, n, config) != 0) { return 0; }
     if (sandhi_server_find_header(buf, n, "Transfer-Encoding") != 0) {
@@ -4482,32 +4495,47 @@ fn _strm_handle_get(cfd, buf, n, config) {
     if (_strm_check_protocol(cfd, buf, n) != 0) { return 0; }
     if (_strm_check_session(cfd, buf, n, config, "") != 0) { return 0; }
 
-    # Open the SSE stream
-    sandhi_server_send_chunked_start(cfd, HTTP_OK, "text/event-stream", 0);
-
-    # Priming event — confirms the stream is up, gives client an event ID
-    # baseline for reconnection.
-    var primer = stream_event_primer(event_id_gen_next(_strm_event_ids));
-    var primer_wire = stream_event_to_wire(primer);
-    sandhi_server_send_chunk(cfd, primer_wire, strlen(primer_wire));
-
-    # Replay buffered events past Last-Event-ID, if provided.
-    var last_id = sandhi_server_find_header(buf, n, "Last-Event-ID");
-    if (last_id != 0) {
-        var replay = resumption_buffer_events_after(_strm_resumption, last_id);
-        var ri = 0;
-        var rn = vec_len(replay);
-        while (ri < rn) {
-            var ev = vec_get(replay, ri);
-            var wire = stream_event_to_wire(ev);
-            sandhi_server_send_chunk(cfd, wire, strlen(wire));
-            ri = ri + 1;
+    # Resolve the drain source: the per-session outbound buffer when a
+    # session store is configured and the client presented a valid
+    # MCP-Session-Id, else the process-global buffer (back-compat for
+    # storeless deployments — that buffer simply stays empty).
+    var rbuf = _strm_resumption;
+    var st = streamable_config_session_store(config);
+    if (st != 0) {
+        var sid = sandhi_server_find_header(buf, n, "MCP-Session-Id");
+        if (sid != 0) {
+            var session = session_store_validate(st, sid);
+            if (session != 0) {
+                rbuf = session_outbound_buffer(_strm_session_outbound(session));
+            }
         }
     }
 
-    # Send retry hint and close. Server-initiated event push waits on
-    # streaming dispatch (v1.5+); for now the GET stream is open just long
-    # enough to deliver the primer + any buffered replay.
+    # Open the SSE stream.
+    sandhi_server_send_chunked_start(cfd, HTTP_OK, "text/event-stream", 0);
+
+    # Primer — an SSE COMMENT (leading ':'), NOT an event. It confirms the
+    # stream is up + flushes headers without carrying an `id:`, so per the SSE
+    # spec it never becomes the client's Last-Event-ID. A synthetic primer id
+    # would be fatal to resumption: it is in no buffer, so the client's next
+    # events_after would miss and silently resume nothing.
+    var primer = ": bote stream open\n\n";
+    sandhi_server_send_chunk(cfd, primer, strlen(primer));
+
+    # Drain buffered notifications (unconditional when there is no cursor).
+    var last_id = sandhi_server_find_header(buf, n, "Last-Event-ID");
+    var drain = _strm_drain_events(rbuf, last_id);
+    var di = 0;
+    var dn = vec_len(drain);
+    while (di < dn) {
+        var ev = vec_get(drain, di);
+        var wire = stream_event_to_wire(ev);
+        sandhi_server_send_chunk(cfd, wire, strlen(wire));
+        di = di + 1;
+    }
+
+    # Retry hint + close. Real-time held-open push is a later (threaded)
+    # phase; today the stream delivers the buffered drain and closes.
     _strm_send_retry(cfd, streamable_config_retry_ms(config));
     sandhi_server_send_chunked_end(cfd);
     return 0;

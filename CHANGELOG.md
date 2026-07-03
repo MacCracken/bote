@@ -17,6 +17,22 @@ have per release.
 ## [Unreleased]
 
 ### Added
+- **Unconditional GET drain** — bite 3 of the server→client push path.
+  `_strm_handle_get` now resolves the client's per-session `SessionOutbound`
+  buffer (from a valid `MCP-Session-Id` when a session store is configured; else
+  the process-global buffer for back-compat) and drains it over the SSE stream:
+  strictly after a non-empty `Last-Event-ID` cursor, else **everything currently
+  buffered** — the "deliver on the client's next GET" model. The drain selection
+  is a pure `_strm_drain_events(rbuf, last_id)` (unit-testable without a socket;
+  empty cursor treated as absent → drain-all, not `events_after("")`). **The
+  primer is now an SSE comment** (`: bote stream open`) instead of an
+  id-carrying event: a synthetic primer id is in no buffer, so a client that
+  adopted it as its `Last-Event-ID` would `events_after`-miss and silently resume
+  nothing — the comment carries no `id:`, so per the SSE spec it never becomes
+  the client's cursor. Ships inert in the shipped `bote-streamable` (no session
+  store configured yet ⇒ storeless fallback, empty drain) and until a producer
+  feeds a buffer. Verified on the wire (GET emits the comment primer + retry, no
+  crash). +5 assertions in `tests/bote_streamable.tcyr` (36 → 41).
 - **Per-session outbound notification buffer** — bite 2 of the server→client
   push path. `McpSession` gains an **opaque** `+32 outbound` slot (32 → 40
   bytes; `mcp_session_outbound` / `mcp_session_set_outbound`) that `session.cyr`

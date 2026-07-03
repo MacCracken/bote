@@ -133,6 +133,22 @@ fn main() {
     assert(streq(event_id_gen_next(session_outbound_id_gen(ob)), "evt-0") == 1,
     "B id gen independent — also starts evt-0, no straddle");
 
+    # ---------------- _strm_drain_events: cursor vs unconditional drain ----------------
+    var dbuf = resumption_buffer_default();
+    resumption_buffer_push(dbuf, stream_event_new("evt-a", "1"));
+    resumption_buffer_push(dbuf, stream_event_new("evt-b", "2"));
+    resumption_buffer_push(dbuf, stream_event_new("evt-c", "3"));
+    # No cursor → drain everything currently buffered.
+    assert_eq(vec_len(_strm_drain_events(dbuf, 0)), 3, "no cursor drains all");
+    # Empty cursor → treated as absent → drain all (not events_after "").
+    assert_eq(vec_len(_strm_drain_events(dbuf, "")), 3, "empty cursor drains all");
+    # Cursor present → strictly after it.
+    var after_b = _strm_drain_events(dbuf, "evt-b");
+    assert_eq(vec_len(after_b), 1, "cursor evt-b → 1 event after");
+    assert(streq(stream_event_id(vec_get(after_b, 0)), "evt-c") == 1, "after evt-b is evt-c");
+    # Unknown cursor → empty (client missed too much).
+    assert_eq(vec_len(_strm_drain_events(dbuf, "evt-zzz")), 0, "unknown cursor → empty");
+
     # ---------------- StreamableConfig ----------------
     var scfg = streamable_config_new("/mcp", 0x0100007F, 8392);
     assert(streq(streamable_config_path(scfg), "/mcp") == 1, "scfg path");
