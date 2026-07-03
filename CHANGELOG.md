@@ -44,6 +44,22 @@ The `[lib.core]` bundle grew 9 → 11 modules (`prompts.cyr`, `resources.cyr`).
   Consumers embedding the transport *library* are unaffected — the session store
   stays opt-in via `streamable_config_with_session_store`.
 
+### Changed
+- **Toolchain pin `6.3.38` → `6.3.42`** (`cyrius.cyml`; `cyrius lib sync --full`
+  re-vendored the gitignored `lib/` and `cyrius deps` re-locked — only 3 stdlib
+  hashes moved: `sigil` / `protobuf` / `sankoch`, the rest byte-identical). Full
+  suite (733) green, all 13 benchmarks run clean (dispatch ~3–7 µs, jsonx
+  sub-µs — no regression), and the SIGILL-sensitive crypto path (jwt/pkce/auth +
+  the startup `chain_new` → sha256) was re-verified on the new toolchain via a
+  runtime binary smoke.
+
+### Fixed
+- **`tests/bote.bcyr` compile** — the benchmark unit was missing the
+  `prompts.cyr` / `resources.cyr` includes ever since those modules landed (it
+  compiles `dispatch.cyr`, which now references them, so it failed with 13
+  undefined functions). Surfaced by running the benchmark suite for the 3.0.0
+  release; fixed by adding the includes in dependency order.
+
 ### Added
 - **POST-piggyback SSE** — bite 6 (optional) of the server→client push path. When
   a `POST` response is built and the requesting session has pending notifications

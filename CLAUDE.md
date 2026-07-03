@@ -6,7 +6,7 @@
 
 - **Language**: Cyrius (ported from Rust at v1.0.1; Rust archive preserved at tag `0.92.0`)
 - **License**: GPL-3.0-only
-- **Cyrius pin**: 6.3.38 (see `cyrius.cyml`; onto the 6.3.x line at 2.9.0; first 6.2.x at 2.7.6; major jump from 5.10.x at 2.7.3)
+- **Cyrius pin**: 6.3.42 (see `cyrius.cyml`; `6.3.38 → 6.3.42` at 3.0.0; onto the 6.3.x line at 2.9.0; first 6.2.x at 2.7.6; major jump from 5.10.x at 2.7.3)
 - **Version**: SemVer; 2.0 handler ABI (`fn h(args, claims) → result`) stable across the 2.x→3.x line; 3.0.0 current (full MCP capability suite — prompts / resources / completion + polled list_changed push; see CHANGELOG)
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
