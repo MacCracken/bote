@@ -183,6 +183,21 @@ fn main() {
     assert_eq(resumption_buffer_len(session_outbound_buffer(nso)), nbefore + 1,
     "dispatcher_register_tool → list_changed reaches the session buffer");
 
+    # Prompt-set changes produce notifications/prompts/list_changed.
+    var pbefore = resumption_buffer_len(session_outbound_buffer(nso));
+    event_sink_publish(nsink, TOPIC_PROMPT_REGISTERED(), "{\"prompt_name\":\"p_q\"}");
+    assert_eq(resumption_buffer_len(session_outbound_buffer(nso)), pbefore + 1,
+    "prompt_registered → notification");
+    var pev = vec_get(resumption_buffer_events(session_outbound_buffer(nso)), pbefore);
+    assert(streq(stream_event_data(pev),
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/prompts/list_changed\",\"params\":{}}") == 1,
+    "buffered event is prompts/list_changed");
+    # Full path: dispatcher_register_prompt fires the prompt event through the sink.
+    var pbefore2 = resumption_buffer_len(session_outbound_buffer(nso));
+    dispatcher_register_prompt(ndisp, prompt_def_new("greet2", "g", 0), &_n_handler);
+    assert_eq(resumption_buffer_len(session_outbound_buffer(nso)), pbefore2 + 1,
+    "dispatcher_register_prompt → prompts/list_changed reaches the buffer");
+
     # ---------------- StreamableConfig ----------------
     var scfg = streamable_config_new("/mcp", 0x0100007F, 8392);
     assert(streq(streamable_config_path(scfg), "/mcp") == 1, "scfg path");

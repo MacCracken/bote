@@ -45,6 +45,9 @@ fn main() {
     # and subsequent requests (incl. the GET stream) must present it.
     var session_store = session_store_default();
     dispatcher_set_events(dispatcher, strm_notify_sink(session_store));
+    # This transport has a drain path, so it may honestly advertise
+    # tools/prompts listChanged (stdio/http/ws binaries do not set this).
+    dispatcher_set_notifications(dispatcher, 1);
 
     var auth_fp_slot[8]; var auth_ctx_slot[8];
     store64(&auth_fp_slot, 0); store64(&auth_ctx_slot, 0);

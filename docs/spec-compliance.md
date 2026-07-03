@@ -33,7 +33,8 @@ supported version.
 | `prompts/list` + `prompts/get` (capability advertised iff a `PromptRegistry` is present) | `dispatch` + `prompts` | ✅ |
 | `resources/list` + `resources/read` (capability advertised iff a `ResourceRegistry` is present; `subscribe`/`listChanged` deferred with the push path) | `dispatch` + `resources` | ✅ |
 | `completion/complete` (capability advertised iff a completion handler is set) | `dispatch` (`dispatcher_set_completion`) | ✅ |
-| `logging/setLevel` + `notifications/message` | — | ⏳ deferred with the server→client push path |
+| `notifications/tools/list_changed` + `notifications/prompts/list_changed` (buffered per session, drained on the client's next streamable `GET`; `listChanged` advertised only by a transport with a drain path) | `dispatch` (`dispatcher_set_notifications`) + `transport_streamable` (`strm_notify_sink`) | ✅ streamable (polled) |
+| `logging/setLevel` + `notifications/message` | — | ⏳ deferred with real-time (held-open) push |
 | Notifications produce no response | `dispatch` + `codec` | ✅ |
 | Batch arrays — mixed req + notif return only req responses | `codec` | ✅ |
 

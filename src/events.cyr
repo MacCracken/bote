@@ -17,6 +17,7 @@ fn TOPIC_TOOL_ANNOUNCE()     { return "bote/tool/announce"; }
 fn TOPIC_TOOL_DISCOVERED()   { return "bote/tool/discovered"; }
 fn TOPIC_TOOL_DEPRECATED()   { return "bote/tool/deprecated"; }
 fn TOPIC_TOOL_DEREGISTERED() { return "bote/tool/deregistered"; }
+fn TOPIC_PROMPT_REGISTERED()  { return "bote/prompt/registered"; }
 fn TOPIC_SANDBOX_CREATED()   { return "bote/sandbox/created"; }
 fn TOPIC_SANDBOX_DESTROYED() { return "bote/sandbox/destroyed"; }
 fn TOPIC_SANDBOX_ERROR()     { return "bote/sandbox/error"; }

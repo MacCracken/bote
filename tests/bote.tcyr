@@ -642,6 +642,16 @@ fn main() {
     "{\"tools\":{},\"prompts\":{},\"resources\":{},\"completions\":{}}") == 1,
     "all four capabilities advertised in canonical order");
 
+    # listChanged is gated on the notifications flag (set only by a transport
+    # with a server→client drain path). Flipping it advertises tools + prompts
+    # listChanged; resources stays bare (no resource-mutation producer).
+    dispatcher_set_notifications(pr_d, 1);
+    var cap_lc = resp_result(dispatcher_dispatch(pr_d,
+    req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}"), 0));
+    assert(streq(jsonx_get_raw(cap_lc, "capabilities"),
+    "{\"tools\":{\"listChanged\":true},\"prompts\":{\"listChanged\":true},\"resources\":{},\"completions\":{}}") == 1,
+    "notifications flag → tools + prompts listChanged advertised");
+
     # ---------------- dispatch: tools/call success ----------------
     dispatcher_handle(d, "svc_echo", &h_echo);
     var call_req = req_with_params(req_new("3", "tools/call"),

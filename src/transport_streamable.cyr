@@ -185,12 +185,16 @@ fn _strm_session_outbound(session) {
 # notifications, and are ignored here.
 
 fn _strm_notify_publish(ctx, topic, payload) {
-    if (streq(topic, TOPIC_TOOL_REGISTERED()) == 0
-    && streq(topic, TOPIC_TOOL_DEREGISTERED()) == 0) {
+    var wire = 0;
+    if (streq(topic, TOPIC_TOOL_REGISTERED()) == 1
+    || streq(topic, TOPIC_TOOL_DEREGISTERED()) == 1) {
+        wire = tools_list_changed_notification();
+    } elif (streq(topic, TOPIC_PROMPT_REGISTERED()) == 1) {
+        wire = prompts_list_changed_notification();
+    } else {
         return 0;
     }
     if (ctx == 0) { return 0; }
-    var wire = tools_list_changed_notification();
     var ids = session_store_ids(ctx);
     var sessions = session_store_sessions(ctx);
     var n = vec_len(ids);

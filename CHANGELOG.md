@@ -17,6 +17,26 @@ have per release.
 ## [Unreleased]
 
 ### Added
+- **`tools`/`prompts` `listChanged` — advertised, honestly** (bite 5, the payoff
+  of the push path). `_build_capabilities` now emits `listChanged:true` on the
+  `tools` and `prompts` capabilities **only when `dispatcher_notifications(d)`
+  is set** — a new `+64` dispatcher flag (`dispatcher_set_notifications`) that a
+  transport turns on **only if it actually has a client-drain path**.
+  `main_streamable` sets it; `bote`/`bote-ws` do not. Result, verified on the
+  wire: `bote-streamable`'s `initialize` advertises
+  `{"tools":{"listChanged":true},"prompts":{"listChanged":true},…}` while the
+  default `bote` advertises `{"tools":{},"prompts":{},…}` — same core
+  `_build_capabilities`, different truth per binary, so no transport ever
+  promises notifications it can't deliver. Also wires the **prompts** producer:
+  a new `TOPIC_PROMPT_REGISTERED` event (`dispatcher_register_prompt` now emits
+  it; `strm_notify_sink` maps it to `notifications/prompts/list_changed`). The
+  stale `_server_emits_tool_list_changed` stub is gone, closing the
+  `dispatch.cyr` capability-honesty note for tools + prompts. `resources`
+  `listChanged`/`subscribe` and `logging` stay off (no producer). Dispatcher
+  grew one slot (64 → 72 bytes). +1 assertion in `tests/bote.tcyr` (414 → 415),
+  +3 in `tests/bote_streamable.tcyr` (46 → 49). **This completes the honest
+  polled-push MVP** (delivery on the client's next GET); real-time held-open
+  push remains the separate, threaded, phase-2 item.
 - **`tools/list_changed` producer** — bite 4 of the server→client push path (the
   producer that makes the notification actually flow). A client-notification
   `EventSink` (`strm_notify_sink(store)` in `src/transport_streamable.cyr`) wraps

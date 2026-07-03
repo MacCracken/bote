@@ -1026,6 +1026,7 @@ fn TOPIC_TOOL_ANNOUNCE()     { return "bote/tool/announce"; }
 fn TOPIC_TOOL_DISCOVERED()   { return "bote/tool/discovered"; }
 fn TOPIC_TOOL_DEPRECATED()   { return "bote/tool/deprecated"; }
 fn TOPIC_TOOL_DEREGISTERED() { return "bote/tool/deregistered"; }
+fn TOPIC_PROMPT_REGISTERED()  { return "bote/prompt/registered"; }
 fn TOPIC_SANDBOX_CREATED()   { return "bote/sandbox/created"; }
 fn TOPIC_SANDBOX_DESTROYED() { return "bote/sandbox/destroyed"; }
 fn TOPIC_SANDBOX_ERROR()     { return "bote/sandbox/error"; }
@@ -1229,10 +1230,17 @@ fn validate_tool_name(name) {
 #                           when 0; created lazily by dispatcher_register_resource)
 #   +56 completion_handler  fn ptr or 0 (completions capability off when 0;
 #                           set via dispatcher_set_completion)
+#   +64 notifications        0/1 — 1 when the server has a working server→client
+#                           notification path (a transport that drains
+#                           list_changed to clients). Gates the `listChanged`
+#                           sub-capabilities. Set by the transport wiring, NOT
+#                           in core: only a transport with a drain path
+#                           (streamable) may advertise listChanged; stdio/http/
+#                           ws must not promise notifications they can't deliver.
 # ================================================================
 
 fn dispatcher_new(reg) {
-    var d = alloc(64);
+    var d = alloc(72);
     store64(d, reg);
     store64(d + 8, map_new());
     store64(d + 16, map_new());
@@ -1241,6 +1249,7 @@ fn dispatcher_new(reg) {
     store64(d + 40, 0);
     store64(d + 48, 0);
     store64(d + 56, 0);
+    store64(d + 64, 0);
     return d;
 }
 
@@ -1252,6 +1261,7 @@ fn dispatcher_event_sink(d) { return load64(d + 32); }
 fn dispatcher_prompts(d)    { return load64(d + 40); }
 fn dispatcher_resources(d)  { return load64(d + 48); }
 fn dispatcher_completion(d) { return load64(d + 56); }
+fn dispatcher_notifications(d) { return load64(d + 64); }
 
 fn dispatcher_set_audit(d, sink) { store64(d + 24, sink); return d; }
 fn dispatcher_set_events(d, sink) { store64(d + 32, sink); return d; }
@@ -1263,6 +1273,11 @@ fn dispatcher_set_resources(d, rreg) { store64(d + 48, rreg); return d; }
 # the result is the full {"completion":{"values":[...]}} body. Setting it
 # flips the `completions` capability on at initialize.
 fn dispatcher_set_completion(d, handler_fp) { store64(d + 56, handler_fp); return d; }
+
+# Declare that this dispatcher's transport can deliver server→client
+# notifications (a list_changed drain path). Flips the `listChanged`
+# sub-capabilities on at initialize. Set by the transport wiring only.
+fn dispatcher_set_notifications(d, on) { store64(d + 64, on); return d; }
 
 # Register a sync tool handler. **2.0 ABI**: handler signature is
 #   fn h(args_cstr, claims) → result_cstr (claims always 0 today)
@@ -1329,6 +1344,15 @@ fn dispatcher_register_prompt(d, prompt_def, handler_fp) {
         dispatcher_set_prompts(d, preg);
     }
     prompt_registry_register(preg, prompt_def, handler_fp);
+    # Emit a prompt-set-changed event so a client-notification sink can push
+    # notifications/prompts/list_changed (no-op when no sink is wired, e.g.
+    # the startup registrations before the transport sets its sink).
+    var pb = str_builder_new();
+    str_builder_add_cstr(pb, "{\"prompt_name\":\"");
+    _json_emit_escaped(pb, prompt_def_name(prompt_def));
+    str_builder_add_cstr(pb, "\"}");
+    event_sink_publish(dispatcher_event_sink(d), TOPIC_PROMPT_REGISTERED(),
+    str_data(str_builder_build(pb)));
     return 0;
 }
 
@@ -1475,48 +1499,41 @@ fn _emit_annotations(sb, ann) {
 # Method handlers
 # ================================================================
 
-# Does bote emit `notifications/tools/list_changed` to the client?
-#
-# The registry emits internal EventSink topics (TOPIC_TOOL_REGISTERED /
-# _DEREGISTERED) on register/deregister, but those go to bote's OWN event
-# bus — they are NOT MCP client notifications. There is no server→client
-# push path yet (dispatch is strictly request→response; the streamable SSE
-# GET closes immediately), so we cannot deliver `notifications/tools/
-# list_changed`. Advertising `listChanged:true` would make the client wait
-# for notifications that never arrive, so we return 0 (⇒ omit the flag,
-# which defaults to false). Flip this to 1 AND wire the notification
-# together once a persistent push channel lands.
-fn _server_emits_tool_list_changed() { return 0; }
-
 # Append the MCP `capabilities` object advertised at initialize.
 #
 # Advertised keys are DERIVED from what bote actually implements, so we
 # never advertise a capability we can't honor:
 #   - `tools`: always — bote is a tool server (an empty registry is still
-#     tool-capable). `listChanged` gated on _server_emits_tool_list_changed.
+#     tool-capable).
 #   - `prompts`: advertised iff the dispatcher has a PromptRegistry (i.e. at
 #     least one prompt was registered — see dispatcher_register_prompt).
 #   - `resources`: advertised iff the dispatcher has a ResourceRegistry (see
 #     dispatcher_register_resource). `subscribe`/`listChanged` omitted — no
-#     server→client push path yet.
+#     resource-mutation producer feeds them yet.
 #   - `completions`: advertised iff a completion handler is set (see
 #     dispatcher_set_completion).
-#   - logging: NOT YET — it exists only to gate `notifications/message`
-#     (server→client push), which is not wired; advertising it would promise
-#     log messages that never arrive. Lands with the notification path.
+#   - `listChanged` (tools + prompts): advertised ONLY when
+#     dispatcher_notifications(d) == 1 — i.e. the transport wired a
+#     server→client drain path (streamable's per-session buffers). The
+#     register/dereg + prompt-register events already fire; the flag confirms
+#     they actually reach a client. Kept OUT of core so stdio/http/ws (no
+#     drain path) never promise notifications they can't deliver.
+#   - logging: NOT YET — it exists only to gate `notifications/message`;
+#     advertising it would promise log messages bote can't send.
 #
 # Version policy: every capability below exists across all supported
 # protocol versions (2024-11-05 … 2025-11-25), so none is gated on the
 # negotiated version. A version-exclusive capability would branch on the
 # negotiated version passed in here.
 fn _build_capabilities(sb, d) {
+    var lc = dispatcher_notifications(d);
     str_builder_add_cstr(sb, "{\"tools\":{");
-    if (_server_emits_tool_list_changed() == 1) {
-        str_builder_add_cstr(sb, "\"listChanged\":true");
-    }
+    if (lc == 1) { str_builder_add_cstr(sb, "\"listChanged\":true"); }
     str_builder_add_cstr(sb, "}");
     if (dispatcher_prompts(d) != 0) {
-        str_builder_add_cstr(sb, ",\"prompts\":{}");
+        str_builder_add_cstr(sb, ",\"prompts\":{");
+        if (lc == 1) { str_builder_add_cstr(sb, "\"listChanged\":true"); }
+        str_builder_add_cstr(sb, "}");
     }
     if (dispatcher_resources(d) != 0) {
         str_builder_add_cstr(sb, ",\"resources\":{}");
