@@ -1,0 +1,127 @@
+# bote::prompts — MCP prompts capability (prompts/list + prompts/get)
+#
+# Mirrors the tool registry (src/registry.cyr): a PromptRegistry holds
+# prompt metadata (for prompts/list) plus a name→handler map (for
+# prompts/get generation). The dispatcher owns an optional PromptRegistry;
+# the `prompts` capability is advertised at initialize iff one is present
+# (see src/dispatch.cyr _build_capabilities). JSON serialization lives in
+# dispatch.cyr alongside the other MCP method builders.
+#
+# Prompt handler ABI (mirrors the 2.0 tool ABI):
+#   fn h(arguments_cstr, claims) → result_cstr
+# where `arguments_cstr` is the prompts/get `arguments` object (JSON) and
+# the returned cstr is the full prompts/get result body, e.g.
+#   {"description":"...","messages":[{"role":"user","content":{...}}]}
+#
+# Requires (entry point includes, before this module): hashmap (pulled by
+# src/registry.cyr), vec, str, string. No local includes — matches dispatch.
+
+# ================================================================
+# PromptArgument — one declared argument (surfaced in prompts/list)
+# ================================================================
+#
+# Layout (24 bytes):
+#   +0  name        cstr
+#   +8  description cstr or 0
+#   +16 required    i64 (0 = optional, 1 = required)
+
+fn prompt_arg_new(name, description, required) {
+    var a = alloc(24);
+    store64(a, name);
+    store64(a + 8, description);
+    store64(a + 16, required);
+    return a;
+}
+
+fn prompt_arg_name(a) { return load64(a); }
+fn prompt_arg_description(a) { return load64(a + 8); }
+fn prompt_arg_required(a) { return load64(a + 16); }
+
+# ================================================================
+# PromptDef — prompt metadata
+# ================================================================
+#
+# Layout (24 bytes):
+#   +0  name        cstr
+#   +8  description cstr or 0
+#   +16 arguments   vec of PromptArgument ptrs or 0
+
+fn prompt_def_new(name, description, arguments) {
+    var p = alloc(24);
+    store64(p, name);
+    store64(p + 8, description);
+    store64(p + 16, arguments);
+    return p;
+}
+
+fn prompt_def_name(p) { return load64(p); }
+fn prompt_def_description(p) { return load64(p + 8); }
+fn prompt_def_arguments(p) { return load64(p + 16); }
+
+# ================================================================
+# PromptRegistry
+# ================================================================
+#
+# Layout (24 bytes):
+#   +0  entries  hashmap: name_cstr -> PromptDef ptr
+#   +8  names    vec of name_cstr (insertion order, for list())
+#   +16 handlers hashmap: name_cstr -> handler fn ptr
+
+fn prompt_registry_new() {
+    var r = alloc(24);
+    store64(r, map_new());
+    store64(r + 8, vec_new());
+    store64(r + 16, map_new());
+    return r;
+}
+
+fn prompt_registry_entries(r) { return load64(r); }
+fn prompt_registry_names(r) { return load64(r + 8); }
+fn prompt_registry_handlers(r) { return load64(r + 16); }
+
+# Register (or replace) a prompt + its generator handler. Returns 0.
+fn prompt_registry_register(r, prompt_def, handler_fp) {
+    var name = prompt_def_name(prompt_def);
+    var entries = prompt_registry_entries(r);
+    if (map_has(entries, name) == 0) {
+        vec_push(prompt_registry_names(r), name);
+    }
+    map_set(entries, name, prompt_def);
+    map_set(prompt_registry_handlers(r), name, handler_fp);
+    return 0;
+}
+
+fn prompt_registry_get(r, name) {
+    return map_get(prompt_registry_entries(r), name);
+}
+
+fn prompt_registry_contains(r, name) {
+    return map_has(prompt_registry_entries(r), name);
+}
+
+# Handler fn ptr for `name`, or 0 if the prompt is unknown.
+fn prompt_registry_handler(r, name) {
+    if (map_has(prompt_registry_handlers(r), name) == 0) { return 0; }
+    return map_get(prompt_registry_handlers(r), name);
+}
+
+fn prompt_registry_len(r) {
+    return map_count(prompt_registry_entries(r));
+}
+
+# Return a vec of PromptDef pointers in insertion order.
+fn prompt_registry_list(r) {
+    var out = vec_new();
+    var names = prompt_registry_names(r);
+    var entries = prompt_registry_entries(r);
+    var n = vec_len(names);
+    var i = 0;
+    while (i < n) {
+        var name = vec_get(names, i);
+        if (map_has(entries, name) == 1) {
+            vec_push(out, map_get(entries, name));
+        }
+        i = i + 1;
+    }
+    return out;
+}

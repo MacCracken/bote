@@ -30,8 +30,8 @@ Two consumer bundles (see `DEPS-PATTERN.md` for the contract):
 
 | Artifact | Profile | Modules | Use when |
 |----------|---------|---------|----------|
-| `dist/bote.cyr` | default `[lib]` | 24 | Consumer needs the full transport surface |
-| `dist/bote-core.cyr` | `[lib.core]` | 9 | Consumer wraps Dispatcher / Registry / Audit but supplies its own transport (e.g. t-ron's SecurityGate) |
+| `dist/bote.cyr` | default `[lib]` | 26 | Consumer needs the full transport surface |
+| `dist/bote-core.cyr` | `[lib.core]` | 10 | Consumer wraps Dispatcher / Registry / Prompts / Audit but supplies its own transport (e.g. t-ron's SecurityGate) |
 
 Regenerate with `cyrius distlib` (default) and `cyrius distlib core`. CI gates both bundles for freshness.
 
@@ -53,14 +53,15 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 
 ## Modules (src/)
 
-**Core 9** — included in both `dist/bote.cyr` and `dist/bote-core.cyr`:
+**Core 10** — included in both `dist/bote.cyr` and `dist/bote-core.cyr`:
 
 | Module | Purpose |
 |--------|---------|
 | `error.cyr` | `BoteError` tagged enum + JSON-RPC code mapping |
 | `protocol.cyr` | `JsonRpcRequest` / `Response` / `Error` types |
 | `jsonx.cyr` | JSON helpers (flat / nested / array accessors) |
-| `registry.cyr` | `ToolRegistry` — registration, discovery, versioning, deprecation |
+| `registry.cyr` | `ToolRegistry` — registration, discovery, versioning, deprecation, profile tags |
+| `prompts.cyr` | `PromptRegistry` — MCP prompts capability (`prompts/list` + `prompts/get`) |
 | `events.cyr` | `EventSink` — pub/sub trait |
 | `audit.cyr` | `AuditLogger` / `AuditSink` — tool-call event trail |
 | `dispatch.cyr` | `Dispatcher` (2.0 handler ABI: `fn h(args, claims) → result_cstr`) |
@@ -150,7 +151,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 
 | Test file | Assertions | Surface |
 |-----------|-----------:|---------|
-| `tests/bote.tcyr` | 363 | error / protocol / jsonx / registry / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / audit_libro / events_majra wire-up |
+| `tests/bote.tcyr` | 387 | error / protocol / jsonx / registry / tool annotations + profiles / prompts / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / audit_libro / events_majra wire-up |
 | `tests/bote_auth.tcyr` | 38 | Bearer + allowlist + JWT HS256 + PKCE validators |
 | `tests/bote_content.tcyr` | 24 | Typed MCP content blocks + annotations |
 | `tests/bote_host.tcyr` | 113 | HostRegistry + IPv4/IPv6 SSRF + JSON config hot-reload |
@@ -161,7 +162,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `tests/bote_streamable.tcyr` | 25 | Streamable HTTP — EventIdGenerator / StreamEvent / ResumptionBuffer / StreamableConfig |
 | `tests/bote_ws.tcyr` | 10 | WebSocket — WsConfig + handler wire-up |
 | `tests/bote_core_only_smoke.tcyr` | drift guard | Includes only `dist/bote-core.cyr` — catches core/transport entanglement |
-| **Total** | **653** | + 1 drift smoke |
+| **Total** | **677** | + 1 drift smoke |
 
 Criterion benchmarks: **14** in `tests/bote.bcyr` (dispatch × 3, jsonx × 2, codec × 3, schema × 4, auth_bearer × 2).
 

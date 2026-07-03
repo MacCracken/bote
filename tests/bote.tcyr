@@ -32,6 +32,7 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/registry.cyr"
+include "src/prompts.cyr"
 include "src/events.cyr"
 include "src/audit.cyr"
 include "src/audit_libro.cyr"
@@ -59,6 +60,11 @@ fn h_echo(args, claims) {
 # Test handler: returns a constant.
 fn h_const(args, claims) {
     return "{\"answer\":42}";
+}
+
+# Test handler: a prompts/get generator returning a fixed message body.
+fn h_prompt(args, claims) {
+    return "{\"description\":\"greeting\",\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"hi\"}}]}";
 }
 
 # EventSink test backend: pushes (topic, payload) pairs into a global vec.
@@ -480,6 +486,58 @@ fn main() {
     assert(streq(pf_all,
     "{\"tools\":[{\"name\":\"svc_scan\",\"description\":\"scan\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"svc_web\",\"description\":\"web\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"svc_bare\",\"description\":\"bare\",\"inputSchema\":{\"type\":\"object\"}}]}") == 1,
     "tools/list without profile returns all tools");
+
+    # ---------------- prompts: registry + capability + list + get ----------------
+    var pr_reg = tool_registry_new();
+    var pr_d = dispatcher_new(pr_reg);
+
+    # Before any prompt: capability is tools-only (prompts not advertised),
+    # and prompts/list is method-not-found.
+    var pr_init0 = resp_result(dispatcher_dispatch(pr_d,
+    req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}"), 0));
+    assert(streq(jsonx_get_raw(pr_init0, "capabilities"), "{\"tools\":{}}") == 1,
+    "no prompts → capabilities tools-only");
+    var pr_ll0 = dispatcher_dispatch(pr_d, req_new("2", "prompts/list"), 0);
+    assert(resp_error_obj(pr_ll0) != 0, "prompts/list without registry → error");
+
+    # Register a prompt: one required + one optional argument.
+    var pr_args = vec_new();
+    vec_push(pr_args, prompt_arg_new("name", "who to greet", 1));
+    vec_push(pr_args, prompt_arg_new("style", 0, 0));
+    dispatcher_register_prompt(pr_d,
+    prompt_def_new("greet", "compose a greeting", pr_args), &h_prompt);
+
+    # Registering flips the prompts capability on.
+    var pr_init1 = resp_result(dispatcher_dispatch(pr_d,
+    req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}"), 0));
+    assert(streq(jsonx_get_raw(pr_init1, "capabilities"), "{\"tools\":{},\"prompts\":{}}") == 1,
+    "registered prompt → capabilities include prompts");
+
+    # prompts/list: required emitted only for the required arg; optional omits it.
+    var pr_ll = resp_result(dispatcher_dispatch(pr_d, req_new("2", "prompts/list"), 0));
+    assert(streq(pr_ll,
+    "{\"prompts\":[{\"name\":\"greet\",\"description\":\"compose a greeting\",\"arguments\":[{\"name\":\"name\",\"description\":\"who to greet\",\"required\":true},{\"name\":\"style\"}]}]}") == 1,
+    "prompts/list serializes prompt + arguments");
+
+    # prompts/get invokes the handler and returns its body verbatim.
+    var pr_get = resp_result(dispatcher_dispatch(pr_d,
+    req_with_params(req_new("3", "prompts/get"), "{\"name\":\"greet\",\"arguments\":{\"name\":\"Ada\"}}"), 0));
+    assert(streq(pr_get,
+    "{\"description\":\"greeting\",\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"hi\"}}]}") == 1,
+    "prompts/get returns handler body");
+
+    var pr_unk = dispatcher_dispatch(pr_d,
+    req_with_params(req_new("3", "prompts/get"), "{\"name\":\"nope\"}"), 0);
+    assert(resp_error_obj(pr_unk) != 0, "prompts/get unknown name → error");
+
+    var pr_noname = dispatcher_dispatch(pr_d,
+    req_with_params(req_new("3", "prompts/get"), "{}"), 0);
+    assert(resp_error_obj(pr_noname) != 0, "prompts/get missing name → error");
+
+    # prompt registry unit surface.
+    assert_eq(prompt_registry_len(dispatcher_prompts(pr_d)), 1, "one prompt registered");
+    assert_eq(prompt_registry_contains(dispatcher_prompts(pr_d), "greet"), 1, "registry contains greet");
+    assert_eq(prompt_registry_contains(dispatcher_prompts(pr_d), "missing"), 0, "registry absent for missing");
 
     # ---------------- dispatch: tools/call success ----------------
     dispatcher_handle(d, "svc_echo", &h_echo);

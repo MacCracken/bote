@@ -27,14 +27,15 @@ output = "build/bote"
 # the default binary. It is NOT in dist/bote-core.cyr: like
 # audit_libro, it depends on a live libro chain, which the
 # transport-free core profile deliberately excludes.
-#   cyrius distlib       → dist/bote.cyr      (default [lib], full bundle — 25 modules)
-#   cyrius distlib core  → dist/bote-core.cyr ([lib.core], 9 transport-free modules)
+#   cyrius distlib       → dist/bote.cyr      (default [lib], full bundle — 26 modules)
+#   cyrius distlib core  → dist/bote-core.cyr ([lib.core], 10 transport-free modules)
 [lib]
 modules = [
     "src/error.cyr",
     "src/protocol.cyr",
     "src/jsonx.cyr",
     "src/registry.cyr",
+    "src/prompts.cyr",
     "src/events.cyr",
     "src/audit.cyr",
     "src/audit_libro.cyr",
@@ -58,7 +59,7 @@ modules = [
     "src/fs_tools.cyr",
 ]
 
-# Core-only opt-in bundle (2.7.2). Nine transport-free modules for
+# Core-only opt-in bundle (2.7.2). Ten transport-free modules for
 # consumers that wrap bote's Dispatcher / Registry / Audit surface
 # but supply their own transport — e.g. t-ron 2.1.x's SecurityGate
 # middleware. Excludes the transports (stdio/http/unix/bridge/
@@ -74,6 +75,7 @@ modules = [
     "src/protocol.cyr",
     "src/jsonx.cyr",
     "src/registry.cyr",
+    "src/prompts.cyr",
     "src/events.cyr",
     "src/audit.cyr",
     "src/dispatch.cyr",

@@ -107,7 +107,8 @@ src/
 ├── error.cyr               — BoteErrTag (12 variants), rpc_code, format
 ├── protocol.cyr            — JsonRpcRequest / Response / Error data types
 ├── jsonx.cyr               — nested-aware JSON extractor
-├── registry.cyr            — ToolDef, ToolSchema, ToolAnnotations, ToolRegistry
+├── registry.cyr            — ToolDef (+profile tags), ToolSchema, ToolAnnotations, ToolRegistry
+├── prompts.cyr             — PromptDef / PromptArgument / PromptRegistry (prompts/list + get)
 ├── dispatch.cyr            — Dispatcher + dispatcher_dispatch
 ├── codec.cyr               — parse_request / serialize_response / process_message
 ├── schema.cyr              — CompiledSchema typed validation

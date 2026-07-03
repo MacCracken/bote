@@ -30,6 +30,7 @@ supported version.
 | `initialize` handshake (serverInfo + capabilities + version negotiation) | `dispatch` | ✅ |
 | `tools/list` with full `inputSchema` | `dispatch` + `registry` | ✅ |
 | `tools/call` with arguments + version selection | `dispatch` + `schema` | ✅ |
+| `prompts/list` + `prompts/get` (capability advertised iff a `PromptRegistry` is present) | `dispatch` + `prompts` | ✅ |
 | Notifications produce no response | `dispatch` + `codec` | ✅ |
 | Batch arrays — mixed req + notif return only req responses | `codec` | ✅ |
 
@@ -40,7 +41,8 @@ supported version.
 | Tool name, description, inputSchema | `registry::ToolDef` | ✅ |
 | Tool versioning + version negotiation in `tools/call` | `tool_def_with_version` + `registry_get_versioned` | ✅ |
 | Tool deprecation message | `tool_def_with_deprecated` | ✅ |
-| Tool annotations: `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` | `ToolAnnotations` (+ `ann_read_only` / `ann_destructive` presets) | ✅ |
+| Tool annotations: `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` — serialized in `tools/list` | `ToolAnnotations` (+ `ann_read_only` / `ann_destructive` presets); `_emit_annotations` | ✅ |
+| Tool profile tags + optional `{"profile":"<tag>"}` filter on `tools/list` (bote extension) | `tool_def_with_profiles` + `_build_tools_list_result` | ✅ |
 | `project_tool` naming convention enforced on dynamic register | `validate_tool_name` | ✅ |
 
 ## Schema Validation

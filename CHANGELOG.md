@@ -17,6 +17,27 @@ have per release.
 ## [Unreleased]
 
 ### Added
+- **MCP prompts capability** — `prompts/list` + `prompts/get` (new module
+  `src/prompts.cyr`). A `PromptRegistry` mirrors the tool registry (metadata for
+  `prompts/list` + a name→generator-handler map for `prompts/get`), and the
+  dispatcher gained one slot (`+40 prompt_registry`, 40 → 48 bytes) plus
+  `dispatcher_register_prompt`, which **lazily** stands up the registry — so
+  registering the first prompt is also what flips the `prompts` capability on at
+  initialize. This is the first payoff of the 0b `_build_capabilities` seam: the
+  `prompts` key is **derived** from actual registry presence (`{"tools":{}}`
+  with no prompts; `{"tools":{},"prompts":{}}` once one is registered), never
+  advertised blind. Prompt generator handlers use the 2.0 ABI
+  (`fn h(arguments_cstr, claims) → result_cstr`) and return the full
+  `{description?, messages:[…]}` body. `prompts/list` serializes each prompt's
+  `name` / optional `description` / optional `arguments` (each arg's `required`
+  emitted only when true). When no prompt registry exists, `prompts/*` fall
+  through to `-32601` (matching the un-advertised capability). A reference
+  `bote_greeting` prompt is registered in the binary family alongside
+  `bote_echo`, proven on the wire (`initialize` → `prompts/list` → `prompts/get
+  name=Ada` ⇒ a `content_text` "Hello, Ada!" message). `src/prompts.cyr` is in
+  both `[lib]` and `[lib.core]` (**core bundle 9 → 10 modules**). +10 assertions
+  in `tests/bote.tcyr` (377 → 387). Fourth bite of the secureyeoman → bote MCP
+  bring-over.
 - **Tool annotations now serialized in `tools/list`** (MCP 2025-11-25
   `ToolAnnotations`). The `ToolAnnotations` model + `tool_def_with_annotations`
   have existed on the registry since the annotations work landed, but the

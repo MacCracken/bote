@@ -13,6 +13,23 @@ fn bote_echo_handler(args, claims) {
     return args;
 }
 
+# Reference prompt generator: greets the optional `name` argument (default
+# "world"). Returns a prompts/get result body — one user message whose
+# content is a typed text block (content_text handles JSON-escaping).
+fn bote_greeting_prompt_handler(args, claims) {
+    var who = jsonx_get_str(args, "name");
+    if (who == 0) { who = "world"; }
+    var text = str_builder_new();
+    str_builder_add_cstr(text, "Hello, ");
+    str_builder_add_cstr(text, who);
+    str_builder_add_cstr(text, "!");
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"description\":\"a friendly greeting\",\"messages\":[{\"role\":\"user\",\"content\":");
+    str_builder_add_cstr(sb, content_text(str_data(str_builder_build(text))));
+    str_builder_add_cstr(sb, "}]}");
+    return str_data(str_builder_build(sb));
+}
+
 # Parse a positive decimal integer from a cstr; returns 0 on bad input.
 fn _parse_uint(s) {
     if (s == 0) { return 0; }
@@ -76,5 +93,12 @@ fn bote_dispatcher_with_echo() {
     registry_register(reg, tool_def_new("bote_echo", "echo arguments back", ok_schema));
     var dispatcher = dispatcher_new(reg);
     dispatcher_handle(dispatcher, "bote_echo", &bote_echo_handler);
+    # Reference prompt so the prompts capability is observable in the
+    # reference binaries (mirrors bote_echo). Consumers register their own.
+    var greet_args = vec_new();
+    vec_push(greet_args, prompt_arg_new("name", "who to greet", 0));
+    dispatcher_register_prompt(dispatcher,
+    prompt_def_new("bote_greeting", "a friendly greeting", greet_args),
+    &bote_greeting_prompt_handler);
     return dispatcher;
 }
