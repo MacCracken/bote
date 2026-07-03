@@ -33,6 +33,24 @@ have per release.
   a single-hint tool, and both absence cases. First bite of the secureyeoman →
   bote MCP capability bring-over (annotations were modeled but unwired).
 
+### Changed
+- **`initialize` capabilities extracted into a `_build_capabilities` seam**
+  (`src/dispatch.cyr`). The `capabilities` object was a hardcoded string literal
+  inside `_build_initialize_result`; it's now built by a dedicated helper whose
+  advertised keys are **derived from what bote actually implements**, so future
+  `prompts` / `resources` / `logging` / `completions` capabilities drop in gated
+  on their own handler surfaces without touching the initialize body. Output is
+  **byte-identical** (`"capabilities":{"tools":{}}`) — purely a refactor + a
+  recorded decision. The **`tools.listChanged` decision is now explicit and
+  pinned by a test**: it is deliberately **not** advertised because bote has no
+  server→client push path (the `TOPIC_TOOL_REGISTERED/_DEREGISTERED` EventSink
+  topics are bote's internal bus, not MCP `notifications/tools/list_changed`), so
+  advertising `listChanged:true` would leave clients waiting for notifications
+  that never arrive. A single predicate `_server_emits_tool_list_changed` flips
+  it when a persistent push channel lands. +2 assertions in `tests/bote.tcyr`
+  (367 → 369). Second bite of the secureyeoman → bote MCP bring-over (the
+  capabilities enabler for prompts/resources/completion).
+
 ## [2.9.0] — 2026-07-03 — runs + serves MCP on agnos (cyrius 6.3.38)
 
 ### Changed

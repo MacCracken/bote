@@ -1157,6 +1157,42 @@ fn _emit_annotations(sb, ann) {
 # Method handlers
 # ================================================================
 
+# Does bote emit `notifications/tools/list_changed` to the client?
+#
+# The registry emits internal EventSink topics (TOPIC_TOOL_REGISTERED /
+# _DEREGISTERED) on register/deregister, but those go to bote's OWN event
+# bus — they are NOT MCP client notifications. There is no server→client
+# push path yet (dispatch is strictly request→response; the streamable SSE
+# GET closes immediately), so we cannot deliver `notifications/tools/
+# list_changed`. Advertising `listChanged:true` would make the client wait
+# for notifications that never arrive, so we return 0 (⇒ omit the flag,
+# which defaults to false). Flip this to 1 AND wire the notification
+# together once a persistent push channel lands.
+fn _server_emits_tool_list_changed() { return 0; }
+
+# Append the MCP `capabilities` object advertised at initialize.
+#
+# Advertised keys are DERIVED from what bote actually implements, so we
+# never advertise a capability we can't honor:
+#   - `tools`: always — bote is a tool server (an empty registry is still
+#     tool-capable). `listChanged` gated on _server_emits_tool_list_changed.
+#   - prompts / resources / logging / completions: NOT YET. Each is added
+#     here, gated on its own handler surface, as that capability lands
+#     (see the secureyeoman → bote MCP bring-over stages).
+#
+# Version policy: every capability below exists across all supported
+# protocol versions (2024-11-05 … 2025-11-25), so none is gated on the
+# negotiated version. A version-exclusive capability would branch on the
+# negotiated version passed in here.
+fn _build_capabilities(sb) {
+    str_builder_add_cstr(sb, "{\"tools\":{");
+    if (_server_emits_tool_list_changed() == 1) {
+        str_builder_add_cstr(sb, "\"listChanged\":true");
+    }
+    str_builder_add_cstr(sb, "}}");
+    return 0;
+}
+
 # Build the initialize response result body.
 fn _build_initialize_result(params_cstr) {
     var requested = jsonx_get_str(params_cstr, "protocolVersion");
@@ -1166,7 +1202,9 @@ fn _build_initialize_result(params_cstr) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"protocolVersion\":\"");
     str_builder_add_cstr(sb, negotiated);
-    str_builder_add_cstr(sb, "\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"bote\",\"version\":\"");
+    str_builder_add_cstr(sb, "\",\"capabilities\":");
+    _build_capabilities(sb);
+    str_builder_add_cstr(sb, ",\"serverInfo\":{\"name\":\"bote\",\"version\":\"");
     str_builder_add_cstr(sb, _bote_server_version());
     str_builder_add_cstr(sb, "\"}}");
     return str_data(str_builder_build(sb));

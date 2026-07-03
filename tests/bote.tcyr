@@ -362,6 +362,13 @@ fn main() {
     var negotiated = jsonx_get_str(init_result, "protocolVersion");
     assert(streq(negotiated, "2024-11-05") == 1, "init negotiates supported version");
 
+    # capabilities: derived from the surface bote actually implements. `tools`
+    # always; `listChanged` deliberately NOT advertised (no server→client push
+    # path yet) — pin the decision so flipping it is a conscious change.
+    var init_caps = jsonx_get_raw(init_result, "capabilities");
+    assert(init_caps != 0, "init body has capabilities");
+    assert(streq(init_caps, "{\"tools\":{}}") == 1, "capabilities: tools only, no listChanged");
+
     # Init with unsupported version → fall back to latest
     var bad_init = req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"1999-01-01\"}");
     var bi_resp = dispatcher_dispatch(d, bad_init, 0);
