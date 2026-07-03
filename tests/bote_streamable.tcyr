@@ -198,6 +198,18 @@ fn main() {
     assert_eq(resumption_buffer_len(session_outbound_buffer(nso)), pbefore2 + 1,
     "dispatcher_register_prompt → prompts/list_changed reaches the buffer");
 
+    # ---------------- POST piggyback: Accept negotiation + response frame ----------------
+    var acc_yes = "POST /mcp HTTP/1.1\r\nAccept: application/json, text/event-stream\r\n\r\n";
+    assert_eq(_strm_accepts_sse(acc_yes, strlen(acc_yes)), 1, "Accept with event-stream → sse ok");
+    var acc_no = "POST /mcp HTTP/1.1\r\nAccept: application/json\r\n\r\n";
+    assert_eq(_strm_accepts_sse(acc_no, strlen(acc_no)), 0, "Accept without event-stream → no sse");
+    var acc_absent = "POST /mcp HTTP/1.1\r\nContent-Type: application/json\r\n\r\n";
+    assert_eq(_strm_accepts_sse(acc_absent, strlen(acc_absent)), 0, "absent Accept → no sse");
+    # The response is framed as an id-less SSE `message` event.
+    assert(streq(_strm_response_frame("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}"),
+    "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n") == 1,
+    "response frame is an id-less SSE message");
+
     # ---------------- StreamableConfig ----------------
     var scfg = streamable_config_new("/mcp", 0x0100007F, 8392);
     assert(streq(streamable_config_path(scfg), "/mcp") == 1, "scfg path");

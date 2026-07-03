@@ -16,7 +16,49 @@ have per release.
 
 ## [Unreleased]
 
+_(empty)_
+
+## [3.0.0] — 2026-07-03 — MCP capability suite + honest polled-push notifications
+
+The **3.0.0** milestone rounds out bote's MCP surface. bote went from three
+methods (`initialize` / `tools/list` / `tools/call`) to a server advertising
+four derived capabilities — **tools, prompts, resources, completion** — plus a
+working **polled server→client notification path** (`notifications/tools/
+list_changed` + `notifications/prompts/list_changed`), delivered on the client's
+next streamable `GET` or piggybacked on a POST. Every capability is advertised
+only when it can actually be honored: `listChanged` appears solely on the
+streamable transport (which has a drain path), never on stdio/http/ws. All
+growth is additive on the 2.0 handler ABI (`fn h(args, claims) → result`),
+needs no new dependencies, and each internal struct grew by appended slots only.
+Test surface: **733** assertions (was 653 at 2.9.0) + the core-only drift smoke.
+The `[lib.core]` bundle grew 9 → 11 modules (`prompts.cyr`, `resources.cyr`).
+
+### Breaking
+- **`bote-streamable` now enforces MCP session lifecycle.** The shipped
+  streamable binary configures a `SessionStore` (to back the per-session
+  notification buffers), so `initialize` mints an `MCP-Session-Id` and every
+  subsequent request — including the `GET` SSE stream — must present it; a
+  session-less non-`initialize` request returns `404`. **Migration:** clients
+  must perform the `initialize` handshake and echo the returned `MCP-Session-Id`
+  header on all following requests (standard MCP 2025-11-25 session management).
+  Consumers embedding the transport *library* are unaffected — the session store
+  stays opt-in via `streamable_config_with_session_store`.
+
 ### Added
+- **POST-piggyback SSE** — bite 6 (optional) of the server→client push path. When
+  a `POST` response is built and the requesting session has pending notifications
+  **and** the client's `Accept` allows `text/event-stream`, the transport answers
+  that POST with an SSE stream (the JSON-RPC response as an id-less `message`
+  frame, then the drained notifications) instead of `application/json` — so a
+  client that never opens a GET stream still receives server notifications.
+  Spec-allowed (MCP Streamable HTTP) and gated three ways (`Accept`, a resolved
+  session, non-empty buffer), so it's a pure add-on: with no pending events the
+  POST returns `application/json` exactly as before (regression-verified on the
+  wire). The response frame is deliberately id-less (a synthetic id would
+  pollute the client's `Last-Event-ID`; only the drained notifications carry
+  resumable ids). New helpers `_strm_accepts_sse` / `_strm_post_session_outbound`
+  / `_strm_response_frame`; +4 assertions in `tests/bote_streamable.tcyr`
+  (49 → 53). Full-bundle-only (`dist/bote-core.cyr` unchanged).
 - **`tools`/`prompts` `listChanged` — advertised, honestly** (bite 5, the payoff
   of the push path). `_build_capabilities` now emits `listChanged:true` on the
   `tools` and `prompts` capabilities **only when `dispatcher_notifications(d)`
