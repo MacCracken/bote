@@ -18,6 +18,34 @@ have per release.
 
 _(empty)_
 
+## [2.9.0] — 2026-07-03 — runs + serves MCP on agnos (cyrius 6.3.38)
+
+### Changed
+- **Toolchain migrated `6.3.15` → `6.3.38`** (`cyrius.cyml` pin; `cyrius lib sync
+  --full` re-vendored the gitignored `lib/` from the current stdlib snapshot).
+  Host suite green (25/22/… all files, 0 failed).
+
+### Fixed
+- **bote now runs on agnos** (was: SIGSEGV at startup on the `--agnos` build).
+  Root cause was **not** bote or sigil — it was a **stale vendored stdlib
+  `freelist.cyr`** carried by the old 6.3.15 pin. Pre-fix `freelist.cyr` used the
+  Linux 6-arg `syscall(SYS_MMAP, 0, size, …)` on every target; on agnos `mmap#27`
+  takes the length in arg1, so the leading Linux addr-hint `0` was read as the
+  size → `mmap#27(0)` → `MAP_FAILED` (0) → the next `store64` SIGSEGV'd. That
+  killed **every `fl_alloc` consumer** — all of sigil's crypto (sha256/hmac/
+  ed25519/aes-gcm) — so bote died in `main()` at `chain_new()` → `sha256_init()`
+  → `fl_alloc(144)`. cyrius already fixed `freelist.cyr` (a `_fl_mmap()` that
+  dispatches `#ifdef CYRIUS_TARGET_AGNOS → syscall(SYS_MMAP, length)`); the
+  6.3.38 migration picks it up. **Proven on agnos under mirshi** (AGNOS→Linux
+  syscall translation): `bote-agnos` serves the full MCP flow — `initialize`
+  (serverInfo bote 2.8.0), `tools/list` (9 tools), and `tools/call bote_echo`
+  (executes, exercising the crypto path). **Also proven on the REAL agnos kernel
+  under QEMU** (real `mmap#27`, not mirshi's host-kernel emulation): the new
+  `BOTE_SELFTEST` kernel hook + `scripts/bote-mcp-smoke.sh` (in the agnos repo)
+  pipe an MCP `initialize` + `tools/call bote_echo` into bote's fd0 via two kernel
+  pipes and capture fd1 — serial shows bote's `serverInfo` reply and the echoed
+  `agnos-kernel` argument, `exit 0`, no fault/panic.
+
 ## [2.8.0] — 2026-07-02 — filesystem tools (`fs_write` / `fs_read` / `fs_mkdir`)
 
 A new `src/fs_tools.cyr` module adds three filesystem tools so an MCP client
