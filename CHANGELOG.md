@@ -33,6 +33,24 @@ have per release.
   a single-hint tool, and both absence cases. First bite of the secureyeoman →
   bote MCP capability bring-over (annotations were modeled but unwired).
 
+### Added
+- **Tool profiles + `tools/list` profile filter** (`src/registry.cyr`,
+  `src/dispatch.cyr`). Tools can carry opaque consumer-defined profile tags
+  (e.g. `security` / `web` / `full`) via `tool_def_with_profiles(d, vec)`; a
+  client may pass `{"profile":"<tag>"}` in `tools/list` params to receive only
+  the tools tagged with that profile (exact-match membership via the new
+  `tool_def_has_profile`). This is bote's `[lib.profile]` idea applied at
+  runtime — the reusable primitive under secureyeoman's AGNOS-bridge profiles /
+  smart-schema-delivery, with **no interpretation in bote** (an untagged tool is
+  in no profile; `full` etc. are pure consumer convention). Fully **additive and
+  opt-in**: `tools/list` with no `profile` param returns the complete list,
+  byte-identical to before. `ToolDef` grew one appended slot (56 → 64 bytes,
+  `+56 profiles`) — same additive pattern as `annotations`/`compiled`, so all
+  existing field offsets and the builder/accessor API are unchanged. The
+  `tools/list` builder now tracks an emitted-count for comma placement so
+  filtered gaps can't corrupt the JSON array. +8 assertions in `tests/bote.tcyr`
+  (369 → 377). Third bite of the secureyeoman → bote MCP bring-over.
+
 ### Changed
 - **`initialize` capabilities extracted into a `_build_capabilities` seam**
   (`src/dispatch.cyr`). The `capabilities` object was a hardcoded string literal

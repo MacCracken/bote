@@ -433,6 +433,54 @@ fn main() {
     "{\"tools\":[{\"name\":\"svc_blank\",\"description\":\"blank\",\"inputSchema\":{\"type\":\"object\"}}]}") == 1,
     "tools/list omits empty annotations object");
 
+    # ---------------- registry/dispatch: tool profiles + tools/list filter ----------------
+    var pf_reg = tool_registry_new();
+    var pf_d = dispatcher_new(pf_reg);
+    var pf_schema = schema_new("object", 0, vec_new());
+    # svc_scan ∈ {security, full}; svc_web ∈ {web, full}; svc_bare untagged.
+    var sec_profs = vec_new();
+    vec_push(sec_profs, "security");
+    vec_push(sec_profs, "full");
+    registry_register(pf_reg,
+    tool_def_with_profiles(tool_def_new("svc_scan", "scan", pf_schema), sec_profs));
+    var web_profs = vec_new();
+    vec_push(web_profs, "web");
+    vec_push(web_profs, "full");
+    registry_register(pf_reg,
+    tool_def_with_profiles(tool_def_new("svc_web", "web", pf_schema), web_profs));
+    registry_register(pf_reg, tool_def_new("svc_bare", "bare", pf_schema));
+
+    # tool_def_has_profile: exact membership; untagged/null → 0.
+    assert_eq(tool_def_has_profile(registry_get(pf_reg, "svc_scan"), "security"), 1, "scan in security");
+    assert_eq(tool_def_has_profile(registry_get(pf_reg, "svc_scan"), "web"), 0, "scan not in web");
+    assert_eq(tool_def_has_profile(registry_get(pf_reg, "svc_bare"), "security"), 0, "bare in no profile");
+    assert_eq(tool_def_has_profile(registry_get(pf_reg, "svc_scan"), 0), 0, "null profile never matches");
+
+    # profile=security → only svc_scan.
+    var pf_sec = resp_result(dispatcher_dispatch(pf_d,
+    req_with_params(req_new("2", "tools/list"), "{\"profile\":\"security\"}"), 0));
+    assert(streq(pf_sec,
+    "{\"tools\":[{\"name\":\"svc_scan\",\"description\":\"scan\",\"inputSchema\":{\"type\":\"object\"}}]}") == 1,
+    "tools/list filters to profile=security");
+
+    # profile=full → svc_scan + svc_web (insertion order), never svc_bare.
+    var pf_full = resp_result(dispatcher_dispatch(pf_d,
+    req_with_params(req_new("2", "tools/list"), "{\"profile\":\"full\"}"), 0));
+    assert(streq(pf_full,
+    "{\"tools\":[{\"name\":\"svc_scan\",\"description\":\"scan\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"svc_web\",\"description\":\"web\",\"inputSchema\":{\"type\":\"object\"}}]}") == 1,
+    "tools/list profile=full returns tagged tools in order");
+
+    # unknown profile → empty array (no leading-comma corruption).
+    var pf_none = resp_result(dispatcher_dispatch(pf_d,
+    req_with_params(req_new("2", "tools/list"), "{\"profile\":\"nope\"}"), 0));
+    assert(streq(pf_none, "{\"tools\":[]}") == 1, "tools/list unknown profile → empty");
+
+    # no profile param → full list, byte-identical to pre-extension behavior.
+    var pf_all = resp_result(dispatcher_dispatch(pf_d, req_new("2", "tools/list"), 0));
+    assert(streq(pf_all,
+    "{\"tools\":[{\"name\":\"svc_scan\",\"description\":\"scan\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"svc_web\",\"description\":\"web\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"svc_bare\",\"description\":\"bare\",\"inputSchema\":{\"type\":\"object\"}}]}") == 1,
+    "tools/list without profile returns all tools");
+
     # ---------------- dispatch: tools/call success ----------------
     dispatcher_handle(d, "svc_echo", &h_echo);
     var call_req = req_with_params(req_new("3", "tools/call"),

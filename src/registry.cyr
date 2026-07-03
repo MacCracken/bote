@@ -102,7 +102,7 @@ fn schema_prop_value(p) { return load64(p + 8); }
 # ToolDef
 # ================================================================
 #
-# Layout (56 bytes):
+# Layout (64 bytes):
 #   +0  name         cstr
 #   +8  description  cstr
 #   +16 input_schema ptr to ToolSchema
@@ -110,9 +110,15 @@ fn schema_prop_value(p) { return load64(p + 8); }
 #   +32 deprecated   cstr or 0 (deprecation message)
 #   +40 annotations  ptr to ToolAnnotations or 0
 #   +48 compiled     ptr to CompiledSchema or 0 (set by tool_def_with_compiled)
+#   +56 profiles     vec of cstr tags or 0 (set by tool_def_with_profiles)
+#
+# Profiles are opaque consumer-defined tags (e.g. "security", "web", "full")
+# used to expose curated tool subsets via a `profile` filter on tools/list.
+# bote does no interpretation — membership is exact-match; an untagged tool
+# (profiles == 0) is in no profile. See _build_tools_list_result in dispatch.
 
 fn tool_def_new(name, description, input_schema) {
-    var d = alloc(56);
+    var d = alloc(64);
     store64(d, name);
     store64(d + 8, description);
     store64(d + 16, input_schema);
@@ -120,6 +126,7 @@ fn tool_def_new(name, description, input_schema) {
     store64(d + 32, 0);
     store64(d + 40, 0);
     store64(d + 48, 0);
+    store64(d + 56, 0);
     return d;
 }
 
@@ -127,6 +134,7 @@ fn tool_def_with_version(d, version) { store64(d + 24, version); return d; }
 fn tool_def_with_deprecated(d, msg) { store64(d + 32, msg); return d; }
 fn tool_def_with_annotations(d, ann) { store64(d + 40, ann); return d; }
 fn tool_def_with_compiled(d, c) { store64(d + 48, c); return d; }
+fn tool_def_with_profiles(d, profiles) { store64(d + 56, profiles); return d; }
 
 fn tool_def_name(d) { return load64(d); }
 fn tool_def_description(d) { return load64(d + 8); }
@@ -135,6 +143,22 @@ fn tool_def_version(d) { return load64(d + 24); }
 fn tool_def_deprecated(d) { return load64(d + 32); }
 fn tool_def_annotations(d) { return load64(d + 40); }
 fn tool_def_compiled(d) { return load64(d + 48); }
+fn tool_def_profiles(d) { return load64(d + 56); }
+
+# Exact-match membership: 1 if `profile` (non-null) is one of the tool's
+# profile tags, else 0. A null profile or an untagged tool returns 0.
+fn tool_def_has_profile(d, profile) {
+    if (profile == 0) { return 0; }
+    var profs = tool_def_profiles(d);
+    if (profs == 0) { return 0; }
+    var n = vec_len(profs);
+    var i = 0;
+    while (i < n) {
+        if (streq(vec_get(profs, i), profile) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
 
 # ================================================================
 # ToolRegistry

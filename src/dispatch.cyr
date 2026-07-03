@@ -324,16 +324,34 @@ fn _build_initialize_result(params_cstr) {
     return str_data(str_builder_build(sb));
 }
 
+# Does tool `t` belong in a `profile`-filtered listing? A null profile means
+# no filter was requested, so every tool matches (full listing, unchanged).
+fn _tool_matches_profile(t, profile) {
+    if (profile == 0) { return 1; }
+    return tool_def_has_profile(t, profile);
+}
+
 # Build the tools/list response result body.
-fn _build_tools_list_result(reg) {
+#
+# `profile` (cstr or 0) is an OPTIONAL bote extension: when a client passes
+# {"profile":"<tag>"} in tools/list params, only tools tagged with that
+# profile are returned (exact-match). When absent (0), the full tool list is
+# returned — byte-identical to pre-extension behavior.
+fn _build_tools_list_result(reg, profile) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"tools\":[");
     var lst = registry_list(reg);
     var n = vec_len(lst);
     var i = 0;
+    var emitted = 0;
     while (i < n) {
-        if (i > 0) { str_builder_add_cstr(sb, ","); }
         var t = vec_get(lst, i);
+        if (_tool_matches_profile(t, profile) == 0) {
+            i = i + 1;
+            continue;
+        }
+        if (emitted > 0) { str_builder_add_cstr(sb, ","); }
+        emitted = emitted + 1;
         str_builder_add_cstr(sb, "{");
         _json_emit_str_field(sb, "name", tool_def_name(t));
         str_builder_add_cstr(sb, ",");
@@ -390,7 +408,9 @@ fn dispatcher_dispatch(d, request, claims) {
     }
 
     if (streq(method, "tools/list") == 1) {
-        return resp_success(id, _build_tools_list_result(reg));
+        var lprofile = 0;
+        if (params != 0) { lprofile = jsonx_get_str(params, "profile"); }
+        return resp_success(id, _build_tools_list_result(reg, lprofile));
     }
 
     if (streq(method, "tools/call") == 1) {
