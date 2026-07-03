@@ -383,6 +383,49 @@ fn main() {
     var tools_raw = jsonx_get_raw(ll2_body, "tools");
     assert(tools_raw != 0, "tools array present");
 
+    # ---------------- dispatch: tools/list serializes annotations ----------------
+    # Fresh registry so the whole body is deterministic. read-only preset →
+    # all four hints emitted (true/false per the tri-state contract).
+    var ann_reg = tool_registry_new();
+    var ann_d = dispatcher_new(ann_reg);
+    var ann_schema = schema_new("object", 0, vec_new());
+    registry_register(ann_reg,
+    tool_def_with_annotations(tool_def_new("svc_ro", "read only", ann_schema), ann_read_only()));
+    var ann_body = resp_result(dispatcher_dispatch(ann_d, req_new("2", "tools/list"), 0));
+    assert(streq(ann_body,
+    "{\"tools\":[{\"name\":\"svc_ro\",\"description\":\"read only\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}}]}") == 1,
+    "tools/list emits full annotations object");
+
+    # Only one hint set → only that key is emitted (no leading comma bug).
+    var ann_reg2 = tool_registry_new();
+    var ann_d2 = dispatcher_new(ann_reg2);
+    var de_ann = ann_set_destructive(ann_new(), HINT_TRUE);
+    registry_register(ann_reg2,
+    tool_def_with_annotations(tool_def_new("svc_rm", "remove", ann_schema), de_ann));
+    var ann_body2 = resp_result(dispatcher_dispatch(ann_d2, req_new("2", "tools/list"), 0));
+    assert(streq(ann_body2,
+    "{\"tools\":[{\"name\":\"svc_rm\",\"description\":\"remove\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"destructiveHint\":true}}]}") == 1,
+    "tools/list emits single-hint annotations");
+
+    # No annotations ptr → no "annotations" key at all (additive: unchanged shape).
+    var plain_reg = tool_registry_new();
+    var plain_d = dispatcher_new(plain_reg);
+    registry_register(plain_reg, tool_def_new("svc_plain", "plain", ann_schema));
+    var plain_body = resp_result(dispatcher_dispatch(plain_d, req_new("2", "tools/list"), 0));
+    assert(streq(plain_body,
+    "{\"tools\":[{\"name\":\"svc_plain\",\"description\":\"plain\",\"inputSchema\":{\"type\":\"object\"}}]}") == 1,
+    "tools/list omits annotations when unset");
+
+    # All-unset annotations ptr → treated as absent (no empty object emitted).
+    var blank_reg = tool_registry_new();
+    var blank_d = dispatcher_new(blank_reg);
+    registry_register(blank_reg,
+    tool_def_with_annotations(tool_def_new("svc_blank", "blank", ann_schema), ann_new()));
+    var blank_body = resp_result(dispatcher_dispatch(blank_d, req_new("2", "tools/list"), 0));
+    assert(streq(blank_body,
+    "{\"tools\":[{\"name\":\"svc_blank\",\"description\":\"blank\",\"inputSchema\":{\"type\":\"object\"}}]}") == 1,
+    "tools/list omits empty annotations object");
+
     # ---------------- dispatch: tools/call success ----------------
     dispatcher_handle(d, "svc_echo", &h_echo);
     var call_req = req_with_params(req_new("3", "tools/call"),

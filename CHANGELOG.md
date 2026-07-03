@@ -16,7 +16,22 @@ have per release.
 
 ## [Unreleased]
 
-_(empty)_
+### Added
+- **Tool annotations now serialized in `tools/list`** (MCP 2025-11-25
+  `ToolAnnotations`). The `ToolAnnotations` model + `tool_def_with_annotations`
+  have existed on the registry since the annotations work landed, but the
+  `tools/list` builder never emitted them — the hints were stored and never seen
+  by clients. `_build_tools_list_result` (`src/dispatch.cyr`) now appends an
+  `"annotations":{...}` object per tool via the new `_emit_annotations` /
+  `_emit_hint_field` helpers, honoring the tri-state contract documented at
+  `src/registry.cyr:16-17`: `readOnlyHint` / `destructiveHint` / `idempotentHint`
+  / `openWorldHint` are each emitted as `true`/`false` only when set, and the
+  whole object is omitted when the annotations ptr is null **or** every hint is
+  unset. Purely additive — no annotations → byte-identical output to before, so
+  the handler ABI and existing clients are unaffected. +4 assertions in
+  `tests/bote.tcyr` (363 → 367) covering the read-only preset (all four hints),
+  a single-hint tool, and both absence cases. First bite of the secureyeoman →
+  bote MCP capability bring-over (annotations were modeled but unwired).
 
 ## [2.9.0] — 2026-07-03 — runs + serves MCP on agnos (cyrius 6.3.38)
 

@@ -1226,6 +1226,43 @@ fn _emit_schema(sb, schema) {
     return 0;
 }
 
+# Append a single tri-state annotation hint as "key":true/false.
+# `first` is 1 when no hint has been emitted yet (suppresses the leading
+# comma); returns the updated `first` flag. HINT_UNSET emits nothing.
+fn _emit_hint_field(sb, first, key, hint) {
+    if (hint == HINT_UNSET) { return first; }
+    if (first == 0) { str_builder_add_cstr(sb, ","); }
+    str_builder_add_cstr(sb, "\"");
+    str_builder_add_cstr(sb, key);
+    if (hint == HINT_TRUE) { str_builder_add_cstr(sb, "\":true"); }
+    else { str_builder_add_cstr(sb, "\":false"); }
+    return 0;
+}
+
+# Append ,"annotations":{...} for a ToolDef's ToolAnnotations ptr.
+# Emits nothing when `ann` is 0 or every hint is unset (so the leading
+# comma is only produced when at least one hint is serialized). MCP
+# 2025-11-25 ToolAnnotations: readOnlyHint/destructiveHint/idempotentHint/
+# openWorldHint, each an optional boolean (skip when unset).
+fn _emit_annotations(sb, ann) {
+    if (ann == 0) { return 0; }
+    var r = ann_read_only_hint(ann);
+    var dd = ann_destructive_hint(ann);
+    var idem = ann_idempotent_hint(ann);
+    var ow = ann_open_world_hint(ann);
+    if (r == HINT_UNSET && dd == HINT_UNSET && idem == HINT_UNSET && ow == HINT_UNSET) {
+        return 0;
+    }
+    str_builder_add_cstr(sb, ",\"annotations\":{");
+    var first = 1;
+    first = _emit_hint_field(sb, first, "readOnlyHint", r);
+    first = _emit_hint_field(sb, first, "destructiveHint", dd);
+    first = _emit_hint_field(sb, first, "idempotentHint", idem);
+    first = _emit_hint_field(sb, first, "openWorldHint", ow);
+    str_builder_add_cstr(sb, "}");
+    return 0;
+}
+
 # ================================================================
 # Method handlers
 # ================================================================
@@ -1271,6 +1308,7 @@ fn _build_tools_list_result(reg) {
             str_builder_add_cstr(sb, ",");
             _json_emit_str_field(sb, "deprecated", dep);
         }
+        _emit_annotations(sb, tool_def_annotations(t));
         str_builder_add_cstr(sb, "}");
         i = i + 1;
     }
