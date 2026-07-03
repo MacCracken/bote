@@ -36,6 +36,13 @@ fn bote_info_resource_handler(uri, claims) {
     return "{\"contents\":[{\"uri\":\"bote://info\",\"mimeType\":\"text/plain\",\"text\":\"bote MCP core — reference resource.\"}]}";
 }
 
+# Reference completion handler: offers candidate values for the
+# bote_greeting prompt's `name` argument. A real consumer would inspect
+# params.ref / params.argument.value and filter; this returns a fixed set.
+fn bote_completion_handler(params, claims) {
+    return "{\"completion\":{\"values\":[\"world\",\"Ada\",\"Alan\"]}}";
+}
+
 # Parse a positive decimal integer from a cstr; returns 0 on bad input.
 fn _parse_uint(s) {
     if (s == 0) { return 0; }
@@ -111,5 +118,7 @@ fn bote_dispatcher_with_echo() {
     dispatcher_register_resource(dispatcher,
     resource_def_new("bote://info", "bote-info", "reference server info", "text/plain"),
     &bote_info_resource_handler);
+    # Reference completion handler (completes bote_greeting's `name` arg).
+    dispatcher_set_completion(dispatcher, &bote_completion_handler);
     return dispatcher;
 }

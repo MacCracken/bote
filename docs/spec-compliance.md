@@ -32,6 +32,8 @@ supported version.
 | `tools/call` with arguments + version selection | `dispatch` + `schema` | ✅ |
 | `prompts/list` + `prompts/get` (capability advertised iff a `PromptRegistry` is present) | `dispatch` + `prompts` | ✅ |
 | `resources/list` + `resources/read` (capability advertised iff a `ResourceRegistry` is present; `subscribe`/`listChanged` deferred with the push path) | `dispatch` + `resources` | ✅ |
+| `completion/complete` (capability advertised iff a completion handler is set) | `dispatch` (`dispatcher_set_completion`) | ✅ |
+| `logging/setLevel` + `notifications/message` | — | ⏳ deferred with the server→client push path |
 | Notifications produce no response | `dispatch` + `codec` | ✅ |
 | Batch arrays — mixed req + notif return only req responses | `codec` | ✅ |
 

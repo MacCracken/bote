@@ -71,10 +71,12 @@ fn validate_tool_name(name) {
 #                           when 0; created lazily by dispatcher_register_prompt)
 #   +48 resource_registry   ResourceRegistry ptr or 0 (resources capability off
 #                           when 0; created lazily by dispatcher_register_resource)
+#   +56 completion_handler  fn ptr or 0 (completions capability off when 0;
+#                           set via dispatcher_set_completion)
 # ================================================================
 
 fn dispatcher_new(reg) {
-    var d = alloc(56);
+    var d = alloc(64);
     store64(d, reg);
     store64(d + 8, map_new());
     store64(d + 16, map_new());
@@ -82,6 +84,7 @@ fn dispatcher_new(reg) {
     store64(d + 32, 0);
     store64(d + 40, 0);
     store64(d + 48, 0);
+    store64(d + 56, 0);
     return d;
 }
 
@@ -92,11 +95,18 @@ fn dispatcher_audit_sink(d) { return load64(d + 24); }
 fn dispatcher_event_sink(d) { return load64(d + 32); }
 fn dispatcher_prompts(d)    { return load64(d + 40); }
 fn dispatcher_resources(d)  { return load64(d + 48); }
+fn dispatcher_completion(d) { return load64(d + 56); }
 
 fn dispatcher_set_audit(d, sink) { store64(d + 24, sink); return d; }
 fn dispatcher_set_events(d, sink) { store64(d + 32, sink); return d; }
 fn dispatcher_set_prompts(d, preg) { store64(d + 40, preg); return d; }
 fn dispatcher_set_resources(d, rreg) { store64(d + 48, rreg); return d; }
+
+# Set the completion handler. ABI: fn h(params_cstr, claims) → result_cstr,
+# where params is the completion/complete params ({ref, argument, ...}) and
+# the result is the full {"completion":{"values":[...]}} body. Setting it
+# flips the `completions` capability on at initialize.
+fn dispatcher_set_completion(d, handler_fp) { store64(d + 56, handler_fp); return d; }
 
 # Register a sync tool handler. **2.0 ABI**: handler signature is
 #   fn h(args_cstr, claims) → result_cstr (claims always 0 today)
@@ -333,9 +343,11 @@ fn _server_emits_tool_list_changed() { return 0; }
 #   - `resources`: advertised iff the dispatcher has a ResourceRegistry (see
 #     dispatcher_register_resource). `subscribe`/`listChanged` omitted — no
 #     server→client push path yet.
-#   - logging / completions: NOT YET. Each is added here, gated on its own
-#     handler surface, as that capability lands (see the secureyeoman → bote
-#     MCP bring-over stages).
+#   - `completions`: advertised iff a completion handler is set (see
+#     dispatcher_set_completion).
+#   - logging: NOT YET — it exists only to gate `notifications/message`
+#     (server→client push), which is not wired; advertising it would promise
+#     log messages that never arrive. Lands with the notification path.
 #
 # Version policy: every capability below exists across all supported
 # protocol versions (2024-11-05 … 2025-11-25), so none is gated on the
@@ -352,6 +364,9 @@ fn _build_capabilities(sb, d) {
     }
     if (dispatcher_resources(d) != 0) {
         str_builder_add_cstr(sb, ",\"resources\":{}");
+    }
+    if (dispatcher_completion(d) != 0) {
+        str_builder_add_cstr(sb, ",\"completions\":{}");
     }
     str_builder_add_cstr(sb, "}");
     return 0;
@@ -586,6 +601,17 @@ fn dispatcher_dispatch(d, request, claims) {
         var rresult = fncall2(rhandler, ruri, claims);
         if (rresult == 0) { rresult = "{\"contents\":[]}"; }
         return resp_success(id, rresult);
+    }
+
+    # completion/complete only when a completion handler is set. The handler
+    # receives the raw params ({ref, argument, ...}) and returns the full
+    # {"completion":{"values":[...]}} body. Otherwise fall through to -32601.
+    if (streq(method, "completion/complete") == 1 && dispatcher_completion(d) != 0) {
+        var cparams = params;
+        if (cparams == 0) { cparams = "{}"; }
+        var cresult = fncall2(dispatcher_completion(d), cparams, claims);
+        if (cresult == 0) { cresult = "{\"completion\":{\"values\":[]}}"; }
+        return resp_success(id, cresult);
     }
 
     if (streq(method, "tools/call") == 1) {

@@ -17,6 +17,24 @@ have per release.
 ## [Unreleased]
 
 ### Added
+- **MCP completion capability** — `completion/complete` (`src/dispatch.cyr`). A
+  single completion handler on the dispatcher (`+56 completion_handler`, 56 → 64
+  bytes) set via `dispatcher_set_completion`; the `completions` capability is
+  **derived** from its presence (`{"tools":{},…,"completions":{}}`). Handler ABI
+  `fn h(params_cstr, claims) → result_cstr` — it receives the raw
+  `{ref, argument, …}` params and returns the full `{"completion":{"values":[…]}}`
+  body, so bote does no ref/argument interpretation (consumer completes against
+  its own prompts/resources). Unknown/unset → `-32601`. No new module (unlike
+  prompts/resources) — dispatcher slot only. A reference completion handler is
+  wired in the binary family, proven on the wire. +6 assertions in
+  `tests/bote.tcyr` (398 → 404), including the four-capability canonical-order
+  check (`{"tools":{},"prompts":{},"resources":{},"completions":{}}`). Sixth bite
+  of the secureyeoman → bote MCP bring-over.
+
+  _Logging (`logging/setLevel` + `notifications/message`) is intentionally NOT
+  in this bite: it exists only to gate server→client log push, which is not
+  wired — advertising a `logging` capability would promise messages bote can't
+  send. It lands with the notification/push work._
 - **MCP resources capability** — `resources/list` + `resources/read` (new module
   `src/resources.cyr`). Same shape as the prompts capability: a
   `ResourceRegistry` (metadata for `resources/list` + a uri→read-handler map),

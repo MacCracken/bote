@@ -73,6 +73,11 @@ fn h_resource(uri, claims) {
     return "{\"contents\":[{\"uri\":\"test://doc\",\"mimeType\":\"text/plain\",\"text\":\"body\"}]}";
 }
 
+# Test handler: a completion/complete handler returning a fixed value set.
+fn h_complete(params, claims) {
+    return "{\"completion\":{\"values\":[\"alpha\",\"beta\"]}}";
+}
+
 # EventSink test backend: pushes (topic, payload) pairs into a global vec.
 # Used by discovery, audit, and events tests below.
 var _ev_topics = 0;
@@ -600,6 +605,42 @@ fn main() {
     assert(streq(jsonx_get_raw(rs_both, "capabilities"),
     "{\"tools\":{},\"prompts\":{},\"resources\":{}}") == 1,
     "prompts + resources both advertised in order");
+
+    # ---------------- completion: capability + complete ----------------
+    var cp_reg = tool_registry_new();
+    var cp_d = dispatcher_new(cp_reg);
+
+    # No handler → capability tools-only, completion/complete not found.
+    var cp_init0 = resp_result(dispatcher_dispatch(cp_d,
+    req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}"), 0));
+    assert(streq(jsonx_get_raw(cp_init0, "capabilities"), "{\"tools\":{}}") == 1,
+    "no completion → capabilities tools-only");
+    var cp_c0 = dispatcher_dispatch(cp_d,
+    req_with_params(req_new("2", "completion/complete"),
+    "{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"x\"},\"argument\":{\"name\":\"a\",\"value\":\"\"}}"), 0);
+    assert(resp_error_obj(cp_c0) != 0, "completion/complete without handler → error");
+
+    # Set the handler: flips the completions capability on.
+    dispatcher_set_completion(cp_d, &h_complete);
+    var cp_init1 = resp_result(dispatcher_dispatch(cp_d,
+    req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}"), 0));
+    assert(streq(jsonx_get_raw(cp_init1, "capabilities"), "{\"tools\":{},\"completions\":{}}") == 1,
+    "completion handler → capabilities include completions");
+
+    var cp_c = resp_result(dispatcher_dispatch(cp_d,
+    req_with_params(req_new("2", "completion/complete"),
+    "{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"x\"},\"argument\":{\"name\":\"a\",\"value\":\"al\"}}"), 0));
+    assert(streq(cp_c, "{\"completion\":{\"values\":[\"alpha\",\"beta\"]}}") == 1,
+    "completion/complete returns handler body");
+    assert(dispatcher_completion(cp_d) != 0, "completion handler set");
+
+    # All four capabilities together, canonical order (pr_d has prompts + resources).
+    dispatcher_set_completion(pr_d, &h_complete);
+    var cp_all = resp_result(dispatcher_dispatch(pr_d,
+    req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}"), 0));
+    assert(streq(jsonx_get_raw(cp_all, "capabilities"),
+    "{\"tools\":{},\"prompts\":{},\"resources\":{},\"completions\":{}}") == 1,
+    "all four capabilities advertised in canonical order");
 
     # ---------------- dispatch: tools/call success ----------------
     dispatcher_handle(d, "svc_echo", &h_echo);
