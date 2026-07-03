@@ -17,6 +17,23 @@ have per release.
 ## [Unreleased]
 
 ### Added
+- **MCP resources capability** — `resources/list` + `resources/read` (new module
+  `src/resources.cyr`). Same shape as the prompts capability: a
+  `ResourceRegistry` (metadata for `resources/list` + a uri→read-handler map),
+  a lazily-created dispatcher slot (`+48 resource_registry`, 48 → 56 bytes) via
+  `dispatcher_register_resource`, and the `resources` capability **derived** from
+  registry presence in `_build_capabilities` (`{"tools":{},"resources":{}}`; with
+  prompts too → `{"tools":{},"prompts":{},"resources":{}}`). `resources/list`
+  serializes each resource's `uri`/`name` (+ optional `description`/`mimeType`);
+  read handlers use the ABI `fn h(uri_cstr, claims) → result_cstr` and return the
+  full `{"contents":[…]}` body (bare MCP `ResourceContents`, not a content
+  block). `subscribe`/`listChanged` are intentionally omitted — no server→client
+  push path is wired. Unknown/absent capability → `-32601`. A reference
+  `bote://info` resource is registered in the binary family, proven on the wire
+  (`resources/list` → `resources/read`). `src/resources.cyr` is in both `[lib]`
+  and `[lib.core]` (**core bundle 10 → 11 modules**). +11 assertions in
+  `tests/bote.tcyr` (387 → 398). Fifth bite of the secureyeoman → bote MCP
+  bring-over.
 - **MCP prompts capability** — `prompts/list` + `prompts/get` (new module
   `src/prompts.cyr`). A `PromptRegistry` mirrors the tool registry (metadata for
   `prompts/list` + a name→generator-handler map for `prompts/get`), and the

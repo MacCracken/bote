@@ -109,6 +109,7 @@ src/
 ├── jsonx.cyr               — nested-aware JSON extractor
 ├── registry.cyr            — ToolDef (+profile tags), ToolSchema, ToolAnnotations, ToolRegistry
 ├── prompts.cyr             — PromptDef / PromptArgument / PromptRegistry (prompts/list + get)
+├── resources.cyr           — ResourceDef / ResourceRegistry (resources/list + read)
 ├── dispatch.cyr            — Dispatcher + dispatcher_dispatch
 ├── codec.cyr               — parse_request / serialize_response / process_message
 ├── schema.cyr              — CompiledSchema typed validation

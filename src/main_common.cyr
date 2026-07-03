@@ -30,6 +30,12 @@ fn bote_greeting_prompt_handler(args, claims) {
     return str_data(str_builder_build(sb));
 }
 
+# Reference resource read handler: returns a single text ResourceContents
+# for the bote://info URI (bare uri/mimeType/text, not a content block).
+fn bote_info_resource_handler(uri, claims) {
+    return "{\"contents\":[{\"uri\":\"bote://info\",\"mimeType\":\"text/plain\",\"text\":\"bote MCP core — reference resource.\"}]}";
+}
+
 # Parse a positive decimal integer from a cstr; returns 0 on bad input.
 fn _parse_uint(s) {
     if (s == 0) { return 0; }
@@ -100,5 +106,10 @@ fn bote_dispatcher_with_echo() {
     dispatcher_register_prompt(dispatcher,
     prompt_def_new("bote_greeting", "a friendly greeting", greet_args),
     &bote_greeting_prompt_handler);
+    # Reference resource so the resources capability is observable in the
+    # reference binaries (mirrors bote_echo / bote_greeting).
+    dispatcher_register_resource(dispatcher,
+    resource_def_new("bote://info", "bote-info", "reference server info", "text/plain"),
+    &bote_info_resource_handler);
     return dispatcher;
 }

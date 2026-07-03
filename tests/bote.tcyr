@@ -33,6 +33,7 @@ include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/registry.cyr"
 include "src/prompts.cyr"
+include "src/resources.cyr"
 include "src/events.cyr"
 include "src/audit.cyr"
 include "src/audit_libro.cyr"
@@ -65,6 +66,11 @@ fn h_const(args, claims) {
 # Test handler: a prompts/get generator returning a fixed message body.
 fn h_prompt(args, claims) {
     return "{\"description\":\"greeting\",\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"hi\"}}]}";
+}
+
+# Test handler: a resources/read handler returning a fixed contents body.
+fn h_resource(uri, claims) {
+    return "{\"contents\":[{\"uri\":\"test://doc\",\"mimeType\":\"text/plain\",\"text\":\"body\"}]}";
 }
 
 # EventSink test backend: pushes (topic, payload) pairs into a global vec.
@@ -538,6 +544,62 @@ fn main() {
     assert_eq(prompt_registry_len(dispatcher_prompts(pr_d)), 1, "one prompt registered");
     assert_eq(prompt_registry_contains(dispatcher_prompts(pr_d), "greet"), 1, "registry contains greet");
     assert_eq(prompt_registry_contains(dispatcher_prompts(pr_d), "missing"), 0, "registry absent for missing");
+
+    # ---------------- resources: registry + capability + list + read ----------------
+    var rs_reg = tool_registry_new();
+    var rs_d = dispatcher_new(rs_reg);
+
+    # Before any resource: capability tools-only, resources/list not found.
+    var rs_init0 = resp_result(dispatcher_dispatch(rs_d,
+    req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}"), 0));
+    assert(streq(jsonx_get_raw(rs_init0, "capabilities"), "{\"tools\":{}}") == 1,
+    "no resources → capabilities tools-only");
+    var rs_ll0 = dispatcher_dispatch(rs_d, req_new("2", "resources/list"), 0);
+    assert(resp_error_obj(rs_ll0) != 0, "resources/list without registry → error");
+
+    # Register a resource with description + mimeType.
+    dispatcher_register_resource(rs_d,
+    resource_def_new("test://doc", "doc", "a test doc", "text/plain"), &h_resource);
+
+    # Registering flips the resources capability on.
+    var rs_init1 = resp_result(dispatcher_dispatch(rs_d,
+    req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}"), 0));
+    assert(streq(jsonx_get_raw(rs_init1, "capabilities"), "{\"tools\":{},\"resources\":{}}") == 1,
+    "registered resource → capabilities include resources");
+
+    # resources/list serializes uri / name / description / mimeType.
+    var rs_ll = resp_result(dispatcher_dispatch(rs_d, req_new("2", "resources/list"), 0));
+    assert(streq(rs_ll,
+    "{\"resources\":[{\"uri\":\"test://doc\",\"name\":\"doc\",\"description\":\"a test doc\",\"mimeType\":\"text/plain\"}]}") == 1,
+    "resources/list serializes resource metadata");
+
+    # resources/read invokes the handler and returns its body verbatim.
+    var rs_read = resp_result(dispatcher_dispatch(rs_d,
+    req_with_params(req_new("3", "resources/read"), "{\"uri\":\"test://doc\"}"), 0));
+    assert(streq(rs_read,
+    "{\"contents\":[{\"uri\":\"test://doc\",\"mimeType\":\"text/plain\",\"text\":\"body\"}]}") == 1,
+    "resources/read returns handler body");
+
+    var rs_unk = dispatcher_dispatch(rs_d,
+    req_with_params(req_new("3", "resources/read"), "{\"uri\":\"nope://x\"}"), 0);
+    assert(resp_error_obj(rs_unk) != 0, "resources/read unknown uri → error");
+
+    var rs_nouri = dispatcher_dispatch(rs_d,
+    req_with_params(req_new("3", "resources/read"), "{}"), 0);
+    assert(resp_error_obj(rs_nouri) != 0, "resources/read missing uri → error");
+
+    assert_eq(resource_registry_len(dispatcher_resources(rs_d)), 1, "one resource registered");
+    assert_eq(resource_registry_contains(dispatcher_resources(rs_d), "test://doc"), 1, "registry contains doc");
+    assert_eq(resource_registry_contains(dispatcher_resources(rs_d), "missing://x"), 0, "registry absent for missing");
+
+    # prompts + resources together → both advertised, tools/prompts/resources order.
+    dispatcher_register_resource(pr_d,
+    resource_def_new("test://p", "p", 0, 0), &h_resource);
+    var rs_both = resp_result(dispatcher_dispatch(pr_d,
+    req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}"), 0));
+    assert(streq(jsonx_get_raw(rs_both, "capabilities"),
+    "{\"tools\":{},\"prompts\":{},\"resources\":{}}") == 1,
+    "prompts + resources both advertised in order");
 
     # ---------------- dispatch: tools/call success ----------------
     dispatcher_handle(d, "svc_echo", &h_echo);

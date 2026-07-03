@@ -1,0 +1,113 @@
+# bote::resources — MCP resources capability (resources/list + resources/read)
+#
+# Mirrors src/prompts.cyr: a ResourceRegistry holds resource metadata (for
+# resources/list) plus a uri→handler map (for resources/read). The
+# dispatcher owns an optional ResourceRegistry; the `resources` capability
+# is advertised at initialize iff one is present (see src/dispatch.cyr
+# _build_capabilities). JSON serialization for the listing lives in
+# dispatch.cyr; read bodies are produced by the handler.
+#
+# Resource read-handler ABI (mirrors the 2.0 tool ABI):
+#   fn h(uri_cstr, claims) → result_cstr
+# where `uri_cstr` is the requested resource URI and the returned cstr is
+# the full resources/read result body, e.g.
+#   {"contents":[{"uri":"...","mimeType":"...","text":"..."}]}
+# (MCP ResourceContents — bare uri/mimeType/text|blob, NOT a content block).
+#
+# subscribe / listChanged are intentionally out until a server→client push
+# path exists (they need the notification channel that is not yet wired).
+#
+# Requires (entry point includes, before this module): hashmap (pulled by
+# src/registry.cyr), vec, str, string. No local includes — matches dispatch.
+
+# ================================================================
+# ResourceDef — resource metadata (surfaced in resources/list)
+# ================================================================
+#
+# Layout (32 bytes):
+#   +0  uri         cstr
+#   +8  name        cstr
+#   +16 description cstr or 0
+#   +24 mime_type   cstr or 0
+
+fn resource_def_new(uri, name, description, mime_type) {
+    var r = alloc(32);
+    store64(r, uri);
+    store64(r + 8, name);
+    store64(r + 16, description);
+    store64(r + 24, mime_type);
+    return r;
+}
+
+fn resource_def_uri(r) { return load64(r); }
+fn resource_def_name(r) { return load64(r + 8); }
+fn resource_def_description(r) { return load64(r + 16); }
+fn resource_def_mime_type(r) { return load64(r + 24); }
+
+# ================================================================
+# ResourceRegistry
+# ================================================================
+#
+# Layout (24 bytes):
+#   +0  entries  hashmap: uri_cstr -> ResourceDef ptr
+#   +8  uris     vec of uri_cstr (insertion order, for list())
+#   +16 handlers hashmap: uri_cstr -> handler fn ptr
+
+fn resource_registry_new() {
+    var r = alloc(24);
+    store64(r, map_new());
+    store64(r + 8, vec_new());
+    store64(r + 16, map_new());
+    return r;
+}
+
+fn resource_registry_entries(r) { return load64(r); }
+fn resource_registry_uris(r) { return load64(r + 8); }
+fn resource_registry_handlers(r) { return load64(r + 16); }
+
+# Register (or replace) a resource + its read handler. Returns 0.
+fn resource_registry_register(r, resource_def, handler_fp) {
+    var uri = resource_def_uri(resource_def);
+    var entries = resource_registry_entries(r);
+    if (map_has(entries, uri) == 0) {
+        vec_push(resource_registry_uris(r), uri);
+    }
+    map_set(entries, uri, resource_def);
+    map_set(resource_registry_handlers(r), uri, handler_fp);
+    return 0;
+}
+
+fn resource_registry_get(r, uri) {
+    return map_get(resource_registry_entries(r), uri);
+}
+
+fn resource_registry_contains(r, uri) {
+    return map_has(resource_registry_entries(r), uri);
+}
+
+# Read-handler fn ptr for `uri`, or 0 if the resource is unknown.
+fn resource_registry_handler(r, uri) {
+    if (map_has(resource_registry_handlers(r), uri) == 0) { return 0; }
+    return map_get(resource_registry_handlers(r), uri);
+}
+
+fn resource_registry_len(r) {
+    return map_count(resource_registry_entries(r));
+}
+
+# Return a vec of ResourceDef pointers in insertion order.
+fn resource_registry_list(r) {
+    var out = vec_new();
+    var uris = resource_registry_uris(r);
+    var entries = resource_registry_entries(r);
+    var n = vec_len(uris);
+    var i = 0;
+    while (i < n) {
+        var uri = vec_get(uris, i);
+        if (map_has(entries, uri) == 1) {
+            vec_push(out, map_get(entries, uri));
+        }
+        i = i + 1;
+    }
+    return out;
+}

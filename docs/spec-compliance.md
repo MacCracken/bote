@@ -31,6 +31,7 @@ supported version.
 | `tools/list` with full `inputSchema` | `dispatch` + `registry` | ✅ |
 | `tools/call` with arguments + version selection | `dispatch` + `schema` | ✅ |
 | `prompts/list` + `prompts/get` (capability advertised iff a `PromptRegistry` is present) | `dispatch` + `prompts` | ✅ |
+| `resources/list` + `resources/read` (capability advertised iff a `ResourceRegistry` is present; `subscribe`/`listChanged` deferred with the push path) | `dispatch` + `resources` | ✅ |
 | Notifications produce no response | `dispatch` + `codec` | ✅ |
 | Batch arrays — mixed req + notif return only req responses | `codec` | ✅ |
 

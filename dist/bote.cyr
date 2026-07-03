@@ -888,6 +888,122 @@ fn prompt_registry_list(r) {
     return out;
 }
 
+# --- resources.cyr ---
+
+# bote::resources — MCP resources capability (resources/list + resources/read)
+#
+# Mirrors src/prompts.cyr: a ResourceRegistry holds resource metadata (for
+# resources/list) plus a uri→handler map (for resources/read). The
+# dispatcher owns an optional ResourceRegistry; the `resources` capability
+# is advertised at initialize iff one is present (see src/dispatch.cyr
+# _build_capabilities). JSON serialization for the listing lives in
+# dispatch.cyr; read bodies are produced by the handler.
+#
+# Resource read-handler ABI (mirrors the 2.0 tool ABI):
+#   fn h(uri_cstr, claims) → result_cstr
+# where `uri_cstr` is the requested resource URI and the returned cstr is
+# the full resources/read result body, e.g.
+#   {"contents":[{"uri":"...","mimeType":"...","text":"..."}]}
+# (MCP ResourceContents — bare uri/mimeType/text|blob, NOT a content block).
+#
+# subscribe / listChanged are intentionally out until a server→client push
+# path exists (they need the notification channel that is not yet wired).
+#
+# Requires (entry point includes, before this module): hashmap (pulled by
+# src/registry.cyr), vec, str, string. No local includes — matches dispatch.
+
+# ================================================================
+# ResourceDef — resource metadata (surfaced in resources/list)
+# ================================================================
+#
+# Layout (32 bytes):
+#   +0  uri         cstr
+#   +8  name        cstr
+#   +16 description cstr or 0
+#   +24 mime_type   cstr or 0
+
+fn resource_def_new(uri, name, description, mime_type) {
+    var r = alloc(32);
+    store64(r, uri);
+    store64(r + 8, name);
+    store64(r + 16, description);
+    store64(r + 24, mime_type);
+    return r;
+}
+
+fn resource_def_uri(r) { return load64(r); }
+fn resource_def_name(r) { return load64(r + 8); }
+fn resource_def_description(r) { return load64(r + 16); }
+fn resource_def_mime_type(r) { return load64(r + 24); }
+
+# ================================================================
+# ResourceRegistry
+# ================================================================
+#
+# Layout (24 bytes):
+#   +0  entries  hashmap: uri_cstr -> ResourceDef ptr
+#   +8  uris     vec of uri_cstr (insertion order, for list())
+#   +16 handlers hashmap: uri_cstr -> handler fn ptr
+
+fn resource_registry_new() {
+    var r = alloc(24);
+    store64(r, map_new());
+    store64(r + 8, vec_new());
+    store64(r + 16, map_new());
+    return r;
+}
+
+fn resource_registry_entries(r) { return load64(r); }
+fn resource_registry_uris(r) { return load64(r + 8); }
+fn resource_registry_handlers(r) { return load64(r + 16); }
+
+# Register (or replace) a resource + its read handler. Returns 0.
+fn resource_registry_register(r, resource_def, handler_fp) {
+    var uri = resource_def_uri(resource_def);
+    var entries = resource_registry_entries(r);
+    if (map_has(entries, uri) == 0) {
+        vec_push(resource_registry_uris(r), uri);
+    }
+    map_set(entries, uri, resource_def);
+    map_set(resource_registry_handlers(r), uri, handler_fp);
+    return 0;
+}
+
+fn resource_registry_get(r, uri) {
+    return map_get(resource_registry_entries(r), uri);
+}
+
+fn resource_registry_contains(r, uri) {
+    return map_has(resource_registry_entries(r), uri);
+}
+
+# Read-handler fn ptr for `uri`, or 0 if the resource is unknown.
+fn resource_registry_handler(r, uri) {
+    if (map_has(resource_registry_handlers(r), uri) == 0) { return 0; }
+    return map_get(resource_registry_handlers(r), uri);
+}
+
+fn resource_registry_len(r) {
+    return map_count(resource_registry_entries(r));
+}
+
+# Return a vec of ResourceDef pointers in insertion order.
+fn resource_registry_list(r) {
+    var out = vec_new();
+    var uris = resource_registry_uris(r);
+    var entries = resource_registry_entries(r);
+    var n = vec_len(uris);
+    var i = 0;
+    while (i < n) {
+        var uri = vec_get(uris, i);
+        if (map_has(entries, uri) == 1) {
+            vec_push(out, map_get(entries, uri));
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
 # --- events.cyr ---
 
 # bote::events — event topic constants + EventSink abstraction
@@ -1219,16 +1335,19 @@ fn validate_tool_name(name) {
 #   +32 event_sink          EventSink ptr or 0 (no-op when 0)
 #   +40 prompt_registry     PromptRegistry ptr or 0 (prompts capability off
 #                           when 0; created lazily by dispatcher_register_prompt)
+#   +48 resource_registry   ResourceRegistry ptr or 0 (resources capability off
+#                           when 0; created lazily by dispatcher_register_resource)
 # ================================================================
 
 fn dispatcher_new(reg) {
-    var d = alloc(48);
+    var d = alloc(56);
     store64(d, reg);
     store64(d + 8, map_new());
     store64(d + 16, map_new());
     store64(d + 24, 0);
     store64(d + 32, 0);
     store64(d + 40, 0);
+    store64(d + 48, 0);
     return d;
 }
 
@@ -1238,10 +1357,12 @@ fn dispatcher_streaming(d)  { return load64(d + 16); }
 fn dispatcher_audit_sink(d) { return load64(d + 24); }
 fn dispatcher_event_sink(d) { return load64(d + 32); }
 fn dispatcher_prompts(d)    { return load64(d + 40); }
+fn dispatcher_resources(d)  { return load64(d + 48); }
 
 fn dispatcher_set_audit(d, sink) { store64(d + 24, sink); return d; }
 fn dispatcher_set_events(d, sink) { store64(d + 32, sink); return d; }
 fn dispatcher_set_prompts(d, preg) { store64(d + 40, preg); return d; }
+fn dispatcher_set_resources(d, rreg) { store64(d + 48, rreg); return d; }
 
 # Register a sync tool handler. **2.0 ABI**: handler signature is
 #   fn h(args_cstr, claims) → result_cstr (claims always 0 today)
@@ -1308,6 +1429,20 @@ fn dispatcher_register_prompt(d, prompt_def, handler_fp) {
         dispatcher_set_prompts(d, preg);
     }
     prompt_registry_register(preg, prompt_def, handler_fp);
+    return 0;
+}
+
+# Register an MCP resource + its read handler. Lazily stands up the
+# dispatcher's ResourceRegistry on first call — which is also what flips the
+# `resources` capability on at initialize (see _build_capabilities).
+# Returns 0.
+fn dispatcher_register_resource(d, resource_def, handler_fp) {
+    var rreg = dispatcher_resources(d);
+    if (rreg == 0) {
+        rreg = resource_registry_new();
+        dispatcher_set_resources(d, rreg);
+    }
+    resource_registry_register(rreg, resource_def, handler_fp);
     return 0;
 }
 
@@ -1461,9 +1596,12 @@ fn _server_emits_tool_list_changed() { return 0; }
 #     tool-capable). `listChanged` gated on _server_emits_tool_list_changed.
 #   - `prompts`: advertised iff the dispatcher has a PromptRegistry (i.e. at
 #     least one prompt was registered — see dispatcher_register_prompt).
-#   - resources / logging / completions: NOT YET. Each is added here, gated
-#     on its own handler surface, as that capability lands (see the
-#     secureyeoman → bote MCP bring-over stages).
+#   - `resources`: advertised iff the dispatcher has a ResourceRegistry (see
+#     dispatcher_register_resource). `subscribe`/`listChanged` omitted — no
+#     server→client push path yet.
+#   - logging / completions: NOT YET. Each is added here, gated on its own
+#     handler surface, as that capability lands (see the secureyeoman → bote
+#     MCP bring-over stages).
 #
 # Version policy: every capability below exists across all supported
 # protocol versions (2024-11-05 … 2025-11-25), so none is gated on the
@@ -1477,6 +1615,9 @@ fn _build_capabilities(sb, d) {
     str_builder_add_cstr(sb, "}");
     if (dispatcher_prompts(d) != 0) {
         str_builder_add_cstr(sb, ",\"prompts\":{}");
+    }
+    if (dispatcher_resources(d) != 0) {
+        str_builder_add_cstr(sb, ",\"resources\":{}");
     }
     str_builder_add_cstr(sb, "}");
     return 0;
@@ -1610,6 +1751,37 @@ fn _extract_tool_name(params_cstr, err_out) {
     return name;
 }
 
+# Build the resources/list response result body.
+fn _build_resources_list_result(rreg) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"resources\":[");
+    var lst = resource_registry_list(rreg);
+    var n = vec_len(lst);
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        var r = vec_get(lst, i);
+        str_builder_add_cstr(sb, "{");
+        _json_emit_str_field(sb, "uri", resource_def_uri(r));
+        str_builder_add_cstr(sb, ",");
+        _json_emit_str_field(sb, "name", resource_def_name(r));
+        var rd = resource_def_description(r);
+        if (rd != 0) {
+            str_builder_add_cstr(sb, ",");
+            _json_emit_str_field(sb, "description", rd);
+        }
+        var rm = resource_def_mime_type(r);
+        if (rm != 0) {
+            str_builder_add_cstr(sb, ",");
+            _json_emit_str_field(sb, "mimeType", rm);
+        }
+        str_builder_add_cstr(sb, "}");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return str_data(str_builder_build(sb));
+}
+
 # ================================================================
 # dispatch — main entry
 # ================================================================
@@ -1658,6 +1830,28 @@ fn dispatcher_dispatch(d, request, claims) {
         var presult = fncall2(phandler, pargs, claims);
         if (presult == 0) { presult = "{\"messages\":[]}"; }
         return resp_success(id, presult);
+    }
+
+    # resources/* only when the resources capability is enabled (a
+    # ResourceRegistry is present). Otherwise fall through to -32601.
+    if (streq(method, "resources/list") == 1 && dispatcher_resources(d) != 0) {
+        return resp_success(id, _build_resources_list_result(dispatcher_resources(d)));
+    }
+
+    if (streq(method, "resources/read") == 1 && dispatcher_resources(d) != 0) {
+        var ruri = jsonx_get_str(params, "uri");
+        if (ruri == 0 || strlen(ruri) == 0) {
+            var re = bote_err_new(ERR_INVALID_PARAMS, "", "missing or empty 'uri' field");
+            return resp_error(id, bote_err_rpc_code(bote_err_tag(re)), str_data(bote_err_format(re)));
+        }
+        var rhandler = resource_registry_handler(dispatcher_resources(d), ruri);
+        if (rhandler == 0) {
+            var rnf = bote_err_new(ERR_INVALID_PARAMS, ruri, "resource not found");
+            return resp_error(id, bote_err_rpc_code(bote_err_tag(rnf)), str_data(bote_err_format(rnf)));
+        }
+        var rresult = fncall2(rhandler, ruri, claims);
+        if (rresult == 0) { rresult = "{\"contents\":[]}"; }
+        return resp_success(id, rresult);
     }
 
     if (streq(method, "tools/call") == 1) {
