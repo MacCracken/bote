@@ -51,6 +51,9 @@ include "src/session.cyr"
 include "src/auth.cyr"
 include "src/transport_streamable.cyr"
 
+# Minimal tool handler for the notify-sink full-path test.
+fn _n_handler(args, claims) { return "{}"; }
+
 fn main() {
     alloc_init();
     fl_init();
@@ -148,6 +151,37 @@ fn main() {
     assert(streq(stream_event_id(vec_get(after_b, 0)), "evt-c") == 1, "after evt-b is evt-c");
     # Unknown cursor → empty (client missed too much).
     assert_eq(vec_len(_strm_drain_events(dbuf, "evt-zzz")), 0, "unknown cursor → empty");
+
+    # ---------------- notify sink: tool-set changes → session buffers ----------------
+    var nstore = session_store_default();
+    var nsink = strm_notify_sink(nstore);
+    var nsid = session_store_create(nstore, "2025-11-25");
+    var nsess = session_store_validate(nstore, nsid);
+    # A tool-registered event broadcasts notifications/tools/list_changed.
+    event_sink_publish(nsink, TOPIC_TOOL_REGISTERED(), "{\"tool_name\":\"x_y\"}");
+    var nso = _strm_session_outbound(nsess);
+    assert_eq(resumption_buffer_len(session_outbound_buffer(nso)), 1,
+    "tool_registered → 1 buffered notification");
+    var nev = vec_get(resumption_buffer_events(session_outbound_buffer(nso)), 0);
+    assert(streq(stream_event_data(nev),
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\",\"params\":{}}") == 1,
+    "buffered event is tools/list_changed");
+    # Non-tool-set topics (audit events) are ignored by the client sink.
+    event_sink_publish(nsink, TOPIC_TOOL_COMPLETED(), "{}");
+    assert_eq(resumption_buffer_len(session_outbound_buffer(nso)), 1, "completed topic ignored");
+    # Deregister also notifies.
+    event_sink_publish(nsink, TOPIC_TOOL_DEREGISTERED(), "{\"tool_name\":\"x_y\"}");
+    assert_eq(resumption_buffer_len(session_outbound_buffer(nso)), 2,
+    "tool_deregistered → another notification");
+
+    # Full path: dispatcher_register_tool fires the event through the sink.
+    var ndisp = dispatcher_new(tool_registry_new());
+    dispatcher_set_events(ndisp, nsink);
+    var nbefore = resumption_buffer_len(session_outbound_buffer(nso));
+    dispatcher_register_tool(ndisp,
+    tool_def_new("reg_tool", "d", schema_new("object", 0, vec_new())), &_n_handler);
+    assert_eq(resumption_buffer_len(session_outbound_buffer(nso)), nbefore + 1,
+    "dispatcher_register_tool → list_changed reaches the session buffer");
 
     # ---------------- StreamableConfig ----------------
     var scfg = streamable_config_new("/mcp", 0x0100007F, 8392);

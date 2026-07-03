@@ -160,10 +160,10 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `tests/bote_libro_tools.tcyr` | 22 | libro audit-tool dispatch surface |
 | `tests/bote_pkce.tcyr` | 17 | RFC 7636 PKCE-S256 |
 | `tests/bote_sandbox.tcyr` | 13 | kavach 3.0 pluggable runner adapter |
-| `tests/bote_streamable.tcyr` | 41 | Streamable HTTP — EventIdGenerator / StreamEvent / ResumptionBuffer / SessionOutbound (per-session buffer + id gen) / GET drain selection / StreamableConfig |
+| `tests/bote_streamable.tcyr` | 46 | Streamable HTTP — EventIdGenerator / StreamEvent / ResumptionBuffer / SessionOutbound (per-session buffer + id gen) / GET drain selection / client-notification sink / StreamableConfig |
 | `tests/bote_ws.tcyr` | 10 | WebSocket — WsConfig + handler wire-up |
 | `tests/bote_core_only_smoke.tcyr` | drift guard | Includes only `dist/bote-core.cyr` — catches core/transport entanglement |
-| **Total** | **720** | + 1 drift smoke |
+| **Total** | **725** | + 1 drift smoke |
 
 Criterion benchmarks: **14** in `tests/bote.bcyr` (dispatch × 3, jsonx × 2, codec × 3, schema × 4, auth_bearer × 2).
 

@@ -37,6 +37,15 @@ fn main() {
 
     var dispatcher = bote_dispatcher_with_echo();
 
+    # Server→client notification wiring. A SessionStore gives each client a
+    # per-session outbound buffer; the client-notification EventSink pushes
+    # notifications/tools/list_changed into those buffers on a tool-set
+    # change, drained on the session's next SSE GET. Enabling the store also
+    # activates MCP session lifecycle: `initialize` mints an MCP-Session-Id
+    # and subsequent requests (incl. the GET stream) must present it.
+    var session_store = session_store_default();
+    dispatcher_set_events(dispatcher, strm_notify_sink(session_store));
+
     var auth_fp_slot[8]; var auth_ctx_slot[8];
     store64(&auth_fp_slot, 0); store64(&auth_ctx_slot, 0);
     _bote_bearer_from_env(&auth_fp_slot, &auth_ctx_slot);
@@ -48,6 +57,7 @@ fn main() {
     if (argc() >= 2) { port = _parse_uint(argv(1)); }
     if (port == 0) { port = 8392; }
     var cfg = streamable_config_new("/mcp", INADDR_LOOPBACK(), port);
+    streamable_config_with_session_store(cfg, session_store);
     if (bearer_fp != 0) { streamable_config_with_bearer_validator(cfg, bearer_fp, bearer_ctx); }
     return transport_streamable_run(dispatcher, cfg);
 }

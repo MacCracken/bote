@@ -173,6 +173,47 @@ fn _strm_session_outbound(session) {
 }
 
 # ================================================================
+# Client-notification sink — bridges dispatcher EventSink topics to the
+# per-session outbound buffers as MCP notifications.
+# ================================================================
+#
+# Wired as the dispatcher's EventSink (dispatcher_set_events); ctx is the
+# SessionStore. On a tool-set change it broadcasts notifications/tools/
+# list_changed into EVERY active session's buffer (each with that session's
+# own event id), for delivery on that session's next GET. Non-tool-set
+# topics (completed/failed/deprecated/…) are audit events, not client
+# notifications, and are ignored here.
+
+fn _strm_notify_publish(ctx, topic, payload) {
+    if (streq(topic, TOPIC_TOOL_REGISTERED()) == 0
+    && streq(topic, TOPIC_TOOL_DEREGISTERED()) == 0) {
+        return 0;
+    }
+    if (ctx == 0) { return 0; }
+    var wire = tools_list_changed_notification();
+    var ids = session_store_ids(ctx);
+    var sessions = session_store_sessions(ctx);
+    var n = vec_len(ids);
+    var i = 0;
+    while (i < n) {
+        var session = map_get(sessions, vec_get(ids, i));
+        if (session != 0) {
+            var so = _strm_session_outbound(session);
+            resumption_buffer_push(session_outbound_buffer(so),
+            stream_event_new(event_id_gen_next(session_outbound_id_gen(so)), wire));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Build the client-notification EventSink for a SessionStore. Pass to
+# dispatcher_set_events so tool register/dereg fan out to session buffers.
+fn strm_notify_sink(store) {
+    return event_sink_new(&_strm_notify_publish, store);
+}
+
+# ================================================================
 # StreamableConfig (80 bytes):
 #   +0  endpoint_path     cstr (e.g. "/mcp")
 #   +8  bind_addr         i64

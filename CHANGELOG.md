@@ -17,6 +17,25 @@ have per release.
 ## [Unreleased]
 
 ### Added
+- **`tools/list_changed` producer** — bite 4 of the server→client push path (the
+  producer that makes the notification actually flow). A client-notification
+  `EventSink` (`strm_notify_sink(store)` in `src/transport_streamable.cyr`) wraps
+  the `SessionStore`; on a `TOPIC_TOOL_REGISTERED`/`_DEREGISTERED` event it
+  **broadcasts** `notifications/tools/list_changed` into every active session's
+  outbound buffer (each with that session's own event id), for delivery on the
+  next SSE GET. Non-tool-set topics (completed/failed/deprecated — audit events)
+  are ignored. No `dispatch.cyr` change and no second sink slot needed: register/
+  dereg already publish to the dispatcher's `EventSink`, and `main_streamable`
+  wasn't using that slot. `main_streamable.cyr` now wires a `SessionStore` +
+  `dispatcher_set_events(strm_notify_sink(store))` and configures the store on
+  the transport — which also **activates MCP session enforcement** (`initialize`
+  mints an `MCP-Session-Id`; other requests, incl. the GET stream, must present
+  it — verified on the wire: init returns a session id, a session GET streams,
+  a session-less GET → 404). The `list_changed` path is proven by a full
+  `dispatcher_register_tool` → sink → buffer test; it stays dormant in the
+  reference binary only because nothing dynamically (de)registers there. The
+  capability is **not advertised yet** — that is bite 5, gated on this working.
+  +5 assertions in `tests/bote_streamable.tcyr` (41 → 46).
 - **Unconditional GET drain** — bite 3 of the server→client push path.
   `_strm_handle_get` now resolves the client's per-session `SessionOutbound`
   buffer (from a valid `MCP-Session-Id` when a session store is configured; else
