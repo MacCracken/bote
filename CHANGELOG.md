@@ -17,7 +17,29 @@ have per release.
 ## [Unreleased]
 
 ### Added
-- **MCP completion capability** — `completion/complete` (`src/dispatch.cyr`). A
+- **Notification wire builders** (`src/stream.cyr`) — the first bite of the
+  server→client push path. A generic `notification_wire(method, params)` emits
+  the JSON-RPC notification envelope `{"jsonrpc":"2.0","method":…,"params":…}`
+  (method JSON-escaped; raw params, `0` ⇒ `{}`), with thin wrappers
+  `tools_list_changed_notification` / `prompts_list_changed_notification` /
+  `resources_list_changed_notification` / `resource_updated_notification(uri)`.
+  `progress_notification` now delegates to it (output byte-identical — the two
+  existing assertions are unchanged). These produce wire bytes only; delivery is
+  the transport's job (the streamable `ResumptionBuffer`, wired in a later bite).
+  Dep-free, additive, full-bundle-only (`stream.cyr` is not in `[lib.core]`), so
+  `dist/bote-core.cyr` is unchanged. +6 assertions in `tests/bote.tcyr`
+  (404 → 410). Groundwork for the honest polled-push MVP (`*/list_changed`);
+  no capability is advertised yet — that waits until a drain path exists.
+
+### Changed
+- **Roadmap: dropped the stale "blocked on cyrius `lib/thread.cyr` MPSC"
+  framing** for streaming dispatch. `lib/thread.cyr` (MPSC + mutex) and
+  `lib/async.cyr` are complete and pinned — server→client notifications are
+  unwired-**by-choice**, not gated on cyrius. A dep-free polled-push MVP (buffer
+  at produce time, drain on the client's next streamable `GET`) needs no threads;
+  only real-time held-open streaming does (the single-threaded sandhi accept loop
+  would otherwise deadlock).
+
   single completion handler on the dispatcher (`+56 completion_handler`, 56 → 64
   bytes) set via `dispatcher_set_completion`; the `completions` capability is
   **derived** from its presence (`{"tools":{},…,"completions":{}}`). Handler ABI

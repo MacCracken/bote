@@ -108,15 +108,20 @@ The functional 2.7.x slate from the 2.6.x carry-forward list is
 empty after 2.7.2 (HostRegistry hot-reload + CONTRIBUTING.md + the
 opt-in core profile all shipped). 2.7.x continues opportunistically
 as new needs surface. The next *planned* arc opens at 2.8.x —
-threaded streaming dispatch, still gated on cyrius `lib/thread.cyr`
-MPSC + `lib/async.cyr` cancellation firming up.
+server→client notifications (`*/list_changed`, `resources/subscribe`,
+`logging`). cyrius `lib/thread.cyr` (MPSC + mutex) and `lib/async.cyr`
+are **complete and pinned**, so this is unwired-by-choice, not a cyrius
+gate: a dep-free polled-push MVP (buffer at produce time, drain on the
+client's next streamable `GET` — the `ResumptionBuffer` scaffold already
+exists) needs no threads at all. Only real-time *held-open* streaming
+needs `lib/thread.cyr`, because the single-threaded sandhi accept loop
+would otherwise deadlock (a held GET starves the POSTs that feed it).
 
 ### Blocked on cyrius / external
 
 | Item | Waiting on |
 |---|---|
-| **Threaded streaming dispatch** (`dispatcher_dispatch_streaming`) | cyrius `lib/thread.cyr` MPSC + `lib/async.cyr` cancellation polling firming up. Data primitives (`ProgressUpdate`, `CancellationToken`) already in place. |
-| **`$/cancelRequest` mid-stream handling** | Streaming dispatch first. |
+| **`$/cancelRequest` mid-stream handling** | Real-time (held-open) streaming dispatch first — itself a bote-side threading task, not a cyrius gate (see the 2.8.x note above). |
 | **Slowloris recv timeout** (audit H5) | `sock_set_recv_timeout` helper in stdlib `lib/net.cyr`. |
 | **WebSocket `Sec-WebSocket-Key` length validation** (audit M4) | stdlib `lib/ws_server.cyr` fix. |
 | **WebSocket arena-per-frame allocator** | stdlib `fl_free` support for long-lived connections. |

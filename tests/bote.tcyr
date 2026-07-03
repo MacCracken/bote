@@ -948,6 +948,26 @@ fn main() {
     var notif_min = progress_notification("\"abc\"", u_min);
     assert(streq(notif_min, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":\"abc\",\"progress\":7}}") == 1, "progress notif minimal");
 
+    # ---------------- stream: notification_wire + list_changed builders ----------------
+    assert(streq(notification_wire("notifications/x", "{\"a\":1}"),
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/x\",\"params\":{\"a\":1}}") == 1,
+    "notification_wire with raw params");
+    assert(streq(notification_wire("notifications/y", 0),
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/y\",\"params\":{}}") == 1,
+    "notification_wire null params → {}");
+    assert(streq(tools_list_changed_notification(),
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\",\"params\":{}}") == 1,
+    "tools/list_changed notification");
+    assert(streq(prompts_list_changed_notification(),
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/prompts/list_changed\",\"params\":{}}") == 1,
+    "prompts/list_changed notification");
+    assert(streq(resources_list_changed_notification(),
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/list_changed\",\"params\":{}}") == 1,
+    "resources/list_changed notification");
+    assert(streq(resource_updated_notification("bote://info"),
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":{\"uri\":\"bote://info\"}}") == 1,
+    "resources/updated notification");
+
     # ---------------- session: validate_protocol_version ----------------
     assert_eq(validate_protocol_version("2025-11-25"), 0, "proto 2025-11-25 ok");
     assert_eq(validate_protocol_version("2025-03-26"), 0, "proto 2025-03-26 ok");

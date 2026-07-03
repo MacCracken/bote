@@ -86,26 +86,71 @@ fn stream_context_new() {
 fn stream_context_progress(c) { return load64(c); }
 fn stream_context_cancellation(c) { return load64(c + 8); }
 
+# ================================================================
+# JSON-RPC notification wire builders
+# ================================================================
+#
+# `notification_wire` is the generic server→client notification envelope:
+#   {"jsonrpc":"2.0","method":<method>,"params":<params>}
+# `method` is a plain string (JSON-escaped); `params` is a raw JSON literal
+# cstr already shaped by the caller (0 ⇒ emit {}). These builders only
+# produce the wire bytes — delivery is the transport's job (the streamable
+# ResumptionBuffer; see src/transport_streamable.cyr).
+
+fn notification_wire(method, params) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"method\":\"");
+    _json_emit_escaped(sb, method);
+    str_builder_add_cstr(sb, "\",\"params\":");
+    if (params == 0) { str_builder_add_cstr(sb, "{}"); }
+    else { str_builder_add_cstr(sb, params); }
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
+# `notifications/tools/list_changed` — the tool set changed.
+fn tools_list_changed_notification() {
+    return notification_wire("notifications/tools/list_changed", "{}");
+}
+
+# `notifications/prompts/list_changed` — the prompt set changed.
+fn prompts_list_changed_notification() {
+    return notification_wire("notifications/prompts/list_changed", "{}");
+}
+
+# `notifications/resources/list_changed` — the resource set changed.
+fn resources_list_changed_notification() {
+    return notification_wire("notifications/resources/list_changed", "{}");
+}
+
+# `notifications/resources/updated` — the resource at `uri` changed.
+fn resource_updated_notification(uri) {
+    var pb = str_builder_new();
+    str_builder_add_cstr(pb, "{\"uri\":\"");
+    _json_emit_escaped(pb, uri);
+    str_builder_add_cstr(pb, "\"}");
+    return notification_wire("notifications/resources/updated", str_data(str_builder_build(pb)));
+}
+
 # Build a JSON-RPC notification cstr for a progress update.
 # request_id is a raw JSON literal cstr (e.g. "1", "\"abc\"", "null").
 fn progress_notification(request_id, update) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",");
-    str_builder_add_cstr(sb, "\"params\":{\"progressToken\":");
-    if (request_id == 0) { str_builder_add_cstr(sb, "null"); }
-    else { str_builder_add_cstr(sb, request_id); }
-    str_builder_add_cstr(sb, ",\"progress\":");
-    str_builder_add_int(sb, progress_update_progress(update));
+    var pb = str_builder_new();
+    str_builder_add_cstr(pb, "{\"progressToken\":");
+    if (request_id == 0) { str_builder_add_cstr(pb, "null"); }
+    else { str_builder_add_cstr(pb, request_id); }
+    str_builder_add_cstr(pb, ",\"progress\":");
+    str_builder_add_int(pb, progress_update_progress(update));
     if (progress_update_has_total(update) == 1) {
-        str_builder_add_cstr(sb, ",\"total\":");
-        str_builder_add_int(sb, progress_update_total(update));
+        str_builder_add_cstr(pb, ",\"total\":");
+        str_builder_add_int(pb, progress_update_total(update));
     }
     var msg = progress_update_message(update);
     if (msg != 0) {
-        str_builder_add_cstr(sb, ",\"message\":\"");
-        _json_emit_escaped(sb, msg);
-        str_builder_add_cstr(sb, "\"");
+        str_builder_add_cstr(pb, ",\"message\":\"");
+        _json_emit_escaped(pb, msg);
+        str_builder_add_cstr(pb, "\"");
     }
-    str_builder_add_cstr(sb, "}}");
-    return str_data(str_builder_build(sb));
+    str_builder_add_cstr(pb, "}");
+    return notification_wire("notifications/progress", str_data(str_builder_build(pb)));
 }

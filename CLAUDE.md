@@ -152,7 +152,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 
 | Test file | Assertions | Surface |
 |-----------|-----------:|---------|
-| `tests/bote.tcyr` | 404 | error / protocol / jsonx / registry / tool annotations + profiles / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / audit_libro / events_majra wire-up |
+| `tests/bote.tcyr` | 410 | error / protocol / jsonx / registry / tool annotations + profiles / prompts / resources / completion / dispatch / codec / schema / stream + notification builders / session / HTTP helpers / discovery / bridge / events / audit / audit_libro / events_majra wire-up |
 | `tests/bote_auth.tcyr` | 38 | Bearer + allowlist + JWT HS256 + PKCE validators |
 | `tests/bote_content.tcyr` | 24 | Typed MCP content blocks + annotations |
 | `tests/bote_host.tcyr` | 113 | HostRegistry + IPv4/IPv6 SSRF + JSON config hot-reload |
@@ -163,7 +163,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `tests/bote_streamable.tcyr` | 25 | Streamable HTTP — EventIdGenerator / StreamEvent / ResumptionBuffer / StreamableConfig |
 | `tests/bote_ws.tcyr` | 10 | WebSocket — WsConfig + handler wire-up |
 | `tests/bote_core_only_smoke.tcyr` | drift guard | Includes only `dist/bote-core.cyr` — catches core/transport entanglement |
-| **Total** | **694** | + 1 drift smoke |
+| **Total** | **700** | + 1 drift smoke |
 
 Criterion benchmarks: **14** in `tests/bote.bcyr` (dispatch × 3, jsonx × 2, codec × 3, schema × 4, auth_bearer × 2).
 
