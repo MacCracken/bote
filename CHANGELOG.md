@@ -18,6 +18,22 @@ have per release.
 
 _(empty)_
 
+## [3.0.1] — 2026-07-07 — bote_echo MCP conformance + toolchain 6.4.20
+
+### Fixed
+- **`bote_echo` now returns an MCP-conformant result.** The reference sample tool returned its
+  arguments verbatim (a bare JSON object), which is not a valid `tools/call` result — a strict MCP
+  client that reads `content[0].text` (e.g. thoth's `/call`, and the agentic tool loop) found none and
+  rendered "no text content could be parsed". `bote_echo_handler` now wraps the echoed arguments in a
+  text content block via the existing `content_text_response` helper —
+  `{"content":[{"type":"text","text":"<args>"}]}`. The real `fs_*` tools were already conformant; only
+  the echo sample was not. (`src/main_common.cyr`.)
+
+### Changed
+- **Toolchain pin `6.3.42 → 6.4.20`** (`cyrius.cyml` + `cyrius lib sync`, 56 floor modules). Clears the
+  drift warning; all three binaries (bote / bote-streamable / bote-ws) build and the full test suite
+  passes on the new toolchain.
+
 ## [3.0.0] — 2026-07-03 — MCP capability suite + honest polled-push notifications
 
 The **3.0.0** milestone rounds out bote's MCP surface. bote went from three

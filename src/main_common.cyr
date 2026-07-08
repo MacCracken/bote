@@ -9,8 +9,13 @@
 # cyrius 5.11.x (4 MB cap), the per-transport entries fold back into
 # src/main.cyr and this common file goes with them.
 
+# Echo the arguments back as an MCP-conformant tool result. Prior to 3.0.1 this
+# returned the raw `args` JSON verbatim (a bare object), which is NOT a valid MCP
+# tools/call result — a strict client (e.g. thoth) that reads content[0].text found
+# none and rendered "no text content". content_text_response wraps the echoed args
+# in a text content block: {"content":[{"type":"text","text":"<args>"}]}.
 fn bote_echo_handler(args, claims) {
-    return args;
+    return content_text_response(args);
 }
 
 # Reference prompt generator: greets the optional `name` argument (default
