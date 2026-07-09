@@ -73,6 +73,7 @@ include "src/content.cyr"
 include "src/host.cyr"
 include "src/libro_tools.cyr"
 include "src/fs_tools.cyr"
+include "src/web_tools.cyr"
 include "src/main_common.cyr"
 
 fn main() {
@@ -93,6 +94,10 @@ fn main() {
     # Filesystem tools (fs_write / fs_read / fs_mkdir), confined to
     # BOTE_FS_ROOT (default "."). Additive; see src/fs_tools.cyr.
     fs_tools_register(dispatcher);
+
+    # Web tools (web_fetch / web_search). Additive; see src/web_tools.cyr.
+    # web_search targets the SearXNG instance at BOTE_SEARXNG_URL (unset -> reported, not faked).
+    web_tools_register(dispatcher);
 
     # Bearer-token auth wiring (opt-in via env var).
     # Set BOTE_BEARER_TOKENS=tok-a,tok-b,tok-c to require any of those

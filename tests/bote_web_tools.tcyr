@@ -1,0 +1,100 @@
+# bote_web_tools.tcyr — unit tests for src/web_tools.cyr.
+#
+# Covers the pure, tricky logic without touching the network:
+#   - _web_is_http / _web_starts_with  (scheme guard)
+#   - _web_html_to_text  (tag strip, script/style skip, entity decode, whitespace collapse)
+#   - _web_urlencode     (percent-encoding for the search query)
+#   - _web_decode_entity (named + numeric entities)
+# The network handlers (web_fetch/web_search) are exercised live, not here.
+# Run: cyrius test tests/bote_web_tools.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "lib/sakshi.cyr"
+include "lib/assert.cyr"
+
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/dispatch.cyr"
+include "src/schema.cyr"
+include "src/web_tools.cyr"
+
+# _t_txt: run _web_html_to_text over `src` and NUL-terminate into `dst`; return dst for streq.
+fn _t_txt(src, dst) {
+    var n = _web_html_to_text(src, strlen(src), dst, 256);
+    store8(dst + n, 0);
+    return dst;
+}
+
+fn main() {
+    alloc_init();
+    var dst = alloc(256);
+
+    # ---------------- scheme guard ----------------
+    assert_eq(_web_is_http("http://a.com"),  1, "http:// allowed");
+    assert_eq(_web_is_http("https://a.com"), 1, "https:// allowed");
+    assert_eq(_web_is_http("ftp://a.com"),   0, "ftp:// refused");
+    assert_eq(_web_is_http("file:///etc"),   0, "file:// refused");
+    assert_eq(_web_is_http("javascript:x"),  0, "javascript: refused");
+    assert_eq(_web_is_http(""),              0, "empty refused");
+    assert_eq(_web_is_http(0),               0, "null refused");
+    assert_eq(_web_starts_with("hello", "he"), 1, "starts_with hit");
+    assert_eq(_web_starts_with("hi", "hello"), 0, "starts_with miss (prefix longer)");
+
+    # ---------------- HTML -> text ----------------
+    assert(streq(_t_txt("<p>Hello <b>world</b></p>", dst), "Hello world"), "tags stripped, spaces collapsed");
+    assert(streq(_t_txt("<script>var x=1;</script>text", dst), "text"), "<script> block skipped");
+    assert(streq(_t_txt("<style>.a{color:red}</style>body", dst), "body"), "<style> block skipped");
+    assert(streq(_t_txt("a &amp; b &lt;c&gt;", dst), "a & b <c>"), "named entities decoded");
+    assert(streq(_t_txt("&quot;q&quot; &#39;a&#39; &nbsp;x", dst), "\"q\" 'a' x"), "quot/apos/nbsp decoded");
+    assert(streq(_t_txt("&#65;&#66;", dst), "AB"), "numeric entities decoded");
+    assert(streq(_t_txt("   x   y   ", dst), "x y"), "leading/trailing trimmed, runs collapsed");
+    assert(streq(_t_txt("<div>\n  line1\n  line2\n</div>", dst), "line1 line2"), "newlines collapse to a space");
+    assert(streq(_t_txt("plain", dst), "plain"), "plain text passes through");
+    # untrusted-page control bytes + a raw NUL are DROPPED (else invalid JSON / silent truncation downstream)
+    var cb = alloc(16);
+    store8(cb + 0, 97); store8(cb + 1, 12); store8(cb + 2, 98); store8(cb + 3, 0);   # 'a' FF 'b' NUL
+    store8(cb + 4, 99); store8(cb + 5, 1);  store8(cb + 6, 100);                      # 'c' 0x01 'd'
+    var cn = _web_html_to_text(cb, 7, dst, 256);
+    store8(dst + cn, 0);
+    assert(streq(dst, "abcd"), "C0 control bytes + raw NUL dropped (no invalid JSON, no truncation)");
+    assert(streq(_t_txt("x&#12;y", dst), "xy"), "&#12; (control) entity dropped");
+
+    # ---------------- url-encode ----------------
+    var enc = alloc(64);
+    _web_urlencode("a b", enc, 64);    assert(streq(enc, "a%20b"), "space -> %20");
+    _web_urlencode("c++", enc, 64);    assert(streq(enc, "c%2B%2B"), "'+' -> %2B");
+    _web_urlencode("x-y_z.~", enc, 64); assert(streq(enc, "x-y_z.~"), "unreserved pass through");
+    _web_urlencode("a=b&c", enc, 64);  assert(streq(enc, "a%3Db%26c"), "'=' and '&' encoded");
+
+    # ---------------- decode_entity (raw) ----------------
+    var e = _web_decode_entity("&amp;xyz", 8, 0);
+    assert_eq(e / 1048576, 38, "&amp; -> '&' (0x26)");
+    assert_eq(e % 1048576, 5,  "&amp; consumes 5 bytes");
+    assert_eq(_web_decode_entity("&bogus;", 7, 0), 0, "unknown entity -> 0 (left literal)");
+
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

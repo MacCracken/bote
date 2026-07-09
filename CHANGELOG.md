@@ -18,6 +18,30 @@ have per release.
 
 _(empty)_
 
+## [3.1.0] — 2026-07-09 — web tools (web_fetch / web_search)
+
+**Web MCP tools.** A new tool family, `src/web_tools.cyr`, alongside `fs_tools` / `libro_tools`, so an MCP
+client (thoth, via daimon) can fetch pages and search the web through the spine — no reimplementation in the
+consumer. Additive; registered by `web_tools_register()` and shipped in the default `dist/bote.cyr` bundle.
+Outbound HTTP uses the sandhi client (the same transport the rest of AGNOS speaks). 25 assertions.
+
+### Added
+- **`web_fetch {url}`** — GET an `http://` / `https://` URL and return its **readable text**: HTML tags are
+  stripped, `<script>` / `<style>` blocks dropped, the common named + numeric entities decoded, and runs of
+  whitespace collapsed. Output is size-capped (64 KiB); non-http schemes are refused; a transport or non-2xx
+  failure is reported, not faked.
+- **`web_search {query, count?}`** — query a **SearXNG** instance (`BOTE_SEARXNG_URL`, configurable,
+  self-hostable, no third-party key) via its JSON API and return the top results (title · url · snippet),
+  parsed with bayan. An unset endpoint is reported honestly — no silent default to a third party.
+- Registered in `src/main.cyr` (after `fs_tools_register`) and the `[lib]` distlib manifest. Tests in
+  `tests/bote_web_tools.tcyr` cover the scheme guard, the HTML→text stripper, url-encoding, and entity decode.
+
+### Security
+- The HTML→text stripper **drops C0 control bytes / DEL / raw NUL** (both literal and `&#<n>;`-decoded) from
+  the untrusted page — readable text has none, and it keeps `web_fetch`'s result valid JSON downstream (the
+  shared escaper does not `\u`-escape control bytes, and a raw NUL would silently truncate the text).
+  Adversarial-review-caught (untrusted-input lens); 27 assertions incl. the control-byte/NUL case.
+
 ## [3.0.1] — 2026-07-07 — bote_echo MCP conformance + toolchain 6.4.20
 
 ### Fixed

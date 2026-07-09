@@ -58,6 +58,7 @@ modules = [
     "src/host.cyr",
     "src/libro_tools.cyr",
     "src/fs_tools.cyr",
+    "src/web_tools.cyr",
 ]
 
 # Core-only opt-in bundle (2.7.2). Eleven transport-free modules for
