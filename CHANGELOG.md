@@ -18,6 +18,30 @@ have per release.
 
 _(empty)_
 
+## [3.1.1] — 2026-07-09 — native HTTPS large responses (toolchain TLS fix), pin `6.4.34`
+
+**`web_fetch` / `web_search` now work over the sovereign native TLS backend for
+real-world (large) HTTPS responses.** 3.1.0 shipped the web tools calling the
+sandhi client, which uses the default **native** TLS backend — but the stdlib
+native TLS record layer had a size-dependent bug: any response whose body arrived
+in a full 16 KB TLS record failed (`example.com` slipped through; anthropic.com /
+cyriusb.com / secureyeoman.ai / robertmaccracken.com did not). No bote source
+change was needed — the fix is entirely in the toolchain's stdlib TLS module,
+picked up by the pin bump.
+
+### Changed
+- **cyrius pin `6.4.20` → `6.4.34`**, which carries the native TLS record-layer
+  fix: (1) an off-by-one in the record-decrypt output buffer (a max-size TLS 1.3
+  record's inner plaintext is `content(2^14) + type-byte` = 16385, above the old
+  16384-byte scratch → `TLS_ERR_BUFFER_FULL` after the AEAD sequence advanced, a
+  connection wedge), and (2) `tls_native_read` now delivers **partial records**
+  (holding any remainder) instead of "whole record or error", so a caller reading
+  in sub-record chunks no longer loses data. `web_fetch` verified over the native
+  backend against all four hosts above (200, byte-lengths identical to libssl).
+
+_No `web_tools.cyr` change_ — the earlier local libssl-backend fallback WIP was a
+workaround for this now-fixed root cause and was dropped (never released).
+
 ## [3.1.0] — 2026-07-09 — web tools (web_fetch / web_search)
 
 **Web MCP tools.** A new tool family, `src/web_tools.cyr`, alongside `fs_tools` / `libro_tools`, so an MCP
