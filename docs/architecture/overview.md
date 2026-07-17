@@ -11,7 +11,7 @@
 > **Lineage**: Originally a Rust crate. Ported to Cyrius via `cyrius port`
 > on 2026-04-13 (v1.0.0). The Rust archive was retired in v1.0.1; the last
 > Rust snapshot is at git tag `0.92.0`. This doc describes the live Cyrius
-> implementation (current: **3.1.3**, cyrius 6.4.66).
+> implementation (current: **3.1.4**, cyrius 6.4.66).
 
 ---
 

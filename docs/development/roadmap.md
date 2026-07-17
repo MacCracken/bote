@@ -1,6 +1,6 @@
 # Bote Roadmap
 
-> **Current**: `3.1.3` (cyrius 6.4.66, libro 2.8.1, majra 2.5.1, sigil 3.12.0, sakshi 2.4.6).
+> **Current**: `3.1.4` (cyrius 6.4.66, libro 2.8.2, majra 2.5.1, sigil 3.12.0, sakshi 2.4.6).
 > 12 active test files, **786 unit assertions** + 1 drift-guard
 > smoke, **14 criterion benchmarks**, **dual** consumer bundles
 > (`dist/bote.cyr` full, 28 modules + `dist/bote-core.cyr` opt-in core via
@@ -77,6 +77,7 @@ surfaced. See the **2.6.x modernization arc** section below.
 | **3.1.1** | **Native HTTPS large responses** — cyrius 6.4.20 → 6.4.34 carries the stdlib native-TLS record-layer fix (max-size 16 KB record off-by-one + partial-record delivery); `web_fetch` / `web_search` now work against real-world hosts over the sovereign native backend. No bote source change |
 | **3.1.2** | **Toolchain 6.4.64 + full dependency refresh** — libro 2.8.1 (audit-row quoting integrity fix; pulls patra 1.12.10 as a new transitive), majra 2.5.1, sigil 3.12.0 (crypto-bank thread-local slot fix), new explicit **sakshi 2.4.6 pin** (registry lag, same class as the sigil pin). No bote logic change. 786/786 assertions across 12 test files + drift smoke, 14 benchmarks flat, capacity 59% / 61% (`fn_table 4841/8192`) |
 | **3.1.3** | **Toolchain 6.4.66 + `BoteErrTag` namespacing** — cyrius 6.4.64 → 6.4.66 (clears pin drift; `lib/` re-sync pulls the `thread_local_alloc` slot allocator that sigil 3.12.0 / patra 1.12.10 now require — the stale snapshot no longer linked). `BoteErrTag` constants `ERR_*` → `BOTE_ERR_*` to escape a flat-namespace collision with libro's own `ERR_IO=3` / `ERR_JSON=4` (bote's `=11` / `=10`; "last definition wins" in the libro-linked binary). Wire contract unchanged. 786/786 assertions, 14 benchmarks flat, capacity 60% / 62% (`fn_table 4879/8192`) |
+| **3.1.4** | **libro 2.8.2 (`LIBRO_ERR_*`) + pin/lock realign** — `[deps.libro]` `2.8.1 → 2.8.2`. libro 2.8.2 namespaces its own `LibroErr` enum `ERR_* → LIBRO_ERR_*` — the upstream reciprocal of 3.1.3's `BOTE_ERR_*`; the bare `ERR_IO`/`ERR_JSON` clash is now resolved at the source on both sides. Also realigns the `[deps.libro]` tag with the lockfile (3.1.3 shipped tag `2.8.1` while the lock already held 2.8.2's content hash via the local `path` override — a clean `git+tag` CI checkout would fail hash verification). libro 2.8.2's own deps (sigil 3.12.1 / patra 1.12.12) sit inside its dist; bote keeps sigil 3.12.0 and its already-1.12.12 patra. No bote source change beyond the version string. 786/786 assertions, 14 benchmarks flat, capacity flat 60% / 62% |
 
 See [CHANGELOG.md](../../CHANGELOG.md) for the full detail per release.
 

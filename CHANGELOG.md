@@ -18,6 +18,30 @@ have per release.
 
 _(empty)_
 
+## [3.1.4] — 2026-07-17 — libro 2.8.2 (`LIBRO_ERR_*`) + `[deps.libro]` pin/lock realign
+
+**libro dep bump.** `[deps.libro]` `2.8.1 → 2.8.2`. libro 2.8.2 namespaces its own `LibroErr`
+enum — the upstream reciprocal of bote's `BOTE_ERR_*` rename at 3.1.3 — so the bare `ERR_IO` /
+`ERR_JSON` collision is now resolved at the source on **both** sides of a libro-linked bote binary,
+not merely avoided by bote's prefix. No bote logic change; wire contract identical.
+
+### Changed
+- **libro `2.8.1` → `2.8.2`** (`[deps.libro]` tag). Upstream, libro 2.8.2 renamed its `LibroErr`
+  enum `ERR_* → LIBRO_ERR_*` (13 constants, e.g. `LIBRO_ERR_IO=3`) and moved its own internal deps
+  to sigil 3.12.1 / patra 1.12.12 under a cyrius 6.4.66 pin. For bote this is transparent: the
+  `audit_libro` / `libro_tools` adapters call libro's **function** API, not its error constants, so
+  no bote source references the renamed tags. bote's vendored `lib/patra.cyr` is already 1.12.12 and
+  bote keeps its own `[deps.sigil]` 3.12.0 pin, so nothing else in bote's dep set shifts. Rebuilt +
+  retested against 2.8.2; `dist/bote.cyr` + `dist/bote-core.cyr` regenerated at v3.1.4.
+
+### Fixed
+- **`[deps.libro]` tag realigned with `cyrius.lock`.** 3.1.3 shipped with the tag reading `2.8.1`
+  while `cyrius.lock` already recorded 2.8.2's content hash (`0fd0ff08…`) — the local
+  `path = "../libro"` override had vendored the 2.8.2 body, masking the drift locally. A clean
+  `git`+`tag` CI checkout would have vendored 2.8.1 (`7187f5b6…`) and **failed lock verification**.
+  Bumping the tag to `2.8.2` makes tag ↔ lock ↔ vendored body agree (all three hashes verified
+  equal); `cyrius.lock` itself is unchanged because it was already correct.
+
 ## [3.1.3] — 2026-07-17 — toolchain 6.4.66 + `BoteErrTag` namespacing (`BOTE_ERR_*`)
 
 **Toolchain bump + error-tag namespacing.** The cyrius wrapper had already rolled to 6.4.66,
