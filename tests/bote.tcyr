@@ -108,47 +108,47 @@ fn main() {
     fl_init();
 
     # ---------------- error: rpc_code mapping ----------------
-    assert_eq(bote_err_rpc_code(ERR_PARSE), 0 - 32700, "rpc_code parse");
-    assert_eq(bote_err_rpc_code(ERR_PROTOCOL), 0 - 32600, "rpc_code protocol");
-    assert_eq(bote_err_rpc_code(ERR_TOOL_NOT_FOUND), 0 - 32601, "rpc_code tool_not_found");
-    assert_eq(bote_err_rpc_code(ERR_INVALID_PARAMS), 0 - 32602, "rpc_code invalid_params");
-    assert_eq(bote_err_rpc_code(ERR_SCHEMA_VIOLATION), 0 - 32602, "rpc_code schema_violation");
-    assert_eq(bote_err_rpc_code(ERR_EXEC_FAILED), 0 - 32000, "rpc_code exec_failed");
-    assert_eq(bote_err_rpc_code(ERR_SANDBOX), 0 - 32000, "rpc_code sandbox");
-    assert_eq(bote_err_rpc_code(ERR_TRANSPORT_CLOSED), 0 - 32003, "rpc_code transport_closed");
-    assert_eq(bote_err_rpc_code(ERR_BIND_FAILED), 0 - 32003, "rpc_code bind_failed");
-    assert_eq(bote_err_rpc_code(ERR_REQUEST_CANCELLED), 0 - 32800, "rpc_code cancelled");
-    assert_eq(bote_err_rpc_code(ERR_JSON), 0 - 32700, "rpc_code json");
-    assert_eq(bote_err_rpc_code(ERR_IO), 0 - 32603, "rpc_code io");
+    assert_eq(bote_err_rpc_code(BOTE_ERR_PARSE), 0 - 32700, "rpc_code parse");
+    assert_eq(bote_err_rpc_code(BOTE_ERR_PROTOCOL), 0 - 32600, "rpc_code protocol");
+    assert_eq(bote_err_rpc_code(BOTE_ERR_TOOL_NOT_FOUND), 0 - 32601, "rpc_code tool_not_found");
+    assert_eq(bote_err_rpc_code(BOTE_ERR_INVALID_PARAMS), 0 - 32602, "rpc_code invalid_params");
+    assert_eq(bote_err_rpc_code(BOTE_ERR_SCHEMA_VIOLATION), 0 - 32602, "rpc_code schema_violation");
+    assert_eq(bote_err_rpc_code(BOTE_ERR_EXEC_FAILED), 0 - 32000, "rpc_code exec_failed");
+    assert_eq(bote_err_rpc_code(BOTE_ERR_SANDBOX), 0 - 32000, "rpc_code sandbox");
+    assert_eq(bote_err_rpc_code(BOTE_ERR_TRANSPORT_CLOSED), 0 - 32003, "rpc_code transport_closed");
+    assert_eq(bote_err_rpc_code(BOTE_ERR_BIND_FAILED), 0 - 32003, "rpc_code bind_failed");
+    assert_eq(bote_err_rpc_code(BOTE_ERR_REQUEST_CANCELLED), 0 - 32800, "rpc_code cancelled");
+    assert_eq(bote_err_rpc_code(BOTE_ERR_JSON), 0 - 32700, "rpc_code json");
+    assert_eq(bote_err_rpc_code(BOTE_ERR_IO), 0 - 32603, "rpc_code io");
 
     # ---------------- error: accessors ----------------
-    var e = bote_err_new(ERR_INVALID_PARAMS, "echo", "missing 'name'");
-    assert_eq(bote_err_tag(e), ERR_INVALID_PARAMS, "tag stored");
+    var e = bote_err_new(BOTE_ERR_INVALID_PARAMS, "echo", "missing 'name'");
+    assert_eq(bote_err_tag(e), BOTE_ERR_INVALID_PARAMS, "tag stored");
     assert(streq(bote_err_tool(e), "echo") == 1, "tool stored");
     assert(streq(bote_err_reason(e), "missing 'name'") == 1, "reason stored");
     assert_eq(bote_err_violations(e), 0, "no violations on plain err");
 
     # ---------------- error: format ----------------
-    var s1 = bote_err_format(bote_err_new(ERR_TOOL_NOT_FOUND, "foo", 0));
+    var s1 = bote_err_format(bote_err_new(BOTE_ERR_TOOL_NOT_FOUND, "foo", 0));
     assert(str_eq(s1, str_from("tool not found: foo")) == 1, "fmt tool_not_found");
 
-    var s2 = bote_err_format(bote_err_new(ERR_INVALID_PARAMS, "t", "r"));
+    var s2 = bote_err_format(bote_err_new(BOTE_ERR_INVALID_PARAMS, "t", "r"));
     assert(str_eq(s2, str_from("invalid params for tool 't': r")) == 1, "fmt invalid_params");
 
-    var s3 = bote_err_format(bote_err_new(ERR_EXEC_FAILED, "t", "r"));
+    var s3 = bote_err_format(bote_err_new(BOTE_ERR_EXEC_FAILED, "t", "r"));
     assert(str_eq(s3, str_from("tool execution failed: t - r")) == 1, "fmt exec_failed");
 
-    var s4 = bote_err_format(bote_err_new(ERR_TRANSPORT_CLOSED, 0, 0));
+    var s4 = bote_err_format(bote_err_new(BOTE_ERR_TRANSPORT_CLOSED, 0, 0));
     assert(str_eq(s4, str_from("transport closed")) == 1, "fmt transport_closed");
 
-    var s5 = bote_err_format(bote_err_new(ERR_BIND_FAILED, 0, "port in use"));
+    var s5 = bote_err_format(bote_err_new(BOTE_ERR_BIND_FAILED, 0, "port in use"));
     assert(str_eq(s5, str_from("transport bind failed: port in use")) == 1, "fmt bind_failed");
 
     # ---------------- error: schema violations join ----------------
     var vs = vec_new();
     vec_push(vs, "name required");
     vec_push(vs, "id must be int");
-    var sv = bote_err_with_violations(ERR_SCHEMA_VIOLATION, "tool_x", vs);
+    var sv = bote_err_with_violations(BOTE_ERR_SCHEMA_VIOLATION, "tool_x", vs);
     var s6 = bote_err_format(sv);
     assert(str_eq(s6, str_from("schema violation for tool 'tool_x': name required; id must be int")) == 1, "fmt schema joins");
 
@@ -242,17 +242,17 @@ fn main() {
     # ---------------- registry: validate_params missing field ----------------
     var miss_err = registry_validate_params(reg2, "scan", "{}");
     assert(miss_err != 0, "validate err on missing");
-    assert_eq(bote_err_tag(miss_err), ERR_INVALID_PARAMS, "missing -> INVALID_PARAMS");
+    assert_eq(bote_err_tag(miss_err), BOTE_ERR_INVALID_PARAMS, "missing -> INVALID_PARAMS");
 
     # ---------------- registry: validate_params unknown tool ----------------
     var unk_err = registry_validate_params(reg2, "nope", "{}");
     assert(unk_err != 0, "validate err on unknown");
-    assert_eq(bote_err_tag(unk_err), ERR_TOOL_NOT_FOUND, "unknown -> TOOL_NOT_FOUND");
+    assert_eq(bote_err_tag(unk_err), BOTE_ERR_TOOL_NOT_FOUND, "unknown -> TOOL_NOT_FOUND");
 
     # ---------------- registry: validate rejects non-object params ----------------
     var nob1 = registry_validate_params(reg2, "scan", "null");
     assert(nob1 != 0, "null rejected");
-    assert_eq(bote_err_tag(nob1), ERR_INVALID_PARAMS, "null -> INVALID_PARAMS");
+    assert_eq(bote_err_tag(nob1), BOTE_ERR_INVALID_PARAMS, "null -> INVALID_PARAMS");
     var nob2 = registry_validate_params(reg2, "scan", "[1,2]");
     assert(nob2 != 0, "array rejected");
     var nob3 = registry_validate_params(reg2, "scan", "42");
@@ -695,7 +695,7 @@ fn main() {
     # ---------------- dispatch: dynamic register_tool with bad name ----------------
     var bad_reg = dispatcher_register_tool(d, tool_def_new("badname", "x", sa), &h_echo);
     assert(bad_reg != 0, "bad name register fails");
-    assert_eq(bote_err_tag(bad_reg), ERR_INVALID_PARAMS, "bad name -> INVALID_PARAMS");
+    assert_eq(bote_err_tag(bad_reg), BOTE_ERR_INVALID_PARAMS, "bad name -> INVALID_PARAMS");
 
     # ---------------- dispatch: dynamic register + dispatch ----------------
     var ok_reg = dispatcher_register_tool(d, tool_def_new("dyn_tool", "dyn", sa), &h_echo);
@@ -716,7 +716,7 @@ fn main() {
     # Deregister missing
     var dereg_miss = dispatcher_deregister_tool(d, "never_existed");
     assert(dereg_miss != 0, "dereg missing returns err");
-    assert_eq(bote_err_tag(dereg_miss), ERR_TOOL_NOT_FOUND, "dereg missing -> TOOL_NOT_FOUND");
+    assert_eq(bote_err_tag(dereg_miss), BOTE_ERR_TOOL_NOT_FOUND, "dereg missing -> TOOL_NOT_FOUND");
 
     # ---------------- codec: parse_request happy path ----------------
     var pr = codec_parse_request("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}");
@@ -920,10 +920,10 @@ fn main() {
     assert_eq(registry_validate_params(rcompiled, "svc_count", "{\"count\":5}"), 0, "compiled validate ok");
     var bv = registry_validate_params(rcompiled, "svc_count", "{\"count\":99}");
     assert(bv != 0, "compiled validate err on bound");
-    assert_eq(bote_err_tag(bv), ERR_SCHEMA_VIOLATION, "bound err -> SCHEMA_VIOLATION");
+    assert_eq(bote_err_tag(bv), BOTE_ERR_SCHEMA_VIOLATION, "bound err -> SCHEMA_VIOLATION");
     var tv = registry_validate_params(rcompiled, "svc_count", "{\"count\":\"x\"}");
     assert(tv != 0, "compiled validate err on type");
-    assert_eq(bote_err_tag(tv), ERR_SCHEMA_VIOLATION, "type err -> SCHEMA_VIOLATION");
+    assert_eq(bote_err_tag(tv), BOTE_ERR_SCHEMA_VIOLATION, "type err -> SCHEMA_VIOLATION");
 
     # ---------------- stream: cancellation token ----------------
     var tok = cancel_token_new();

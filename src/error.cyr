@@ -2,19 +2,19 @@
 # Mirrors rust-old/src/error.rs
 
 enum BoteErrTag {
-    ERR_TOOL_NOT_FOUND = 0;
-    ERR_INVALID_PARAMS = 1;
-    ERR_EXEC_FAILED = 2;
-    ERR_PROTOCOL = 3;
-    ERR_PARSE = 4;
-    ERR_TRANSPORT_CLOSED = 5;
-    ERR_BIND_FAILED = 6;
-    ERR_REQUEST_CANCELLED = 7;
-    ERR_SCHEMA_VIOLATION = 8;
-    ERR_SANDBOX = 9;
-    ERR_JSON = 10;
-    ERR_IO = 11;
-    ERR_TAG_COUNT = 12;
+    BOTE_ERR_TOOL_NOT_FOUND = 0;
+    BOTE_ERR_INVALID_PARAMS = 1;
+    BOTE_ERR_EXEC_FAILED = 2;
+    BOTE_ERR_PROTOCOL = 3;
+    BOTE_ERR_PARSE = 4;
+    BOTE_ERR_TRANSPORT_CLOSED = 5;
+    BOTE_ERR_BIND_FAILED = 6;
+    BOTE_ERR_REQUEST_CANCELLED = 7;
+    BOTE_ERR_SCHEMA_VIOLATION = 8;
+    BOTE_ERR_SANDBOX = 9;
+    BOTE_ERR_JSON = 10;
+    BOTE_ERR_IO = 11;
+    BOTE_ERR_TAG_COUNT = 12;
 }
 
 # BoteError struct (32 bytes):
@@ -48,18 +48,18 @@ fn bote_err_violations(e) { return load64(e + 24); }
 
 # Map a BoteErrTag to its JSON-RPC error code (negative).
 fn bote_err_rpc_code(tag) {
-    if (tag == ERR_PARSE) { return 0 - 32700; }
-    if (tag == ERR_PROTOCOL) { return 0 - 32600; }
-    if (tag == ERR_TOOL_NOT_FOUND) { return 0 - 32601; }
-    if (tag == ERR_INVALID_PARAMS) { return 0 - 32602; }
-    if (tag == ERR_SCHEMA_VIOLATION) { return 0 - 32602; }
-    if (tag == ERR_EXEC_FAILED) { return 0 - 32000; }
-    if (tag == ERR_SANDBOX) { return 0 - 32000; }
-    if (tag == ERR_TRANSPORT_CLOSED) { return 0 - 32003; }
-    if (tag == ERR_BIND_FAILED) { return 0 - 32003; }
-    if (tag == ERR_REQUEST_CANCELLED) { return 0 - 32800; }
-    if (tag == ERR_JSON) { return 0 - 32700; }
-    if (tag == ERR_IO) { return 0 - 32603; }
+    if (tag == BOTE_ERR_PARSE) { return 0 - 32700; }
+    if (tag == BOTE_ERR_PROTOCOL) { return 0 - 32600; }
+    if (tag == BOTE_ERR_TOOL_NOT_FOUND) { return 0 - 32601; }
+    if (tag == BOTE_ERR_INVALID_PARAMS) { return 0 - 32602; }
+    if (tag == BOTE_ERR_SCHEMA_VIOLATION) { return 0 - 32602; }
+    if (tag == BOTE_ERR_EXEC_FAILED) { return 0 - 32000; }
+    if (tag == BOTE_ERR_SANDBOX) { return 0 - 32000; }
+    if (tag == BOTE_ERR_TRANSPORT_CLOSED) { return 0 - 32003; }
+    if (tag == BOTE_ERR_BIND_FAILED) { return 0 - 32003; }
+    if (tag == BOTE_ERR_REQUEST_CANCELLED) { return 0 - 32800; }
+    if (tag == BOTE_ERR_JSON) { return 0 - 32700; }
+    if (tag == BOTE_ERR_IO) { return 0 - 32603; }
     return 0 - 32603;
 }
 
@@ -70,34 +70,34 @@ fn bote_err_format(e) {
     var reason = bote_err_reason(e);
     var sb = str_builder_new();
 
-    if (tag == ERR_TOOL_NOT_FOUND) {
+    if (tag == BOTE_ERR_TOOL_NOT_FOUND) {
         str_builder_add_cstr(sb, "tool not found: ");
         if (tool != 0) { str_builder_add_cstr(sb, tool); }
-    } elif (tag == ERR_INVALID_PARAMS) {
+    } elif (tag == BOTE_ERR_INVALID_PARAMS) {
         str_builder_add_cstr(sb, "invalid params for tool '");
         if (tool != 0) { str_builder_add_cstr(sb, tool); }
         str_builder_add_cstr(sb, "': ");
         if (reason != 0) { str_builder_add_cstr(sb, reason); }
-    } elif (tag == ERR_EXEC_FAILED) {
+    } elif (tag == BOTE_ERR_EXEC_FAILED) {
         str_builder_add_cstr(sb, "tool execution failed: ");
         if (tool != 0) { str_builder_add_cstr(sb, tool); }
         str_builder_add_cstr(sb, " - ");
         if (reason != 0) { str_builder_add_cstr(sb, reason); }
-    } elif (tag == ERR_PROTOCOL) {
+    } elif (tag == BOTE_ERR_PROTOCOL) {
         str_builder_add_cstr(sb, "protocol error: ");
         if (reason != 0) { str_builder_add_cstr(sb, reason); }
-    } elif (tag == ERR_PARSE) {
+    } elif (tag == BOTE_ERR_PARSE) {
         str_builder_add_cstr(sb, "parse error: ");
         if (reason != 0) { str_builder_add_cstr(sb, reason); }
-    } elif (tag == ERR_TRANSPORT_CLOSED) {
+    } elif (tag == BOTE_ERR_TRANSPORT_CLOSED) {
         str_builder_add_cstr(sb, "transport closed");
-    } elif (tag == ERR_BIND_FAILED) {
+    } elif (tag == BOTE_ERR_BIND_FAILED) {
         str_builder_add_cstr(sb, "transport bind failed: ");
         if (reason != 0) { str_builder_add_cstr(sb, reason); }
-    } elif (tag == ERR_REQUEST_CANCELLED) {
+    } elif (tag == BOTE_ERR_REQUEST_CANCELLED) {
         str_builder_add_cstr(sb, "request cancelled: ");
         if (reason != 0) { str_builder_add_cstr(sb, reason); }
-    } elif (tag == ERR_SCHEMA_VIOLATION) {
+    } elif (tag == BOTE_ERR_SCHEMA_VIOLATION) {
         str_builder_add_cstr(sb, "schema violation for tool '");
         if (tool != 0) { str_builder_add_cstr(sb, tool); }
         str_builder_add_cstr(sb, "': ");
@@ -111,15 +111,15 @@ fn bote_err_format(e) {
                 i = i + 1;
             }
         }
-    } elif (tag == ERR_SANDBOX) {
+    } elif (tag == BOTE_ERR_SANDBOX) {
         str_builder_add_cstr(sb, "sandbox error for tool '");
         if (tool != 0) { str_builder_add_cstr(sb, tool); }
         str_builder_add_cstr(sb, "': ");
         if (reason != 0) { str_builder_add_cstr(sb, reason); }
-    } elif (tag == ERR_JSON) {
+    } elif (tag == BOTE_ERR_JSON) {
         str_builder_add_cstr(sb, "json error: ");
         if (reason != 0) { str_builder_add_cstr(sb, reason); }
-    } elif (tag == ERR_IO) {
+    } elif (tag == BOTE_ERR_IO) {
         str_builder_add_cstr(sb, "io error: ");
         if (reason != 0) { str_builder_add_cstr(sb, reason); }
     } else {

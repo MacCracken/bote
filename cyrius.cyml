@@ -5,7 +5,7 @@ description = "MCP core service in Cyrius — stable 2.x. JSON-RPC 2.0, six tran
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/bote"
 language = "cyrius"
-cyrius = "6.4.64"
+cyrius = "6.4.66"
 
 [build]
 entry = "src/main.cyr"
@@ -178,7 +178,7 @@ modules = ["dist/majra.cyr"]
 
 # sakshi tracing/logging — explicit pin overriding the stdlib registry,
 # which lags the toolchain snapshot (the registry resolves `sakshi` →
-# 2.4.3 while the 6.4.64 snapshot bundles 2.4.6, so every build warned
+# 2.4.3 while the 6.4.66 snapshot bundles 2.4.6, so every build warned
 # "./lib/ shadows version-pinned … sakshi 2.4.3 (pinned: 2.4.6)").
 # Same registry-lag class as the sigil pin below. dist/sakshi.cyr is
 # self-contained (links only stdlib fnptr + atomic).

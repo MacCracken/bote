@@ -53,7 +53,7 @@ CI runs the same gates plus a capacity gate (fail if `fn_table` or `identifiers`
 - **No `panic!` or `unwrap()` in library code.** Cyrius doesn't have those, but the analogue is unguarded `syscall(SYS_EXIT, ...)` or implicit out-of-bounds — guard at the boundary.
 - **Constant-time comparisons** for any token / signature / secret material. The codebase has the pattern; mirror it.
 - **`tracing`-style structured logging** is not yet available in cyrius; for now, use `sakshi_debug` / `sakshi_info` / `sakshi_warn` consistently.
-- **`#[non_exhaustive]`-equivalent**: cyrius enums always allow tail-extension; rely on default-case handling in any `if (tag == ERR_X)` chain.
+- **`#[non_exhaustive]`-equivalent**: cyrius enums always allow tail-extension; rely on default-case handling in any `if (tag == BOTE_ERR_X)` chain. (Enum constants are global — prefix them `BOTE_`; see the `BOTE_ERR_*` namespacing note in CLAUDE.md.)
 - **Keep functions focused and testable** — `tests/bote_<module>.tcyr` is the contract.
 - **No nested 2-arg call inside `assert(...)` inside `streq(...)`** with certain JSON literal contexts — the 5.10.x parser occasionally chokes (`expected ')', got string`). Stage the inner call into a `var` first; same behaviour, parses.
 

@@ -308,13 +308,13 @@ fn _vp_first_nonws(s) {
 
 fn registry_validate_params(r, name, params_cstr) {
     if (registry_contains(r, name) == 0) {
-        return bote_err_new(ERR_TOOL_NOT_FOUND, name, 0);
+        return bote_err_new(BOTE_ERR_TOOL_NOT_FOUND, name, 0);
     }
     var t = registry_get(r, name);
 
     # 1. params must be a JSON object.
     if (_vp_first_nonws(params_cstr) != 123) {
-        return bote_err_new(ERR_INVALID_PARAMS, name, "params must be an object");
+        return bote_err_new(BOTE_ERR_INVALID_PARAMS, name, "params must be an object");
     }
 
     # 2. Compiled schema path (preferred — full type/enum/bounds/nested checks).
@@ -322,7 +322,7 @@ fn registry_validate_params(r, name, params_cstr) {
     if (compiled != 0) {
         var violations = compiled_validate(compiled, params_cstr);
         if (vec_len(violations) > 0) {
-            return bote_err_with_violations(ERR_SCHEMA_VIOLATION, name, violations);
+            return bote_err_with_violations(BOTE_ERR_SCHEMA_VIOLATION, name, violations);
         }
         return 0;
     }
@@ -343,7 +343,7 @@ fn registry_validate_params(r, name, params_cstr) {
             str_builder_add_cstr(sb, "missing required field: ");
             str_builder_add_cstr(sb, req_key);
             var msg = str_builder_build(sb);
-            return bote_err_new(ERR_INVALID_PARAMS, name, str_data(msg));
+            return bote_err_new(BOTE_ERR_INVALID_PARAMS, name, str_data(msg));
         }
         i = i + 1;
     }

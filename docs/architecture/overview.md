@@ -11,7 +11,7 @@
 > **Lineage**: Originally a Rust crate. Ported to Cyrius via `cyrius port`
 > on 2026-04-13 (v1.0.0). The Rust archive was retired in v1.0.1; the last
 > Rust snapshot is at git tag `0.92.0`. This doc describes the live Cyrius
-> implementation (current: **3.1.2**, cyrius 6.4.64).
+> implementation (current: **3.1.3**, cyrius 6.4.66).
 
 ---
 
@@ -212,7 +212,7 @@ Bote follows these conventions throughout:
 | Structs are heap-alloc'd byte ranges with fixed offsets | `var d = alloc(48); store64(d + 8, name);` |
 | Accessors are `module_field(ptr) → load64(ptr + offset)` | `tool_def_name(d) → load64(d)` |
 | Optional fields use `0` as the sentinel | `tool_def_version(d) == 0` means no version |
-| Tagged enums = i64 tag at offset 0 | `bote_err_tag(e) == ERR_INVALID_PARAMS` |
+| Tagged enums = i64 tag at offset 0 | `bote_err_tag(e) == BOTE_ERR_INVALID_PARAMS` |
 | Lists are `vec_*` from `lib/vec.cyr`; maps are `map_*` from `lib/hashmap.cyr` | |
 | Strings are NUL-terminated cstrs unless a libro/majra boundary calls for `Str` (fat string from `lib/str.cyr`) | wrap with `str_from(cstr)` at the boundary |
 | Function pointers via `&fn_name`, called with `fncall1(fp, arg)` / `fncall2(fp, a, b)` | adapters: `audit`, `events`, `auth` |

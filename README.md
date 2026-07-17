@@ -289,7 +289,7 @@ the same surface.
 
 ## Versioning
 
-**Current**: `3.1.2` — full MCP capability suite (prompts / resources /
+**Current**: `3.1.3` — full MCP capability suite (prompts / resources /
 completion + polled `list_changed` push), filesystem + web tools, six
 transports across three binaries, JWT/PKCE auth substrate. SemVer; the
 2.0 handler ABI is stable across the 2.x→3.x line. See

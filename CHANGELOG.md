@@ -18,6 +18,37 @@ have per release.
 
 _(empty)_
 
+## [3.1.3] — 2026-07-17 — toolchain 6.4.66 + `BoteErrTag` namespacing (`BOTE_ERR_*`)
+
+**Toolchain bump + error-tag namespacing.** The cyrius wrapper had already rolled to 6.4.66,
+leaving the manifest pin (6.4.64) drifting and the local `lib/` snapshot stale enough that the
+server binary no longer linked. This release re-pins to 6.4.66, re-syncs `lib/`, and namespaces
+bote's `BoteErrTag` constants to escape a bare-token collision with libro. No transport, dispatch,
+or wire-format behavior change; numeric error values and JSON-RPC code mapping are identical.
+
+### Changed
+- **cyrius pin `6.4.64` → `6.4.66`** — clears the "manifest-pin: 6.4.64 (drift — wrapper is
+  6.4.66)" warning. Re-syncing the declared stdlib subset (`cyrius deps` + `cyrius lib sync`)
+  refreshes `lib/thread_local.cyr` to the 6.4.65 **slot allocator** (`thread_local_alloc`) that
+  sigil 3.12.0's `crypto_scratch` and patra 1.12.10's TLS slots now call — without it every binary
+  failed to link with `undefined function 'thread_local_alloc'`. `cyrius.lock` picks up the
+  refreshed `bayan 1.1.0 → 1.2.0` and `patra` snapshot hashes from the same sync; also clears the
+  `./lib/` shadow warning. 6.4.66 itself is a Win64-only ≥10-arg call fix (per the 6.4.64 span) —
+  inert on this target.
+
+### Fixed
+- **`BoteErrTag` constants namespaced `ERR_*` → `BOTE_ERR_*`** (all 13 tags,
+  `BOTE_ERR_TOOL_NOT_FOUND` … `BOTE_ERR_TAG_COUNT`). The bare tags collided with `lib/libro.cyr`'s
+  own bare `ERR_IO` (=3) / `ERR_JSON` (=4) — bote's are `=11` / `=10`. In the default binary and
+  full bundle (which pull libro in via `libro_tools`), cyrius is single-pass and "last definition
+  wins", so the shared token resolved to whichever module was included last — leaving
+  `bote_err_rpc_code` / `bote_err_format` able to map an IO/JSON error against the wrong tag value.
+  Namespacing removes the shared-symbol hazard entirely. Numeric tag values (0–12) and the
+  JSON-RPC code mapping are unchanged, so the wire contract is identical. These are internal
+  handler/dispatch/registry tags — no first-party consumer references the bare names; any
+  out-of-tree consumer that referenced them must prefix `BOTE_ERR_`. `dist/bote.cyr` +
+  `dist/bote-core.cyr` regenerated (53 tags each, 0 bare `ERR_`).
+
 ## [3.1.2] — 2026-07-16 — toolchain 6.4.64 + dependency refresh (libro 2.8.1, majra 2.5.1, sigil 3.12.0, sakshi pin)
 
 **Toolchain + full dependency refresh.** No bote logic change — the release moves every pin to

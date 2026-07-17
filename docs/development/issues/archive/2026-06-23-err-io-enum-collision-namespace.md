@@ -1,6 +1,16 @@
 # `ERR_IO` enum constant collides ecosystem-wide — namespace `BoteErrTag` as `BOTE_ERR_*`
 
 **Filed:** 2026-06-23 (by a hoosh consumer — hoosh 2.4.7 toolchain bump to cyrius 6.2.37)
+**Resolved:** 2026-07-17 in bote `3.1.3` — the entire `BoteErrTag` enum was
+prefixed `ERR_* → BOTE_ERR_*` (all 13 tags, `BOTE_ERR_TOOL_NOT_FOUND` …
+`BOTE_ERR_TAG_COUNT`); the `bote_err_*` constructors, the `BoteErrTag → JSON-RPC
+code` mapping, and every `src/` + test reference were updated, and
+`dist/bote-core.cyr` + `dist/bote.cyr` regenerated (0 bare `ERR_`, 53 tags
+each). No bare aliases were kept — a compatibility `ERR_IO` alias would
+reintroduce the exact libro `ERR_IO=3` collision this fixes. The real in-tree
+collision was against `lib/libro.cyr`'s `ERR_IO=3` / `ERR_JSON=4` in the
+libro-linked default binary (bote's are `=11` / `=10`). Landed as a patch
+(3.1.3), not the originally-suggested 2.8.0 — bote is well past that line.
 **Severity:** Medium — `last-definition-wins` build warning today; latent
 value-dependent-logic hazard when bote-core is compiled alongside another lib
 that also defines a bare `ERR_IO`.
