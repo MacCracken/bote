@@ -18,6 +18,63 @@ have per release.
 
 _(empty)_
 
+## [3.1.2] — 2026-07-16 — toolchain 6.4.64 + dependency refresh (libro 2.8.1, majra 2.5.1, sigil 3.12.0, sakshi pin)
+
+**Toolchain + full dependency refresh.** No bote logic change — the release moves every pin to
+its current tag, clears two per-build toolchain warnings (manifest-pin drift, sakshi lib-freshness
+shadow), and banks upstream correctness fixes bote inherits: libro's audit-row quoting fix and
+sigil's crypto-bank thread-local slot fix.
+
+### Changed
+- **cyrius pin `6.4.34` → `6.4.64`** — clears the "manifest-pin: 6.4.34 (drift — wrapper is
+  6.4.64)" warning. Span highlights relevant to bote: `net.cyr` `sock_accept` per-poll alloc-leak
+  fix (6.4.61 — all four socket transports sit on `net`), sandhi `signal_ignore`/SIGPIPE +
+  `output_buf` 16 MiB → 1 GiB (6.4.51/.52), per-profile distlib `.deps` subsetting (6.4.48),
+  DX diagnostics — column numbers, source carets, multi-error reporting (6.4.60/.62), and the
+  lib-freshness shadow check (6.4.63) that surfaced the sakshi lag below. 6.4.64 itself is a
+  Win64-only ≥10-arg call fix, inert on this target. `cyrius.lock` now records the
+  declared-subset resolution (the 6.4.x `cyrius deps` behavior).
+- **libro `2.7.10` → `2.8.1`.** 2.8.0 is a toolchain/dep refresh in which libro thinned its own
+  sigil surface (its binary, not the `dist/libro.cyr` body bote consumes — that is unchanged);
+  2.8.1 fixes `patrastore_append` to use a bound (prepared-statement) INSERT, so a `'` in any
+  audit field no longer silently drops the row (integrity fix on the audit chain bote fronts via
+  `libro_tools`). libro's `.deps` sidecar now also pulls **patra 1.12.10** — a new transitive
+  `lib/patra.cyr` vendored by `cyrius deps` (the tests that include `lib/libro.cyr` already
+  include it).
+- **majra `2.5.0` → `2.5.1`** — toolchain/dep refresh; the dist bundle body is byte-identical
+  (banner restamp only).
+- **sigil `3.9.8` → `3.12.0`.** Banks 3.9.9's **crypto-bank thread-local slot fix (slot 0 → 8)**
+  — slot 0 collided with patra's SQL scratch, corrupting banked crypto state in any process
+  linking both, which bote now does (patra arrives via libro 2.8.x above). 3.10.x–3.12.0 add
+  Authenticode/UEFI signing, per-primitive distlib profiles, and BLAKE2b + Argon2id — additive;
+  bote's consumed surface (sha256 / hmac_sha256 / ed25519) is unchanged. The full
+  `dist/sigil.cyr` bundle is retained: bote consumes two overlapping primitive families
+  (SHA-2/HMAC + Ed25519), and majra 2.5.1's footprint review showed the thin per-primitive
+  profiles overlap on ~121 fns for that shape (noisier than the full bundle's deduplicated
+  closure).
+- **6.4.x cyrfmt reflow** of `src/fs_tools.cyr` + `src/web_tools.cyr` (whitespace-only
+  continuation-line indentation — same reflow class as the 2.7.6 formatter churn).
+- `_bote_server_version()` → `"3.1.2"` (`src/dispatch.cyr`); `dist/bote.cyr` (6538 lines) +
+  `dist/bote-core.cyr` (2569 lines) regenerated at v3.1.2.
+
+### Added
+- **Explicit `[deps.sakshi]` pin at `2.4.6`** (`dist/sakshi.cyr`, self-contained — links only
+  stdlib `fnptr` + `atomic`). The stdlib registry still resolves `sakshi` → 2.4.3, which tripped
+  6.4.63's lib-freshness warning on every build. Same registry-lag class as the sigil pin;
+  brings sakshi 2.4.4's custom headers + W3C 128-bit trace-id along the way.
+
+### Notes
+- The pre-existing benign linker diagnostics are unchanged: `duplicate fn '_sub_new'`
+  (lib/majra.cyr) and `duplicate fn 'cancel_token_new'` — the latter now root-caused as stdlib
+  `async.cyr`'s own cancel-token (present since at least 6.4.34, semantically identical to
+  `src/stream.cyr`'s: an 8-byte heap flag initialised to 0; bote's later definition wins).
+- Verified: **786/786 assertions** across 12 test files + the core-only drift smoke; **14
+  benchmarks** flat vs the 2.7.6 baseline (`schema_compile_nested` 9 → 7.5 µs; first entry
+  logged at the 6.4.x sub-µs bench precision); capacity **59% / 61%** (`fn_table 4841/8192`,
+  `identifiers 160696/262144`) — well under the 95% CI gate; `fmt` / `lint` / `vet` / `deny`
+  clean; stdio `initialize` + `tools/call` round-trip smoke on the shipped binary
+  (`serverInfo.version` = 3.1.2).
+
 ## [3.1.1] — 2026-07-09 — native HTTPS large responses (toolchain TLS fix), pin `6.4.34`
 
 **`web_fetch` / `web_search` now work over the sovereign native TLS backend for

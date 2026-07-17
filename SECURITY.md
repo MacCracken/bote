@@ -3,21 +3,25 @@
 ## Scope
 
 bote is an MCP core service library providing JSON-RPC 2.0 protocol handling,
-tool dispatch, and multiple transport layers (stdio, HTTP, WebSocket, Unix
-socket). It processes untrusted JSON input from clients and dispatches to
-user-registered handlers.
+tool dispatch, and multiple transport layers (stdio, HTTP, Unix socket,
+HTTP↔stdio bridge, Streamable HTTP/SSE, WebSocket). It processes untrusted
+JSON input from clients and dispatches to user-registered handlers.
 
 The primary security-relevant surface areas are:
 
-- **JSON-RPC parsing** — `serde_json` deserialization of untrusted client input.
-  Malformed or oversized payloads could cause excessive memory allocation.
-- **Transport layer** — HTTP, WebSocket, and Unix socket transports accept
-  network connections. No authentication or TLS is built in; these are expected
-  to be handled by the deployment environment.
-- **Tool dispatch** — handler functions are user-provided. Panics in handlers
-  are caught and converted to error responses, not propagated.
-- **Concurrency** — streaming handlers run on spawned threads/tasks. Mutex
-  poisoning is handled gracefully (unwrap_or_else, not unwrap).
+- **JSON-RPC parsing** — `codec` / `jsonx` parsing of untrusted client input.
+  Malformed or oversized payloads could cause excessive memory allocation;
+  batch length is capped to bound per-request allocation.
+- **Transport layer** — HTTP, Streamable HTTP/SSE, WebSocket, Unix socket, and
+  bridge transports accept network connections. Opt-in auth validators (bearer,
+  allowlist, JWT HS256, PKCE) are built in; TLS is expected to be handled by
+  the deployment environment.
+- **Tool dispatch** — handler functions are user-provided. Arguments are
+  validated against the registered JSON Schema before invocation; validation
+  failures are returned as error responses, not propagated.
+- **Outbound requests** — the `host` module's SSRF guard rejects URLs targeting
+  loopback / link-local / private / cloud-metadata endpoints (IPv4 and IPv6)
+  before any network call.
 - **Audit chain** — the optional libro integration uses SHA-256 hash linking
   for tamper detection.
 
@@ -25,8 +29,9 @@ The primary security-relevant surface areas are:
 
 | Version | Supported |
 | ------- | --------- |
-| 0.22.x  | Yes       |
-| < 0.22  | No        |
+| 3.1.x   | Yes (current minor) |
+| 3.0.x   | Yes (prior minor) |
+| < 3.0   | No        |
 
 ## Reporting a Vulnerability
 
@@ -42,10 +47,11 @@ responsibly:
 
 ## Security Design
 
-- No `unsafe` code in the library.
-- Compile-time `Send + Sync` assertions on all public types.
-- Mutex poisoning handled gracefully across all transports.
-- Handler panics caught and returned as JSON-RPC error responses.
+- No panic/abort in library code — errors return as 0 / -1 / error tags; the
+  consumer decides.
 - jsonrpc version validated on every request.
 - Empty/missing tool names rejected before dispatch.
-- Feature-gated dependencies — core has minimal attack surface.
+- Tool arguments validated against the registered JSON Schema before dispatch.
+- JSON-RPC batch length capped to bound per-request allocation.
+- Profile-split distribution (`dist/bote-core.cyr`) — core has minimal attack
+  surface.

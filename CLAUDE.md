@@ -6,8 +6,8 @@
 
 - **Language**: Cyrius (ported from Rust at v1.0.1; Rust archive preserved at tag `0.92.0`)
 - **License**: GPL-3.0-only
-- **Cyrius pin**: 6.3.42 (see `cyrius.cyml`; `6.3.38 → 6.3.42` at 3.0.0; onto the 6.3.x line at 2.9.0; first 6.2.x at 2.7.6; major jump from 5.10.x at 2.7.3)
-- **Version**: SemVer; 2.0 handler ABI (`fn h(args, claims) → result`) stable across the 2.x→3.x line; 3.0.0 current (full MCP capability suite — prompts / resources / completion + polled list_changed push; see CHANGELOG)
+- **Cyrius pin**: 6.4.64 (see `cyrius.cyml`; `6.4.34 → 6.4.64` at 3.1.2; onto the 6.4.x line at 3.0.1; `6.3.38 → 6.3.42` at 3.0.0; onto the 6.3.x line at 2.9.0; first 6.2.x at 2.7.6; major jump from 5.10.x at 2.7.3)
+- **Version**: SemVer; 2.0 handler ABI (`fn h(args, claims) → result`) stable across the 2.x→3.x line; 3.1.2 current (toolchain 6.4.64 + full dep refresh; web tools at 3.1.0; full MCP capability suite — prompts / resources / completion + polled list_changed push — at 3.0.0; see CHANGELOG)
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -17,12 +17,13 @@
 
 | Dep | Role |
 |-------|------|
-| libro 2.7.4 | Hash-linked audit chain (`[deps.libro]` git pin) |
-| majra 2.4.7 | Pub/sub event publishing (`[deps.majra]` git pin) |
-| sigil 3.7.14 | Crypto (sha256 / hmac_sha256 / ed25519) — **`[deps.sigil]` git pin**, NOT the bare `sigil` stdlib entry. The stdlib registry has historically lagged the self-contained bundle (the 6.1.x registry resolved `sigil` to 3.7.10, whose `dist/sigil.cyr` dangled `include "src/sha_ni.cyr"`); 3.7.12 inlined the SHA-NI/AES-NI banks and 3.7.14 keeps the bundle self-contained. The pin overrides the registry so `cyrius deps` gets the self-contained bundle. **`thread_local` must precede `sigil`** in `[deps] stdlib` — 3.7.14's `crypto_scratch` exercises the TLS path and SIGILLs at runtime without it. |
+| libro 2.8.1 | Hash-linked audit chain (`[deps.libro]` git pin). Its `.deps` sidecar also pulls **patra 1.12.10** (`lib/patra.cyr`) for the audit store since libro 2.8.x |
+| majra 2.5.1 | Pub/sub event publishing (`[deps.majra]` git pin) |
+| sigil 3.12.0 | Crypto (sha256 / hmac_sha256 / ed25519) — **`[deps.sigil]` git pin**, NOT the bare `sigil` stdlib entry. The stdlib registry has historically lagged the self-contained bundle (the 6.1.x registry resolved `sigil` to 3.7.10, whose `dist/sigil.cyr` dangled `include "src/sha_ni.cyr"`; 3.7.12+ bundles are self-contained). The pin overrides the registry so `cyrius deps` gets the current self-contained bundle. Full bundle retained over the 3.11.x per-primitive profiles — bote consumes two overlapping primitive families (SHA-2/HMAC + Ed25519), and the thin closures overlap on ~121 fns (see majra 2.5.1's footprint review). **`thread_local` must precede `sigil`** in `[deps] stdlib` — sigil ≥3.7.14's `crypto_scratch` exercises the TLS path and SIGILLs at runtime without it. |
+| sakshi 2.4.6 | Tracing / structured logging — **`[deps.sakshi]` explicit pin** (since 3.1.2): the registry resolves `sakshi` → 2.4.3, which trips the 6.4.63 lib-freshness shadow warning on every build. Same registry-lag class as sigil. `dist/sakshi.cyr` is self-contained (links only stdlib `fnptr` + `atomic`) |
 | kavach 3.0  | Tool sandboxing (pluggable runner via fn-pointer + ctx adapter) |
 
-All AGNOS deps pinned in `cyrius.cyml [deps.<name>]` with `git` + `tag` (+ `path` for local dev). `lib/` is gitignored — `cyrius deps` rehydrates from the pinned tags. The contract is the pin, not the bytes on disk. `cyrius deps` resolves the bare `[deps] stdlib` names from the 6.1.x registry, which can lag the toolchain snapshot — when a stdlib crate's registry version is broken for single-file consumption (see sigil), pin it explicitly in `[deps.<name>]` to override.
+All AGNOS deps pinned in `cyrius.cyml [deps.<name>]` with `git` + `tag` (+ `path` for local dev). `lib/` is gitignored — `cyrius deps` rehydrates from the pinned tags. The contract is the pin, not the bytes on disk. `cyrius deps` resolves the bare `[deps] stdlib` names from the registry, which can lag the toolchain snapshot — when a stdlib crate's registry version is broken for single-file consumption (see sigil) or stale enough to trip the 6.4.63 lib-freshness warning (see sakshi), pin it explicitly in `[deps.<name>]` to override.
 
 ## Distribution
 
@@ -30,7 +31,7 @@ Two consumer bundles (see `DEPS-PATTERN.md` for the contract):
 
 | Artifact | Profile | Modules | Use when |
 |----------|---------|---------|----------|
-| `dist/bote.cyr` | default `[lib]` | 27 | Consumer needs the full transport surface |
+| `dist/bote.cyr` | default `[lib]` | 28 | Consumer needs the full transport surface |
 | `dist/bote-core.cyr` | `[lib.core]` | 11 | Consumer wraps Dispatcher / Registry / Prompts / Resources / Audit but supplies its own transport (e.g. t-ron's SecurityGate) |
 
 Regenerate with `cyrius distlib` (default) and `cyrius distlib core`. CI gates both bundles for freshness.
@@ -88,6 +89,8 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `content.cyr` | Typed MCP content blocks + annotations |
 | `host.cyr` | HostRegistry + IPv4/IPv6 SSRF guard + JSON config hot-reload |
 | `libro_tools.cyr` | libro audit-tool dispatch (5 tools; in default binary + bundle since 2.7.5, not in core) |
+| `fs_tools.cyr` | Filesystem MCP tools (`fs_write` / `fs_read` / `fs_mkdir`) — root-confined (`BOTE_FS_ROOT`); since 2.8.0 |
+| `web_tools.cyr` | Web MCP tools (`web_fetch` / `web_search` via SearXNG, sandhi client); since 3.1.0 |
 
 **Binary entries** — `src/main.cyr` + `src/main_streamable.cyr` + `src/main_ws.cyr` + `src/main_common.cyr` (shared helpers).
 
@@ -143,7 +146,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **Cyrius is single-pass.** Include order matters. New stdlib transitive deps go BEFORE the modules that reference them in `cyrius.cyml [deps] stdlib` (see the `ct` / `keccak` / `random` → `sigil` ordering for the worked example, and `thread` → `thread_local` → `sigil` for the 3.7.14 TLS-storage SIGILL guard added at 2.7.6).
 - **Compile-source budget.** The cyrius 5.10.x parser had a 2 MB cap on expanded source that forced the per-transport binary split. **6.1.24 (2.7.3) raised it** — `src/main.cyr` builds clean and the cap is no longer the binding constraint. Still watch the `cyrius build` output for `expanded source exceeds`. Three response paths remain on record if it ever fires again: upstream cap raise (the 6.1.x path), per-transport binary split (the 2.7.2 path, still in place), opt-in module split for consumers (`dist/bote-core.cyr`).
-- **Function-table cap.** CI gates fn_table + identifier-buffer utilisation at < 95% (`CYRIUS_STATS=1`). At 2.7.6 (cyrius 6.2.11) we're at **58% / 60%** on `src/main.cyr` (`fn_table 4770/8192`, `identifiers 157633/262144`) — the small bump over 2.7.5's `4764/157278` is the `thread_local` pull-through (the sigil 3.7.14 TLS-path SIGILL guard). Still up from 52% / 52% at 2.7.3 because the 6.1.x `bayan` module consolidates json + base64 + csv + u128 (replacing the smaller standalone `json`/`base64` stdlib modules), but well under the 95% gate and far below the 93% / 92% peak at 2.7.2.
+- **Function-table cap.** CI gates fn_table + identifier-buffer utilisation at < 95% (`CYRIUS_STATS=1`). At 3.1.2 (cyrius 6.4.64) we're at **59% / 61%** on `src/main.cyr` (`fn_table 4841/8192`, `identifiers 160696/262144`) — the bump over 2.7.6's `4770/157633` (58% / 60%) is the fs/web tool families plus the dep-refresh pull-through (patra via libro 2.8.x, sigil 3.12.0's larger surface). Well under the 95% gate and far below the 93% / 92% peak at 2.7.2 on the old 5.10.x caps.
 - **No `unwrap()` / `panic!()` analog.** Library code returns 0 / -1 / error tags; consumer decides.
 - **Feature-shape via `[lib.<profile>]`.** Don't invent feature flags in Cyrius — produce a separate dist bundle if a consumer subset is worth supporting.
 - **`tracing` analog via libro / majra.** Audit goes to libro chain; events to majra pubsub. Wire via `dispatcher_set_audit` / `dispatcher_set_events`.
@@ -155,15 +158,17 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `tests/bote.tcyr` | 415 | error / protocol / jsonx / registry / tool annotations + profiles / prompts / resources / completion / listChanged flag / dispatch / codec / schema / stream + notification builders / session (+ outbound slot) / HTTP helpers / discovery / bridge / events / audit / audit_libro / events_majra wire-up |
 | `tests/bote_auth.tcyr` | 38 | Bearer + allowlist + JWT HS256 + PKCE validators |
 | `tests/bote_content.tcyr` | 24 | Typed MCP content blocks + annotations |
+| `tests/bote_fs_tools.tcyr` | 26 | Filesystem tools — path safety (`..` / absolute refusal), JSON unescape, root confinement |
 | `tests/bote_host.tcyr` | 113 | HostRegistry + IPv4/IPv6 SSRF + JSON config hot-reload |
 | `tests/bote_jwt.tcyr` | 28 | JWT HS256 verify (header / payload / sig parsing) |
 | `tests/bote_libro_tools.tcyr` | 22 | libro audit-tool dispatch surface |
 | `tests/bote_pkce.tcyr` | 17 | RFC 7636 PKCE-S256 |
 | `tests/bote_sandbox.tcyr` | 13 | kavach 3.0 pluggable runner adapter |
 | `tests/bote_streamable.tcyr` | 53 | Streamable HTTP — EventIdGenerator / StreamEvent / ResumptionBuffer / SessionOutbound (per-session buffer + id gen) / GET drain selection / client-notification sink (tools + prompts list_changed) / POST-piggyback SSE / StreamableConfig |
+| `tests/bote_web_tools.tcyr` | 27 | Web tools — scheme guard, HTML→text stripper (incl. control-byte/NUL drop), url-encode, entity decode |
 | `tests/bote_ws.tcyr` | 10 | WebSocket — WsConfig + handler wire-up |
 | `tests/bote_core_only_smoke.tcyr` | drift guard | Includes only `dist/bote-core.cyr` — catches core/transport entanglement |
-| **Total** | **733** | + 1 drift smoke |
+| **Total** | **786** | + 1 drift smoke |
 
 Criterion benchmarks: **14** in `tests/bote.bcyr` (dispatch × 3, jsonx × 2, codec × 3, schema × 4, auth_bearer × 2).
 

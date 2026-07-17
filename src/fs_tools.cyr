@@ -228,18 +228,18 @@ fn fs_tools_register(dispatcher) {
     var reg = dispatcher_registry(dispatcher);
 
     registry_register(reg, tool_def_new(
-        "fs_write", "write a UTF-8 text file (parents created) under the server root; args {path, content}",
-        schema_new("object", 0, vec_new())));
+    "fs_write", "write a UTF-8 text file (parents created) under the server root; args {path, content}",
+    schema_new("object", 0, vec_new())));
     dispatcher_handle(dispatcher, "fs_write", &fs_write_handler);
 
     registry_register(reg, tool_def_new(
-        "fs_read", "read a text file under the server root; args {path}",
-        schema_new("object", 0, vec_new())));
+    "fs_read", "read a text file under the server root; args {path}",
+    schema_new("object", 0, vec_new())));
     dispatcher_handle(dispatcher, "fs_read", &fs_read_handler);
 
     registry_register(reg, tool_def_new(
-        "fs_mkdir", "create a directory (and parents) under the server root; args {path}",
-        schema_new("object", 0, vec_new())));
+    "fs_mkdir", "create a directory (and parents) under the server root; args {path}",
+    schema_new("object", 0, vec_new())));
     dispatcher_handle(dispatcher, "fs_mkdir", &fs_mkdir_handler);
 
     return 0;

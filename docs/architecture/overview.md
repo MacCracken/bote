@@ -1,15 +1,17 @@
 # Bote Architecture (Cyrius)
 
-> MCP core service — JSON-RPC 2.0 protocol, tool registry, dispatch, six
-> transports, bearer-token middleware, libro audit tools, typed content
-> blocks, host registry with SSRF guard.
+> MCP core service — JSON-RPC 2.0 protocol, tool registry, prompts +
+> resources registries, dispatch, six transports, bearer auth + JWT
+> HS256 + RFC 7636 PKCE, libro audit tools, fs + web tools, typed
+> content blocks (with annotations), host registry with SSRF guard,
+> pluggable sandbox runner (kavach 3.0).
 >
 > **Name**: Bote (German) — messenger.
 >
 > **Lineage**: Originally a Rust crate. Ported to Cyrius via `cyrius port`
 > on 2026-04-13 (v1.0.0). The Rust archive was retired in v1.0.1; the last
 > Rust snapshot is at git tag `0.92.0`. This doc describes the live Cyrius
-> implementation (current: **1.9.2**, cyrius 4.7.0).
+> implementation (current: **3.1.2**, cyrius 6.4.64).
 
 ---
 
@@ -30,7 +32,7 @@
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│ Consumers (jalwa, shruti, tazama, daimon, agnoshi, …) +            │
+│ Consumers (phylax, t-ron, sutra, jalwa, rasa, mneme, …) +          │
 │ TS clients (via bridge) + browser clients (via streamable / WS)    │
 │                                                                    │
 │ Client: JSON-RPC 2.0 over stdio / HTTP / Unix / streamable / WS    │
@@ -59,9 +61,9 @@
 │                          │                                         │
 │ ┌──────────────┐ ┌───────▼────────┐ ┌────────────────────────────┐ │
 │ │ registry     │ │ dispatch       │ │ stream                     │ │
-│ │ (ToolDef +   │─│ (initialize /  │─│ (ProgressUpdate,           │ │
-│ │  schemas +   │ │ tools/list /   │ │  CancellationToken,        │ │
-│ │  versions)   │ │ tools/call)    │ │  progress notifications)   │ │
+│ │ (ToolDef +   │─│ (initialize,   │─│ (ProgressUpdate,           │ │
+│ │  schemas +   │ │ tools, prompts,│ │  CancellationToken,        │ │
+│ │  versions)   │ │ resources, …)  │ │  progress notifications)   │ │
 │ └──────┬───────┘ └───────┬────────┘ └────────────────────────────┘ │
 │        │                 │                                         │
 │ ┌──────▼─────────────────▼────────────────────────────────────────┐│
@@ -79,6 +81,8 @@
 │ │   bote_echo                                                    │ │
 │ │   libro_query  libro_verify  libro_export                      │ │
 │ │   libro_proof  libro_retention                                 │ │
+│ │   fs_write  fs_read  fs_mkdir                                  │ │
+│ │   web_fetch  web_search                                        │ │
 │ └────────────────────────────────────────────────────────────────┘ │
 │                                                                    │
 │ ┌────────────────────────────────────────────────────────────────┐ │
@@ -102,8 +106,13 @@
 
 ```
 src/
-├── main.cyr                — CLI entry: argv selects transport,
-│                             BOTE_BEARER_TOKENS env-wires auth allowlist
+├── main.cyr                — CLI entry (stdio/http/unix/bridge): argv
+│                             selects transport; registers echo + libro
+│                             + fs + web tools
+├── main_streamable.cyr     — entry for build/bote-streamable
+├── main_ws.cyr             — entry for build/bote-ws
+├── main_common.cyr         — shared entry helpers (dispatcher setup,
+│                             BOTE_BEARER_TOKENS env-wires auth allowlist)
 ├── error.cyr               — BoteErrTag (12 variants), rpc_code, format
 ├── protocol.cyr            — JsonRpcRequest / Response / Error data types
 ├── jsonx.cyr               — nested-aware JSON extractor
@@ -121,9 +130,14 @@ src/
 ├── events.cyr              — EventSink (fn-ptr + ctx) + topic constants
 ├── events_majra.cyr        — MajraEvents adapter
 ├── auth.cyr                — Bearer-token middleware (RFC 6750)
-├── content.cyr             — Typed MCP content blocks
+├── jwt.cyr                 — JWT HS256 verifier (RFC 7519 / 7515)
+├── pkce.cyr                — RFC 7636 PKCE helpers (S256)
+├── sandbox.cyr             — pluggable sandbox runner adapter (kavach 3.0)
+├── content.cyr             — Typed MCP content blocks (+ annotations)
 ├── host.cyr                — HostRegistry + SSRF guard (IPv4 + IPv6)
 ├── libro_tools.cyr         — Five built-in MCP tools over a libro chain
+├── fs_tools.cyr            — fs_write / fs_read / fs_mkdir MCP tools (BOTE_FS_ROOT-confined)
+├── web_tools.cyr           — web_fetch / web_search MCP tools (sandhi HTTP client)
 ├── transport_stdio.cyr     — line-oriented stdin/stdout loop
 ├── transport_http.cyr      — HTTP/1.1 server + middleware
 ├── transport_unix.cyr      — AF_UNIX line-oriented loop
@@ -131,21 +145,35 @@ src/
 ├── transport_streamable.cyr — Streamable HTTP / SSE (MCP 2025-11-25)
 └── transport_ws.cyr        — WebSocket (RFC 6455)
 
-lib/                        — vendored cyrius stdlib
-                             (used: alloc, args, base64, chrono, fmt,
-                              fnptr, hashmap, http_server, io, json, net,
-                              str, string, syscalls, tagged, vec,
-                              ws_server, freelist, thread, sigil, …)
-[deps.libro]   git = "MacCracken/libro"   tag = "1.0.3"
-[deps.majra]   git = "MacCracken/majra"   tag = "2.2.0"
+lib/                        — cyrius stdlib + AGNOS dep bundles,
+                             rehydrated by `cyrius deps` (gitignored)
+                             (stdlib: string, fmt, alloc, vec, str, slice,
+                              syscalls, io, args, assert, hashmap, bayan,
+                              fnptr, chrono, tagged, net, async, dynlib,
+                              fdlopen, freelist, thread, atomic, sync,
+                              thread_local, sakshi, ct, keccak, random,
+                              sigil, tls, sandhi; ws_server manually
+                              included by transport_ws.cyr only)
+[deps.libro]   git = "MacCracken/libro"   tag = "2.8.1"   (+ patra 1.12.10 transitive)
+[deps.majra]   git = "MacCracken/majra"   tag = "2.5.1"
+[deps.sakshi]  git = "MacCracken/sakshi"  tag = "2.4.6"   (registry-lag pin)
+[deps.sigil]   git = "MacCracken/sigil"   tag = "3.12.0"  (registry-lag pin)
 
 tests/
-├── bote.tcyr                  — 394 core assertions
+├── bote.tcyr                  — 415 core assertions
+├── bote_auth.tcyr             — 38 (bearer + allowlist + JWT + PKCE validators)
+├── bote_content.tcyr          — 24 (content blocks + annotations)
+├── bote_fs_tools.tcyr         — 26 (fs_tools)
+├── bote_host.tcyr             — 113 (host registry + SSRF)
+├── bote_jwt.tcyr              — 28 (JWT HS256 verify)
 ├── bote_libro_tools.tcyr      — 22 (libro_tools)
-├── bote_content.tcyr          — 18 (content blocks)
-├── bote_host.tcyr             — 56 (host registry + SSRF)
-├── bote_auth.tcyr             — 29 (bearer middleware)
-└── bote.bcyr                  — 10 hot-path benchmarks
+├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
+├── bote_sandbox.tcyr          — 13 (kavach 3.0 runner adapter)
+├── bote_streamable.tcyr       — 53 (streamable HTTP / SSE)
+├── bote_web_tools.tcyr        — 27 (web_tools)
+├── bote_ws.tcyr               — 10 (WebSocket)
+├── bote_core_only_smoke.tcyr  — drift guard (includes only dist/bote-core.cyr)
+└── bote.bcyr                  — 14 hot-path benchmarks
 
 fuzz/
 ├── codec_parse.fcyr
@@ -157,13 +185,15 @@ docs/
 ├── architecture/overview.md   — this file
 ├── benchmarks-rust-v-cyrius.md
 ├── cyrius-feedback.md         — language issues found during the port
+├── resolved-lang-issues.md    — issues since fixed upstream
 ├── spec-compliance.md         — MCP 2025-11-25 conformance matrix
-├── development/roadmap.md     — shipped per release, remaining for 2.0
-├── bugs/                      — cyrius bug reports w/ reproducers
-└── proposals/                 — stdlib proposals (http_server, ws_server)
+├── development/roadmap.md     — shipped per release, backlog
+├── development/issues/        — cyrius toolchain issues w/ reproducers
+└── audit/                     — audit reports
 ```
 
-The per-module test-file split (five `tests/bote_*.tcyr` files) is a
+The per-module test-file split (eleven per-module `tests/bote_*.tcyr`
+files plus the core-only drift smoke) is a
 deliberate organization choice — it mirrors `src/` layout and makes
 per-module compile times tight. (It originated as a workaround for the
 cyrius 4.5.1 parser identifier-buffer cap; that cap has since been
@@ -301,6 +331,7 @@ Typed MCP content blocks for richer-than-text tool results:
 | `content_resource_link(uri, name, mime)` | reference (client fetches by URI) |
 | `content_array(blocks)` / `content_array_error(blocks)` | envelope; second sets `isError:true` |
 | `content_single(block)` / `content_text_response(text)` | shorthand for single-block case |
+| `content_with_annotations(block, audience, priority)` | attach MCP annotations to any block |
 
 `src/bridge.cyr::wrap_tool_result` already passes through a ready-made
 content envelope untouched, so handlers opt in without any transport
@@ -316,10 +347,10 @@ change.
 
 | Artifact | Count | Where |
 |---|---|---|
-| Core unit tests | 394 | `tests/bote.tcyr` |
-| Module tests | 125 | `tests/bote_libro_tools.tcyr` (22) + `bote_content.tcyr` (18) + `bote_host.tcyr` (56) + `bote_auth.tcyr` (29) |
-| **Total assertions** | **519** | |
-| Benchmarks | 10 | `tests/bote.bcyr` |
+| Core unit tests | 415 | `tests/bote.tcyr` |
+| Module tests | 371 | `tests/bote_auth.tcyr` (38) + `bote_content.tcyr` (24) + `bote_fs_tools.tcyr` (26) + `bote_host.tcyr` (113) + `bote_jwt.tcyr` (28) + `bote_libro_tools.tcyr` (22) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_web_tools.tcyr` (27) + `bote_ws.tcyr` (10) |
+| **Total assertions** | **786** | plus the `bote_core_only_smoke.tcyr` drift guard |
+| Benchmarks | 14 | `tests/bote.bcyr` |
 | Fuzz harnesses | 4 | `fuzz/*.fcyr` |
 
 All hot paths sub-10 µs on x86_64 (`AMD Ryzen 7 5800H`). Side-by-side

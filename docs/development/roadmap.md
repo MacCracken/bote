@@ -1,13 +1,15 @@
 # Bote Roadmap
 
-> **Current**: `2.7.6` (cyrius 6.2.11, libro 2.7.4, majra 2.4.7, sigil 3.7.14).
-> 11 active test files, **653 unit assertions** + 1 drift-guard
+> **Current**: `3.1.2` (cyrius 6.4.64, libro 2.8.1, majra 2.5.1, sigil 3.12.0, sakshi 2.4.6).
+> 12 active test files, **786 unit assertions** + 1 drift-guard
 > smoke, **14 criterion benchmarks**, **dual** consumer bundles
-> (`dist/bote.cyr` full + `dist/bote-core.cyr` opt-in core via
-> `[lib.core]` profile), per-transport binary trio
+> (`dist/bote.cyr` full, 28 modules + `dist/bote-core.cyr` opt-in core via
+> `[lib.core]` profile, 11 modules), per-transport binary trio
 > (`bote` / `bote-streamable` / `bote-ws` — retained from the
 > 5.10.x cap workaround; reconsolidation unblocked on 6.1.x), CI capacity + dual
-> dist-freshness gates, annotations-preserving `wrap_tool_result`,
+> dist-freshness gates, full MCP capability suite (tools / prompts /
+> resources / completion + polled `list_changed` push), fs / web / libro
+> tool families, annotations-preserving `wrap_tool_result`,
 > HostRegistry hot-reload, 4 fuzz harnesses, 6 transports,
 > handler-claims ABI plumbed end-to-end, JWT HS256 + RFC 7636
 > PKCE, bearer + allowlist + JWT validators, pluggable sandbox
@@ -21,16 +23,16 @@
 > **Full release history**: [CHANGELOG.md](../../CHANGELOG.md).
 > Rust archive preserved at git tag `0.92.0` (retired in v1.0.1).
 
-2.0 shipped. 2.x is feature-stable on the handler ABI (fn `(args, claims) → result_cstr`) and the six transports; patch releases add capabilities, not shape changes.
+3.0 shipped. The 2.0 handler ABI (fn `(args, claims) → result_cstr`) and the six transports are stable across the 2.x→3.x line; patch releases add capabilities, not shape changes.
 
-**2.6.x is the modernization arc.** Forward feature work that was
-on the 2.6.x slate has shifted to 2.7.x. The 2.6.x line is reserved
+**2.6.x was the modernization arc.** Forward feature work that was
+on the 2.6.x slate shifted to 2.7.x. The 2.6.x line was reserved
 for catching bote up to the first-party Cyrius floor: the dist-bundle
 dep contract, the cyrius.cyml + `${file:VERSION}` layout, the
 versioned-toolchain CI installer, the `cyrius deps --verify` /
 `cyrius.lock` gates, and the residual libro 2.6.x / majra 2.4.x /
 sandhi-HTTP-server porting that the 5.10.34 toolchain bump
-surfaces. See the **2.6.x modernization arc** section below.
+surfaced. See the **2.6.x modernization arc** section below.
 
 ---
 
@@ -65,6 +67,15 @@ surfaces. See the **2.6.x modernization arc** section below.
 | **2.7.4** | Toolchain patch refresh (cyrius 6.1.41); **breaking** tool-registry constructor rename to resolve the ai-hwaccel `registry_new` collision for multi-library consumers (szal, mihi, hoosh). All 653 assertions (+ drift smoke) pass on the renamed constructor |
 | **2.7.5** | **`libro_tools` folded back into the default binary + `dist/bote.cyr`** (now 24 modules) — reverts the 1.9.4 cap-headroom decision now that the 6.1.x cap raise puts `src/main.cyr` at 58% / 60% (`fn_table 4764/8192`). `main()` stands up an in-memory libro chain and registers the five `libro_*` audit tools by default. Stays out of `dist/bote-core.cyr` (depends on a live libro chain, like `audit_libro`). All 653 assertions (+ drift smoke) pass |
 | **2.7.6** | **Cyrius 6.1.41 → 6.2.11** (first move onto the 6.2.x line) + dep refresh (libro 2.7.2 → 2.7.4, majra 2.4.5 → 2.4.7, sigil 3.7.12 → 3.7.14). **sigil 3.7.14 TLS-path SIGILL guard**: `thread_local` added to `[deps] stdlib` (before `sigil`) and to all six sigil-using test files — without it the crypto path links clean but SIGILLs at runtime (exit 132). 6.2.11 formatter reflow (whitespace) across `src/` + `tests/`; `dist/*` regenerated at v2.7.6. `fn_table 4770/8192` (58% / 60%). All 653 assertions (+ drift smoke) pass, 14 benchmarks no-regression |
+| **2.7.7** | **Cyrius 6.2.11 → 6.3.15 base-stack migration** — tier-3 step of the coordinated base-security-stack migration (sakshi 2.4.3 → sigil 3.9.8 → majra 2.5.0 → libro 2.7.9 → bote → the five consumers). 6.3.x stdlib rename reconciliation (`http_send_204` → `sandhi_server_send_204`; bote-local `http_find_header` compat shim in `transport_ws.cyr`); `atomic` / `sync` / `dynlib` added to `[deps] stdlib`; stale `_bote_server_version` literal fixed (`2.7.1` → `2.7.7`). No runtime logic change; all 653 assertions pass |
+| **2.7.8** | **AF_UNIX transport fail-closes on agnos** — `transport_unix_run` guarded with `#ifdef CYRIUS_TARGET_AGNOS` (agnos has no AF_UNIX domain sockets); the full `bote` binary now compiles under `cyrius build --agnos` (bote-core was already agnos-clean). Mirrors majra's ipc AF_UNIX guard |
+| **2.8.0** | **Filesystem tools** — `fs_write` / `fs_read` / `fs_mkdir` in new `src/fs_tools.cyr`, root-confined (`BOTE_FS_ROOT`; absolute / `..` paths refused), opt-in via `fs_tools_register()`. In the full bundle (25 modules), not core. +26 assertions (`tests/bote_fs_tools.tcyr`) |
+| **2.9.0** | **Runs + serves MCP on agnos** — cyrius 6.3.15 → 6.3.38 picks up the stdlib `freelist.cyr` agnos `mmap#27` fix (the stale vendored copy SIGSEGV'd every `fl_alloc` consumer, killing sigil's crypto in `main()` at `chain_new()`). Full MCP flow proven under mirshi and on the real agnos kernel under QEMU (`BOTE_SELFTEST` + `bote-mcp-smoke.sh`) |
+| **3.0.0** | **MCP capability suite + honest polled-push notifications** — prompts / resources / completion capabilities plus `notifications/tools/list_changed` + `notifications/prompts/list_changed`, delivered on the client's next streamable `GET` or POST-piggyback SSE; `listChanged` advertised only where a drain path exists (streamable, never stdio/http/ws). **Breaking**: `bote-streamable` enforces MCP session lifecycle (`MCP-Session-Id`). `[lib.core]` 9 → 11 modules (`prompts.cyr`, `resources.cyr`). cyrius 6.3.38 → 6.3.42. 733 assertions (was 653) |
+| **3.0.1** | **`bote_echo` MCP conformance** — the reference sample tool now wraps its echoed args in a text content block via `content_text_response` (was a bare JSON object, invalid as a `tools/call` result). Toolchain 6.3.42 → 6.4.20 |
+| **3.1.0** | **Web tools** — `web_fetch` (HTML→readable-text stripper, 64 KiB cap, scheme guard) + `web_search` (SearXNG via `BOTE_SEARXNG_URL` — self-hostable, no third-party key) in new `src/web_tools.cyr`; outbound HTTP via the sandhi client. Stripper drops C0 control bytes / DEL / raw NUL from the untrusted page. +27 assertions (`tests/bote_web_tools.tcyr`) |
+| **3.1.1** | **Native HTTPS large responses** — cyrius 6.4.20 → 6.4.34 carries the stdlib native-TLS record-layer fix (max-size 16 KB record off-by-one + partial-record delivery); `web_fetch` / `web_search` now work against real-world hosts over the sovereign native backend. No bote source change |
+| **3.1.2** | **Toolchain 6.4.64 + full dependency refresh** — libro 2.8.1 (audit-row quoting integrity fix; pulls patra 1.12.10 as a new transitive), majra 2.5.1, sigil 3.12.0 (crypto-bank thread-local slot fix), new explicit **sakshi 2.4.6 pin** (registry lag, same class as the sigil pin). No bote logic change. 786/786 assertions across 12 test files + drift smoke, 14 benchmarks flat, capacity 59% / 61% (`fn_table 4841/8192`) |
 
 See [CHANGELOG.md](../../CHANGELOG.md) for the full detail per release.
 
@@ -103,27 +114,29 @@ work belongs.
 | **Add `content.cyr` to the `[lib.core]` profile** — ship the typed content-block constructors (`content_text`, `content_text_response`, `content_array`, `content_array_error`, `content_image`, `content_resource`, …) in `dist/bote-core.cyr` | **P1** | Small | Content blocks are the tool-result format *every* handler emits — transport or not — but `content.cyr` currently ships only in the full `[lib]` bundle. Core-profile consumers (nein 1.6.0 `mcp` module; t-ron) are therefore forced to hand-roll `{"content":[…],"isError":…}` with a raw `str_builder` + `_json_emit_escaped`, duplicating logic content.cyr already provides — and re-implementing JSON escaping per consumer is exactly the injection-surface duplication the core profile should prevent. `content.cyr` (232 lines, 13 fns) references only `_json_emit_escaped` (already in core via `dispatch.cyr`), `str_builder_*`, and `vec_*` — no transport/host/session deps — so it drops into `[lib.core]` after `dispatch.cyr` cleanly (single-pass ordering). Fix: add the module to `[lib.core]`, extend the core-only drift guard (`tests/bote_core_only_smoke.tcyr`), regen both dist bundles. Surfaced building nein's MCP tool handlers against `dist/bote-core.cyr`. |
 | **DEPS-PATTERN.md doesn't mention `cyrius lib sync`** — a core consumer following the doc hits `dep libro requires 'ct' … not in the cyrius stdlib` and reasonably (but wrongly) concludes it's a resolver bug | **P2 — docs** | Small | **NOT a resolver bug** (earlier diagnosis was wrong). Cyrius deliberately does not auto-resolve stdlib (supply-chain safety); a consumer of the bote/libro/majra graph must (a) declare every transitive stdlib module in `[deps] stdlib` — `ct, keccak, random, slice, thread, thread_local, sync, atomic, ws_server, result` (+ `sigil`) — and (b) run **`cyrius lib sync`** to copy that declared subset into `./lib/` **before** `cyrius deps`. DEPS-PATTERN.md documents `git + tag + modules` but omits the `lib sync` step and the transitive-stdlib requirement, so a first-time core consumer dead-ends on the `ct` error and thinks it's broken. nein 1.6.0 vendored bote-core over this misread; nein 1.6.1 retired the vendoring and consumes bote-core + sigil as git deps the same way daimon does (works cleanly). Fix: add a "Consuming the core bundle from a project without the crypto stack" section to DEPS-PATTERN.md showing the `[deps] stdlib` list + the `cyrius lib sync → cyrius deps` order. Surfaced building nein's `mcp` + `sign` modules. |
 | **Opt-in transport profile** — `dist/bote-core.cyr` alongside `dist/bote.cyr` | ✅ **Shipped 2.7.2** | Medium | Resolved per [`issues/2026-05-10-opt-in-transport-profile.md`](issues/2026-05-10-opt-in-transport-profile.md). `cyrius.cyml [lib.core]` profile, 9-module 70 KB bundle, `DEPS-PATTERN.md`, `tests/bote_core_only_smoke.tcyr` drift guard, dual dist-freshness CI. t-ron 2.1.x flips its [deps.bote] to `dist/bote-core.cyr` in next patch. |
-| **Reconsolidate per-transport binaries** — fold `bote-streamable` + `bote-ws` back into single `bote` binary | **P2 — gated** | Small | Blocked on cyrius 5.11.x migration (cap raise 2 MB → 4 MB per the companion proposal at `cyrius/docs/development/proposals/2026-05-10-raise-compile-source-cap.md`). When that lands, retire `src/main_streamable.cyr` / `src/main_ws.cyr` / `src/main_common.cyr` and restore the streamable / ws CLI branches in `src/main.cyr`. The `dist/bote-core.cyr` profile stays — still useful for transport-less consumers. |
+| **Reconsolidate per-transport binaries** — fold `bote-streamable` + `bote-ws` back into single `bote` binary | **P2 — unblocked** | Small | Unblocked by the 6.1.x cap raise at 2.7.3 (the planned 5.11.x migration per the companion proposal at `cyrius/docs/development/proposals/2026-05-10-raise-compile-source-cap.md` landed as 6.1.x). When taken up, retire `src/main_streamable.cyr` / `src/main_ws.cyr` / `src/main_common.cyr` and restore the streamable / ws CLI branches in `src/main.cyr`. The `dist/bote-core.cyr` profile stays — still useful for transport-less consumers. |
 | **OAuth 2.1 authorization-code flow** (bote-as-AS) | Deferred | High | Out of scope for MCP core; bote is the resource server. Flagged as explicitly deferred — consumers compose bote with their own AS layer. |
 
 The functional 2.7.x slate from the 2.6.x carry-forward list is
 empty after 2.7.2 (HostRegistry hot-reload + CONTRIBUTING.md + the
-opt-in core profile all shipped). 2.7.x continues opportunistically
-as new needs surface. The next *planned* arc opens at 2.8.x —
-server→client notifications (`*/list_changed`, `resources/subscribe`,
-`logging`). cyrius `lib/thread.cyr` (MPSC + mutex) and `lib/async.cyr`
-are **complete and pinned**, so this is unwired-by-choice, not a cyrius
-gate: a dep-free polled-push MVP (buffer at produce time, drain on the
-client's next streamable `GET` — the `ResumptionBuffer` scaffold already
-exists) needs no threads at all. Only real-time *held-open* streaming
-needs `lib/thread.cyr`, because the single-threaded sandhi accept loop
-would otherwise deadlock (a held GET starves the POSTs that feed it).
+opt-in core profile all shipped). ✅ **The notifications arc shipped
+at 3.0.0** — the dep-free polled-push MVP (buffer at produce time,
+drain on the client's next streamable `GET`, built on the
+`ResumptionBuffer` scaffold, plus POST-piggyback SSE) landed with
+`tools` / `prompts` `list_changed`; `resources/subscribe` and
+`logging` stay intentionally unadvertised (no producer — advertising
+them would promise messages bote can't deliver). Only real-time
+*held-open* streaming remains open; cyrius `lib/thread.cyr` (MPSC +
+mutex) and `lib/async.cyr` are **complete and pinned**, so it's a
+bote-side threading task, not a cyrius gate — needed because the
+single-threaded sandhi accept loop would otherwise deadlock (a held
+GET starves the POSTs that feed it).
 
 ### Blocked on cyrius / external
 
 | Item | Waiting on |
 |---|---|
-| **`$/cancelRequest` mid-stream handling** | Real-time (held-open) streaming dispatch first — itself a bote-side threading task, not a cyrius gate (see the 2.8.x note above). |
+| **`$/cancelRequest` mid-stream handling** | Real-time (held-open) streaming dispatch first — itself a bote-side threading task, not a cyrius gate (see the notifications note above). |
 | **Slowloris recv timeout** (audit H5) | `sock_set_recv_timeout` helper in stdlib `lib/net.cyr`. |
 | **WebSocket `Sec-WebSocket-Key` length validation** (audit M4) | stdlib `lib/ws_server.cyr` fix. |
 | **WebSocket arena-per-frame allocator** | stdlib `fl_free` support for long-lived connections. |
@@ -166,7 +179,7 @@ Some bote work is gated on cyrius. Live language-level friction
 resolved upstream issues bote reported + each fix landed:
 [docs/resolved-lang-issues.md](../resolved-lang-issues.md).
 
-Status against current cyrius (5.10.34):
+Status against current cyrius (6.4.64):
 
 | Issue | Status |
 |---|---|
@@ -186,12 +199,12 @@ Status against current cyrius (5.10.34):
 | Include-once cap 64 → 256 | ✅ Raised in 4.8.4 |
 | `PP_IFDEF_PASS` nested-include fixpoint | ✅ Shipped in 4.8.4 |
 | 4.8.4 release-binary vs alpha2 skew | ✅ Closed by 2026-04-14 retag; bote 2.5.1 restored full dep-graph tests |
-| `lib/http_server.cyr` folded into `lib/sandhi.cyr` (5.10.x) | ✅ Bridged in 2.6.0 via `src/_sandhi_compat.cyr` shim; retire in 2.6.1 |
+| `lib/http_server.cyr` folded into `lib/sandhi.cyr` (5.10.x) | ✅ Bridged in 2.6.0 via `src/_sandhi_compat.cyr` shim; retired in 2.6.1 |
 | `lib/tls.cyr` required by sandhi for `TLS_EARLY_DATA_ACCEPTED` | ✅ Added to `[deps] stdlib` in 2.6.0 |
 | `secret` is a storage-class keyword in 5.10.x | ✅ jwt.cyr parameter rename in 2.6.0 |
 | Per-thread request buffers (process-global today) | 🟡 Tracked upstream; affects future threaded dispatch |
 | Bump allocator without `fl_free` for general use | 🟡 Tracked; affects WS arena work |
-| fn_table / identifier-buffer headroom at 88-89% with full integration | 🟡 Tracked for 2.6.4 — split / feature-gate decision |
+| fn_table / identifier-buffer headroom at 88-89% with full integration | ✅ Relieved by the 6.1.x cap raise (2.7.3); 59% / 61% at 3.1.2 under the 2.6.4 CI capacity gate |
 
 No current open bugs. Future reports land under `docs/bugs/` during
 active triage and move to `docs/resolved-lang-issues.md` when closed.
