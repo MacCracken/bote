@@ -206,7 +206,7 @@ transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ## Verification
 
-### Tests — 811 total across twelve files (+ a core-only drift smoke)
+### Tests — 858 total across thirteen files (+ a core-only drift smoke)
 
 Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`).
 
@@ -221,6 +221,7 @@ cyrius test tests/bote_libro_tools.tcyr   # 22 — libro_tools wrappers
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals
+cyrius test tests/bote_transport_unix.tcyr # 47 — Unix transport: sockaddr, accept-error policy, backoff
 cyrius test tests/bote_web_tools.tcyr     # 27 — web_fetch / web_search
 cyrius test tests/bote_ws.tcyr            # 10 — WebSocket config + wire-up
 cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dist/bote-core.cyr
@@ -291,7 +292,7 @@ the same surface.
 
 ## Versioning
 
-**Current**: `3.2.0` — full MCP capability suite (prompts / resources /
+**Current**: `3.2.1` — full MCP capability suite (prompts / resources /
 completion + polled `list_changed` push), filesystem + web tools, six
 transports across three binaries, and a JWT/PKCE auth substrate that
 (since 3.2.0) actually ships in `dist/bote.cyr` with `exp` enforced.

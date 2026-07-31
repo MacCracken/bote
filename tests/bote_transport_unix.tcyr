@@ -1,0 +1,210 @@
+# bote_transport_unix.tcyr — src/transport_unix.cyr.
+#
+# NEW at 3.2.1. This module had ZERO test coverage: no test file
+# included it, and no assertion anywhere touched transport_unix_run,
+# _unix_sockaddr, _unix_process_lines or _unix_handle_client.
+#
+# transport_unix_run itself cannot be unit-tested — it blocks in an
+# accept loop forever — which is exactly why 3.2.1 factors the
+# accept-error classification out into the pure `_unix_accept_action`
+# and `_unix_backoff_next`. Those, plus the pure `_unix_sockaddr`, are
+# what this file covers. A live-socket integration test would be
+# net-new infrastructure (the repo has no socket-test harness at all)
+# and is scoped separately.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/slice.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/assert.cyr"
+
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/transport_unix.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ================================================================
+    # _unix_sockaddr — sockaddr_un construction
+    # ================================================================
+    var a = alloc(110);
+    var n = _unix_sockaddr(a, "/tmp/bote.sock");
+    # sun_family (2 bytes at +0) then the path at +2, NUL-terminated.
+    assert_eq(load16(a), AF_UNIX, "sun_family = AF_UNIX at +0");
+    assert(streq(a + 2, "/tmp/bote.sock") == 1, "path copied at +2");
+    # returned len = 2 (family) + strlen(path) + 1 (NUL)
+    assert_eq(n, 2 + 14 + 1, "addrlen = 2 + pathlen + 1");
+    assert_eq(load8(a + 2 + 14), 0, "path NUL-terminated");
+
+    # Zero-filled: bytes past the NUL must be clean, or the kernel sees
+    # trailing garbage as part of an abstract-namespace name.
+    assert_eq(load8(a + 2 + 15), 0, "tail zero-filled");
+    assert_eq(load8(a + 109), 0, "last byte zero-filled");
+
+    # Shortest sensible path.
+    var b = alloc(110);
+    assert_eq(_unix_sockaddr(b, "/x"), 2 + 2 + 1, "short path addrlen");
+    assert(streq(b + 2, "/x") == 1, "short path copied");
+
+    # Empty path — degenerate but must not corrupt the struct.
+    var e = alloc(110);
+    assert_eq(_unix_sockaddr(e, ""), 3, "empty path addrlen = 3");
+    assert_eq(load16(e), AF_UNIX, "empty path keeps sun_family");
+    assert_eq(load8(e + 2), 0, "empty path is just a NUL");
+
+    # ---- the 107-byte truncation clamp ----
+    # sockaddr_un.sun_path is 108 bytes; this clamps to 107 + NUL. The
+    # boundary was untested before 3.2.1 and is the one place this fn
+    # can silently produce a different path than the caller asked for.
+    var longp = alloc(300);
+    var i = 0;
+    while (i < 200) { store8(longp + i, 97); i = i + 1; }   # 200 × 'a'
+    store8(longp + 200, 0);
+    var c = alloc(110);
+    var cn = _unix_sockaddr(c, longp);
+    assert_eq(cn, 2 + 107 + 1, "over-long path clamps to 107 + NUL");
+    assert_eq(load8(c + 2 + 107), 0, "clamped path NUL-terminated");
+    assert_eq(load8(c + 2 + 106), 97, "byte 106 is still path data");
+    # And the clamp must not run past the 110-byte buffer.
+    assert_eq(load8(c + 109), 0, "clamp stays inside the 110-byte buffer");
+
+    # Exactly at the boundary: 107 chars must NOT be truncated.
+    var exactp = alloc(120);
+    i = 0;
+    while (i < 107) { store8(exactp + i, 98); i = i + 1; }  # 107 × 'b'
+    store8(exactp + 107, 0);
+    var d = alloc(110);
+    assert_eq(_unix_sockaddr(d, exactp), 2 + 107 + 1, "107 chars fits exactly");
+    assert_eq(load8(d + 2 + 106), 98, "107th char preserved");
+
+    # ================================================================
+    # _unix_accept_action — accept(2) errno policy (3.2.1)
+    # ================================================================
+    # Through 3.2.0 the accept loop had no else branch, so ANY persistent
+    # error spun at 100% CPU forever. These assertions pin the policy
+    # that replaced it.
+
+    # ---- transient: retry immediately, listener is fine ----
+    assert_eq(_unix_accept_action(EINTR), BOTE_ACCEPT_RETRY,
+    "EINTR retries immediately");
+    assert_eq(_unix_accept_action(BOTE_ERRNO_ECONNABORTED), BOTE_ACCEPT_RETRY,
+    "ECONNABORTED retries immediately");
+    assert_eq(_unix_accept_action(BOTE_ERRNO_EPROTO), BOTE_ACCEPT_RETRY,
+    "EPROTO retries immediately");
+    assert_eq(_unix_accept_action(EAGAIN), BOTE_ACCEPT_RETRY,
+    "EAGAIN retries (unreachable on a blocking fd, kept defensively)");
+
+    # ---- fatal: accept on this fd can never succeed again ----
+    assert_eq(_unix_accept_action(BOTE_ERRNO_EBADF), BOTE_ACCEPT_FATAL,
+    "EBADF is fatal");
+    assert_eq(_unix_accept_action(EINVAL), BOTE_ACCEPT_FATAL,
+    "EINVAL is fatal");
+    assert_eq(_unix_accept_action(BOTE_ERRNO_ENOTSOCK), BOTE_ACCEPT_FATAL,
+    "ENOTSOCK is fatal");
+    assert_eq(_unix_accept_action(BOTE_ERRNO_EOPNOTSUPP), BOTE_ACCEPT_FATAL,
+    "EOPNOTSUPP is fatal");
+
+    # ---- resource pressure: sleep and retry, self-healing ----
+    assert_eq(_unix_accept_action(EMFILE), BOTE_ACCEPT_BACKOFF,
+    "EMFILE backs off (per-process fd limit, recoverable)");
+    assert_eq(_unix_accept_action(ENFILE), BOTE_ACCEPT_BACKOFF,
+    "ENFILE backs off (system-wide fd limit, recoverable)");
+    assert_eq(_unix_accept_action(BOTE_ERRNO_ENOBUFS), BOTE_ACCEPT_BACKOFF,
+    "ENOBUFS backs off");
+    assert_eq(_unix_accept_action(BOTE_ERRNO_ENOMEM), BOTE_ACCEPT_BACKOFF,
+    "ENOMEM backs off");
+
+    # ---- unknown errno defaults to BACKOFF, never FATAL ----
+    # Misclassifying a recoverable condition as fatal would take a
+    # working server down; backoff merely wastes time before the
+    # give-up counter ends the loop. Sleeping beats spinning, and
+    # beats a wrong shutdown.
+    assert_eq(_unix_accept_action(9999), BOTE_ACCEPT_BACKOFF,
+    "unrecognised errno backs off, does not kill the listener");
+    assert_eq(_unix_accept_action(0), BOTE_ACCEPT_BACKOFF,
+    "errno 0 backs off (defensive — accept should not report it)");
+
+    # The three actions must be distinct, or the loop's branches collapse.
+    assert(BOTE_ACCEPT_RETRY != BOTE_ACCEPT_BACKOFF, "RETRY != BACKOFF");
+    assert(BOTE_ACCEPT_BACKOFF != BOTE_ACCEPT_FATAL, "BACKOFF != FATAL");
+    assert(BOTE_ACCEPT_RETRY != BOTE_ACCEPT_FATAL, "RETRY != FATAL");
+
+    # ================================================================
+    # _unix_backoff_next — capped exponential backoff
+    # ================================================================
+    assert_eq(_unix_backoff_next(0), BOTE_UNIX_BACKOFF_MIN_MS,
+    "first backoff is the floor (1ms)");
+    assert_eq(_unix_backoff_next(1), 2, "1 -> 2");
+    assert_eq(_unix_backoff_next(2), 4, "2 -> 4");
+    assert_eq(_unix_backoff_next(64), 128, "64 -> 128");
+    # Doubling past the ceiling clamps rather than overshooting.
+    assert_eq(_unix_backoff_next(128), BOTE_UNIX_BACKOFF_MAX_MS,
+    "128 -> clamped to the 250ms ceiling, not 256");
+    assert_eq(_unix_backoff_next(BOTE_UNIX_BACKOFF_MAX_MS), BOTE_UNIX_BACKOFF_MAX_MS,
+    "at the ceiling it stays there");
+    # Negative is not reachable from the loop but must not produce a
+    # negative sleep if it ever were.
+    assert_eq(_unix_backoff_next(0 - 5), BOTE_UNIX_BACKOFF_MIN_MS,
+    "negative input floors to the minimum, never sleeps negative");
+    assert(BOTE_UNIX_BACKOFF_MIN_MS > 0, "backoff floor is positive");
+    assert(BOTE_UNIX_BACKOFF_MAX_MS >= BOTE_UNIX_BACKOFF_MIN_MS, "ceiling >= floor");
+    assert(BOTE_UNIX_ACCEPT_GIVEUP > 0, "give-up bound is positive");
+
+    # ================================================================
+    # sleep_ms — the backoff primitive actually sleeps
+    # ================================================================
+    # 3.2.1 is bote's FIRST sleep_ms call site. On aarch64 it only works
+    # because the cyrius backend rewrites poll(7) into ppoll(73) with an
+    # ms->timespec conversion; before that fix it returned -EFAULT
+    # instantly and the "sleep" was a spin. Since this file runs under
+    # `cyrius test --aarch64` too, this assertion is what proves the
+    # backoff is a real sleep on both arches rather than a busy loop.
+    var t0 = clock_now_ms();
+    sleep_ms(50);
+    var elapsed = clock_now_ms() - t0;
+    assert(elapsed >= 40, "sleep_ms(50) actually blocks (>=40ms elapsed)");
+    assert(elapsed < 5000, "sleep_ms(50) returns promptly (<5s)");
+
+    # ================================================================
+    # sys_accept4 reaches accept4 on every arch — the 3.2.1 guard
+    # ================================================================
+    # This is the assertion the whole 3.2.1 change exists for. accept4
+    # on a fd that is not a socket must report ENOTSOCK (-88). Under
+    # `cyrius test --aarch64` this proves SYS_ACCEPT4 = 242 genuinely
+    # lands on accept4 there — if the constant were wrong we would get
+    # -ENOSYS, -EINVAL, or a different call's error instead.
+    #
+    # The constant it replaced (net.cyr's bare x86 `SYS_ACCEPT = 43`)
+    # also happens to answer -ENOTSOCK on aarch64, because the cyrius
+    # backend renumbers 43 -> 202 at runtime. That is precisely the
+    # point: the old code was correct only by way of a compiler-internal
+    # table in which 43 would otherwise be `statfs`. This one is correct
+    # by way of the per-arch syscall peer.
+    assert_eq(sys_accept4(2, 0, 0, 0), 0 - 88,
+    "sys_accept4 on a non-socket fd -> -ENOTSOCK (arch-correct SYS_ACCEPT4)");
+
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

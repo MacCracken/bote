@@ -149,3 +149,23 @@
 ### ^ Final 3.2.0 run, after the JWT/PKCE bundle fold (fbca945). Flat against the first 3.2.0
 ### block above (dispatch_initialize 2.865 -> 2.876 us, auth_bearer_check_unset 1.339 -> 1.335 us),
 ### confirming the two new modules cost the dispatch path nothing — they are not on it.
+
+## 2026-07-31T01:26:09Z  v3.2.1 (42a636b)
+  dispatch_initialize: 2.826us avg (min=1.396us max=25.772us) [10000 iters]
+  dispatch_tools_list: 3.412us avg (min=2.305us max=43.861us) [10000 iters]
+  dispatch_tools_call: 6.783us avg (min=4.330us max=17.740us) [10000 iters]
+  jsonx_get_str_flat: 1.468us avg (min=907ns max=31.917us) [100000 iters]
+  jsonx_get_raw_nested: 1.824us avg (min=907ns max=19.905us) [100000 iters]
+  codec_parse_request: 2.803us avg (min=1.397us max=369.251us) [10000 iters]
+  codec_serialize_response: 1.907us avg (min=907ns max=21.371us) [10000 iters]
+  codec_process_message: 8.712us avg (min=6.635us max=83.809us) [10000 iters]
+  validate_compiled_simple: 1.935us avg (min=908ns max=13.270us) [10000 iters]
+  validate_compiled_nested: 3.735us avg (min=2.304us max=129.067us) [10000 iters]
+  schema_compile_simple: 3.944us avg (min=2.374us max=128.299us) [10000 iters]
+  schema_compile_nested: 7.946us avg (min=5.587us max=134.863us) [10000 iters]
+  auth_bearer_check_unset: 1.346us avg (min=838ns max=18.019us) [100000 iters]
+  auth_bearer_check_set: 2.155us avg (min=907ns max=128.648us) [100000 iters]
+### ^ 3.2.1. Flat against the 3.2.0 block (dispatch_initialize 2.876 -> 2.826 us,
+### auth_bearer_check_unset 1.335 -> 1.346 us). Expected: the sys_accept4 swap and the
+### accept-error policy are in the Unix transport's connection-accept path, which no
+### benchmark touches — all 14 exercise dispatch / codec / schema / jsonx / auth.

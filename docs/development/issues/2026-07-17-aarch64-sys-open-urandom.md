@@ -220,17 +220,26 @@ The full aarch64 *test* sweep is not in CI (it needs `qemu-user`); it was run
 locally at 3.2.0 and `cyrius test --aarch64 <file>` reproduces it wherever
 `qemu-aarch64` is on `PATH`.
 
-### Deliberately left open
+### Deliberately left open — ✅ since closed in 3.2.1
 
-`src/transport_unix.cyr:113` calls `syscall(SYS_ACCEPT, sfd, 0, 0)`, and
+`src/transport_unix.cyr:123` calls `syscall(SYS_ACCEPT, sfd, 0, 0)`, and
 `SYS_ACCEPT` comes from `lib/net.cyr:12` — a bare, unguarded `var SYS_ACCEPT = 43`,
 which is the **x86** number. It compiles on aarch64 and is runtime-correct only
 because the backend renumbers `43 → 202`, the same compiler-internal dependence the
 numeric syscalls above were removed for. It is **not** a build blocker, so it is out
-of scope for this fix; `sock_accept(sfd)` (`lib/net.cyr:331`, Result-returning) is
-the consistent replacement, and `src/transport_unix.cyr` already uses `sock_send` /
-`sock_recv` ten lines away. Worth its own bite, and arguably an upstream `net.cyr`
-fix rather than a bote one.
+of scope for this fix.
+
+> **Closed in 3.2.1 — but not the way this note proposed.** The suggestion above was
+> `sock_accept(sfd)`. That would **not** have fixed it: `sock_accept`'s own non-agnos
+> branch (`lib/net.cyr:350`) issues the same bare `43`, so it relocates the
+> dependence into the stdlib rather than removing it. What landed is
+> **`sys_accept4(sfd, 0, 0, 0)`** — `SYS_ACCEPT4` is defined natively by each syscall
+> peer (x86_64 288, aarch64 242), so it needs no renumber-table entry at all, and
+> `accept4(fd, NULL, NULL, 0)` is exactly `accept(fd, NULL, NULL)`. Same class of fix
+> as `sys_open` / `sys_unlink` / `sys_chmod` above. 3.2.1 also routed the remaining
+> eight raw `syscall(SYS_*)` sites in `src/` through their wrappers, which let CI ban
+> the *form* outright — a stronger guard than this issue's constant denylist, which
+> by construction could never have caught `SYS_ACCEPT`. See CHANGELOG 3.2.1.
 
 ### Downstream
 

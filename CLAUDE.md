@@ -7,7 +7,7 @@
 - **Language**: Cyrius (ported from Rust at v1.0.1; Rust archive preserved at tag `0.92.0`)
 - **License**: GPL-3.0-only
 - **Cyrius pin**: 6.5.3 (see `cyrius.cyml`; onto the 6.5.x line at 3.2.0; `6.4.64 → 6.4.66` at 3.1.3; `6.4.34 → 6.4.64` at 3.1.2; onto the 6.4.x line at 3.0.1; `6.3.38 → 6.3.42` at 3.0.0; onto the 6.3.x line at 2.9.0; first 6.2.x at 2.7.6; major jump from 5.10.x at 2.7.3)
-- **Version**: SemVer; 2.0 handler ABI (`fn h(args, claims) → result`) stable across the 2.x→3.x line; 3.2.0 current (toolchain 6.5.3 + full dep refresh — libro 2.8.4 / majra 2.5.3 / sigil 3.12.1 / sakshi 2.4.7; libro `LIBRO_ERR_*` namespacing + `[deps.libro]` pin/lock realign at 3.1.4; toolchain 6.4.66 + `BOTE_ERR_*` error-tag namespacing at 3.1.3; full dep refresh at 3.1.2; web tools at 3.1.0; full MCP capability suite — prompts / resources / completion + polled list_changed push — at 3.0.0; see CHANGELOG)
+- **Version**: SemVer; 2.0 handler ABI (`fn h(args, claims) → result`) stable across the 2.x→3.x line; 3.2.1 current (`sys_accept4` + accept-loop error policy; toolchain 6.5.3 + full dep refresh — libro 2.8.4 / majra 2.5.3 / sigil 3.12.1 / sakshi 2.4.7; libro `LIBRO_ERR_*` namespacing + `[deps.libro]` pin/lock realign at 3.1.4; toolchain 6.4.66 + `BOTE_ERR_*` error-tag namespacing at 3.1.3; full dep refresh at 3.1.2; web tools at 3.1.0; full MCP capability suite — prompts / resources / completion + polled list_changed push — at 3.0.0; see CHANGELOG)
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -82,7 +82,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `auth.cyr` | Bearer + allowlist + JWT HS256 + PKCE validators |
 | `transport_stdio.cyr` | stdio transport |
 | `transport_http.cyr` | HTTP transport |
-| `transport_unix.cyr` | Unix domain socket transport |
+| `transport_unix.cyr` | Unix domain socket transport (accept via `sys_accept4`; capped-backoff accept-error policy since 3.2.1) |
 | `bridge.cyr` | HTTP↔stdio TypeScript bridge with CORS |
 | `transport_streamable.cyr` | Streamable HTTP / SSE transport |
 | `transport_ws.cyr` | WebSocket transport (manually includes `lib/ws_server.cyr`) |
@@ -167,11 +167,12 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `tests/bote_libro_tools.tcyr` | 22 | libro audit-tool dispatch surface |
 | `tests/bote_pkce.tcyr` | 17 | RFC 7636 PKCE-S256 |
 | `tests/bote_sandbox.tcyr` | 13 | kavach-shaped pluggable runner adapter |
+| `tests/bote_transport_unix.tcyr` | 47 | Unix transport — `_unix_sockaddr` (incl. the 107-byte truncation clamp), accept-error policy `_unix_accept_action` + capped backoff, `sleep_ms` really blocks, `sys_accept4` arch guard. New at 3.2.1; module had no coverage before |
 | `tests/bote_streamable.tcyr` | 53 | Streamable HTTP — EventIdGenerator / StreamEvent / ResumptionBuffer / SessionOutbound (per-session buffer + id gen) / GET drain selection / client-notification sink (tools + prompts list_changed) / POST-piggyback SSE / StreamableConfig |
 | `tests/bote_web_tools.tcyr` | 27 | Web tools — scheme guard, HTML→text stripper (incl. control-byte/NUL drop), url-encode, entity decode |
 | `tests/bote_ws.tcyr` | 10 | WebSocket — WsConfig + handler wire-up |
 | `tests/bote_core_only_smoke.tcyr` | drift guard | Includes only `dist/bote-core.cyr` — catches core/transport entanglement |
-| **Total** | **811** | + 1 drift smoke; green on x86_64 **and** aarch64 |
+| **Total** | **858** | + 1 drift smoke; green on x86_64 **and** aarch64 |
 
 Criterion benchmarks: **14** in `tests/bote.bcyr` (dispatch × 3, jsonx × 2, codec × 3, schema × 4, auth_bearer × 2).
 

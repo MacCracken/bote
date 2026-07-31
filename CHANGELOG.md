@@ -18,6 +18,89 @@ have per release.
 
 _(empty)_
 
+## [3.2.1] — 2026-07-30 — `sys_accept4` closes the last x86-numbered syscall; accept loop no longer busy-spins
+
+**Closes the item 3.2.0 deliberately left open.** `src/transport_unix.cyr`'s accept call was the
+last place bote reached past the stdlib to a raw syscall number, and fixing it surfaced a second,
+worse defect in the same six lines: the loop had no error branch at all.
+
+### Fixed
+- **`syscall(SYS_ACCEPT, sfd, 0, 0)` → `sys_accept4(sfd, 0, 0, 0)`.** `SYS_ACCEPT` is defined in
+  **neither** syscall peer — its only definition anywhere in `lib/` is `lib/net.cyr:12`, a bare
+  unguarded `var SYS_ACCEPT = 43`, the **x86_64** number. It therefore resolved on every arch and
+  worked on aarch64 only because the cyrius backend emits a runtime renumber chain (`ESYSXLAT`,
+  43 → 202) ahead of every `svc`. That is an implementation detail rather than a documented
+  guarantee, and 43 on aarch64 is `statfs` — an unlisted number does not fail loudly, it calls the
+  wrong syscall. `sys_accept4` issues `SYS_ACCEPT4`, which the peers define natively per arch
+  (x86_64 288, aarch64 242); neither is in the renumber table because neither needs to be.
+  `accept4(fd, NULL, NULL, 0)` is defined to be exactly `accept(fd, NULL, NULL)`, so behaviour is
+  identical. `flags` stays `0` — `SOCK_CLOEXEC` is the usual reason to reach for accept4 and would
+  be a behaviour change, so it belongs in its own bite.
+  - **`sock_accept()` was considered and rejected.** It is the obvious "own the stack" answer and
+    the one 3.2.0's issue note suggested, but its own non-agnos branch (`lib/net.cyr:350`) issues
+    the **same bare 43** — it would have relocated the dependence into the stdlib, not removed it.
+  - The stdlib makes this argument itself. `sys_getpeername` in `lib/syscalls_linux_common.cyr`
+    documents sandhi 1.9.0 hardcoding a raw `syscall(52, …)` for getpeername, which on aarch64 is
+    **fchmod** and *succeeds* — "the caller believes it obtained a peer address while its buffer is
+    untouched garbage. Verified on real pi." Its conclusion is explicit: do not solve that class
+    with an ESYSXLAT entry, take the number from the per-arch peer. This does that.
+  - Verified, not assumed: a new assertion calls `sys_accept4` on a non-socket fd and requires
+    `-ENOTSOCK` (−88), which under `cyrius test --aarch64` proves 242 genuinely lands on accept4
+    there. A live three-connection round-trip over a real AF_UNIX socket confirms
+    accept → handle → close → re-accept, with the socket at mode 0600 and the idle process at
+    00:00:00 CPU.
+- **The accept loop busy-spun forever on any persistent error.** It was
+  `if (cfd >= 0) { … }` with **no else**, so a failing `accept(2)` was re-issued immediately,
+  without bound, sleep or diagnostic — 100% of one core indefinitely. Under `EMFILE` the pending
+  connection is not dequeued either, so it retried the same connection at full speed. This is an
+  availability defect, not a privilege one: the socket is `chmod 0600`, so no other UID can
+  connect; the realistic trigger is bote's own fd exhaustion (libro/patra chain fds, `fs_tools`,
+  `web_tools`' sandhi client sockets) or a low `RLIMIT_NOFILE`.
+  - Replaced with a three-way policy in a **pure, unit-testable** `_unix_accept_action(errno)`:
+    `EINTR` / `ECONNABORTED` / `EPROTO` / `EAGAIN` retry immediately; `EBADF` / `EINVAL` /
+    `ENOTSOCK` / `EOPNOTSUPP` are fatal and hand the listener back to the caller (per the no-panic
+    rule — the consumer decides); everything else backs off. Backoff is capped exponential
+    (1 ms doubling to 250 ms, reset on success) with a 200-consecutive-failure give-up (~50 s).
+  - **Unknown errnos back off rather than being treated as fatal**, deliberately: misclassifying a
+    recoverable condition as fatal would take a working server down, whereas backoff merely wastes
+    time before the give-up counter ends the loop. Sleeping is never as bad as spinning.
+  - `EAGAIN` is currently unreachable — the listen fd is never made non-blocking and carries no
+    `SO_RCVTIMEO` — and is handled anyway so the loop stays correct if that changes.
+  - **Note for the other four transports:** `sandhi_server_run` and its pooled/TLS variants carry
+    the *identical* unguarded spin, so http / streamable / ws / bridge still inherit it. bote's
+    policy is deliberately stricter than the house pattern rather than copying it; the sandhi side
+    wants an upstream fix.
+- **Stale line citations** in `docs/development/issues/2026-07-17-aarch64-sys-open-urandom.md` and
+  the 3.2.0 CHANGELOG entry (`transport_unix.cyr:113` → `:123`, `lib/net.cyr:331` → `:320`),
+  caught while verifying this change.
+
+### Added
+- **`tests/bote_transport_unix.tcyr` — 47 assertions, the first coverage this module has ever
+  had.** No test file included `src/transport_unix.cyr` and no assertion touched
+  `transport_unix_run`, `_unix_sockaddr`, `_unix_process_lines` or `_unix_handle_client`.
+  `transport_unix_run` itself cannot be unit-tested (it blocks in an accept loop forever), which is
+  precisely why the error classification was factored out as a pure function. Covers: the full
+  `_unix_accept_action` errno matrix including the unknown-errno default; `_unix_backoff_next`
+  including the clamp at the ceiling and a negative input never yielding a negative sleep;
+  `_unix_sockaddr` including the **107-byte truncation clamp and its exact boundary**, previously
+  untested; that `sleep_ms` really blocks (this is bote's first `sleep_ms` call site, and on
+  aarch64 it works only because the backend rewrites `poll(7)` into `ppoll(73)` — before that fix
+  it returned `-EFAULT` instantly and the "sleep" was a spin); and the `sys_accept4` arch guard.
+- **CI: a bare `syscall(SYS_*)` in `src/` is now a hard failure.** The 3.2.0 denylist enumerates
+  constants that are x86-only *today*, so it could not have caught `SYS_ACCEPT`, which is x86-only
+  by virtue of being defined nowhere except `net.cyr`. Banning the *form* is the stronger guard:
+  every syscall bote needs has an arch-portable stdlib wrapper. Verified to fire on the pre-fix
+  `transport_unix.cyr` and pass on the fixed tree.
+
+### Changed
+- **The remaining eight raw `syscall(SYS_*)` sites in `src/` now use their stdlib wrappers** —
+  `sys_exit` in the three `main*.cyr` entries, and `sys_write` / `sys_read` in
+  `src/transport_stdio.cyr`, alongside `sys_socket` / `sys_bind` / `sys_listen` / `sys_close` in
+  `src/transport_unix.cyr`. All were already arch-correct (the peers define these per arch), so
+  this is style — but it is what lets the CI gate above be an exception-free ban rather than a
+  list of carve-outs. All four wrappers exist on the agnos peer too, so no target regresses.
+  Verified with a live stdio round-trip (`initialize` + `tools/list`).
+
 ## [3.2.0] — 2026-07-30 — toolchain 6.5.3 + full dep refresh; aarch64 portability; JWT `exp` enforced and JWT/PKCE finally shipped
 
 **Minor, not a patch — `dist/bote.cyr` grows two modules.** `src/jwt.cyr` and `src/pkce.cyr`, the
@@ -139,7 +222,7 @@ and a `[deps.sigil]` tag/lock drift that had CI red at HEAD is realigned.
   - **Verified end to end**, not merely linked: all three binaries cross-build to real
     `EM_AARCH64` ELF, and the **full suite — 13 files, 786 assertions — passes under
     `cyrius test --aarch64`**.
-  - Still open by choice: `src/transport_unix.cyr:113` uses `SYS_ACCEPT` from `lib/net.cyr`'s
+  - Still open by choice: `src/transport_unix.cyr:123` uses `SYS_ACCEPT` from `lib/net.cyr`'s
     unguarded `var SYS_ACCEPT = 43` (the x86 number), correct on aarch64 only via the same
     backend renumbering. Not a build blocker, so out of scope here; `sock_accept()` is the
     consistent replacement and arguably an upstream `net.cyr` fix.

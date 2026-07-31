@@ -217,6 +217,7 @@ jobs:
                       tests/bote_pkce.tcyr \
                       tests/bote_sandbox.tcyr \
                       tests/bote_streamable.tcyr \
+                      tests/bote_transport_unix.tcyr \
                       tests/bote_web_tools.tcyr \
                       tests/bote_ws.tcyr \
                       tests/bote_core_only_smoke.tcyr; do
@@ -273,6 +274,28 @@ jobs:
             exit 1
           fi
           echo "  clean — no x86_64-only SYS_* outside comments"
+          echo "--- denylist: bare syscall(SYS_*) in src/ ---"
+          # Added 3.2.1. The denylist above only catches constants that
+          # are x86-only TODAY. It could not have caught SYS_ACCEPT,
+          # which is defined in NEITHER syscall peer — its only
+          # definition is lib/net.cyr's bare `var SYS_ACCEPT = 43` (the
+          # x86 number), so it resolved everywhere and worked on aarch64
+          # only via the backend's runtime renumber chain, in which 43
+          # would otherwise be statfs.
+          #
+          # Every syscall bote needs has an arch-portable stdlib wrapper
+          # (sys_open / sys_close / sys_read / sys_write / sys_socket /
+          # sys_bind / sys_listen / sys_accept4 / sys_unlink / sys_chmod
+          # / sys_exit / random_bytes), so src/ has no legitimate reason
+          # to issue a raw syscall() with a SYS_ constant. Banning the
+          # form is a stronger guard than enumerating bad constants.
+          raw=$(sed 's/#.*//' src/*.cyr | grep -nE 'syscall\(\s*SYS_' || true)
+          if [ -n "$raw" ]; then
+            echo "::error::raw syscall(SYS_*) in src/ — use the arch-portable stdlib wrapper."
+            echo "$raw"
+            exit 1
+          fi
+          echo "  clean — no raw syscall(SYS_*) in src/"
           echo "--- cross-build ---"
           for e in main:bote main_streamable:bote-streamable main_ws:bote-ws; do
             src="${e%%:*}"; out="${e##*:}"
