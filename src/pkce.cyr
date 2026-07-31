@@ -12,14 +12,20 @@
 #   pkce_code_challenge_s256(verifier)   — challenge = base64url(sha256(verifier))
 #
 # The S256 method is the only one OAuth 2.1 mandates; "plain" is
-# explicitly removed in 2.1, so we don't ship it. Use sigil's
-# `hmac_sha256`-companion `sha256` one-shot for the digest, our
-# existing `jwt_b64u_*` helpers from src/jwt.cyr for base64url
-# encode (until cyrius lifts that to stdlib via the
-# cyrius-stdlib-base64url proposal).
+# explicitly removed in 2.1, so we don't ship it. Uses sigil's
+# `hmac_sha256`-companion `sha256` one-shot for the digest and an
+# inline base64url encoder for the challenge.
 #
-# Requires: src/jwt.cyr to be included first (for jwt_b64u_decode's
-# alphabet table — we share `_b64u_alphabet` across the two helpers).
+# Dependencies: sigil (`sha256`) and `random` (`random_bytes`) only.
+#
+# 3.2.0 removed a stale "Requires: src/jwt.cyr to be included first
+# (for jwt_b64u_decode's alphabet table — we share `_b64u_alphabet`
+# across the two helpers)" note. It was wrong in every particular:
+# this module names no jwt symbol, there is no shared
+# `_b64u_alphabet` (this file has its own `_pkce_alphabet` at the
+# 66-char unreserved set, and a separate 64-char literal inline in
+# `pkce_code_challenge_s256`), and a test including only src/pkce.cyr
+# compiles and passes the RFC 7636 Appendix B vector.
 
 # RFC 7636 §4.1: the unreserved characters allowed in code_verifier.
 # 66 chars: A-Z a-z 0-9 - . _ ~

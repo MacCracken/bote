@@ -31,7 +31,7 @@ Two consumer bundles (see `DEPS-PATTERN.md` for the contract):
 
 | Artifact | Profile | Modules | Use when |
 |----------|---------|---------|----------|
-| `dist/bote.cyr` | default `[lib]` | 28 | Consumer needs the full transport surface |
+| `dist/bote.cyr` | default `[lib]` | 30 | Consumer needs the full transport surface |
 | `dist/bote-core.cyr` | `[lib.core]` | 11 | Consumer wraps Dispatcher / Registry / Prompts / Resources / Audit but supplies its own transport (e.g. t-ron's SecurityGate) |
 
 Regenerate with `cyrius distlib` (default) and `cyrius distlib core`. CI gates both bundles for freshness.
@@ -91,6 +91,8 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `libro_tools.cyr` | libro audit-tool dispatch (5 tools; in default binary + bundle since 2.7.5, not in core) |
 | `fs_tools.cyr` | Filesystem MCP tools (`fs_write` / `fs_read` / `fs_mkdir`) — root-confined (`BOTE_FS_ROOT`); since 2.8.0 |
 | `web_tools.cyr` | Web MCP tools (`web_fetch` / `web_search` via SearXNG, sandhi client); since 3.1.0 |
+| `jwt.cyr` | JWT HS256 verifier (RFC 7519 / 7515) — exact `alg` field read + `exp` enforcement; `auth_validator_jwt_hs256` plugs into the bearer middleware. **In the bundle since 3.2.0** (orphaned before that) |
+| `pkce.cyr` | RFC 7636 PKCE — `pkce_code_verifier` (getrandom) + `pkce_code_challenge_s256`. **In the bundle since 3.2.0** |
 
 **Binary entries** — `src/main.cyr` + `src/main_streamable.cyr` + `src/main_ws.cyr` + `src/main_common.cyr` (shared helpers).
 
@@ -161,7 +163,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `tests/bote_content.tcyr` | 24 | Typed MCP content blocks + annotations |
 | `tests/bote_fs_tools.tcyr` | 26 | Filesystem tools — path safety (`..` / absolute refusal), JSON unescape, root confinement |
 | `tests/bote_host.tcyr` | 113 | HostRegistry + IPv4/IPv6 SSRF + JSON config hot-reload |
-| `tests/bote_jwt.tcyr` | 28 | JWT HS256 verify (header / payload / sig parsing) |
+| `tests/bote_jwt.tcyr` | 53 | JWT HS256 verify — b64u decode, signature, exact `alg` field read (incl. the algorithm-confusion header), `exp` enforcement + malformed-claim rejection. Both gates mutation-proven |
 | `tests/bote_libro_tools.tcyr` | 22 | libro audit-tool dispatch surface |
 | `tests/bote_pkce.tcyr` | 17 | RFC 7636 PKCE-S256 |
 | `tests/bote_sandbox.tcyr` | 13 | kavach 3.0 pluggable runner adapter |
@@ -169,7 +171,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `tests/bote_web_tools.tcyr` | 27 | Web tools — scheme guard, HTML→text stripper (incl. control-byte/NUL drop), url-encode, entity decode |
 | `tests/bote_ws.tcyr` | 10 | WebSocket — WsConfig + handler wire-up |
 | `tests/bote_core_only_smoke.tcyr` | drift guard | Includes only `dist/bote-core.cyr` — catches core/transport entanglement |
-| **Total** | **786** | + 1 drift smoke |
+| **Total** | **811** | + 1 drift smoke; green on x86_64 **and** aarch64 |
 
 Criterion benchmarks: **14** in `tests/bote.bcyr` (dispatch × 3, jsonx × 2, codec × 3, schema × 4, auth_bearer × 2).
 

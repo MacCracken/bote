@@ -12,10 +12,14 @@ include "lib/freelist.cyr"
 include "lib/thread.cyr"
 include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
 include "lib/sakshi.cyr"
+include "lib/random.cyr"        # 3.2.0: pkce_code_verifier uses random_bytes
 include "lib/sigil.cyr"
 include "lib/assert.cyr"
 
-include "src/jwt.cyr"
+# 3.2.0: dropped `include "src/jwt.cyr"`. pkce.cyr never referenced a
+# jwt symbol — its header's "Requires: src/jwt.cyr to be included
+# first" note was stale (see the note in src/pkce.cyr). Removing it
+# keeps this file's compile unit honest about what pkce actually needs.
 include "src/pkce.cyr"
 
 fn main() {

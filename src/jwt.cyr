@@ -6,22 +6,41 @@
 # middleware (1.9.0): plug in `auth_validator_jwt_hs256` as the
 # fn-pointer and the secret as the ctx.
 #
-# Scope: HS256 only. RS256 / ES256 need an asymmetric primitive sigil
-# doesn't yet expose; tracked for a later release. PKCE helpers (code
-# verifier + S256 challenge) similarly deferred — that's a 2.3 ship.
+# Scope: HS256 only.
 #
-# Validation performed:
-#   - exactly two `.` separators (3 segments)
-#   - header decodes and contains `"alg":"HS256"` (case-insensitive)
+# The "RS256 / ES256 need an asymmetric primitive sigil doesn't yet
+# expose" note that stood here through 3.1.4 was **stale** — sigil has
+# exposed `rsa_pkcs1v15_verify_sha256` / `rsa_pubkey_from_der` for
+# several minors, and bote already depends on sigil. RS256 is therefore
+# unblocked whenever bote wants it; it is simply not built yet, and the
+# decision should be re-taken on merit rather than on a defunct
+# blocker. (Corrected at 3.2.0. agnosai, the consumer that surfaced
+# this, implements RS256 locally because it also needs iss/aud claim
+# validation that bote has no concept of.)
+#
+# If RS256 ever lands here, note that `_jwt_str_field_eq` below already
+# reads `alg` as an exact JSON field. That is a precondition, not a
+# nicety: the moment one verifier accepts more than one algorithm, a
+# loose `alg` match becomes the classic algorithm-confusion vector.
+#
+# Validation performed — this list is enforced, not aspirational:
+#   - exactly two `.` separators (3 segments), non-empty
+#   - header decodes as base64url and its `alg` field is EXACTLY the
+#     JSON string "HS256" (a parsed field read, byte-exact, case
+#     sensitive per RFC 7515 §4.1.1 — `alg` values are case-sensitive)
 #   - HMAC-SHA256(header.payload, secret) == base64url-decoded signature
 #     (constant-time compare — no per-byte timing leak)
-#   - `exp` claim, if present in the payload, is in the future
-#     (uses chrono's wall-clock seconds)
+#   - `exp` claim, if present in the payload, is strictly in the future
+#     (`clock_epoch_secs()`, RFC 7519 §4.1.4, no leeway) — checked only
+#     AFTER the signature verifies, so it never runs on attacker bytes
 #
 # Returns 1 on valid, 0 on any failure. The validator wrapper
 # (`auth_validator_jwt_hs256`) returns the original token cstr on
 # success so the dispatcher can thread it as opaque "claims" to
-# handlers (a future 2.x release will parse it into structured claims).
+# handlers (a future release will parse it into structured claims).
+#
+# NOT validated: `nbf`, `iss`, `aud`, `sub`, `jti`. A consumer that
+# needs those must check them itself — say so, do not assume.
 
 # base64url decode — uses cyrius stdlib's `lib/base64.cyr` (4.8.1+).
 # Wrapper translates the stdlib's `{ptr,len}` 16-byte return-pair to
@@ -65,6 +84,129 @@ fn _jwt_dot(s, len, from) {
     return 0 - 1;
 }
 
+# ================================================================
+# Claim readers — (buf, len) based, deliberately NOT cstr based
+# ================================================================
+#
+# These take an explicit length rather than a NUL-terminated cstr, and
+# so use jsonx's `_jx_*` internals rather than its public
+# `jsonx_get_str` / `jsonx_get_raw` entry points.
+#
+# That is a security choice, not a style one. Every public jsonx entry
+# point begins with `strlen(obj_cstr)` (src/jsonx.cyr:126, :142, :160).
+# The decoded JWT header and payload are attacker-controlled bytes; an
+# embedded NUL byte would truncate the strlen view, hiding everything
+# after it. For `alg` that is merely wrong; for `exp` it is
+# **fail-open** — a hidden `exp` reads as "no exp claim" and the token
+# is accepted forever. bayan's base64url decoder does NUL-terminate its
+# output (lib/bayan.cyr), so the cstr path would compile and appear to
+# work, which is exactly what makes the trap worth naming here.
+
+# Read the JSON string field `key` out of the object in buf[0..len) and
+# compare it byte-exactly to `want`.
+#
+# Returns 1 only on: key present, value is a properly terminated JSON
+# string, and its contents equal `want` exactly. Everything else — key
+# absent, value a number/bool/null/object/array, unterminated string,
+# different length, different bytes — returns 0. Fail-closed.
+fn _jwt_str_field_eq(buf, len, key, want) {
+    var pos = _jx_find_value_pos(buf, len, key);
+    if (pos == 0 - 1) { return 0; }
+    if (pos >= len) { return 0; }
+    if (load8(buf + pos) != 34) { return 0; }        # not a JSON string
+    var end = _jx_skip_string(buf, len, pos);
+    if (end <= pos + 1) { return 0; }
+    # _jx_skip_string returns `len` when it runs off the end without
+    # finding a closing quote. Requiring the byte before `end` to be a
+    # quote separates "closed at the last byte" from "never closed", so
+    # a truncated `{"alg":"HS256` cannot masquerade as a closed value.
+    if (load8(buf + end - 1) != 34) { return 0; }
+    var inner = end - pos - 2;                       # strip both quotes
+    var wlen = strlen(want);
+    if (inner != wlen) { return 0; }
+    if (memeq(buf + pos + 1, want, wlen) == 1) { return 1; }
+    return 0;
+}
+
+# Parse an unsigned decimal integer from buf[from..end).
+#
+# Returns the value, or -1 on ANY of: an empty span, a non-digit byte
+# anywhere in the span, or more digits than an i64 can hold. -1 is an
+# unambiguous sentinel here because a NumericDate is never negative, so
+# the caller never has to guess whether 0 meant "absent" or
+# "unparseable" — a conflation that would be fail-open for `exp`.
+#
+# The digit cap is what makes overflow impossible rather than merely
+# unlikely: 18 digits maxes at ~1e18, comfortably inside i64's ~9.22e18,
+# so the accumulator cannot wrap. (An overflowing exp would wrap
+# negative and read as long-expired — fail-closed, but by accident. We
+# would rather reject it on purpose.) 18 digits is ~31 billion years of
+# Unix time; no legitimate token comes close.
+#
+# Deliberately not `str_to_int` (lib/str.cyr): that one silently SKIPS
+# non-digits and keeps accumulating, so it parses "1e9" as 19. Nor
+# `atoi`, which needs a NUL-terminated cstr we do not have here.
+fn _jwt_parse_uint(buf, from, end) {
+    if (end <= from) { return 0 - 1; }
+    if (end - from > 18) { return 0 - 1; }
+    var v = 0;
+    var i = from;
+    while (i < end) {
+        var c = load8(buf + i);
+        if (c < 48 || c > 57) { return 0 - 1; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+# Enforce the `exp` (expiration time) claim over a decoded payload.
+# Returns 1 = accept, 0 = reject.
+#
+# 3.2.0: this is new code. The module header has claimed this check
+# since 2.2.0 and no such check existed — `jwt_verify_hs256` accepted a
+# structurally valid, correctly signed, arbitrarily expired token. See
+# docs/development/issues/2026-07-30-jwt-module-is-orphaned-and-documents-an-exp-check-it-does-not-perform.md
+fn _jwt_exp_ok(payload, plen) {
+    var pos = _jx_find_value_pos(payload, plen, "exp");
+    # Absent `exp` is legal — RFC 7519 §4.1.4 makes the claim optional.
+    # There is nothing to enforce, so accept.
+    if (pos == 0 - 1) { return 1; }
+
+    # Present but not a NumericDate -> REJECT, do not treat as absent.
+    # RFC 7519 §2 defines NumericDate as a JSON *number*. A quoted
+    # `"exp": "1785461260"`, a bool, null, or a nested object is
+    # malformed. Folding "malformed" into "absent" is the fail-open
+    # direction: it would let a crafted claim buy unlimited lifetime.
+    # _jwt_parse_uint rejects all of those (a leading quote is byte 34,
+    # not a digit), and its -1 keeps that distinct from a real 0.
+    var end = _jx_skip_value(payload, plen, pos);
+    var exp = _jwt_parse_uint(payload, pos, end);
+    if (exp == 0 - 1) { return 0; }
+
+    var now = clock_epoch_secs();
+    # chrono documents 0 as "clock unknown" (e.g. an agnos RTC read
+    # mid-update), NOT the epoch — lib/chrono.cyr:50. Treating it as 0
+    # would make every token look expired and lock every client out.
+    # Skipping the time window on an unreadable clock is the
+    # established house behaviour; sigil's `_x509_in_window` does
+    # exactly this (`if (now_unix == 0) { return 1; }`).
+    if (now == 0) { return 1; }
+
+    # RFC 7519 §4.1.4: "the current date/time MUST be before the
+    # expiration date/time listed in the exp claim". So now == exp is a
+    # reject, not a pass.
+    #
+    # No leeway. The RFC permits "some small leeway" for clock skew and
+    # bote does not take it: a resource server that silently honours a
+    # token past its stated expiry is doing something the operator
+    # cannot see in the logs, and the size of that grace would be an
+    # invisible security parameter. Consumers that need skew tolerance
+    # should fix their clocks or wrap this validator.
+    if (exp <= now) { return 0; }
+    return 1;
+}
+
 # Verify a JWT. Returns 1 on valid, 0 otherwise.
 fn jwt_verify_hs256(token, key, key_len) {
     if (token == 0 || key == 0 || key_len <= 0) { return 0; }
@@ -76,30 +218,24 @@ fn jwt_verify_hs256(token, key, key_len) {
     var dot2 = _jwt_dot(token, tlen, dot1 + 1);
     if (dot2 <= dot1 + 1 || dot2 >= tlen - 1) { return 0; }
 
-    # Header check: decode and look for "HS256" alg literal. Quick scan
-    # rather than full JSON parse — guards against alg=none downgrade.
+    # Header check: decode and require `alg` to be EXACTLY "HS256".
+    #
+    # 3.2.0: this was a naive substring scan for the five bytes "HS256"
+    # anywhere in the decoded header. That is satisfied by
+    # `{"alg":"none","kid":"HS256-2024"}` — the literal occurs inside
+    # the `kid` VALUE, so the downgrade guard the scan existed to
+    # provide did not hold. It now reads `alg` as a parsed JSON field
+    # and compares byte-exactly.
+    #
+    # This runs BEFORE the HMAC, on unverified bytes, and that is
+    # deliberate: it is the algorithm-downgrade guard, so it has to
+    # gate what the signature step will even attempt. It is also cheap
+    # and total — no allocation, no recursion beyond jsonx's own
+    # depth-capped skip.
     var hlen_slot[8]; store64(&hlen_slot, 0);
     var header = jwt_b64u_decode(token, dot1, &hlen_slot);
     if (header == 0) { return 0; }
-    var hlen = load64(&hlen_slot);
-    var alg_ok = 0;
-    var ai = 0;
-    while (ai + 5 <= hlen) {
-        # naive substring search for "HS256" (5 bytes)
-        if (load8(header + ai) == 72) {       # 'H'
-            if (load8(header + ai + 1) == 83) {   # 'S'
-                if (load8(header + ai + 2) == 50) { # '2'
-                    if (load8(header + ai + 3) == 53) {  # '5'
-                        if (load8(header + ai + 4) == 54) {  # '6'
-                            alg_ok = 1; ai = hlen;
-                        }
-                    }
-                }
-            }
-        }
-        ai = ai + 1;
-    }
-    if (alg_ok == 0) { return 0; }
+    if (_jwt_str_field_eq(header, load64(&hlen_slot), "alg", "HS256") == 0) { return 0; }
 
     # Compute HMAC-SHA256 over `header_b64u . payload_b64u`.
     var sig_input_len = dot2;
@@ -112,8 +248,23 @@ fn jwt_verify_hs256(token, key, key_len) {
     var actual = jwt_b64u_decode(token + dot2 + 1, sig_b64u_len, &slen_slot);
     if (actual == 0) { return 0; }
     if (load64(&slen_slot) != 32) { return 0; }
+    if (_jwt_ct_eq(expected, actual, 32) == 0) { return 0; }
 
-    return _jwt_ct_eq(expected, actual, 32);
+    # ---- everything below here runs on VERIFIED bytes only ----
+    #
+    # Ordering is load-bearing. Before 3.2.0 the ct-compare above was
+    # the function's terminal statement, so any claim check bolted on
+    # ahead of it would have been parsing attacker-controlled input
+    # that had not been authenticated yet. The signature gates the
+    # claims, never the reverse.
+    var plen_slot[8]; store64(&plen_slot, 0);
+    var payload = jwt_b64u_decode(token + dot1 + 1, dot2 - dot1 - 1, &plen_slot);
+    # A signed token whose payload is not valid base64url is malformed.
+    # The signature covers the encoded text, so this is reachable — and
+    # it is a reject, not a pass.
+    if (payload == 0) { return 0; }
+
+    return _jwt_exp_ok(payload, load64(&plen_slot));
 }
 
 # ================================================================

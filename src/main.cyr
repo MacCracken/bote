@@ -49,6 +49,25 @@ include "src/stream.cyr"
 include "src/session.cyr"
 include "src/discovery.cyr"
 include "src/auth.cyr"
+# jwt.cyr + pkce.cyr — 3.2.0. `[package].description` has advertised
+# "JWT HS256 + RFC 7636 PKCE" since 2.2.0, but neither module was in
+# any main entry or in `[lib]` / `[lib.core]`, so no consumer could
+# reach either one: `grep -c '^fn jwt_verify_hs256' dist/bote.cyr
+# dist/bote-core.cyr` returned 0 and 0. They ship now.
+#
+# Placed after auth.cyr because jwt implements auth's validator ABI
+# (`fn validator(token, ctx) -> claims | 0`, src/auth.cyr) — though the
+# coupling is one-way: auth.cyr names no jwt symbol, so only jsonx
+# (for the claim readers) and chrono (for `exp`) are hard ordering
+# constraints, and both sit far earlier in this list.
+#
+# NOT added to `[lib.core]`: that profile's documented stdlib footprint
+# excludes sigil (see DEPS-PATTERN.md), and both modules need it —
+# jwt for `hmac_sha256`, pkce for `sha256`. That is a decision, not an
+# oversight; a core-bundle consumer wanting JWT would have to argue for
+# pulling the whole sigil bundle into the transport-free profile.
+include "src/jwt.cyr"
+include "src/pkce.cyr"
 include "src/transport_stdio.cyr"
 include "src/transport_http.cyr"
 include "src/transport_unix.cyr"

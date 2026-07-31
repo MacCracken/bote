@@ -146,27 +146,37 @@ GET starves the POSTs that feed it).
 | **WS per-message deflate** (RFC 7692) | LZ77 + Huffman in stdlib; likely via a future `lib/dynlib.cyr` zlib binding. |
 | **DNS resolution for hostname SSRF** | cyrius `getaddrinfo` stub. Production callers pair with a network-policy egress block. |
 
-### JWT — the RS256 gate is stale, and `src/jwt.cyr` ships in no bundle
+### JWT — ✅ closed at 3.2.0 (two of three); RS256 remains an open decision
 
-Three corrections recorded 2026-07-30, verified by reading and filed as
-[`2026-07-30-jwt-module-is-orphaned-and-documents-an-exp-check-it-does-not-perform.md`](issues/2026-07-30-jwt-module-is-orphaned-and-documents-an-exp-check-it-does-not-perform.md):
+Filed 2026-07-30 as
+[`2026-07-30-jwt-module-is-orphaned-and-documents-an-exp-check-it-does-not-perform.md`](issues/2026-07-30-jwt-module-is-orphaned-and-documents-an-exp-check-it-does-not-perform.md).
+Three findings; the two with a consequence are fixed.
 
-- ~~**JWT RS256 / ES256** — waiting on sigil RSA / ECDSA primitives.~~ **No longer waiting.** sigil
-  exposes `rsa_pubkey_from_der` (which accepts SPKI directly) and `rsa_pkcs1v15_verify_sha256`, and
-  bote already depends on sigil at tag `3.12.0`. Verified end to end from a real SPKI PEM and an
-  openssl-signed RS256 token: 1 for a valid signature, 0 for a tampered input and 0 for a tampered
-  signature. RS256 is a decision now, not a dependency. (ES256 still needs ECDSA — check separately
-  rather than assuming it moved too.)
-- **`src/jwt.cyr` is in neither `[lib]` nor `[lib.core]`**, so no bundle ships `jwt_verify_hs256`.
-  `[package].description` advertises "JWT HS256 + RFC 7636 PKCE"; `dist/` contains neither. One line
-  plus `cyrius distlib` fixes the packaging half.
-- **The module documents an `exp` expiry check that the code does not perform.** Fix this *before*
-  the packaging item — landing (2) first would ship the gap to every consumer at once.
+- ✅ **The `exp` check the module documented but did not perform** is implemented (3.2.0). It runs
+  only *after* the HMAC verifies, uses `clock_epoch_secs()`, treats a `0` clock as "unknown" rather
+  than the epoch (skipping the window, per sigil's `_x509_in_window` precedent), and grants **no
+  leeway**. A malformed `exp` — string-typed, null, bool, exponent notation, or absurdly long —
+  rejects rather than reading as absent, because folding "unparseable" into "no expiry" is the
+  fail-open direction. Mutation-proven: removing the gate fails 8 assertions.
+- ✅ **`src/jwt.cyr` + `src/pkce.cyr` now ship in `dist/bote.cyr`** (30 module folds, was 28), so
+  `[package].description`'s "JWT HS256 + RFC 7636 PKCE" is finally true. They are deliberately
+  **not** in `[lib.core]` — that profile's documented stdlib footprint excludes sigil and both
+  modules need it. The same change replaced the `alg` **substring scan** with an exact JSON field
+  read; the old scan accepted `{"alg":"none","kid":"HS256-2024"}`, which the new
+  mutation-proven regression test demonstrates directly.
+- 🟡 **JWT RS256 / ES256 — an open decision, no longer a dependency.** The old "waiting on sigil
+  RSA / ECDSA primitives" premise expired: sigil exposes `rsa_pubkey_from_der` (accepts SPKI
+  directly) and `rsa_pkcs1v15_verify_sha256`, and bote depends on sigil at `3.12.1`. Verified end
+  to end from a real SPKI PEM and an openssl-signed RS256 token: 1 for a valid signature, 0 for a
+  tampered input and 0 for a tampered signature. (ES256 still needs ECDSA — check separately rather
+  than assuming it moved too.)
 
-**Not a request to build RS256 here.** agnosai, the consumer that raised it, is implementing RS256
-locally: it needs `iss`/`aud`/`exp` claim validation that bote has no concept of, so routing through
-bote would be indirection over no shared code. This entry exists so the deferral is re-decided on its
-merits rather than on a premise that expired.
+  **Not a request to build RS256 here.** agnosai, the consumer that raised it, implements RS256
+  locally: it needs `iss`/`aud`/`exp` claim validation that bote has no concept of, so routing
+  through bote would be indirection over no shared code. This entry exists so the deferral is
+  re-decided on its merits rather than on a premise that expired. If it is ever built, note that
+  `_jwt_str_field_eq` already reads `alg` as an exact field — a precondition, since the moment one
+  verifier accepts more than one algorithm a loose `alg` match becomes algorithm confusion.
 
 ### Carried forward (not release-blocking)
 

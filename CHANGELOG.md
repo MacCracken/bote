@@ -18,15 +18,71 @@ have per release.
 
 _(empty)_
 
-## [3.2.0] — 2026-07-30 — toolchain 6.5.3 + full dependency refresh + aarch64 portability
+## [3.2.0] — 2026-07-30 — toolchain 6.5.3 + full dep refresh; aarch64 portability; JWT `exp` enforced and JWT/PKCE finally shipped
 
-**Toolchain + full dependency refresh, and bote builds on aarch64 for the first time.** Moves
-every pin to its current tag, clears the manifest-pin drift warning, lands the two source changes
-the 6.5.x line makes mandatory, realigns the `[deps.sigil]` tag with `cyrius.lock` (which was red
-at HEAD), and removes the three x86_64-only syscall constants that made an aarch64 cross-build
-impossible for bote and for every consumer vendoring `dist/bote.cyr`.
+**Minor, not a patch — `dist/bote.cyr` grows two modules.** `src/jwt.cyr` and `src/pkce.cyr`, the
+"JWT HS256 + RFC 7636 PKCE" that `[package].description` has advertised since **2.2.0**, were in
+neither `[lib]` nor `[lib.core]` and reachable by no consumer. They ship now — with the `exp` check
+their own header has documented and **not performed** for the same eight releases actually
+implemented, and with the `alg` substring scan replaced by an exact field read.
+
+Alongside that: every dependency pin moves to its current tag, the toolchain goes onto the 6.5.x
+line, the three x86_64-only syscall constants that made an aarch64 cross-build impossible are gone,
+and a `[deps.sigil]` tag/lock drift that had CI red at HEAD is realigned.
+
+### Security
+- **`jwt_verify_hs256` enforced no expiry.** Its header comment claimed *"`exp` claim, if present
+  in the payload, is in the future (uses chrono's wall-clock seconds)"* since 2.2.0. No such check
+  existed — `exp` appeared exactly once in the file, in that comment, and the module referenced no
+  clock function at all. A structurally valid, correctly signed, **arbitrarily expired** token
+  verified. Severity was bounded only by the packaging defect below: no consumer could reach the
+  module. Fixing the packaging without fixing this would have shipped the gap to every consumer at
+  once, so it is fixed first. Resolves finding (2) of
+  `docs/development/issues/2026-07-30-jwt-module-is-orphaned-and-documents-an-exp-check-it-does-not-perform.md`.
+  - Runs **only after the HMAC verifies**. The constant-time compare was previously the function's
+    terminal statement; it now short-circuits, and the payload is decoded below that line, so claim
+    parsing never touches unauthenticated bytes.
+  - Absent `exp` accepts (RFC 7519 §4.1.4 makes it optional). Past `exp` rejects. **`exp == now`
+    rejects** — §4.1.4 requires *now* to be strictly before *exp*. **No leeway**: the RFC permits
+    "some small leeway" and bote declines it, because a server that silently honours a token past
+    its stated expiry does something the operator cannot see in the logs.
+  - A present-but-malformed `exp` — string-typed `"1785461260"`, `null`, `true`, `1e9`, or 25
+    digits — **rejects rather than reading as absent**. Folding "unparseable" into "no expiry" is
+    the fail-open direction. `_jwt_parse_uint` returns `-1` rather than `0` so the sentinel can
+    never be confused with a real zero, and caps at 18 digits so i64 overflow is impossible rather
+    than merely unlikely.
+  - `clock_epoch_secs() == 0` **skips** the window. `lib/chrono.cyr:50` documents 0 as "clock
+    unknown", not the epoch; treating it as epoch would expire every token and lock every client
+    out. Matches sigil's `_x509_in_window` precedent.
+- **The `alg` check was a substring scan, and it was defeatable.** It searched the decoded header
+  for the five bytes `HS256` *anywhere*, so `{"alg":"none","kid":"HS256-2024"}` satisfied it — the
+  literal sits inside the `kid` value. Replaced with an exact JSON field read
+  (`_jwt_str_field_eq`), byte-exact and case-sensitive per RFC 7515 §4.1.1. The issue classed this
+  as "harmless while HS256 is the only algorithm"; it is fixed now anyway, because that caution is
+  only sound for as long as nobody forgets it, and because it is a precondition for RS256 ever
+  landing here.
+- **Claim readers use jsonx's `(buf, len)` internals, not its public cstr API.** Every public jsonx
+  entry point begins with `strlen()`. The decoded header and payload are attacker-controlled, and
+  an embedded NUL would truncate that view — hiding `exp` entirely, which reads as "no expiry".
+  bayan's base64url decoder *does* NUL-terminate its output, so the cstr path would have compiled
+  and appeared to work. That is what made it worth avoiding rather than merely noting.
 
 ### Added
+- **`src/jwt.cyr` + `src/pkce.cyr` ship in `dist/bote.cyr`** (28 → 30 module folds), exporting
+  `jwt_verify_hs256`, `auth_validator_jwt_hs256`, `jwt_secret_*`, `pkce_code_verifier` and
+  `pkce_code_challenge_s256`. Resolves finding (1) of the same issue. **Deliberately not in
+  `[lib.core]`**: that profile's documented stdlib footprint excludes sigil and both modules need
+  it (`hmac_sha256` / `sha256`), so folding them in would defeat the reason the core profile
+  exists. That is a decision, not an oversight — the issue explicitly left it open. Capacity cost:
+  `fn_table` 4961 → 4974, identifiers 163966 → 164307 (15% / 31% of ceiling).
+- **`tests/bote_jwt.tcyr` 28 → 53 assertions**, with a new `_mint_hs256(hdr, payload, key)` helper.
+  Every token in the file was previously a hardcoded literal, which is why the `exp` cases (whose
+  value must track the wall clock) and the alg-confusion case (which needs a *valid* signature over
+  a hostile header) could not be expressed at all. **Both gates are mutation-proven**: restoring
+  the substring `alg` scan fails 2 assertions, removing the `exp` gate fails 8. Also noted and
+  relabelled — the pre-existing `alg=none` literal never reached the alg gate (its empty third
+  segment is rejected structurally several checks earlier), so it had never tested what its name
+  claimed.
 - **aarch64 portability gate in CI** (`.github/workflows/ci.yml`). bote had no aarch64 lane at
   all, which is exactly why the regression below went unnoticed until a consumer hit it. Two
   gates, both deterministic and emulator-free: a comment-stripped **denylist grep** over
@@ -39,6 +95,26 @@ impossible for bote and for every consumer vendoring `dist/bote.cyr`.
   gated.
 
 ### Fixed
+- **`bayan_json_v_parse_str` → `bayan_json_v_parse_buf`** (`src/web_tools.cyr`). bayan 1.3.0, folded
+  into the stdlib at cyrius 6.5.1, renamed the buf+len typed JSON parser and removed the old name.
+  Identical `(buf, len)` signature and semantics, but building `src/main.cyr` against the 6.5.x
+  stdlib died with `error: refusing to emit binary with 1 reachable undefined function(s)`. This was
+  the only stdlib removal reaching bote — a mechanical diff of all 666 distinct stdlib call targets
+  in `src/` across the 6.4.66 and 6.5.3 snapshots found no other removal and **zero** arity changes.
+- **17 wrong-arity call sites in the test + bench suites.** cyrius 6.5.1 escalated a wrong argument
+  count from a warning that still emitted a binary to a hard error that emits nothing. The affected
+  calls — `codec_process_message` 2-of-3 (×7) and `bridge_process_message` 2-of-3 (×4) in
+  `tests/bote.tcyr`, `auth_bearer_check` 5-of-6 (×4) in `tests/bote_auth.tcyr` and (×2) in
+  `tests/bote.bcyr` — had been running with the trailing parameter bound to whatever occupied the
+  register. All now pass the `claims` / `claims_out` argument explicitly as `0`, matching every
+  `src/` call site. **`src/` itself was already correct**; this was test-suite rot only, and it means
+  the pre-3.2.0 assertions on those paths were passing against an unbound parameter.
+- **`[deps.sigil]` tag realigned with `cyrius.lock`.** 3.1.4 shipped `tag = "3.12.0"` while
+  `cyrius.lock` already recorded 3.12.1's content hash (`292e0a2d…`); the local `path = "../sigil"`
+  override vendored the 3.12.1 body and masked the drift. A clean `git`+`tag` CI checkout would have
+  vendored 3.12.0 (`c36d26a0…`) and **failed `cyrius deps --verify`** — i.e. CI was red at HEAD, for
+  the same reason and in the same shape as the libro drift fixed at 3.1.4. Tag, lock and vendored
+  body now agree for all four AGNOS deps.
 - **aarch64 cross-build (`undefined variable 'SYS_OPEN'`).** Resolves
   `docs/development/issues/2026-07-17-aarch64-sys-open-urandom.md`, filed by **daimon**. The
   fix is **wider than the report**: the issue identified `SYS_OPEN` as "the *only* blocker", but
@@ -95,28 +171,6 @@ impossible for bote and for every consumer vendoring `dist/bote.cyr`.
   `_int` slot of `_web_get(url)` at a different arity — the exact landmine sakshi 2.4.7 defused in
   its own `_sk_write_int`/`_sk_write_str` pair. Dormant here (both `_web_get` call sites pass a cstr
   as arg 1), but the arity mismatch is what arms it. Module-private; no consumer surface.
-
-### Fixed
-- **`bayan_json_v_parse_str` → `bayan_json_v_parse_buf`** (`src/web_tools.cyr`). bayan 1.3.0, folded
-  into the stdlib at cyrius 6.5.1, renamed the buf+len typed JSON parser and removed the old name.
-  Identical `(buf, len)` signature and semantics, but building `src/main.cyr` against the 6.5.x
-  stdlib died with `error: refusing to emit binary with 1 reachable undefined function(s)`. This was
-  the only stdlib removal reaching bote — a mechanical diff of all 666 distinct stdlib call targets
-  in `src/` across the 6.4.66 and 6.5.3 snapshots found no other removal and **zero** arity changes.
-- **17 wrong-arity call sites in the test + bench suites.** cyrius 6.5.1 escalated a wrong argument
-  count from a warning that still emitted a binary to a hard error that emits nothing. The affected
-  calls — `codec_process_message` 2-of-3 (×7) and `bridge_process_message` 2-of-3 (×4) in
-  `tests/bote.tcyr`, `auth_bearer_check` 5-of-6 (×4) in `tests/bote_auth.tcyr` and (×2) in
-  `tests/bote.bcyr` — had been running with the trailing parameter bound to whatever occupied the
-  register. All now pass the `claims` / `claims_out` argument explicitly as `0`, matching every
-  `src/` call site. **`src/` itself was already correct**; this was test-suite rot only, and it means
-  the pre-3.2.0 assertions on those paths were passing against an unbound parameter.
-- **`[deps.sigil]` tag realigned with `cyrius.lock`.** 3.1.4 shipped `tag = "3.12.0"` while
-  `cyrius.lock` already recorded 3.12.1's content hash (`292e0a2d…`); the local `path = "../sigil"`
-  override vendored the 3.12.1 body and masked the drift. A clean `git`+`tag` CI checkout would have
-  vendored 3.12.0 (`c36d26a0…`) and **failed `cyrius deps --verify`** — i.e. CI was red at HEAD, for
-  the same reason and in the same shape as the libro drift fixed at 3.1.4. Tag, lock and vendored
-  body now agree for all four AGNOS deps.
 
 ### Performance
 - **Bump is performance-neutral — proven, because the raw numbers say otherwise.** The v3.2.0

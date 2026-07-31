@@ -16,9 +16,48 @@ include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL gua
 include "lib/sakshi.cyr"
 include "lib/bayan.cyr"
 include "lib/sigil.cyr"
+include "lib/chrono.cyr"
 include "lib/assert.cyr"
 
+# 3.2.0: jwt.cyr reads `alg` and `exp` through jsonx's (buf, len)
+# internals rather than a strlen-based cstr API, so jsonx must be
+# included first — cyrius is single-pass.
+include "src/jsonx.cyr"
 include "src/jwt.cyr"
+
+# ================================================================
+# HS256 token minting — 3.2.0
+# ================================================================
+# Every token in this file used to be a hardcoded literal, which meant
+# the `exp` cases (whose value has to move with the wall clock) and the
+# alg-confusion case (which needs a VALID signature over a hostile
+# header) could not be expressed at all. This mints them for real:
+# base64url(header) . base64url(payload) . base64url(HMAC-SHA256(...)).
+fn _mint_hs256(hdr_json, payload_json, key) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base64url_encode(hdr_json, strlen(hdr_json)));
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_cstr(sb, base64url_encode(payload_json, strlen(payload_json)));
+    var signing_input = str_cstr(str_builder_build(sb));
+
+    var mac = alloc(32);
+    hmac_sha256(key, strlen(key), signing_input, strlen(signing_input), mac);
+
+    var sb2 = str_builder_new();
+    str_builder_add_cstr(sb2, signing_input);
+    str_builder_add_cstr(sb2, ".");
+    str_builder_add_cstr(sb2, base64url_encode(mac, 32));
+    return str_cstr(str_builder_build(sb2));
+}
+
+# Build `{"sub":"a","exp":<secs>}` for a computed expiry.
+fn _payload_with_exp(secs) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"sub\":\"a\",\"exp\":");
+    str_builder_add_int(sb, secs);
+    str_builder_add_cstr(sb, "}");
+    return str_cstr(str_builder_build(sb));
+}
 
 fn main() {
     alloc_init();
@@ -85,9 +124,115 @@ fn main() {
 
     # Non-HS256 alg downgrade rejected — header with "alg":"none"
     # Header = {"alg":"none"} → eyJhbGciOiJub25lIn0
+    #
+    # NB (3.2.0): this literal has an EMPTY third segment, so it is
+    # rejected structurally at the `dot2 >= tlen - 1` guard, several
+    # checks before the header is ever decoded. It therefore does NOT
+    # exercise the alg gate — it never did. Kept as a malformed-input
+    # case; the real alg coverage is the minted token below.
     var none_token = "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.";
     assert_eq(jwt_verify_hs256(none_token, jwt_key, strlen(jwt_key)), 0,
-    "alg=none downgrade rejected");
+    "alg=none (empty sig segment) rejected structurally");
+
+    # ================================================================
+    # 3.2.0 — `alg` is an exact JSON field read, not a substring scan
+    # ================================================================
+    # Regression test for finding (2) of the 2026-07-30 issue. Through
+    # 3.1.4 the alg check scanned the decoded header for the five bytes
+    # "HS256" ANYWHERE, so this header satisfied it — the literal sits
+    # inside the `kid` VALUE while `alg` actually says "none". Minted
+    # with a correct HMAC so nothing else can reject it: this token
+    # reaches the alg gate, and only the alg gate can turn it away.
+    var confusion = _mint_hs256("{\"alg\":\"none\",\"kid\":\"HS256-2024\"}",
+    "{\"sub\":\"a\"}", jwt_key);
+    assert_eq(jwt_verify_hs256(confusion, jwt_key, strlen(jwt_key)), 0,
+    "alg confusion: HS256 inside kid does not satisfy alg");
+
+    # Control: the same mint with a real HS256 header verifies — proves
+    # the assertion above fails on `alg`, not on a broken minter.
+    var minted_ok = _mint_hs256("{\"alg\":\"HS256\",\"typ\":\"JWT\"}",
+    "{\"sub\":\"a\"}", jwt_key);
+    assert_eq(jwt_verify_hs256(minted_ok, jwt_key, strlen(jwt_key)), 1,
+    "minted HS256 token verifies (minter control)");
+
+    # `alg` must be a JSON string, and byte-exact. RFC 7515 §4.1.1 alg
+    # values are case-sensitive.
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"alg\":\"hs256\"}", "{\"sub\":\"a\"}", jwt_key),
+    jwt_key, strlen(jwt_key)), 0, "lowercase alg rejected (case-sensitive)");
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"alg\":\"HS2560\"}", "{\"sub\":\"a\"}", jwt_key),
+    jwt_key, strlen(jwt_key)), 0, "alg longer than HS256 rejected");
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"alg\":\"HS25\"}", "{\"sub\":\"a\"}", jwt_key),
+    jwt_key, strlen(jwt_key)), 0, "alg shorter than HS256 rejected");
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"typ\":\"JWT\"}", "{\"sub\":\"a\"}", jwt_key),
+    jwt_key, strlen(jwt_key)), 0, "missing alg rejected");
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"alg\":256}", "{\"sub\":\"a\"}", jwt_key),
+    jwt_key, strlen(jwt_key)), 0, "non-string alg rejected");
+
+    # ================================================================
+    # 3.2.0 — `exp` is enforced (RFC 7519 §4.1.4)
+    # ================================================================
+    # Finding (2) of the issue: the module header documented this check
+    # since 2.2.0 and no such check existed, so a correctly signed but
+    # arbitrarily expired token was accepted. All tokens below are
+    # correctly signed — expiry is the ONLY thing that can reject them.
+    var now = clock_epoch_secs();
+
+    # Absent exp is legal (the claim is optional) — the canonical
+    # jwt.io token above has only `iat`, and still verifies.
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"alg\":\"HS256\"}", "{\"sub\":\"a\"}", jwt_key),
+    jwt_key, strlen(jwt_key)), 1, "absent exp accepted");
+
+    # Future exp accepted.
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"alg\":\"HS256\"}", _payload_with_exp(now + 3600), jwt_key),
+    jwt_key, strlen(jwt_key)), 1, "exp one hour in the future accepted");
+
+    # Past exp rejected — the whole point.
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"alg\":\"HS256\"}", _payload_with_exp(now - 3600), jwt_key),
+    jwt_key, strlen(jwt_key)), 0, "exp one hour in the past rejected");
+
+    # Fixed historical exp (2018-01-18) — clock-independent.
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"alg\":\"HS256\"}", _payload_with_exp(1516239022), jwt_key),
+    jwt_key, strlen(jwt_key)), 0, "long-expired token rejected");
+
+    # exp == now is a reject: RFC 7519 requires now to be strictly
+    # BEFORE exp. No leeway is granted.
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"alg\":\"HS256\"}", _payload_with_exp(now), jwt_key),
+    jwt_key, strlen(jwt_key)), 0, "exp == now rejected (no leeway)");
+
+    # Malformed exp must REJECT, not read as absent — folding
+    # "unparseable" into "no expiry" would be the fail-open direction.
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"alg\":\"HS256\"}",
+    "{\"sub\":\"a\",\"exp\":\"1785461260\"}", jwt_key), jwt_key, strlen(jwt_key)), 0,
+    "string-typed exp rejected (NumericDate is a JSON number)");
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"alg\":\"HS256\"}",
+    "{\"sub\":\"a\",\"exp\":null}", jwt_key), jwt_key, strlen(jwt_key)), 0,
+    "null exp rejected");
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"alg\":\"HS256\"}",
+    "{\"sub\":\"a\",\"exp\":true}", jwt_key), jwt_key, strlen(jwt_key)), 0,
+    "boolean exp rejected");
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"alg\":\"HS256\"}",
+    "{\"sub\":\"a\",\"exp\":1e9}", jwt_key), jwt_key, strlen(jwt_key)), 0,
+    "exponent-notation exp rejected (str_to_int would read this as 19)");
+    # 25 digits — would overflow i64 and wrap negative. Rejected on
+    # purpose by the digit cap, not by accident via the wrap.
+    assert_eq(jwt_verify_hs256(_mint_hs256("{\"alg\":\"HS256\"}",
+    "{\"sub\":\"a\",\"exp\":9999999999999999999999999}", jwt_key), jwt_key, strlen(jwt_key)), 0,
+    "absurd 25-digit exp rejected (no i64 wrap)");
+
+    # ---- claim readers, direct ----
+    assert_eq(_jwt_parse_uint("1785461260", 0, 10), 1785461260, "parse_uint plain");
+    assert_eq(_jwt_parse_uint("x", 0, 1), 0 - 1, "parse_uint non-digit -> -1");
+    assert_eq(_jwt_parse_uint("", 0, 0), 0 - 1, "parse_uint empty span -> -1");
+    assert_eq(_jwt_parse_uint("0", 0, 1), 0, "parse_uint zero is a real 0, not -1");
+    assert_eq(_jwt_parse_uint("1234567890123456789", 0, 19), 0 - 1,
+    "parse_uint 19 digits -> -1 (over the 18-digit cap)");
+    assert_eq(_jwt_str_field_eq("{\"alg\":\"HS256\"}", 15, "alg", "HS256"), 1,
+    "str_field_eq exact match");
+    assert_eq(_jwt_str_field_eq("{\"alg\":\"none\",\"kid\":\"HS256\"}", 27, "alg", "HS256"), 0,
+    "str_field_eq ignores a match in another field's value");
+    # Unterminated string must not masquerade as a closed one.
+    assert_eq(_jwt_str_field_eq("{\"alg\":\"HS256", 13, "alg", "HS256"), 0,
+    "str_field_eq rejects unterminated string");
 
     # ================================================================
     # JwtSecret handle + validator adapter

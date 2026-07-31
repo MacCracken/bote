@@ -48,6 +48,8 @@ modules = [
     "src/session.cyr",
     "src/discovery.cyr",
     "src/auth.cyr",
+    "src/jwt.cyr",
+    "src/pkce.cyr",
     "src/transport_stdio.cyr",
     "src/transport_http.cyr",
     "src/transport_unix.cyr",
