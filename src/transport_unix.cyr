@@ -96,7 +96,17 @@ fn transport_unix_run(dispatcher, path) {
     return 1;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    syscall(SYS_UNLINK, path);
+    # 3.2.0 (aarch64 portability): sys_unlink / sys_chmod below are the
+    # stdlib's arch-portable wrappers. The raw SYS_UNLINK and SYS_CHMOD
+    # constants they replace are defined only in
+    # lib/syscalls_x86_64_linux.cyr — aarch64 Linux's generic table has
+    # unlinkat(2) and fchmodat(2) and neither bare form — so both were
+    # hard `undefined variable` errors on an aarch64 build. The wrappers
+    # expand to unlinkat(AT_FDCWD, path, 0) / fchmodat(AT_FDCWD, path,
+    # mode, 0) there, which is semantically identical for an absolute
+    # path. SYS_SOCKET / SYS_BIND / SYS_LISTEN are defined on both arches
+    # and need no change.
+    sys_unlink(path);
     var sfd = syscall(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0);
     if (sfd < 0) { return 1; }
     var addr = alloc(110);
@@ -106,7 +116,7 @@ fn transport_unix_run(dispatcher, path) {
     # 1.9.6 audit L1: restrict perms so only the owning UID can connect.
     # Without this the socket inherits the process umask (typically 0022 →
     # mode 0755) and any local user can dial it.
-    syscall(SYS_CHMOD, path, 0x180);   # 0o600 = 384 decimal = 0x180
+    sys_chmod(path, 0x180);            # 0o600 = 384 decimal = 0x180
     var lr = syscall(SYS_LISTEN, sfd, 16);
     if (lr < 0) { syscall(SYS_CLOSE, sfd); return 1; }
     while (1 == 1) {

@@ -47,6 +47,29 @@ bote ships **two** distribution artifacts:
 If either bundle is missing at the tag, downstream consumers
 that selected that profile break at `cyrius deps` time.
 
+### Stdlib the consumer must supply
+
+The bundles are include-free by design — they carry **no**
+`include "lib/…"` lines, so the consumer's own `[deps] stdlib`
+has to cover every stdlib leaf the fold calls. The
+auto-generated `dist/bote.deps` sidecar is a **partial** hint,
+not the full set: at 3.2.0 it lists three names while the full
+bundle also reaches `syscalls`, `io`, `net`, `tls`, `sandhi`,
+`sigil`, `chrono`, `str`, `string`, `fmt`, `alloc`, `vec`,
+`slice`, `tagged`, `fnptr`, `freelist`, `thread`, `atomic`,
+`sync`, `thread_local`, `ct`, `keccak` and `random`. Mirror
+bote's own `[deps] stdlib` list in `cyrius.cyml` — including
+its **ordering**, which is load-bearing under single-pass
+compilation.
+
+**New at 3.2.0: `random`.** `src/session.cyr`'s
+`_gen_session_id` now draws entropy through `random_bytes()`
+(getrandom(2)) instead of opening `/dev/urandom` by raw
+syscall. A consumer whose stdlib list omits `random` gets
+`undefined function 'random_bytes'`. Add it before the modules
+that reference it — bote lists it alongside `ct` / `keccak`,
+ahead of `sigil`.
+
 ## Profile selection
 
 Most consumers want the default:

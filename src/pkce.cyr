@@ -36,16 +36,16 @@ var _pkce_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012345
 fn pkce_code_verifier(out_buf, len) {
     if (len < 43) { return 1; }
     if (len > 128) { return 1; }
-    var fd = syscall(SYS_OPEN, "/dev/urandom", 0, 0);
-    if (fd < 0) { return 1; }
+    # 3.2.0 (aarch64 portability): getrandom(2) via the stdlib
+    # `random_bytes` wrapper, replacing a raw
+    # `syscall(SYS_OPEN, "/dev/urandom", 0, 0)` + read-loop + close.
+    # SYS_OPEN exists only on x86_64 (aarch64's generic table has openat
+    # and no open), so that reference failed the aarch64 build outright.
+    # SYS_GETRANDOM is defined on both arches. Same fail-closed contract:
+    # anything short of a full fill returns non-zero and writes nothing.
+    # See src/session.cyr's _gen_session_id for the full rationale.
     var raw = alloc(len);
-    var got = 0;
-    while (got < len) {
-        var r = syscall(SYS_READ, fd, raw + got, len - got);
-        if (r <= 0) { syscall(SYS_CLOSE, fd); return 1; }
-        got = got + r;
-    }
-    syscall(SYS_CLOSE, fd);
+    if (random_bytes(raw, len) != len) { return 1; }
     var i = 0;
     while (i < len) {
         var b = load8(raw + i);

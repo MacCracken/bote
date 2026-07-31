@@ -18,12 +18,55 @@ have per release.
 
 _(empty)_
 
-## [3.2.0] — 2026-07-30 — toolchain 6.5.3 + full dependency refresh
+## [3.2.0] — 2026-07-30 — toolchain 6.5.3 + full dependency refresh + aarch64 portability
 
-**Toolchain + full dependency refresh.** Moves every pin to its current tag, clears the
-manifest-pin drift warning, and lands the two source changes the 6.5.x line makes mandatory: a
-removed stdlib function and a compiler check that turned 17 latent test-suite defects into hard
-errors. Also realigns the `[deps.sigil]` tag with `cyrius.lock`, which was red at HEAD.
+**Toolchain + full dependency refresh, and bote builds on aarch64 for the first time.** Moves
+every pin to its current tag, clears the manifest-pin drift warning, lands the two source changes
+the 6.5.x line makes mandatory, realigns the `[deps.sigil]` tag with `cyrius.lock` (which was red
+at HEAD), and removes the three x86_64-only syscall constants that made an aarch64 cross-build
+impossible for bote and for every consumer vendoring `dist/bote.cyr`.
+
+### Added
+- **aarch64 portability gate in CI** (`.github/workflows/ci.yml`). bote had no aarch64 lane at
+  all, which is exactly why the regression below went unnoticed until a consumer hit it. Two
+  gates, both deterministic and emulator-free: a comment-stripped **denylist grep** over
+  `src/*.cyr` + `dist/*.cyr` for all 17 `SYS_*` constants that exist on x86_64 but not aarch64,
+  and a **blocking cross-build** of all three entries asserting `e_machine == 0xB7`
+  (`EM_AARCH64`) on each output. The denylist was verified to fire on the pre-fix
+  `src/session.cyr` and pass on the fixed tree.
+- **`tests/bote_fs_tools.tcyr` and `tests/bote_web_tools.tcyr` added to the CI test list.** Both
+  existed and passed locally but were absent from the CI loop — 53 assertions that were never
+  gated.
+
+### Fixed
+- **aarch64 cross-build (`undefined variable 'SYS_OPEN'`).** Resolves
+  `docs/development/issues/2026-07-17-aarch64-sys-open-urandom.md`, filed by **daimon**. The
+  fix is **wider than the report**: the issue identified `SYS_OPEN` as "the *only* blocker", but
+  set-differencing the two syscall peers (95 constants on x86_64, 88 on aarch64) shows 17 x86-only
+  constants, of which bote referenced **three** — `SYS_OPEN` (`src/session.cyr`, `src/pkce.cyr`)
+  plus `SYS_UNLINK` and `SYS_CHMOD` (`src/transport_unix.cyr:99` / `:109`, both missed by the
+  report, both in the shipped bundle). An `undefined variable` is fatal, so fixing only `SYS_OPEN`
+  would have moved the failure two lines down, not to green.
+  - Both entropy sites now use **`random_bytes()`** (getrandom(2)) rather than the report's
+    suggested `sys_open`. `lib/random.cyr:3` recommends it over `/dev/urandom` + open/read/close
+    outright, `lib/io.cyr:68` warns that raw `sys_open` is ABI-wrong on agnos (a silent
+    miscompile, not a build error), and `SYS_GETRANDOM` is defined on both arches. One syscall
+    instead of three, internal short-read looping, and it works where `/dev/urandom` is not
+    reachable (early boot, chroot, landlocked process). The 1.9.4 audit M2 fail-closed contract —
+    refuse to mint a session ID rather than ship a guessable one — is preserved exactly.
+  - `src/transport_unix.cyr` routes through `sys_unlink` / `sys_chmod`, which expand to
+    `unlinkat(AT_FDCWD, …)` / `fchmodat(AT_FDCWD, …)` on aarch64.
+  - Two hardcoded numeric syscalls in `_gen_session_id` (`syscall(1, 2, "fatal: …", 47)` — the
+    **x86** write number) became `eprint(msg, len)` / `sys_exit(90)`. They worked on aarch64 only
+    because the cyrius backend renumbers `x8=1 → 64`; correctness should not rest on a
+    compiler-internal translation table.
+  - **Verified end to end**, not merely linked: all three binaries cross-build to real
+    `EM_AARCH64` ELF, and the **full suite — 13 files, 786 assertions — passes under
+    `cyrius test --aarch64`**.
+  - Still open by choice: `src/transport_unix.cyr:113` uses `SYS_ACCEPT` from `lib/net.cyr`'s
+    unguarded `var SYS_ACCEPT = 43` (the x86 number), correct on aarch64 only via the same
+    backend renumbering. Not a build blocker, so out of scope here; `sock_accept()` is the
+    consistent replacement and arguably an upstream `net.cyr` fix.
 
 ### Changed
 - **cyrius pin `6.4.66` → `6.5.3`.** Clears the "manifest-pin: 6.4.66 (drift — wrapper is 6.5.3)"

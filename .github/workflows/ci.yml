@@ -210,12 +210,14 @@ jobs:
           for tcyr in tests/bote.tcyr \
                       tests/bote_auth.tcyr \
                       tests/bote_content.tcyr \
+                      tests/bote_fs_tools.tcyr \
                       tests/bote_host.tcyr \
                       tests/bote_jwt.tcyr \
+                      tests/bote_libro_tools.tcyr \
                       tests/bote_pkce.tcyr \
                       tests/bote_sandbox.tcyr \
-                      tests/bote_libro_tools.tcyr \
                       tests/bote_streamable.tcyr \
+                      tests/bote_web_tools.tcyr \
                       tests/bote_ws.tcyr \
                       tests/bote_core_only_smoke.tcyr; do
             echo "--- $tcyr ---"
@@ -228,6 +230,58 @@ jobs:
             fi
           done
           [ $fail -eq 0 ] || exit 1
+
+      - name: aarch64 portability gate
+        # Added 3.2.0. bote had no aarch64 lane, and the gap let three
+        # x86_64-only syscall constants reach `src/` and (via
+        # src/session.cyr) the shipped dist/bote.cyr, breaking the
+        # cross-build for bote and for every consumer that vendors the
+        # bundle. See docs/development/issues/2026-07-17-aarch64-sys-open-urandom.md.
+        #
+        # Two gates, both cheap and both deterministic (no emulator):
+        #
+        #   1. Denylist. lib/syscalls_x86_64_linux.cyr defines 95 SYS_*
+        #      constants, lib/syscalls_aarch64_linux.cyr defines 88, and
+        #      exactly 17 exist only on x86_64 — aarch64 Linux uses the
+        #      generic table, which carries only the *at()/*at2() forms.
+        #      Referencing one is a hard `undefined variable` error, not a
+        #      warning, so this list is a build-break denylist. Comments
+        #      are stripped first: the fix commit deliberately NAMES these
+        #      constants in explanatory comments.
+        #
+        #   2. Cross-build all three entries. The denylist cannot catch a
+        #      new x86-only symbol that upstream adds later, so the actual
+        #      compile is the backstop.
+        #
+        # Not gated here: the full aarch64 TEST sweep, which needs
+        # qemu-user. It was run locally at 3.2.0 — all 13 files, 786
+        # assertions green on aarch64 — and `cyrius test --aarch64 <file>`
+        # reproduces it wherever qemu-aarch64 is on PATH.
+        run: |
+          set -e
+          X86_ONLY='SYS_(ACCESS|CHMOD|DUP2|EPOLL_WAIT|FORK|LINK|LSTAT|MKDIR|OPEN|PAUSE|PIPE|READLINK|RENAME|RMDIR|STAT|SYMLINK|UNLINK)\b'
+          echo "--- denylist: x86_64-only SYS_* in src/ and dist/ ---"
+          hits=$(sed 's/#.*//' src/*.cyr dist/*.cyr 2>/dev/null | grep -nE "$X86_ONLY" || true)
+          if [ -n "$hits" ]; then
+            echo "::error::x86_64-only SYS_* constant referenced — this breaks the aarch64 build."
+            echo "$hits"
+            echo
+            echo "Use the arch-portable stdlib wrapper instead:"
+            echo "  SYS_OPEN   -> sys_open(path, flags, mode)   (or random_bytes() for entropy)"
+            echo "  SYS_UNLINK -> sys_unlink(path)"
+            echo "  SYS_CHMOD  -> sys_chmod(path, mode)"
+            exit 1
+          fi
+          echo "  clean — no x86_64-only SYS_* outside comments"
+          echo "--- cross-build ---"
+          for e in main:bote main_streamable:bote-streamable main_ws:bote-ws; do
+            src="${e%%:*}"; out="${e##*:}"
+            cyrius build --aarch64 "src/$src.cyr" "build/$out-aarch64"
+            # ELF e_machine at offset 0x12 must be 0xB7 (EM_AARCH64), little-endian.
+            mach=$(od -An -tx1 -j18 -N2 "build/$out-aarch64" | tr -d ' ')
+            [ "$mach" = "b700" ] || { echo "::error::$out-aarch64 is not EM_AARCH64 (e_machine=$mach)"; exit 1; }
+            echo "  OK  build/$out-aarch64  ($(wc -c < "build/$out-aarch64") bytes, EM_AARCH64)"
+          done
 
       - name: Build benchmarks (non-fatal)
         run: |
