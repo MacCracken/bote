@@ -25,8 +25,8 @@
 # `merkle_inclusion_proof`. All of those are now field reads on
 # struct-typed handles. We re-introduce the thin accessor names
 # below as module-local `_lt_*` helpers so the handler bodies stay
-# readable — matches the entry struct layout at lib/libro.cyr:200
-# (raw offsets are documented inline).
+# readable — matches libro's `struct entry` layout (raw offsets are
+# documented inline).
 
 # ================================================================
 # Module state: the chain we're wrapping, set once at init
@@ -41,8 +41,13 @@ fn libro_tools_init(chain) {
 
 # ================================================================
 # libro 2.x struct-field accessors (used to be public; raw offsets
-# now). Layout reference: lib/libro.cyr:200 (entry), :28 (error),
-# :1079 (chain), :2046 (merkle_tree).
+# now). Layout reference: `struct entry` / `struct error` /
+# `struct chain` / `struct merkle_tree` in lib/libro.cyr.
+#
+# 3.2.0: the line-number citations that used to sit here (:200, :28,
+# :1079, :2046) were already wrong at libro 2.8.2 and rotted further
+# at 2.8.4. They are gone — grep the struct NAME instead, which does
+# not drift on an upstream bump.
 # ================================================================
 
 # struct entry — +0 uuid_hi, +8 uuid_lo, +16 timestamp, +24 severity,
@@ -57,7 +62,14 @@ fn _lt_entry_agent_id(e)  { return load64(e + 56); }
 fn _lt_entry_hash(e)      { return load64(e + 72); }
 
 # struct chain — +0 entries(vec), +8 prev_hash(Str), +16 max_capacity,
-# +24 overflow(vec).
+# +24 overflow(vec), +32 streaming.
+#
+# libro 2.8.4 appended the 5th field (`streaming`, chain 32 -> 40
+# bytes) for its new O(1)-memory write-through constructor
+# `chain_new_streaming()`. Appended, not inserted — so the +0 read
+# below is unaffected. bote stands up its chain with plain
+# `chain_new()` (src/main.cyr), which keeps entries retained, which is
+# what the libro_query / export / proof handlers below iterate.
 fn _lt_chain_entries(c)   { return load64(c); }
 
 # struct error — +0 code, +8 msg(cstr), +16 field_name, +24 index,

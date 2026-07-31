@@ -18,6 +18,83 @@ have per release.
 
 _(empty)_
 
+## [3.2.0] — 2026-07-30 — toolchain 6.5.3 + full dependency refresh
+
+**Toolchain + full dependency refresh.** Moves every pin to its current tag, clears the
+manifest-pin drift warning, and lands the two source changes the 6.5.x line makes mandatory: a
+removed stdlib function and a compiler check that turned 17 latent test-suite defects into hard
+errors. Also realigns the `[deps.sigil]` tag with `cyrius.lock`, which was red at HEAD.
+
+### Changed
+- **cyrius pin `6.4.66` → `6.5.3`.** Clears the "manifest-pin: 6.4.66 (drift — wrapper is 6.5.3)"
+  warning and satisfies every dep's declared toolchain floor (sakshi 2.4.7 declares the highest at
+  6.5.0). Two capacity ceilings moved inside the window: 6.4.75 raised `fn_table` 8192 → 32768 and
+  6.4.76 raised the identifier pool 256 KB → 512 KB in place, so `src/main.cyr` now reads
+  **4961/32768 fn_table (15%) and 163966/524288 identifiers (31%)**, against 4879/8192 and
+  161809/262144 (60% / 62%) at 3.1.4. The CI capacity gate needs no change — it parses the
+  denominator out of the `cyrius stats:` block rather than hardcoding it.
+- **libro `2.8.2` → `2.8.4`**, **majra `2.5.1` → `2.5.3`**, **sigil `3.12.0` → `3.12.1`**,
+  **sakshi `2.4.6` → `2.4.7`**. Zero API change across bote's adapter surface: libro adds three
+  functions (`chain_new_streaming` / `entry_free` / `_chain_retain`) and removes none, majra's
+  signature set is byte-identical, sigil adds only `_sigil_ensure_slot`, sakshi renames two private
+  internals. patra does not move (1.12.12); libro 2.8.4 pins the same sigil 3.12.1 / patra 1.12.12
+  as 2.8.2.
+  - libro 2.8.4 appends a 5th field to `struct chain` (`streaming`, 32 → 40 bytes). `src/libro_tools.cyr`
+    reads libro structs by raw offset; the field is **appended**, so `_lt_chain_entries(c) = load64(c)`
+    at +0 is unaffected. Comment updated; the four stale `lib/libro.cyr:NNN` line citations that had
+    already rotted at 2.8.2 are removed in favour of struct names, which don't drift on a bump.
+  - majra 2.5.3 changes pattern matching (`#`/`+` honoured only at whole-level positions). bote is
+    unaffected — all 11 topics in `src/events.cyr` are fully-qualified 3-level strings and the only
+    pattern in-tree is a whole-level trailing `#`. Its head-of-line-blocking fix is the one
+    behaviourally visible win for consumers with a slow subscriber.
+- **`_web_get_int` → `_web_arg_number`** (`src/web_tools.cyr`). cyrius treats a trailing
+  `_int`/`_str`/`_cstr` as an overload-dispatch suffix, so `_web_get_int(args, key)` occupied the
+  `_int` slot of `_web_get(url)` at a different arity — the exact landmine sakshi 2.4.7 defused in
+  its own `_sk_write_int`/`_sk_write_str` pair. Dormant here (both `_web_get` call sites pass a cstr
+  as arg 1), but the arity mismatch is what arms it. Module-private; no consumer surface.
+
+### Fixed
+- **`bayan_json_v_parse_str` → `bayan_json_v_parse_buf`** (`src/web_tools.cyr`). bayan 1.3.0, folded
+  into the stdlib at cyrius 6.5.1, renamed the buf+len typed JSON parser and removed the old name.
+  Identical `(buf, len)` signature and semantics, but building `src/main.cyr` against the 6.5.x
+  stdlib died with `error: refusing to emit binary with 1 reachable undefined function(s)`. This was
+  the only stdlib removal reaching bote — a mechanical diff of all 666 distinct stdlib call targets
+  in `src/` across the 6.4.66 and 6.5.3 snapshots found no other removal and **zero** arity changes.
+- **17 wrong-arity call sites in the test + bench suites.** cyrius 6.5.1 escalated a wrong argument
+  count from a warning that still emitted a binary to a hard error that emits nothing. The affected
+  calls — `codec_process_message` 2-of-3 (×7) and `bridge_process_message` 2-of-3 (×4) in
+  `tests/bote.tcyr`, `auth_bearer_check` 5-of-6 (×4) in `tests/bote_auth.tcyr` and (×2) in
+  `tests/bote.bcyr` — had been running with the trailing parameter bound to whatever occupied the
+  register. All now pass the `claims` / `claims_out` argument explicitly as `0`, matching every
+  `src/` call site. **`src/` itself was already correct**; this was test-suite rot only, and it means
+  the pre-3.2.0 assertions on those paths were passing against an unbound parameter.
+- **`[deps.sigil]` tag realigned with `cyrius.lock`.** 3.1.4 shipped `tag = "3.12.0"` while
+  `cyrius.lock` already recorded 3.12.1's content hash (`292e0a2d…`); the local `path = "../sigil"`
+  override vendored the 3.12.1 body and masked the drift. A clean `git`+`tag` CI checkout would have
+  vendored 3.12.0 (`c36d26a0…`) and **failed `cyrius deps --verify`** — i.e. CI was red at HEAD, for
+  the same reason and in the same shape as the libro drift fixed at 3.1.4. Tag, lock and vendored
+  body now agree for all four AGNOS deps.
+
+### Performance
+- **Bump is performance-neutral — proven, because the raw numbers say otherwise.** The v3.2.0
+  `benches/history.log` block reads 1.5–3.7× slower than v3.1.4 across all 14 benchmarks. A
+  controlled A/B/C on the same host in the same hour — identical bench source, `cyrius build
+  --no-deps` + direct run — isolates it: **A** (cycc 6.4.66 + stdlib 6.4.66, the exact 3.1.4 world)
+  **2.924 µs** `dispatch_initialize` / **1.347 µs** `auth_bearer_check_unset`; **B** (cycc 6.5.3 +
+  stdlib 6.5.3) **2.864 / 1.333 µs**; **C** (cycc 6.5.3 + stdlib 6.4.66) **2.901 / 1.347 µs**. A ≡ B ≡ C
+  within run-to-run noise, and the 6.4.66 control reproduces the *slow* numbers — so the level shift
+  is the host, not the bump. `lib/bench.cyr` and `lib/chrono.cyr` are byte-identical between the two
+  snapshots (`diff -q`, rc=0), ruling out a measurement-harness change. Full control table is
+  recorded inline in `benches/history.log`. Compare v3.2.0 forward against v3.2.0 until the host
+  baseline is re-established.
+- **6.4.80 constant-fold defect does not reach bote.** cyrius 6.4.80 fixed a CRITICAL silent
+  wrong-value bug (a literal subtraction with a negative intermediate discarding its left operand,
+  e.g. `1 - 2 + 3` folding to 5) that was live at bote's previous 6.4.66 pin — and CI builds at the
+  manifest pin. A comment- and string-stripped scan for three-term literal `+ - & | ^` expressions
+  found **0 matches** in `src/*.cyr`, `tests/*.tcyr` and `tests/*.bcyr`, and 37 in the vendored
+  `lib/*.cyr` of which **0** have a negative literal intermediate. Recorded because "our tests
+  passed" is not evidence against a defect whose failure mode is a silently wrong value.
+
 ## [3.1.4] — 2026-07-17 — libro 2.8.2 (`LIBRO_ERR_*`) + `[deps.libro]` pin/lock realign
 
 **libro dep bump.** `[deps.libro]` `2.8.1 → 2.8.2`. libro 2.8.2 namespaces its own `LibroErr`

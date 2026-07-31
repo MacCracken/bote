@@ -94,3 +94,39 @@
   schema_compile_nested: 6.349us avg (min=5.279us max=95.669us) [10000 iters]
   auth_bearer_check_unset: 360ns avg (min=340ns max=20.709us) [100000 iters]
   auth_bearer_check_set: 1.059us avg (min=1.021us max=22.281us) [100000 iters]
+
+## 2026-07-31T00:40:02Z  v3.2.0 (1344bc2)
+  dispatch_initialize: 2.865us avg (min=1.396us max=44.628us) [10000 iters]
+  dispatch_tools_list: 3.451us avg (min=1.886us max=59.854us) [10000 iters]
+  dispatch_tools_call: 6.828us avg (min=4.749us max=116.077us) [10000 iters]
+  jsonx_get_str_flat: 1.468us avg (min=907ns max=65.301us) [100000 iters]
+  jsonx_get_raw_nested: 1.861us avg (min=907ns max=208.476us) [100000 iters]
+  codec_parse_request: 2.714us avg (min=1.396us max=16.343us) [10000 iters]
+  codec_serialize_response: 1.905us avg (min=839ns max=14.667us) [10000 iters]
+  codec_process_message: 8.790us avg (min=6.146us max=29.543us) [10000 iters]
+  validate_compiled_simple: 2.041us avg (min=907ns max=23.467us) [10000 iters]
+  validate_compiled_nested: 3.835us avg (min=2.305us max=23.397us) [10000 iters]
+  schema_compile_simple: 3.905us avg (min=2.375us max=68.514us) [10000 iters]
+  schema_compile_nested: 7.666us avg (min=5.238us max=132.628us) [10000 iters]
+  auth_bearer_check_unset: 1.339us avg (min=489ns max=15.365us) [100000 iters]
+  auth_bearer_check_set: 2.183us avg (min=907ns max=533.238us) [100000 iters]
+
+### NOTE (3.2.0, toolchain 6.4.66 -> 6.5.3): the level shift above is the HOST, not the bump.
+### Every figure in the v3.2.0 block is ~1.5-3.7x the v3.1.4 block. Controlled A/B on this same
+### machine, same hour, identical bench source, `cyrius build --no-deps` + direct run:
+###   A  cycc 6.4.66 + stdlib 6.4.66  (the exact 3.1.4 world)
+###   B  cycc 6.5.3  + stdlib 6.5.3   (the 3.2.0 world)
+###   C  cycc 6.5.3  + stdlib 6.4.66  (compiler isolated from stdlib)
+###                              A(old)     B(new)     C(mix)
+###   dispatch_initialize        2.924us    2.864us    2.901us
+###   dispatch_tools_call        7.266us    6.701us    6.972us
+###   jsonx_get_str_flat         1.474us    1.475us    1.474us
+###   codec_process_message      9.103us    8.809us    9.203us
+###   schema_compile_nested      7.568us    7.662us    7.516us
+###   auth_bearer_check_unset    1.347us    1.333us    1.347us
+###   auth_bearer_check_set      2.140us    2.124us    2.137us
+### A == B == C within run-to-run noise, and the 6.4.66 control reproduces the SLOW numbers.
+### So the bump is performance-neutral; the host regressed between 2026-07-17 and 2026-07-30.
+### bench.cyr and chrono.cyr are byte-identical between the two snapshots (diff -q, rc=0), so it
+### is not a measurement-harness change either. Compare v3.2.0 forward against v3.2.0, not
+### against v3.1.4, until the host baseline is re-established.

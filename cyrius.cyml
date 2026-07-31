@@ -5,7 +5,7 @@ description = "MCP core service in Cyrius — stable 2.x. JSON-RPC 2.0, six tran
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/bote"
 language = "cyrius"
-cyrius = "6.4.66"
+cyrius = "6.5.3"
 
 [build]
 entry = "src/main.cyr"
@@ -158,12 +158,22 @@ stdlib = [
 # libro audit chain — single-file dist bundle. cyrius deps clones
 # libro at the tag and copies dist/libro.cyr into lib/libro.cyr.
 # That's the only file we include from main.cyr; the bundle is
-# self-contained (no further includes). Since libro 2.8.x its .deps
-# sidecar also pulls patra (lib/patra.cyr) for the audit store.
+# self-contained (no further includes).
+#
+# patra (lib/patra.cyr, the audit store) arrives via libro's own
+# `[deps.patra]` manifest block — NOT via `dist/libro.deps`, which
+# lists only the 22 stdlib leaves and contains no patra entry. The
+# mechanism matters: a sidecar leaf and a nested manifest dep resolve
+# differently. (Corrected at 3.2.0; the comment claimed the sidecar.)
+#
+# 2.8.4 appends a 5th field to `struct chain` (`streaming`, 32 -> 40
+# bytes) for the new `chain_new_streaming()` write-through
+# constructor. Appended, so src/libro_tools.cyr's raw +0 offset read
+# is unaffected; bote still calls plain `chain_new()`.
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
 path = "../libro"
-tag = "2.8.2"
+tag = "2.8.4"
 modules = ["dist/libro.cyr"]
 
 # majra pub/sub — same single-file dist bundle pattern. The default
@@ -173,19 +183,28 @@ modules = ["dist/libro.cyr"]
 [deps.majra]
 git = "https://github.com/MacCracken/majra"
 path = "../majra"
-tag = "2.5.1"
+tag = "2.5.3"
 modules = ["dist/majra.cyr"]
 
 # sakshi tracing/logging — explicit pin overriding the stdlib registry,
 # which lags the toolchain snapshot (the registry resolves `sakshi` →
-# 2.4.3 while the 6.4.66 snapshot bundles 2.4.6, so every build warned
-# "./lib/ shadows version-pinned … sakshi 2.4.3 (pinned: 2.4.6)").
+# 2.4.3 while the snapshot bundles the current tag, so every build
+# warned "./lib/ shadows version-pinned … sakshi 2.4.3 (pinned: …)").
 # Same registry-lag class as the sigil pin below. dist/sakshi.cyr is
 # self-contained (links only stdlib fnptr + atomic).
+#
+# bote references zero sakshi symbols directly — it is here because
+# libro links it. 2.4.7 renames two private internals
+# (`_sk_write_int`/`_sk_write_str` → `_sk_buf_write_number`/
+# `_sk_buf_write_string`) to escape cyrius's reserved `_int`/`_str`
+# overload-dispatch suffixes; no public surface moved. That same
+# lesson is why bote renamed `_web_get_int` → `_web_arg_number` at
+# 3.2.0. sakshi 2.4.7 declares the highest toolchain pin in bote's
+# dep set (6.5.0), which the 6.5.3 pin above satisfies.
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi"
 path = "../sakshi"
-tag = "2.4.6"
+tag = "2.4.7"
 modules = ["dist/sakshi.cyr"]
 
 # sigil crypto — pinned explicitly to the self-contained single-file
@@ -201,8 +220,21 @@ modules = ["dist/sakshi.cyr"]
 # random still precede it via [deps] stdlib for the single-pass forward
 # refs, and thread_local now precedes sigil for its TLS crypto_scratch
 # path (3.7.14 SIGILL guard — see the [deps] stdlib note above).
+#
+# 3.12.1 makes that ordering guard load-bearing for a SECOND reason:
+# the crypto-bank TLS slot moved from a hardcoded literal 8 to an
+# allocator-claimed slot via `thread_local_alloc()` (CAS-gated
+# `_sigil_ensure_slot`). It is the only change in 3.12.1.
+#
+# 3.2.0 also realigns tag ↔ lock. 3.1.4 shipped `tag = "3.12.0"` while
+# cyrius.lock already recorded 3.12.1's dist hash (292e0a2d…) — the
+# local `path = "../sigil"` override vendored the 3.12.1 body and
+# masked it, exactly the drift the 3.1.4 CHANGELOG called out for
+# libro. A clean git+tag CI checkout would have vendored 3.12.0
+# (c36d26a0…) and failed `cyrius deps --verify`. Tag, lock and
+# vendored body now agree.
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil"
 path = "../sigil"
-tag = "3.12.0"
+tag = "3.12.1"
 modules = ["dist/sigil.cyr"]

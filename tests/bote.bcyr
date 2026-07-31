@@ -122,14 +122,14 @@ fn b_schema_compile_nested() {
 # the no-overhead claim from 1.9.0 (the bearer middleware should
 # vanish when not configured).
 fn b_auth_bearer_check_unset() {
-    return auth_bearer_check(0, _b_auth_req, _b_auth_req_len, 0, 0);
+    return auth_bearer_check(0, _b_auth_req, _b_auth_req_len, 0, 0, 0);
 }
 
 # Validator configured → full path: parse Authorization header,
 # call validator (allowlist), accept/reject.
 fn b_auth_bearer_check_set() {
     return auth_bearer_check(0, _b_auth_req, _b_auth_req_len,
-    &auth_validator_allowlist, _b_auth_allowed);
+    &auth_validator_allowlist, _b_auth_allowed, 0);
 }
 
 # ================================================================

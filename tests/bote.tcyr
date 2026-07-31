@@ -765,12 +765,12 @@ fn main() {
     registry_register(dreg2, tool_def_new("svc_echo", "echo", sa2));
     dispatcher_handle(d2, "svc_echo", &h_echo);
 
-    var pm1 = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}", d2);
+    var pm1 = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}", d2, 0);
     assert(pm1 != 0, "single ok");
     assert_eq(jsonx_has(pm1, "result"), 1, "single has result");
 
     # process_message notification → 0
-    assert_eq(codec_process_message("{\"jsonrpc\":\"2.0\",\"method\":\"notify\"}", d2), 0, "single notif -> 0");
+    assert_eq(codec_process_message("{\"jsonrpc\":\"2.0\",\"method\":\"notify\"}", d2, 0), 0, "single notif -> 0");
 
     # process_message non-json → parse error
     var pmpe = codec_process_message("not json", d2, 0);
@@ -783,13 +783,13 @@ fn main() {
     assert_eq(jsonx_has(pmni, "error"), 1, "scalar -> error obj");
 
     # process_message wrong jsonrpc version
-    var pmwv = codec_process_message("{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"x\"}", d2);
+    var pmwv = codec_process_message("{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"x\"}", d2, 0);
     assert_eq(jsonx_has(pmwv, "error"), 1, "wrong version -> err");
 
     # ---------------- codec: process_message batch ----------------
     var pmb = codec_process_message(
     "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"},{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}]",
-    d2);
+    d2, 0);
     assert(pmb != 0, "batch returns array");
     # Should be an array
     assert_eq(load8(pmb), 91, "batch starts with [");
@@ -797,13 +797,13 @@ fn main() {
     # batch with notification (only one response back)
     var pmbn = codec_process_message(
     "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"},{\"jsonrpc\":\"2.0\",\"method\":\"notify\"}]",
-    d2);
+    d2, 0);
     assert(pmbn != 0, "mixed batch returns");
 
     # all-notifications batch → 0
     var pmbz = codec_process_message(
     "[{\"jsonrpc\":\"2.0\",\"method\":\"a\"},{\"jsonrpc\":\"2.0\",\"method\":\"b\"}]",
-    d2);
+    d2, 0);
     assert_eq(pmbz, 0, "all-notif batch -> 0");
 
     # empty batch → invalid request
@@ -1172,7 +1172,7 @@ fn main() {
 
     var bp_call = bridge_process_message(
     "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"svc_echo\",\"arguments\":{\"k\":\"v\"}}}",
-    bd);
+    bd, 0);
     assert(bp_call != 0, "bridge tools/call returns json");
     var bp_result = jsonx_get_raw(bp_call, "result");
     assert(bp_result != 0, "result present");
@@ -1180,7 +1180,7 @@ fn main() {
 
     # Non-tools-call methods pass through unchanged.
     var bp_init = bridge_process_message(
-    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}", bd);
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}", bd, 0);
     assert(bp_init != 0, "init returns json");
     var bp_init_result = jsonx_get_raw(bp_init, "result");
     assert_eq(jsonx_has(bp_init_result, "protocolVersion"), 1, "init has protocolVersion (not wrapped)");
@@ -1189,7 +1189,7 @@ fn main() {
     # Tool-call error → wrapped as success + isError.
     var bp_unknown = bridge_process_message(
     "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"missing_tool\",\"arguments\":{}}}",
-    bd);
+    bd, 0);
     assert(bp_unknown != 0, "unknown returns json");
     var bp_un_result = jsonx_get_raw(bp_unknown, "result");
     assert(bp_un_result != 0, "error mapped to result");
@@ -1197,7 +1197,7 @@ fn main() {
     assert_eq(jsonx_has(bp_unknown, "error"), 0, "no top-level error obj");
 
     # Notification still produces no response.
-    assert_eq(bridge_process_message("{\"jsonrpc\":\"2.0\",\"method\":\"notify\"}", bd), 0,
+    assert_eq(bridge_process_message("{\"jsonrpc\":\"2.0\",\"method\":\"notify\"}", bd, 0), 0,
     "bridge notif -> 0");
 
     # ---------------- bridge: cors origin selection ----------------
@@ -1225,7 +1225,7 @@ fn main() {
     # ---------------- review punch: codec pure-notification batch -> 0 ----------------
     var pure_notifs = codec_process_message(
     "[{\"jsonrpc\":\"2.0\",\"method\":\"a\"},{\"jsonrpc\":\"2.0\",\"method\":\"b\"},{\"jsonrpc\":\"2.0\",\"method\":\"c\"}]",
-    bd);
+    bd, 0);
     assert_eq(pure_notifs, 0, "pure-notification batch returns 0");
 
     # ================================================================
