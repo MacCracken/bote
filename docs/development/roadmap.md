@@ -145,7 +145,28 @@ GET starves the POSTs that feed it).
 | **WS subprotocol negotiation** (`Sec-WebSocket-Protocol`) | Header is read; enforcement needs a registry design. |
 | **WS per-message deflate** (RFC 7692) | LZ77 + Huffman in stdlib; likely via a future `lib/dynlib.cyr` zlib binding. |
 | **DNS resolution for hostname SSRF** | cyrius `getaddrinfo` stub. Production callers pair with a network-policy egress block. |
-| **JWT RS256 / ES256** | sigil RSA / ECDSA primitives. HS256 already shipped in 2.2.0. |
+
+### JWT — the RS256 gate is stale, and `src/jwt.cyr` ships in no bundle
+
+Three corrections recorded 2026-07-30, verified by reading and filed as
+[`2026-07-30-jwt-module-is-orphaned-and-documents-an-exp-check-it-does-not-perform.md`](issues/2026-07-30-jwt-module-is-orphaned-and-documents-an-exp-check-it-does-not-perform.md):
+
+- ~~**JWT RS256 / ES256** — waiting on sigil RSA / ECDSA primitives.~~ **No longer waiting.** sigil
+  exposes `rsa_pubkey_from_der` (which accepts SPKI directly) and `rsa_pkcs1v15_verify_sha256`, and
+  bote already depends on sigil at tag `3.12.0`. Verified end to end from a real SPKI PEM and an
+  openssl-signed RS256 token: 1 for a valid signature, 0 for a tampered input and 0 for a tampered
+  signature. RS256 is a decision now, not a dependency. (ES256 still needs ECDSA — check separately
+  rather than assuming it moved too.)
+- **`src/jwt.cyr` is in neither `[lib]` nor `[lib.core]`**, so no bundle ships `jwt_verify_hs256`.
+  `[package].description` advertises "JWT HS256 + RFC 7636 PKCE"; `dist/` contains neither. One line
+  plus `cyrius distlib` fixes the packaging half.
+- **The module documents an `exp` expiry check that the code does not perform.** Fix this *before*
+  the packaging item — landing (2) first would ship the gap to every consumer at once.
+
+**Not a request to build RS256 here.** agnosai, the consumer that raised it, is implementing RS256
+locally: it needs `iss`/`aud`/`exp` claim validation that bote has no concept of, so routing through
+bote would be indirection over no shared code. This entry exists so the deferral is re-decided on its
+merits rather than on a premise that expired.
 
 ### Carried forward (not release-blocking)
 
