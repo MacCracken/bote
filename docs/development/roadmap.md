@@ -1,20 +1,22 @@
 # Bote Roadmap
 
-> **Current**: `3.1.4` (cyrius 6.4.66, libro 2.8.2, majra 2.5.1, sigil 3.12.0, sakshi 2.4.6).
-> 12 active test files, **786 unit assertions** + 1 drift-guard
-> smoke, **14 criterion benchmarks**, **dual** consumer bundles
-> (`dist/bote.cyr` full, 28 modules + `dist/bote-core.cyr` opt-in core via
+> **Current**: `3.2.0` (cyrius 6.5.3, libro 2.8.4, majra 2.5.3, sigil 3.12.1, sakshi 2.4.7).
+> 12 active test files, **811 unit assertions** + 1 drift-guard
+> smoke — green on **x86_64 and aarch64** — **14 criterion benchmarks**,
+> **dual** consumer bundles
+> (`dist/bote.cyr` full, 30 modules + `dist/bote-core.cyr` opt-in core via
 > `[lib.core]` profile, 11 modules), per-transport binary trio
 > (`bote` / `bote-streamable` / `bote-ws` — retained from the
-> 5.10.x cap workaround; reconsolidation unblocked on 6.1.x), CI capacity + dual
-> dist-freshness gates, full MCP capability suite (tools / prompts /
-> resources / completion + polled `list_changed` push), fs / web / libro
-> tool families, annotations-preserving `wrap_tool_result`,
-> HostRegistry hot-reload, 4 fuzz harnesses, 6 transports,
-> handler-claims ABI plumbed end-to-end, JWT HS256 + RFC 7636
-> PKCE, bearer + allowlist + JWT validators, pluggable sandbox
-> runner (kavach 3.0 compatible), typed MCP content blocks
-> with annotations, HostRegistry + IPv4/IPv6 SSRF guard.
+> 5.10.x cap workaround; reconsolidation unblocked on 6.1.x), CI capacity +
+> dual dist-freshness + **aarch64 portability** gates, full MCP capability
+> suite (tools / prompts / resources / completion + polled `list_changed`
+> push), fs / web / libro tool families, annotations-preserving
+> `wrap_tool_result`, HostRegistry hot-reload, 4 fuzz harnesses,
+> 6 transports, handler-claims ABI plumbed end-to-end, **JWT HS256
+> (exact `alg` field read + enforced `exp`) + RFC 7636 PKCE — both now
+> shipping in `dist/bote.cyr`**, bearer + allowlist + JWT validators,
+> pluggable sandbox runner (kavach 3.9.3 compatible), typed MCP content
+> blocks with annotations, HostRegistry + IPv4/IPv6 SSRF guard.
 >
 > **Spec**: MCP 2025-11-25 | **Compliance**: [spec-compliance.md](../spec-compliance.md)
 >
@@ -48,7 +50,7 @@ surfaced. See the **2.6.x modernization arc** section below.
 | **1.9.5** | Security batch B — SSRF rewrite (integer-form / octal / IPv4-mapped IPv6 bypasses, 3 criticals closed) |
 | **1.9.6** | Final pre-2.0 polish — 413 cap, bridge CORS oracle fix, Unix socket mode 0600, `content_with_annotations` |
 | **2.0.0** | Stable release — handler-claims ABI (`fn h(args, claims)`), carry-forward of all 1.9.x hardening |
-| **2.1.0** | Pluggable sandbox runner — kavach 3.0 compatible via fn-pointer + ctx adapter |
+| **2.1.0** | Pluggable sandbox runner — kavach-compatible via fn-pointer + ctx adapter |
 | **2.2.0** | JWT HS256 verifier + validator adapter |
 | **2.3.0** | RFC 7636 PKCE-S256 helpers (verifier gen + S256 challenge) |
 | **2.3.1** | Cleanup — remove proposal docs that landed upstream |
@@ -78,6 +80,7 @@ surfaced. See the **2.6.x modernization arc** section below.
 | **3.1.2** | **Toolchain 6.4.64 + full dependency refresh** — libro 2.8.1 (audit-row quoting integrity fix; pulls patra 1.12.10 as a new transitive), majra 2.5.1, sigil 3.12.0 (crypto-bank thread-local slot fix), new explicit **sakshi 2.4.6 pin** (registry lag, same class as the sigil pin). No bote logic change. 786/786 assertions across 12 test files + drift smoke, 14 benchmarks flat, capacity 59% / 61% (`fn_table 4841/8192`) |
 | **3.1.3** | **Toolchain 6.4.66 + `BoteErrTag` namespacing** — cyrius 6.4.64 → 6.4.66 (clears pin drift; `lib/` re-sync pulls the `thread_local_alloc` slot allocator that sigil 3.12.0 / patra 1.12.10 now require — the stale snapshot no longer linked). `BoteErrTag` constants `ERR_*` → `BOTE_ERR_*` to escape a flat-namespace collision with libro's own `ERR_IO=3` / `ERR_JSON=4` (bote's `=11` / `=10`; "last definition wins" in the libro-linked binary). Wire contract unchanged. 786/786 assertions, 14 benchmarks flat, capacity 60% / 62% (`fn_table 4879/8192`) |
 | **3.1.4** | **libro 2.8.2 (`LIBRO_ERR_*`) + pin/lock realign** — `[deps.libro]` `2.8.1 → 2.8.2`. libro 2.8.2 namespaces its own `LibroErr` enum `ERR_* → LIBRO_ERR_*` — the upstream reciprocal of 3.1.3's `BOTE_ERR_*`; the bare `ERR_IO`/`ERR_JSON` clash is now resolved at the source on both sides. Also realigns the `[deps.libro]` tag with the lockfile (3.1.3 shipped tag `2.8.1` while the lock already held 2.8.2's content hash via the local `path` override — a clean `git+tag` CI checkout would fail hash verification). libro 2.8.2's own deps (sigil 3.12.1 / patra 1.12.12) sit inside its dist; bote keeps sigil 3.12.0 and its already-1.12.12 patra. No bote source change beyond the version string. 786/786 assertions, 14 benchmarks flat, capacity flat 60% / 62% |
+| **3.2.0** | **Toolchain 6.5.3 + full dep refresh + aarch64 + JWT repair.** cyrius 6.4.66 → 6.5.3 (onto the 6.5.x line); libro 2.8.4 / majra 2.5.3 / sigil 3.12.1 / sakshi 2.4.7. Two source changes the 6.5.x line forced: `bayan_json_v_parse_str` → `_parse_buf` (removed from the stdlib at 6.5.1) and 17 wrong-arity test/bench call sites (6.5.1 escalated arity from warning to hard error — those tests had been running with an unbound parameter). **aarch64 unblocked**: three x86_64-only syscall constants removed (`SYS_OPEN` ×2 via `random_bytes`, plus `SYS_UNLINK` / `SYS_CHMOD` that the filing missed), 811 assertions green under `cyrius test --aarch64`, new CI denylist + cross-build gate. **JWT**: the `exp` check documented since 2.2.0 and never implemented now runs (after the HMAC, fail-closed on malformed claims, no leeway); the `alg` substring scan — defeated by `{"alg":"none","kid":"HS256-2024"}` — is an exact field read; `src/jwt.cyr` + `src/pkce.cyr` finally ship in `dist/bote.cyr` (28 → 30 modules), deliberately not in core. Both gates mutation-proven. Capacity 15% / 31% (`fn_table 4974/32768` — denominators moved at 6.4.75/76). Bump proven perf-neutral by a same-host A/B/C against the 6.4.66 toolchain |
 
 See [CHANGELOG.md](../../CHANGELOG.md) for the full detail per release.
 
@@ -115,7 +118,7 @@ work belongs.
 |---|---|---|---|
 | **Add `content.cyr` to the `[lib.core]` profile** — ship the typed content-block constructors (`content_text`, `content_text_response`, `content_array`, `content_array_error`, `content_image`, `content_resource`, …) in `dist/bote-core.cyr` | **P1** | Small | Content blocks are the tool-result format *every* handler emits — transport or not — but `content.cyr` currently ships only in the full `[lib]` bundle. Core-profile consumers (nein 1.6.0 `mcp` module; t-ron) are therefore forced to hand-roll `{"content":[…],"isError":…}` with a raw `str_builder` + `_json_emit_escaped`, duplicating logic content.cyr already provides — and re-implementing JSON escaping per consumer is exactly the injection-surface duplication the core profile should prevent. `content.cyr` (232 lines, 13 fns) references only `_json_emit_escaped` (already in core via `dispatch.cyr`), `str_builder_*`, and `vec_*` — no transport/host/session deps — so it drops into `[lib.core]` after `dispatch.cyr` cleanly (single-pass ordering). Fix: add the module to `[lib.core]`, extend the core-only drift guard (`tests/bote_core_only_smoke.tcyr`), regen both dist bundles. Surfaced building nein's MCP tool handlers against `dist/bote-core.cyr`. |
 | **DEPS-PATTERN.md doesn't mention `cyrius lib sync`** — a core consumer following the doc hits `dep libro requires 'ct' … not in the cyrius stdlib` and reasonably (but wrongly) concludes it's a resolver bug | **P2 — docs** | Small | **NOT a resolver bug** (earlier diagnosis was wrong). Cyrius deliberately does not auto-resolve stdlib (supply-chain safety); a consumer of the bote/libro/majra graph must (a) declare every transitive stdlib module in `[deps] stdlib` — `ct, keccak, random, slice, thread, thread_local, sync, atomic, ws_server, result` (+ `sigil`) — and (b) run **`cyrius lib sync`** to copy that declared subset into `./lib/` **before** `cyrius deps`. DEPS-PATTERN.md documents `git + tag + modules` but omits the `lib sync` step and the transitive-stdlib requirement, so a first-time core consumer dead-ends on the `ct` error and thinks it's broken. nein 1.6.0 vendored bote-core over this misread; nein 1.6.1 retired the vendoring and consumes bote-core + sigil as git deps the same way daimon does (works cleanly). Fix: add a "Consuming the core bundle from a project without the crypto stack" section to DEPS-PATTERN.md showing the `[deps] stdlib` list + the `cyrius lib sync → cyrius deps` order. Surfaced building nein's `mcp` + `sign` modules. |
-| **Opt-in transport profile** — `dist/bote-core.cyr` alongside `dist/bote.cyr` | ✅ **Shipped 2.7.2** | Medium | Resolved per [`issues/2026-05-10-opt-in-transport-profile.md`](issues/2026-05-10-opt-in-transport-profile.md). `cyrius.cyml [lib.core]` profile, 9-module 70 KB bundle, `DEPS-PATTERN.md`, `tests/bote_core_only_smoke.tcyr` drift guard, dual dist-freshness CI. t-ron 2.1.x flips its [deps.bote] to `dist/bote-core.cyr` in next patch. |
+| **Opt-in transport profile** — `dist/bote-core.cyr` alongside `dist/bote.cyr` | ✅ **Shipped 2.7.2** | Medium | Resolved per [`issues/archive/2026-05-10-opt-in-transport-profile.md`](issues/archive/2026-05-10-opt-in-transport-profile.md). `cyrius.cyml [lib.core]` profile, 9-module 70 KB bundle, `DEPS-PATTERN.md`, `tests/bote_core_only_smoke.tcyr` drift guard, dual dist-freshness CI. t-ron 2.1.x flips its [deps.bote] to `dist/bote-core.cyr` in next patch. |
 | **Reconsolidate per-transport binaries** — fold `bote-streamable` + `bote-ws` back into single `bote` binary | **P2 — unblocked** | Small | Unblocked by the 6.1.x cap raise at 2.7.3 (the planned 5.11.x migration per the companion proposal at `cyrius/docs/development/proposals/2026-05-10-raise-compile-source-cap.md` landed as 6.1.x). When taken up, retire `src/main_streamable.cyr` / `src/main_ws.cyr` / `src/main_common.cyr` and restore the streamable / ws CLI branches in `src/main.cyr`. The `dist/bote-core.cyr` profile stays — still useful for transport-less consumers. |
 | **OAuth 2.1 authorization-code flow** (bote-as-AS) | Deferred | High | Out of scope for MCP core; bote is the resource server. Flagged as explicitly deferred — consumers compose bote with their own AS layer. |
 

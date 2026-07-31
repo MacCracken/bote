@@ -33,8 +33,8 @@ bote ships **two** distribution artifacts:
 
 | Artifact              | Profile  | Modules | Use when                                     |
 |-----------------------|----------|---------|----------------------------------------------|
-| `dist/bote.cyr`       | default  | 24      | Consumer needs bote's full transport surface |
-| `dist/bote-core.cyr`  | `core`   | 9       | Consumer wraps Dispatcher / Registry / Audit but supplies its own transport |
+| `dist/bote.cyr`       | default  | 30      | Consumer needs bote's full transport surface |
+| `dist/bote-core.cyr`  | `core`   | 11      | Consumer wraps Dispatcher / Registry / Prompts / Resources / Audit but supplies its own transport |
 
 - Every tagged release must commit **both** artifacts.
 - Each bundle is a self-contained, include-free single `.cyr`
@@ -105,7 +105,7 @@ own stdlib without `sandhi` / `tls` / `ws_server` /
 `sigil 3.x` — a much smaller compile-source budget that fits
 under the cyrius 5.10.x 2 MB cap with room for the consumer's
 own modules. See
-`docs/development/issues/2026-05-10-opt-in-transport-profile.md`
+`docs/development/issues/archive/2026-05-10-opt-in-transport-profile.md`
 for the rationale and module-split derivation.
 
 ## How to produce both bundles
@@ -152,23 +152,35 @@ transports. The jump unblocks removing the per-transport binary
 split inside bote itself (still in place at 2.7.3; reconsolidation
 tracked as a follow-up — see CHANGELOG 2.7.3).
 
-## What lives in the core 9?
+## What lives in the core 11?
 
-| # | File                  | Role                                          |
-|---|-----------------------|-----------------------------------------------|
-| 1 | `src/error.cyr`       | `BoteError` tagged enum                       |
-| 2 | `src/protocol.cyr`    | `JsonRpcRequest` / `Response` / `Error`       |
-| 3 | `src/jsonx.cyr`       | JSON helpers                                  |
-| 4 | `src/registry.cyr`    | `ToolRegistry`                                |
-| 5 | `src/events.cyr`      | `EventSink`                                   |
-| 6 | `src/audit.cyr`       | `AuditLogger` / `AuditSink`                   |
-| 7 | `src/dispatch.cyr`    | `Dispatcher` (2.0 handler ABI)                |
-| 8 | `src/codec.cyr`       | Encoder / decoder                             |
-| 9 | `src/schema.cyr`      | Schema compile                                |
+| #  | File                  | Role                                          |
+|----|-----------------------|-----------------------------------------------|
+| 1  | `src/error.cyr`       | `BoteError` tagged enum                       |
+| 2  | `src/protocol.cyr`    | `JsonRpcRequest` / `Response` / `Error`       |
+| 3  | `src/jsonx.cyr`       | JSON helpers                                  |
+| 4  | `src/registry.cyr`    | `ToolRegistry`                                |
+| 5  | `src/prompts.cyr`     | `PromptRegistry` (MCP prompts capability)     |
+| 6  | `src/resources.cyr`   | `ResourceRegistry` (MCP resources capability) |
+| 7  | `src/events.cyr`      | `EventSink`                                   |
+| 8  | `src/audit.cyr`       | `AuditLogger` / `AuditSink`                   |
+| 9  | `src/dispatch.cyr`    | `Dispatcher` (2.0 handler ABI)                |
+| 10 | `src/codec.cyr`       | Encoder / decoder                             |
+| 11 | `src/schema.cyr`      | Schema compile                                |
+
+(The core profile grew 9 → 11 at 3.0.0, when the MCP prompts and
+resources capabilities landed. The table said 9 until 3.2.0.)
 
 Stdlib footprint: `string`, `fmt`, `alloc`, `vec`, `str`,
-`tagged`, `assert`, `fnptr`, `hashmap`, `json`, `chrono`,
+`tagged`, `assert`, `fnptr`, `hashmap`, `bayan`, `chrono`,
 `freelist`. No `tls` / `sandhi` / `sigil` / `ws_server` / `slice`.
+
+That "no `sigil`" is why `src/jwt.cyr` and `src/pkce.cyr` are in
+`[lib]` only and **not** in `[lib.core]`, even though both ship
+in the full bundle from 3.2.0: jwt needs `hmac_sha256` and pkce
+needs `sha256`. Pulling the sigil bundle into the transport-free
+profile would defeat the reason that profile exists. A consumer
+who wants JWT from the core bundle has to argue for it.
 
 Drift guard: `tests/bote_core_only_smoke.tcyr` includes only
 `dist/bote-core.cyr` plus the minimal stdlib and runs a

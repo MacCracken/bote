@@ -40,7 +40,7 @@ is in the same position.
 
 **Fix:** one line in `[lib] modules` plus `cyrius distlib`. Whether it also belongs in `[lib.core]` is
 a real decision rather than an oversight: that profile exists to bound the consumer compile set (see
-`2026-05-10-opt-in-transport-profile.md`), and JWT verification is arguably transport-adjacent. A
+`archive/2026-05-10-opt-in-transport-profile.md`), and JWT verification is arguably transport-adjacent. A
 consumer wanting it from the core bundle would have to argue for it.
 
 ## 2. The `exp` check is documented but absent

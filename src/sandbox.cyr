@@ -2,7 +2,7 @@
 #
 # Same fn-pointer + ctx adapter pattern as AuditSink (src/audit.cyr) and
 # EventSink (src/events.cyr). Bote ships the abstract surface and a noop
-# adapter; consumers wire their backend (kavach 3.0 — multi-backend
+# adapter; consumers wire their backend (kavach 3.9.3 — multi-backend
 # sandboxing — is the canonical choice in the AGNOS ecosystem) by
 # providing a fn pointer that satisfies the SandboxRunner shape:
 #

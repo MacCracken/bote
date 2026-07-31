@@ -130,3 +130,22 @@
 ### bench.cyr and chrono.cyr are byte-identical between the two snapshots (diff -q, rc=0), so it
 ### is not a measurement-harness change either. Compare v3.2.0 forward against v3.2.0, not
 ### against v3.1.4, until the host baseline is re-established.
+
+## 2026-07-31T01:04:55Z  v3.2.0 (fbca945)
+  dispatch_initialize: 2.876us avg (min=1.397us max=59.923us) [10000 iters]
+  dispatch_tools_list: 3.438us avg (min=1.956us max=60.064us) [10000 iters]
+  dispatch_tools_call: 6.775us avg (min=4.749us max=31.079us) [10000 iters]
+  jsonx_get_str_flat: 1.465us avg (min=908ns max=26.051us) [100000 iters]
+  jsonx_get_raw_nested: 1.832us avg (min=907ns max=31.498us) [100000 iters]
+  codec_parse_request: 2.694us avg (min=1.397us max=31.988us) [10000 iters]
+  codec_serialize_response: 1.891us avg (min=908ns max=52.800us) [10000 iters]
+  codec_process_message: 8.714us avg (min=6.565us max=125.085us) [10000 iters]
+  validate_compiled_simple: 1.944us avg (min=1.396us max=132.768us) [10000 iters]
+  validate_compiled_nested: 3.701us avg (min=2.304us max=16.133us) [10000 iters]
+  schema_compile_simple: 3.887us avg (min=2.374us max=128.788us) [10000 iters]
+  schema_compile_nested: 7.570us avg (min=5.308us max=161.473us) [10000 iters]
+  auth_bearer_check_unset: 1.335us avg (min=838ns max=16.762us) [100000 iters]
+  auth_bearer_check_set: 2.147us avg (min=907ns max=33.803us) [100000 iters]
+### ^ Final 3.2.0 run, after the JWT/PKCE bundle fold (fbca945). Flat against the first 3.2.0
+### block above (dispatch_initialize 2.865 -> 2.876 us, auth_bearer_check_unset 1.339 -> 1.335 us),
+### confirming the two new modules cost the dispatch path nothing — they are not on it.

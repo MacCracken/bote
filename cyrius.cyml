@@ -1,7 +1,7 @@
 [package]
 name = "bote"
 version = "${file:VERSION}"
-description = "MCP core service in Cyrius — stable 2.x. JSON-RPC 2.0, six transports, bearer auth + JWT HS256 + RFC 7636 PKCE, libro audit tools, content blocks (with annotations), host registry + IPv4/IPv6 SSRF guard, pluggable sandbox runner (kavach 3.0)"
+description = "MCP core service in Cyrius — stable 2.x. JSON-RPC 2.0, six transports, bearer auth + JWT HS256 + RFC 7636 PKCE, libro audit tools, content blocks (with annotations), host registry + IPv4/IPv6 SSRF guard, pluggable sandbox runner (kavach 3.9.3 shape)"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/bote"
 language = "cyrius"
@@ -27,7 +27,7 @@ output = "build/bote"
 # the default binary. It is NOT in dist/bote-core.cyr: like
 # audit_libro, it depends on a live libro chain, which the
 # transport-free core profile deliberately excludes.
-#   cyrius distlib       → dist/bote.cyr      (default [lib], full bundle — 28 modules)
+#   cyrius distlib       → dist/bote.cyr      (default [lib], full bundle — 30 modules)
 #   cyrius distlib core  → dist/bote-core.cyr ([lib.core], 11 transport-free modules)
 [lib]
 modules = [
@@ -63,7 +63,8 @@ modules = [
     "src/web_tools.cyr",
 ]
 
-# Core-only opt-in bundle (2.7.2). Eleven transport-free modules for
+# Core-only opt-in bundle (2.7.2; 9 modules then, 11 since the 3.0.0
+# prompts/resources capabilities). Transport-free modules for
 # consumers that wrap bote's Dispatcher / Registry / Audit surface
 # but supply their own transport — e.g. t-ron 2.1.x's SecurityGate
 # middleware. Excludes the transports (stdio/http/unix/bridge/
@@ -71,7 +72,7 @@ modules = [
 # events_majra. Keeps consumers off the cyrius 2 MB compile-source cap
 # while still allowing the single-bundle DEPS-PATTERN.
 #
-# See docs/development/issues/2026-05-10-opt-in-transport-profile.md
+# See docs/development/issues/archive/2026-05-10-opt-in-transport-profile.md
 # for the rationale and split derivation.
 [lib.core]
 modules = [

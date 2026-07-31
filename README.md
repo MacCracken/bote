@@ -51,7 +51,7 @@ apps don't each reimplement the same protocol.
 | **Audit / events sinks** — fn-pointer + ctx adapters, libro + majra wired | ✅ |
 | **Streaming primitives** — `ProgressUpdate`, `CancellationToken`, progress notifications | data layer ✅ / threaded dispatch ⏳ |
 | **OAuth 2.1 substrate** — bearer (RFC 6750), JWT HS256 verifier, PKCE-S256 helpers | ✅ |
-| **Sandbox runner** — fn-pointer + ctx adapter (kavach 3.0 shape), noop default | ✅ |
+| **Sandbox runner** — fn-pointer + ctx adapter (kavach 3.9.3 shape), noop default | ✅ |
 
 ---
 
@@ -178,7 +178,7 @@ src/events_majra.cyr       MajraEvents adapter
 src/auth.cyr               Bearer-token middleware (RFC 6750)
 src/jwt.cyr                JWT HS256 verifier (RFC 7519)
 src/pkce.cyr               RFC 7636 PKCE-S256 helpers
-src/sandbox.cyr            Pluggable sandbox runner (kavach 3.0 adapter shape)
+src/sandbox.cyr            Pluggable sandbox runner (kavach 3.9.3 adapter shape)
 src/content.cyr            Typed MCP content blocks (text/image/audio/resource/blob)
 src/host.cyr               HostRegistry + SSRF guard (IPv4 + IPv6)
 src/libro_tools.cyr        Five built-in MCP tools over a libro chain
@@ -199,14 +199,16 @@ src/main_common.cyr        Shared binary setup (dispatcher + env bearer wiring)
 Dependencies rehydrate into `lib/` (gitignored) via `cyrius deps`.
 Cross-project deps (libro, majra, sigil, sakshi) are git-pinned via
 `[deps.<name>]` in `cyrius.cyml`. Two consumer bundles ship in `dist/`:
-`bote.cyr` (full, 28 modules) and `bote-core.cyr` (core 11,
+`bote.cyr` (full, 30 modules) and `bote-core.cyr` (core 11,
 transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ---
 
 ## Verification
 
-### Tests — 786 total across twelve files (+ a core-only drift smoke)
+### Tests — 811 total across twelve files (+ a core-only drift smoke)
+
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`).
 
 ```sh
 cyrius test tests/bote.tcyr               # 415 — core protocol/dispatch/codec/schema/session/transports
@@ -214,10 +216,10 @@ cyrius test tests/bote_auth.tcyr          # 38 — bearer + allowlist + JWT + PK
 cyrius test tests/bote_content.tcyr       # 24 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 26 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 113 — host registry + SSRF guard (IPv4 + IPv6)
-cyrius test tests/bote_jwt.tcyr           # 28 — JWT HS256 verify
+cyrius test tests/bote_jwt.tcyr           # 53 — JWT HS256 verify + exact alg + exp enforcement
 cyrius test tests/bote_libro_tools.tcyr   # 22 — libro_tools wrappers
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
-cyrius test tests/bote_sandbox.tcyr       # 13 — kavach 3.0 runner adapter
+cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals
 cyrius test tests/bote_web_tools.tcyr     # 27 — web_fetch / web_search
 cyrius test tests/bote_ws.tcyr            # 10 — WebSocket config + wire-up
@@ -289,9 +291,11 @@ the same surface.
 
 ## Versioning
 
-**Current**: `3.1.4` — full MCP capability suite (prompts / resources /
+**Current**: `3.2.0` — full MCP capability suite (prompts / resources /
 completion + polled `list_changed` push), filesystem + web tools, six
-transports across three binaries, JWT/PKCE auth substrate. SemVer; the
+transports across three binaries, and a JWT/PKCE auth substrate that
+(since 3.2.0) actually ships in `dist/bote.cyr` with `exp` enforced.
+Builds and tests clean on aarch64. SemVer; the
 2.0 handler ABI is stable across the 2.x→3.x line. See
 [CHANGELOG.md](CHANGELOG.md) for the full history.
 
