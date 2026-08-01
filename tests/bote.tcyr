@@ -379,6 +379,40 @@ fn main() {
     var negotiated = jsonx_get_str(init_result, "protocolVersion");
     assert(streq(negotiated, "2024-11-05") == 1, "init negotiates supported version");
 
+    # [3.3.0] serverInfo is configurable — a dispatcher embedded in another
+    # product must not introduce itself as "bote". Default first, so the
+    # pre-3.3.0 wire is pinned as unchanged.
+    var si_default = jsonx_get_raw(init_result, "serverInfo");
+    assert_eq(jsonx_has(si_default, "name"), 1, "serverInfo carries a name");
+    assert(streq(jsonx_get_str(si_default, "name"), "bote") == 1,
+    "an unconfigured dispatcher still says \"bote\" — 3.3.0 is additive, the default wire is unchanged");
+    assert(streq(jsonx_get_str(si_default, "version"), _bote_server_version()) == 1,
+    "and still reports bote's own version");
+
+    # Now override both.
+    var si_d2 = dispatcher_new(dreg);
+    dispatcher_set_server_info(si_d2, "agnosai", "2.0.0");
+    var si_i2 = resp_result(dispatcher_dispatch(si_d2,
+    req_with_params(req_new("2", "initialize"), "{\"protocolVersion\":\"2024-11-05\"}"), 0));
+    var si2 = jsonx_get_raw(si_i2, "serverInfo");
+    assert(streq(jsonx_get_str(si2, "name"), "agnosai") == 1,
+    "a configured dispatcher advertises the HOST's name, which is what makes dispatcher_dispatch \
+    usable by a consumer whose own wire says something other than bote");
+    assert(streq(jsonx_get_str(si2, "version"), "2.0.0") == 1, "and the host's version");
+
+    # Either field alone falls back independently.
+    var si_d3 = dispatcher_new(dreg);
+    dispatcher_set_server_info(si_d3, "agnosai", 0);
+    var si_i3 = resp_result(dispatcher_dispatch(si_d3,
+    req_with_params(req_new("3", "initialize"), "{\"protocolVersion\":\"2024-11-05\"}"), 0));
+    var si3 = jsonx_get_raw(si_i3, "serverInfo");
+    assert(streq(jsonx_get_str(si3, "name"), "agnosai") == 1, "name overridden alone");
+    assert(streq(jsonx_get_str(si3, "version"), _bote_server_version()) == 1,
+    "with version falling back to bote's — 0 means \"keep bote's value for this field\"");
+
+    assert_eq(dispatcher_server_name(si_d2) != 0, 1, "server_name accessor reads back");
+    assert_eq(dispatcher_server_version(si_d3), 0, "an unset field reads back as 0");
+
     # capabilities: derived from the surface bote actually implements. `tools`
     # always; `listChanged` deliberately NOT advertised (no server→client push
     # path yet) — pin the decision so flipping it is a conscious change.

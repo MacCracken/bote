@@ -19,7 +19,7 @@ fn _mcp_is_supported(v) {
 
 fn _mcp_latest_version() { return "2025-11-25"; }
 
-fn _bote_server_version() { return "3.2.1"; }
+fn _bote_server_version() { return "3.3.0"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -82,8 +82,12 @@ fn validate_tool_name(name) {
 #                           ws must not promise notifications they can't deliver.
 # ================================================================
 
+#   +72 server_name           cstr — the `serverInfo.name` this dispatcher
+#                           advertises at initialize, or 0 for bote's own.
+#   +80 server_version        cstr — the matching `serverInfo.version`, or 0.
+#                           Set together via dispatcher_set_server_info.
 fn dispatcher_new(reg) {
-    var d = alloc(72);
+    var d = alloc(88);
     store64(d, reg);
     store64(d + 8, map_new());
     store64(d + 16, map_new());
@@ -93,6 +97,8 @@ fn dispatcher_new(reg) {
     store64(d + 48, 0);
     store64(d + 56, 0);
     store64(d + 64, 0);
+    store64(d + 72, 0);
+    store64(d + 80, 0);
     return d;
 }
 
@@ -105,6 +111,27 @@ fn dispatcher_prompts(d)    { return load64(d + 40); }
 fn dispatcher_resources(d)  { return load64(d + 48); }
 fn dispatcher_completion(d) { return load64(d + 56); }
 fn dispatcher_notifications(d) { return load64(d + 64); }
+
+fn dispatcher_server_name(d)    { return load64(d + 72); }
+fn dispatcher_server_version(d) { return load64(d + 80); }
+
+# Set the `serverInfo` this dispatcher advertises at `initialize`.
+#
+# **A dispatcher embedded in another product must not introduce itself as
+# "bote".** Before 3.3.0 `_build_initialize_result` hardcoded
+# `"serverInfo":{"name":"bote"}`, so every consumer's MCP clients saw bote's
+# identity and bote's version rather than the host application's — which is
+# wrong for every downstream, and for a host whose own oracle emits its own name
+# it is a wire divergence with no workaround short of hand-rolling the envelope.
+#
+# Both arguments are cstrs. Passing 0 for either keeps bote's own value for that
+# field, so `dispatcher_set_server_info(d, "agnosai", 0)` renames the server and
+# keeps bote's version. Unset (the default) is byte-identical to pre-3.3.0.
+fn dispatcher_set_server_info(d, name, version) {
+    store64(d + 72, name);
+    store64(d + 80, version);
+    return d;
+}
 
 fn dispatcher_set_audit(d, sink) { store64(d + 24, sink); return d; }
 fn dispatcher_set_events(d, sink) { store64(d + 32, sink); return d; }
@@ -399,8 +426,14 @@ fn _build_initialize_result(d, params_cstr) {
     str_builder_add_cstr(sb, negotiated);
     str_builder_add_cstr(sb, "\",\"capabilities\":");
     _build_capabilities(sb, d);
-    str_builder_add_cstr(sb, ",\"serverInfo\":{\"name\":\"bote\",\"version\":\"");
-    str_builder_add_cstr(sb, _bote_server_version());
+    var sname = dispatcher_server_name(d);
+    if (sname == 0) { sname = "bote"; }
+    var sver = dispatcher_server_version(d);
+    if (sver == 0) { sver = _bote_server_version(); }
+    str_builder_add_cstr(sb, ",\"serverInfo\":{\"name\":\"");
+    str_builder_add_cstr(sb, sname);
+    str_builder_add_cstr(sb, "\",\"version\":\"");
+    str_builder_add_cstr(sb, sver);
     str_builder_add_cstr(sb, "\"}}");
     return str_data(str_builder_build(sb));
 }

@@ -18,6 +18,46 @@ have per release.
 
 _(empty)_
 
+## [3.3.0] — 2026-07-31 — `serverInfo` is configurable; a dispatcher can carry the host's identity
+
+### Added
+
+- **`dispatcher_set_server_info(d, name, version)`** plus the
+  `dispatcher_server_name` / `dispatcher_server_version` accessors.
+
+  `_build_initialize_result` hardcoded `"serverInfo":{"name":"bote"}`
+  (`src/dispatch.cyr:402`), so **every consumer embedding bote's dispatcher
+  introduced itself to MCP clients as bote**, at bote's version, rather than as
+  the host product. That is wrong for any downstream, and for a host whose own
+  wire says something else it was unfixable short of hand-rolling the whole
+  JSON-RPC envelope — which is exactly what agnosai did (`server/routes/mcp.cyr`
+  builds its own, citing this line as the reason it cannot delegate).
+
+  Both arguments are cstrs and each falls back independently: `0` means "keep
+  bote's value for this field", so `dispatcher_set_server_info(d, "agnosai", 0)`
+  renames the server and keeps bote's version.
+
+  **Additive — an unconfigured dispatcher emits the pre-3.3.0 wire byte for
+  byte**, and a test pins that default alongside the overrides so the
+  compatibility claim is checked rather than asserted. Mutation-verified:
+  forcing the name back to a constant fails two assertions.
+
+  `dispatcher_new` grows 72 → 88 bytes. ABI-safe: `dispatcher_new` is the only
+  constructor (verified — the other `alloc(72)` in `transport_http.cyr` is an
+  unrelated struct), the size is not documented to callers, and all 22 call
+  sites take the struct from the function.
+
+  Ships in **both** profiles, including `[lib.core]` — `dist/bote-core.cyr` is
+  what agnosai pins.
+
+### Changed
+
+- **Cyrius pin `6.5.3` → `6.5.4`**, with `cyrius lib sync --full`. `lib/` matches
+  the pinned snapshot exactly — 0 of 99 files differ — and the build emits no
+  drift or shadow warning. The two files outside the snapshot (`libro`, `majra`)
+  are declared git deps, not staleness.
+- `_bote_server_version()` returns `3.3.0`.
+
 ## [3.2.1] — 2026-07-30 — `sys_accept4` closes the last x86-numbered syscall; accept loop no longer busy-spins
 
 **Closes the item 3.2.0 deliberately left open.** `src/transport_unix.cyr`'s accept call was the
