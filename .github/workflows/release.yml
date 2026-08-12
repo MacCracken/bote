@@ -55,7 +55,21 @@ jobs:
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
+      - name: Sync the pinned stdlib snapshot
+        # Same load-bearing ordering as ci.yml — and it matters MORE here,
+        # because this job runs on the tag push. Cyrius 6.x splits stdlib
+        # provisioning from git-dep resolution: `cyrius deps` does NOT populate
+        # ./lib/ from the snapshot, it only overlays [deps.NAME] on top of it.
+        # Run bare against an empty ./lib/, it fails resolving the stdlib leaves
+        # named in each dep's `dist/<pkg>.deps` sidecar.
+        #
+        # ⚠ The error text it prints is WRONG — see ci.yml for the detail. It
+        # blames the cyrius stdlib for modules that are demonstrably in it.
+        run: cyrius lib sync --full
+
       - name: Resolve deps
+        # Overlays the [deps.NAME] bundles onto the synced snapshot. Must run
+        # AFTER the sync step above.
         run: cyrius deps
 
       - name: Verify dep hashes
