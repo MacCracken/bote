@@ -172,7 +172,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `tests/bote_web_tools.tcyr` | 27 | Web tools — scheme guard, HTML→text stripper (incl. control-byte/NUL drop), url-encode, entity decode |
 | `tests/bote_ws.tcyr` | 10 | WebSocket — WsConfig + handler wire-up |
 | `tests/bote_core_only_smoke.tcyr` | drift guard | Includes only `dist/bote-core.cyr` — catches core/transport entanglement |
-| **Total** | **858** | + 1 drift smoke; green on x86_64 **and** aarch64 |
+| **Total** | **867** | + 1 drift smoke; green on x86_64 **and** aarch64 |
 
 Criterion benchmarks: **14** in `tests/bote.bcyr` (dispatch × 3, jsonx × 2, codec × 3, schema × 4, auth_bearer × 2).
 

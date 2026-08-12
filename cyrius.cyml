@@ -5,7 +5,7 @@ description = "MCP core service in Cyrius — stable 2.x. JSON-RPC 2.0, six tran
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/bote"
 language = "cyrius"
-cyrius = "6.5.4"
+cyrius = "6.5.20"
 
 [build]
 entry = "src/main.cyr"
@@ -173,10 +173,17 @@ stdlib = [
 # bytes) for the new `chain_new_streaming()` write-through
 # constructor. Appended, so src/libro_tools.cyr's raw +0 offset read
 # is unaffected; bote still calls plain `chain_new()`.
+# 2.8.5 is what lets bote's defensive `[deps.sakshi]` go: it bumps libro's own
+# `[deps.patra]` 1.12.12 -> 1.13.0, terminating the stale-sakshi chain three
+# levels down. It also moves `[deps.sigil]` / `[deps.sigil_tpm]` 3.12.1 -> 3.12.7
+# (the PKCS#1 v1.5 and RSA-PSS bypasses) — libro fed the overlay through BOTH
+# pins, not just patra. ⚠ libro's sidecar no longer declares `sakshi`; bote is
+# unaffected because it declares `"sakshi"` in its own `[deps].stdlib` above,
+# but do not remove that declaration on the assumption libro supplies it.
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
 path = "../libro"
-tag = "2.8.4"
+tag = "2.8.5"
 modules = ["dist/libro.cyr"]
 
 # majra pub/sub — same single-file dist bundle pattern. The default
@@ -186,29 +193,51 @@ modules = ["dist/libro.cyr"]
 [deps.majra]
 git = "https://github.com/MacCracken/majra"
 path = "../majra"
-tag = "2.5.3"
+tag = "2.6.3"
 modules = ["dist/majra.cyr"]
 
-# sakshi tracing/logging — explicit pin overriding the stdlib registry,
-# which lags the toolchain snapshot (the registry resolves `sakshi` →
-# 2.4.3 while the snapshot bundles the current tag, so every build
-# warned "./lib/ shadows version-pinned … sakshi 2.4.3 (pinned: …)").
-# Same registry-lag class as the sigil pin below. dist/sakshi.cyr is
-# self-contained (links only stdlib fnptr + atomic).
+# ── `[deps.sakshi]` DELETED at 3.3.1 — both of its preconditions landed ──
 #
-# bote references zero sakshi symbols directly — it is here because
-# libro links it. 2.4.7 renames two private internals
-# (`_sk_write_int`/`_sk_write_str` → `_sk_buf_write_number`/
-# `_sk_buf_write_string`) to escape cyrius's reserved `_int`/`_str`
-# overload-dispatch suffixes; no public surface moved. That same
-# lesson is why bote renamed `_web_get_int` → `_web_arg_number` at
-# 3.2.0. sakshi 2.4.7 declares the highest toolchain pin in bote's
-# dep set (6.5.0), which the 6.5.3 pin above satisfies.
-[deps.sakshi]
-git = "https://github.com/MacCracken/sakshi"
-path = "../sakshi"
-tag = "2.4.7"
-modules = ["dist/sakshi.cyr"]
+# It was a FORWARD pin (2.4.8 -> 2.4.10), defensive against a transitive chain
+# and NOT against anything bote wants: bote references zero sakshi symbols
+# directly; it sits in `[deps].stdlib` only because libro links it.
+#
+# ⚠ **Removing it was tried EARLIER at 3.3.1 and made things worse**, which is
+# why the mechanism is kept here rather than the conclusion. `sakshi` is in
+# `[deps].stdlib`, so deleting the block looked like a pure simplification that
+# would let the module track the fold. What actually happened:
+#
+#     cyrius deps --no-lock  ->  lib/sakshi.cyr = 2.4.2   (stale stdlib registry)
+#     cyrius lib sync --full ->  lib/sakshi.cyr = 2.4.10  (the fold, correct)
+#     cyrius deps --lock     ->  lib/sakshi.cyr = 2.4.10  (still correct)
+#     cyrius build           ->  lib/sakshi.cyr = 2.4.2   (implicit resolve, WRONG)
+#
+# The three-step ends clean and the very next build silently reverts it — which
+# is why this must be verified AFTER a build, never after the sync.
+#
+# The source was three levels down and was never bote's:
+#
+#     bote -> [deps.libro] 2.8.4 -> [deps.patra] 1.12.12 -> [deps.sakshi] 2.4.2
+#
+# ✅ **Both blockers are now cleared (2026-08-12):**
+#
+#   1. cyrius **6.5.20 re-folds patra 1.13.0** — `lib/patra.cyr` in the snapshot
+#      reads `# Version: 1.13.0`, and 1.13.0 carries zero `[deps.*]` blocks.
+#   2. **libro 2.8.5 bumps `[deps.patra]` 1.12.12 -> 1.13.0**, terminating the
+#      chain. ⚠ libro deliberately KEPT the block rather than deleting it: bote
+#      consumes `dist/libro.cyr`, which calls `patra_*` 54 times and defines
+#      none, and bote declares no patra of its own — so bote can only get patra
+#      by resolving libro's `[deps.patra]` transitively. Deleting it there would
+#      strand bote. libro's manifest carries the measurement.
+#
+# Verified after a `cyrius build` (not after the three-step) that `lib/sakshi.cyr`
+# holds at the snapshot's 2.4.10 with this block gone.
+#
+# ⚠ **If a sakshi pin is ever reintroduced here, note the bundle hazard**: bote
+# publishes `dist/bote.cyr` and `dist/bote-core.cyr`, and on a bundle-publishing
+# library a git dep can make `cyrius distlib` reclassify a module OUT of the
+# stdlib leaves and drop it from the `.deps` sidecars, breaking clean-room
+# consumers. kavach hit exactly that.
 
 # sigil crypto — pinned explicitly to the self-contained single-file
 # dist bundle (same pattern as libro / majra). The stdlib registry has
@@ -236,8 +265,46 @@ modules = ["dist/sakshi.cyr"]
 # libro. A clean git+tag CI checkout would have vendored 3.12.0
 # (c36d26a0…) and failed `cyrius deps --verify`. Tag, lock and
 # vendored body now agree.
-[deps.sigil]
-git = "https://github.com/MacCracken/sigil"
-path = "../sigil"
-tag = "3.12.1"
-modules = ["dist/sigil.cyr"]
+# ⚠ **`[deps.sigil]` was REMOVED at 3.3.1, and it was pinning bote to a sigil
+# with two known authentication bypasses.** Same mechanism as the sakshi block
+# above: `sigil` is already in `[deps].stdlib`, sigil is FOLDED INTO the cyrius
+# stdlib snapshot, and this git dep overlaid the fold — so bote and every
+# consumer that resolves through bote's manifest built **3.12.1** while the
+# 6.5.19 snapshot ships **3.12.7**. What that skipped:
+#
+#   * **3.12.5 — PKCS#1 v1.5 verify accepted forged signatures.** The two
+#     operands of the final compare lived in `cbank()`-banked file-scope globals,
+#     so a lane collision let one thread's valid pair satisfy another thread's
+#     check. Measured by the reporting consumer at **888 forged accepted of
+#     400,000**, alongside 70% of *valid* signatures wrongly rejected.
+#   * **3.12.6 — the same class in RSA-PSS**, which is what TLS 1.3
+#     CertificateVerify runs through (`lib/tls_native_hs13.cyr`). bote makes
+#     outbound TLS and terminates it in `src/transport_http.cyr` /
+#     `transport_streamable.cyr` / `transport_ws.cyr`, so this is on bote's own
+#     peer-authentication path, not a theoretical one. Root cause was a cyrius
+#     tail-call frame-release bug, fixed in 6.5.14 — which this pin also predated.
+#   * 3.12.2-3.12.4: public-exponent modexp schedule, and the first two stages of
+#     the lane localisation.
+#
+# bote's own JWT is HS256 (`hmac_sha256`) and PKCE is SHA-256, neither of which
+# touches the RSA paths — but the TLS transports do, and a consumer inheriting
+# this downgrade gets it everywhere.
+#
+# The original reason for the pin is also gone. It read: the stdlib *registry*
+# lagged the self-contained bundle (the 6.1.x registry resolved `sigil` to
+# 3.7.10, whose `dist/sigil.cyr` dangled guarded `include "src/sha_ni.cyr"` /
+# `"src/aes_ni.cyr"` lines that broke single-file consumers). 3.7.12 inlined
+# those banks; the fold has been self-contained since. There is no registry left
+# to outrun.
+#
+# ⚠ **Ordering in `[deps].stdlib` is still load-bearing and did not change.**
+# `ct` / `keccak` / `random` must precede `sigil` (single-pass forward refs to
+# `ct_eq_bytes_lens`, `ct_select`, `_keccak_*`, `shake256`, `random_bytes`), and
+# `thread_local` must precede it too — without TLS storage the binaries link
+# clean and then SIGILL at first crypto use (exit 132). That guard became
+# load-bearing for a second reason at 3.12.1, when the crypto-bank TLS slot moved
+# from a hardcoded literal 8 to a CAS-gated `thread_local_alloc()`.
+#
+# ⚠ Same rule as sakshi: **do not re-add this as a git dep.** It would reclassify
+# sigil out of the stdlib leaves in `dist/bote.deps` and break clean-room
+# consumers.

@@ -18,6 +18,139 @@ have per release.
 
 _(empty)_
 
+## [3.3.1] — 2026-08-12 — the dependency set was years behind, and one pin hid two auth bypasses
+
+### Security
+
+- **`[deps.sigil]` is REMOVED, which upgrades sigil 3.12.1 → 3.12.7 and closes
+  two authentication bypasses bote was pinned behind.**
+
+  `sigil` is already listed in `[deps].stdlib` and sigil is **folded into the
+  cyrius stdlib snapshot**, so this block was a pure override — it held bote, and
+  every consumer resolving through bote's manifest, on a sigil from before:
+
+  - **3.12.5 — PKCS#1 v1.5 verify accepted forged signatures.** Both operands of
+    the final compare lived in `cbank()`-banked file-scope globals, so a lane
+    collision let one thread's valid pair satisfy another thread's check. The
+    reporting consumer measured **888 forged signatures accepted out of 400,000**,
+    alongside **70% of valid signatures wrongly rejected**.
+  - **3.12.6 — the same class in RSA-PSS**, which is the path TLS 1.3
+    CertificateVerify runs through. bote terminates TLS in `transport_http`,
+    `transport_streamable` and `transport_ws`, so this is on bote's own peer
+    authentication, not a hypothetical. Root cause was a cyrius tail-call
+    frame-release bug fixed in **6.5.14** — which this pin also predated.
+
+  bote's own JWT is HS256 and PKCE is SHA-256, neither of which touches the RSA
+  paths; the exposure is the TLS transports, plus every downstream consumer that
+  inherited the downgrade.
+
+  The pin's original justification is also gone: it existed because the pre-fold
+  stdlib *registry* lagged the self-contained bundle (the 6.1.x registry resolved
+  `sigil` → 3.7.10, whose `dist/sigil.cyr` dangled guarded `include` lines that
+  broke single-file consumers). 3.7.12 inlined those banks and the fold has been
+  self-contained since.
+
+### Changed
+
+- **Toolchain pinned to cyrius 6.5.20** (was 6.5.10 — ten releases behind).
+  Full three-step, `lib/` diffed against the 6.5.20 snapshot **after the sync and
+  again after a build**: zero drift, `cyrius deps --verify` 113 verified / 0 failed.
+
+  6.5.20 is taken rather than .19 for two reasons. It **re-folds patra 1.13.0**,
+  which is what finally retires the defensive sakshi pin below; and it fixes a
+  **P1 miscompile** in `switch` / `match` — a case body could only be left safely
+  by `return`, so a body that fell through after storing to a local produced a
+  wrong answer with no diagnostic, or a segfault, on every target. The cause was
+  the regalloc NOP-harvest compactor shifting jump-table entries by +4 per
+  preceding case body. bote's own `src/` contains no statement-position
+  `switch` / `match`, so the exposure was in the vendored surface only.
+
+- **`[deps.majra]` 2.5.3 → 2.6.3**, seven releases. Picks up an O(n²) queue drain
+  fix (a `pq_dequeue` that shifted every survivor per pop — 15.6 µs → 89 ns at
+  depth 16,000), an unguarded negative priority that indexed **before** the queue
+  struct, a concurrent-`relay_receive` allocator race, and majra dropping its own
+  `[deps.sakshi]`.
+
+- **`[deps.libro]` 2.8.4 → 2.8.5.** This is the release that terminates the
+  stale-sakshi chain: libro bumps its own `[deps.patra]` 1.12.12 → **1.13.0**
+  (zero `[deps.*]` blocks) and its `[deps.sigil]` / `[deps.sigil_tpm]` 3.12.1 →
+  **3.12.7**. ⚠ libro fed the overlay through **both** pins — sigil 3.12.1's
+  manifest declared `[deps.sakshi]` at **2.4.3** alongside patra's 2.4.2 — which
+  no earlier analysis had identified.
+
+  ⚠ libro 2.8.5's `dist/libro.deps` no longer declares `sakshi` as a leaf. bote
+  is unaffected because it declares `"sakshi"` in its own `[deps].stdlib`; do
+  not remove that declaration on the assumption libro supplies it.
+
+- **`[deps.sakshi]` (2.4.10) is DELETED — the workaround's two preconditions
+  both landed.** It was a forward pin defending against a chain three levels
+  down, not against anything bote wants: bote references zero sakshi symbols
+  directly.
+
+  ```
+  bote -> [deps.libro] 2.8.4 -> [deps.patra] 1.12.12 -> [deps.sakshi] 2.4.2
+  ```
+
+  ⚠ **Deleting it EARLIER in this cycle was tried and made things worse**, and
+  the mechanism is kept because it is what makes the verification rule
+  non-negotiable: with the block removed the three-step ended correct (2.4.10)
+  and **the very next `cyrius build` silently reverted `lib/sakshi.cyr` to
+  2.4.2** through the implicit resolve. `deps --verify` cannot catch that — the
+  lock is written *from disk*, so it records the downgraded file's hash.
+
+  Both gates are now cleared: cyrius **6.5.20 re-folds patra 1.13.0**, and
+  **libro 2.8.5** bumps the link bote actually resolves through. Re-verified
+  **after a build**, not after the sync: `lib/sakshi.cyr` holds at the
+  snapshot's **2.4.10**, `lib/patra.cyr` at 1.13.0, `lib/sigil.cyr` at 3.12.7,
+  and no stdlib file differs from the snapshot.
+
+- **`[deps.majra]` 2.5.3 → 2.6.3 also picks up majra's own 6.5.20 pin**, which
+  retires the last piece of the `fl_alloc` workaround: `relay_receive_ex`
+  allocates its result struct outside the lock again, shortening a critical
+  section held across a subscriber-list walk on a hot pub/sub path.
+
+### Known issues
+
+- ✅ **The whole four-level chain is CLOSED as of this release.** All three
+  upstream repos landed, in order: **patra 1.13.0** (zero `[deps.*]`, sakshi from
+  the fold), **cyrius 6.5.20** (re-folds patra 1.13.0), **libro 2.8.5**
+  (`[deps.patra]` → 1.13.0, `[deps.sigil]`/`[deps.sigil_tpm]` → 3.12.7). bote's
+  defensive `[deps.sakshi]` is deleted above and re-verified after a build.
+
+  ⚠ **One correction to the earlier plan, which had libro deleting all three of
+  its git deps in favour of `[deps].stdlib` entries.** Two of those three would
+  have been wrong:
+
+  - **`[deps.patra]` must STAY** (bumped, not deleted). bote consumes
+    `dist/libro.cyr`, which calls `patra_*` 54 times and defines none of them,
+    and bote declares no patra of its own — so bote can only obtain patra by
+    resolving libro's block transitively. Deleting it strands bote.
+  - **`[deps.sigil]` must stay a THIN sub-bundle selection** rather than becoming
+    a `[deps].stdlib` entry. The fold is the monolith: `lib/sigil.cyr` is 27,550
+    lines carrying the x509/RSA bignum banks. Measured — a consumer taking
+    `dist/sigil.cyr` builds with `warning: large static data (10794336 bytes)`,
+    while libro's thin build is `.bss` **80,224 bytes**. Only the *tag* needed to
+    move.
+
+- ⚠ **A latent hole in libro's sidecar was unmasked, not created, by 2.8.5.**
+  `dist/libro.deps` declared `sakshi` only because patra 1.12.12's
+  `[deps.sakshi]` block put it there — the very defect being fixed. Measured at
+  27 leaves on 1.12.12, **26** on 1.13.0, and 26 with the block removed
+  entirely. bote is unaffected (it declares `"sakshi"` itself), but a clean-room
+  consumer relying only on libro's sidecar would now fail. `cyrius distlib`'s
+  self-check cannot catch this class: undefined *functions* are downgraded to
+  warnings, so only an undefined *variable* fails a bundle.
+
+- **13 repos in this workspace still pin `[deps.sakshi]` at stale tags**
+  (2.3.0 → 2.4.7): argonaut, anuenue, shakti, garjan, ghurni, daimon, phylax,
+  prani, vidya, stiva, yukti, owl, sit. None is in bote's dependency path.
+
+- **`duplicate fn 'sha256_hex'` / `'sha512_hex'`** (`lib/sigil_hex.cyr` vs
+  `lib/sigil.cyr`) are inherited from libro's thin sigil selection and are
+  **benign**: both files are sigil 3.12.7 and the function bodies are
+  byte-identical, verified by diff. Alongside the pre-existing `_sub_new` and
+  `cancel_token_new` diagnostics.
+
 ## [3.3.0] — 2026-07-31 — `serverInfo` is configurable; a dispatcher can carry the host's identity
 
 ### Added
