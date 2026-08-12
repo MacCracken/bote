@@ -55,38 +55,15 @@ jobs:
         run: cyrius --version
 
       - name: Sync the pinned stdlib snapshot
-        # ⚠ LOAD-BEARING. Cyrius 6.x splits stdlib provisioning from git-dep
-        # resolution — `cyrius deps` does NOT populate ./lib/ from the snapshot,
-        # despite what the step below used to claim. `cyrius lib sync --full`
-        # copies the version-pinned snapshot in; `cyrius deps` only OVERLAYS the
-        # [deps.libro] / [deps.majra] bundles on top of it.
-        #
-        # Why order matters: `cyrius deps` reads each dep's `dist/<pkg>.deps`
-        # sidecar and tries to resolve every stdlib leaf by reading
-        # `./lib/<name>.cyr`. Against an empty ./lib/ that read fails.
-        #
-        # ⚠ **Do not trust the error text — it is WRONG.** It reads
-        # `dep X requires 'Y' but it is not in the cyrius stdlib`, and every
-        # module it named here IS in the stdlib. Verified against the 6.5.20
-        # snapshot: bench 20,668 B, test 2,529 B, patra 223,641 B — all present.
-        # The real condition is "./lib/ has not been synced yet", and the
-        # message points away from the fix. Sync first; do NOT go editing
-        # libro's or majra's `[deps].stdlib` to chase modules that were never
-        # missing.
-        #
-        # This bit on 2026-08-12, as `4 deps resolved, 3 errors`: libro's
-        # `bench` + `test` and majra's `patra`. Neither manifest was at fault —
-        # libro 2.8.5's sidecar grew 22 → 26 leaves because cyrius 6.5.10+ folds
-        # a dep's DECLARED `[deps].stdlib` into its sidecar, and bote moved
-        # majra 2.5.3 (sidecar without `patra`) → 2.6.3 (with it). majra's own
-        # CI has carried this step since 2.4.5 and never saw the failure.
+        # Cyrius 6.x: `lib sync --full` provisions ./lib/ from the pinned
+        # snapshot; `cyrius deps` only OVERLAYS [deps.NAME] on top. deps alone
+        # against an empty ./lib/ fails on the stdlib leaves each dep's
+        # dist/<pkg>.deps sidecar names.
+        # Its error claims the module "is not in the cyrius stdlib" — that is
+        # false; filed as cyrius 2026-08-12-agnosai-deps-misleading-stdlib-error.
         run: cyrius lib sync --full
 
       - name: Resolve dependencies
-        # Overlays the [deps.libro] / [deps.majra] dist bundles at their tagged
-        # versions onto the synced snapshot, and writes cyrius.lock. ./lib/ is
-        # gitignored — first-party convention across agnosys / majra / libro /
-        # yukti / patra. Must run AFTER the sync step above.
         run: cyrius deps
 
       - name: Verify dep hashes
