@@ -116,13 +116,13 @@ fn bote_dispatcher_with_echo() {
     var greet_args = vec_new();
     vec_push(greet_args, prompt_arg_new("name", "who to greet", 0));
     dispatcher_register_prompt(dispatcher,
-    prompt_def_new("bote_greeting", "a friendly greeting", greet_args),
-    &bote_greeting_prompt_handler);
+      prompt_def_new("bote_greeting", "a friendly greeting", greet_args),
+      &bote_greeting_prompt_handler);
     # Reference resource so the resources capability is observable in the
     # reference binaries (mirrors bote_echo / bote_greeting).
     dispatcher_register_resource(dispatcher,
-    resource_def_new("bote://info", "bote-info", "reference server info", "text/plain"),
-    &bote_info_resource_handler);
+      resource_def_new("bote://info", "bote-info", "reference server info", "text/plain"),
+      &bote_info_resource_handler);
     # Reference completion handler (completes bote_greeting's `name` arg).
     dispatcher_set_completion(dispatcher, &bote_completion_handler);
     return dispatcher;

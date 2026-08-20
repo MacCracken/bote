@@ -55,10 +55,18 @@ echo "$NEW" > VERSION
 if [ -f src/dispatch.cyr ]; then
     if grep -q "_bote_server_version" src/dispatch.cyr; then
         sed -i "s|fn _bote_server_version() { return \"$OLD\"; }|fn _bote_server_version() { return \"$NEW\"; }|" src/dispatch.cyr
-        # Confirm the literal actually moved — guards against an OLD with a
-        # -hotfix suffix or reformatting the sed pattern silently missed.
-        if grep -q "_bote_server_version() { return \"$OLD\"; }" src/dispatch.cyr; then
-            echo "ERROR: failed to update _bote_server_version (still \"$OLD\") —" >&2
+        # Confirm the literal actually moved. ⚠ This MUST assert the NEW value is
+        # present, not merely that OLD is absent — the absent-OLD form is vacuous
+        # the moment the literal has already drifted, which is exactly when the
+        # check is needed. It happened: at 3.3.2 the literal still read "3.3.0"
+        # while VERSION said 3.3.1, so the sed pattern (built from OLD=3.3.1)
+        # matched nothing AND the old guard passed, and the script reported
+        # success. bote 3.3.1 therefore shipped an MCP `initialize` handshake
+        # reporting 3.3.0.
+        if ! grep -q "_bote_server_version() { return \"$NEW\"; }" src/dispatch.cyr; then
+            echo "ERROR: _bote_server_version is not \"$NEW\" after the rewrite —" >&2
+            echo "       it currently reads:" >&2
+            grep -n "_bote_server_version() { return" src/dispatch.cyr >&2
             echo "       update src/dispatch.cyr by hand." >&2
             exit 1
         fi

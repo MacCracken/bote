@@ -187,7 +187,7 @@ fn _strm_session_outbound(session) {
 fn _strm_notify_publish(ctx, topic, payload) {
     var wire = 0;
     if (streq(topic, TOPIC_TOOL_REGISTERED()) == 1
-    || streq(topic, TOPIC_TOOL_DEREGISTERED()) == 1) {
+      || streq(topic, TOPIC_TOOL_DEREGISTERED()) == 1) {
         wire = tools_list_changed_notification();
     } elif (streq(topic, TOPIC_PROMPT_REGISTERED()) == 1) {
         wire = prompts_list_changed_notification();
@@ -204,7 +204,7 @@ fn _strm_notify_publish(ctx, topic, payload) {
         if (session != 0) {
             var so = _strm_session_outbound(session);
             resumption_buffer_push(session_outbound_buffer(so),
-            stream_event_new(event_id_gen_next(session_outbound_id_gen(so)), wire));
+              stream_event_new(event_id_gen_next(session_outbound_id_gen(so)), wire));
         }
         i = i + 1;
     }
@@ -376,9 +376,9 @@ fn _strm_handle_post(cfd, buf, n, config) {
         sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
     }
     if (auth_bearer_check(cfd, buf, n,
-    streamable_config_bearer_validator(config),
-    streamable_config_bearer_ctx(config),
-    &claims_slot) != 0) { return 0; }
+        streamable_config_bearer_validator(config),
+        streamable_config_bearer_ctx(config),
+        &claims_slot) != 0) { return 0; }
     if (_strm_check_protocol(cfd, buf, n) != 0) { return 0; }
 
     var bo = sandhi_server_body_offset(buf, n);
@@ -426,7 +426,7 @@ fn _strm_handle_post(cfd, buf, n, config) {
     # takes the application/json path below.
     var pso = _strm_post_session_outbound(buf, n, config);
     if (pso != 0 && _strm_accepts_sse(buf, n) == 1
-    && resumption_buffer_len(session_outbound_buffer(pso)) > 0) {
+      && resumption_buffer_len(session_outbound_buffer(pso)) > 0) {
         sandhi_server_send_chunked_start(cfd, HTTP_OK, "text/event-stream", extra);
         var rframe = _strm_response_frame(resp);
         sandhi_server_send_chunk(cfd, rframe, strlen(rframe));
@@ -442,7 +442,7 @@ fn _strm_handle_post(cfd, buf, n, config) {
         return 0;
     }
     sandhi_server_send_response(cfd, HTTP_OK, "OK", "application/json",
-    resp, strlen(resp), extra);
+      resp, strlen(resp), extra);
     return 0;
 }
 
@@ -481,9 +481,9 @@ fn _strm_handle_get(cfd, buf, n, config) {
         sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
     }
     if (auth_bearer_check(cfd, buf, n,
-    streamable_config_bearer_validator(config),
-    streamable_config_bearer_ctx(config),
-    0) != 0) { return 0; }
+        streamable_config_bearer_validator(config),
+        streamable_config_bearer_ctx(config),
+        0) != 0) { return 0; }
     if (_strm_check_protocol(cfd, buf, n) != 0) { return 0; }
     if (_strm_check_session(cfd, buf, n, config, "") != 0) { return 0; }
 
@@ -562,7 +562,7 @@ fn transport_streamable_run(dispatcher, config) {
     _strm_init();
     store64(config + 56, dispatcher);
     return sandhi_server_run(streamable_config_addr(config),
-    streamable_config_port(config),
-    &_strm_handle,
-    config);
+      streamable_config_port(config),
+      &_strm_handle,
+      config);
 }

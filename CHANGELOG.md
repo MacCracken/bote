@@ -18,6 +18,70 @@ have per release.
 
 _(empty)_
 
+## [3.3.2] — 2026-08-19 — closing the transitive patra downgrade, and a version literal that had lied since 3.3.1
+
+### Changed — cyrius 6.5.20 → 6.5.31, libro 2.8.5 → 2.8.8, majra 2.6.3 → 2.6.6
+
+**881** assertions green across 14 suites, 0 failed.
+
+The toolchain pin was eleven patches behind and pulled the 6.5.20 stdlib
+snapshot; 6.5.31 brings the folds shipped since (sakshi 2.4.11, patra 1.13.9,
+yukti 2.3.8, niyama 1.0.7, mabda 4.1.0, ganita 1.1.4, yantra 1.0.3).
+
+### Fixed — the transitive patra downgrade that reached agnosai
+
+bote is the middle link in **agnosai → bote → libro → patra**. libro 2.8.5
+declared `[deps.patra] tag = "1.13.8"` while the toolchain folds 1.13.9, and
+`cyrius deps` applies a declared dep's copy *on top of* the `lib sync --full`
+snapshot on every resolve — so the stale tag rewrote `lib/patra.cyr` for
+everything downstream. Measured before the bump: `lib sync --full` landed patra
+1.13.9, then `cyrius deps` rewrote it to **1.13.0**.
+
+It only bites where there are no sibling checkouts, because `path` beats `tag`
+locally — which is why it passed every developer machine and broke agnosai's CI.
+`deps --verify` does not catch it either: the lock is regenerated *from* the
+downgraded file.
+
+libro 2.8.8 moves its pin to 1.13.9; taking that here closes the chain. Verified
+after this bump: `lib/patra.cyr` stays **1.13.9** across
+`lib sync --full` → `cyrius deps`, and `lib/libro.cyr` reports 2.8.8.
+
+Once released, agnosai can drop the defensive `[deps.patra]` shim it carries in
+2.0.2 and move to 6.5.31 itself.
+
+⚠ **Release order matters**: libro 2.8.8 must be tagged and pushed before this
+release's `[deps.libro] tag = "2.8.8"` will resolve in CI, which has no
+`../libro` to fall back on.
+
+### Fixed — `_bote_server_version()` reported 3.3.0, and the bump script's guard could not see it
+
+`src/dispatch.cyr:22` read `"3.3.0"` while VERSION said 3.3.1, so bote 3.3.1's
+MCP `initialize` handshake under-reported its own version to every client.
+
+The reason it survived a release is the guard in `scripts/version-bump.sh`: it
+asserted the **OLD** value was absent rather than that the **NEW** value was
+present. Once the literal had drifted off OLD, the sed pattern (built from OLD)
+matched nothing *and* the absent-OLD check passed — so the script rewrote
+nothing and reported success. A guard that can only fail when the thing it
+guards is already correct is vacuous.
+
+Both fixed: the literal now reads 3.3.2, and the guard asserts the new value is
+present, printing the offending line when it is not.
+
+### Changed — 13 `src/` files reformatted for 6.5.31's canonical form
+
+**Caused by the pin bump, unlike libro's sweep.** bote was 0/35 unformatted
+under 6.5.20 and 13/35 under 6.5.31 — the formatter's canonical continuation
+indent changed between them. (libro's 6 files fail identically under 6.5.27 and
+6.5.31, i.e. genuinely pre-existing; the two sweeps are not the same finding.)
+
+bote's CI has no format gate, so this would not have failed the build — it would
+have ambushed the next person to run `cyrius fmt`. Swept now.
+`git diff -w -- src/` is empty apart from the `_bote_server_version` literal
+above, so nothing but indentation moved. Both bundles regenerated and verified
+idempotent across a second `cyrius distlib` / `cyrius distlib core`.
+
+
 ## [3.3.1] — 2026-08-12 — the dependency set was years behind, and one pin hid two auth bypasses
 
 ### Security
