@@ -18,6 +18,36 @@ have per release.
 
 _(empty)_
 
+## [3.3.3] — 2026-08-21 — libro 2.8.10: a PatraStore read from another thread no longer crashes
+
+### Changed — libro 2.8.8 → 2.8.10
+
+**116** assertions green across 14 suites, 0 failed.
+
+libro 2.8.9 removes `PatraStore`'s cross-thread prepared-statement cache, and
+2.8.10 declares the patra it is actually built against.
+`patrastore_open` prepared its `SELECT` and `COUNT` once and stored the handles;
+patra's SQL parse scratch is **per-thread**, so executing one from another thread
+dereferenced TLS that was not there and **killed the process** — no diagnostic,
+no error return.
+
+bote does not read a PatraStore off-thread today, so nothing here changes
+behaviour. It is carried because bote is the middle link in
+**agnosai → bote → libro**, and Agnostic — which does serve a durable audit trail
+from a worker pool — cannot get the fix any other way.
+
+⚠ **`[deps.patra]` moves 1.13.9 → 1.13.10 with it**, because libro 2.8.10
+declares it. 1.13.10 removes an unconditional `sakshi_set_level(SK_WARN)` from
+`patra_init` that clobbered the host's log level. That transitive tag is exactly
+the thing 3.3.2 had to unpick, so it is stated rather than left to be discovered:
+resolved from git, this tag chain is
+`bote 3.3.3 → libro 2.8.10 → patra 1.13.10`.
+
+⚠ **Tag ordering.** patra 1.13.10 is tagged; libro 2.8.10 must be tagged before
+this release's lock resolves for anyone without sibling checkouts. (libro 2.8.9
+shipped the crash fix but still declared patra 1.13.9 — 2.8.10 corrects that,
+which is why this depends on .10 and not .9.)
+
 ## [3.3.2] — 2026-08-19 — closing the transitive patra downgrade, and a version literal that had lied since 3.3.1
 
 ### Changed — cyrius 6.5.20 → 6.5.31, libro 2.8.5 → 2.8.8, majra 2.6.3 → 2.6.6
