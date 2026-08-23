@@ -199,7 +199,7 @@ src/main_common.cyr        Shared binary setup (dispatcher + env bearer wiring)
 Dependencies rehydrate into `lib/` (gitignored) via `cyrius deps`.
 Cross-project deps **libro and majra** are git-pinned via
 `[deps.<name>]` in `cyrius.cyml`. Two consumer bundles ship in `dist/`:
-`bote.cyr` (full, 30 modules) and `bote-core.cyr` (core 11,
+`bote.cyr` (full, 30 modules) and `bote-core.cyr` (core 12,
 transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ---

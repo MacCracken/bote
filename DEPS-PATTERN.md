@@ -34,7 +34,7 @@ bote ships **two** distribution artifacts:
 | Artifact              | Profile  | Modules | Use when                                     |
 |-----------------------|----------|---------|----------------------------------------------|
 | `dist/bote.cyr`       | default  | 30      | Consumer needs bote's full transport surface |
-| `dist/bote-core.cyr`  | `core`   | 11      | Consumer wraps Dispatcher / Registry / Prompts / Resources / Audit but supplies its own transport |
+| `dist/bote-core.cyr`  | `core`   | 12      | Consumer wraps Dispatcher / Registry / Prompts / Resources / Content / Audit but supplies its own transport |
 
 - Every tagged release must commit **both** artifacts.
 - Each bundle is a self-contained, include-free single `.cyr`
@@ -69,6 +69,59 @@ syscall. A consumer whose stdlib list omits `random` gets
 `undefined function 'random_bytes'`. Add it before the modules
 that reference it — bote lists it alongside `ct` / `keccak`,
 ahead of `sigil`.
+
+## Resolving the bundle: `cyrius lib sync` BEFORE `cyrius deps`
+
+⚠ **Read this before filing a resolver bug.** The most common
+first-time failure consuming bote (or the bote → libro → majra graph)
+looks like a broken resolver and is not one:
+
+```
+dep libro requires 'ct' ... is not in the cyrius stdlib
+```
+
+`ct` **is** in the cyrius stdlib. The message is misleading (filed
+upstream as `2026-08-12-agnosai-deps-misleading-stdlib-error`). What it
+actually means is that `./lib/` does not yet contain that module.
+
+Cyrius deliberately does **not** auto-resolve stdlib — that is a
+supply-chain choice, not an oversight. Two things follow, and the
+**order matters**:
+
+1. Declare every transitive stdlib module your graph reaches in your own
+   `[deps] stdlib`. For the full bote bundle plus libro/majra that means
+   adding, beyond the obvious ones, `ct`, `keccak`, `random`, `slice`,
+   `thread`, `thread_local`, `sync`, `atomic`, `result`, `sigil` — and
+   `ws_server` only if you use the WebSocket transport.
+2. Run **`cyrius lib sync --full`** to provision `./lib/` from the pinned
+   toolchain snapshot, and only *then* `cyrius deps`, which **overlays**
+   your declared `[deps.<name>]` git deps on top of that snapshot.
+
+```sh
+cyrius lib sync --full   # provision ./lib/ from the pinned snapshot
+cyrius deps              # overlay [deps.*] git deps on top
+cyrius deps --verify     # confirm against cyrius.lock
+```
+
+Running `cyrius deps` against an empty `./lib/` fails on the stdlib
+leaves each dep's `dist/<pkg>.deps` sidecar names. This is exactly what
+bote's own CI does, in this order — see `.github/workflows/ci.yml`.
+
+⚠ Two traps worth stating, both of which have cost real time:
+
+- **`cyrius build` does an implicit resolve.** So verify a vendored
+  dependency's version *after a build*, not after `cyrius deps` — bote
+  had a case (3.3.1) where the three-step ended correct and the very
+  next build silently reverted a file.
+- **A local `path =` beats `tag =`** and vendors your working tree, which
+  can mask a wrong or unpushed tag. Your machine passes; a clean CI
+  checkout resolving from `git + tag` gets different bytes and fails
+  `cyrius deps --verify`.
+
+**nein 1.6.0 vendored `bote-core.cyr` outright over this misread; 1.6.1
+retired the vendoring** and consumes bote-core + sigil as ordinary git
+deps, the same way daimon does. Vendoring is not the fix — the sync step
+is.
 
 ## Profile selection
 
@@ -152,7 +205,7 @@ transports. The jump unblocks removing the per-transport binary
 split inside bote itself (still in place at 2.7.3; reconsolidation
 tracked as a follow-up — see CHANGELOG 2.7.3).
 
-## What lives in the core 11?
+## What lives in the core 12?
 
 | #  | File                  | Role                                          |
 |----|-----------------------|-----------------------------------------------|
@@ -167,9 +220,22 @@ tracked as a follow-up — see CHANGELOG 2.7.3).
 | 9  | `src/dispatch.cyr`    | `Dispatcher` (2.0 handler ABI)                |
 | 10 | `src/codec.cyr`       | Encoder / decoder                             |
 | 11 | `src/schema.cyr`      | Schema compile                                |
+| 12 | `src/content.cyr`     | Typed MCP content blocks + annotations        |
 
 (The core profile grew 9 → 11 at 3.0.0, when the MCP prompts and
-resources capabilities landed. The table said 9 until 3.2.0.)
+resources capabilities landed, and 11 → 12 at **3.3.6** with
+`content.cyr`. The table said 9 until 3.2.0.)
+
+`content.cyr` is in core because content blocks are the tool-result
+format **every** handler emits, transport or not. Before 3.3.6,
+core-profile consumers (nein's `mcp` module, t-ron) hand-rolled
+`{"content":[…],"isError":…}` with a raw `str_builder` — which means
+each of them re-implemented JSON string escaping, the exact duplicated
+injection surface this profile exists to prevent. It adds **no** new
+stdlib leaves: its only external references are `_json_emit_escaped`
+(already in core via `dispatch.cyr`), `str_builder_*` / `str_data`,
+`vec_*` and `alloc`. It is listed **last** in `[lib.core]` because
+cyrius is single-pass and it calls `_json_emit_escaped`.
 
 Stdlib footprint: `string`, `fmt`, `alloc`, `vec`, `str`,
 `tagged`, `assert`, `fnptr`, `hashmap`, `bayan`, `chrono`,
@@ -187,3 +253,12 @@ Drift guard: `tests/bote_core_only_smoke.tcyr` includes only
 `dispatcher_new + registry_register + dispatcher_handle`
 round-trip. If a future bote change wires a core-module symbol
 against a transport-module helper, the smoke fails at CI time.
+
+Since 3.3.6 it also asserts the content-block **bytes**, not just that
+they link: that a quote and a backslash come back escaped, and that
+`content_array` omits `isError` while `content_array_error` emits
+`"isError":true`. A link-only check would not notice an escaping
+regression, and escaping is the whole reason `content.cyr` belongs in
+this profile. Both assertions are mutation-proven — expecting the raw
+unescaped string exits 7, and asserting `isError` on the success array
+exits 9.

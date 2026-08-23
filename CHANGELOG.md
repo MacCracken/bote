@@ -18,6 +18,134 @@ have per release.
 
 _(empty)_
 
+## [3.3.6] — 2026-08-23 — content blocks reach the core profile; six of seven "external blockers" had already expired
+
+**883** assertions green across 14 suites, 0 failed, plus a materially
+stronger core drift guard.
+
+### Added — `content.cyr` joins `[lib.core]` (core profile 11 → 12 modules)
+
+Typed MCP content blocks — `content_text`, `content_text_response`,
+`content_array`, `content_array_error`, `content_image`, `content_resource`,
+`content_with_annotations` and the rest — now ship in `dist/bote-core.cyr`.
+
+Content blocks are the tool-result format **every** handler emits, transport
+or not, but the module was in the full bundle only. Core-profile consumers
+(nein's `mcp` module, t-ron) were therefore hand-rolling
+`{"content":[…],"isError":…}` with a raw `str_builder` — which means each of
+them re-implemented JSON string escaping. ⭐ **That is the point**: duplicated
+escaping is duplicated injection surface, and preventing exactly that is what
+a shared core profile is for.
+
+- **No new stdlib leaves.** `dist/bote-core.deps` is byte-identical — the
+  module's only external references are `_json_emit_escaped` (already in core
+  via `dispatch.cyr`), `str_builder_*` / `str_data`, `vec_*` and `alloc`.
+  Verified, not assumed.
+- Listed **last** in `[lib.core]`: cyrius is single-pass and it calls
+  `_json_emit_escaped`.
+- Core bundle 95,256 → **104,581 B**.
+
+⚠ Consumers on `dist/bote.cyr` see no change — `content.cyr` was already in
+the full bundle. This is additive for the core profile: nothing was removed
+and no signature changed.
+
+### Changed — the core drift guard now checks bytes, not just linkage
+
+`tests/bote_core_only_smoke.tcyr` previously answered "did it link". For
+content blocks that is not enough, because the reason they belong in core is
+the escaping. It now asserts that a quote and a backslash come back **escaped**,
+that `content_array` omits `isError` entirely, and that `content_array_error`
+emits `"isError":true`.
+
+Both new assertions are **mutation-proven**: expecting the raw unescaped
+string exits 7, and asserting `isError` on the success array exits 9. The
+substring helper is hand-rolled on purpose — pulling in an assert library
+would weaken the very thing this file guards, that the core bundle stands up
+with nothing else linked.
+
+### Added — `DEPS-PATTERN.md`: the `cyrius lib sync` step it never documented
+
+New section, **"Resolving the bundle: `cyrius lib sync` BEFORE `cyrius deps`"**.
+
+A first-time consumer of the bote → libro → majra graph hits:
+
+```
+dep libro requires 'ct' ... is not in the cyrius stdlib
+```
+
+`ct` **is** in the stdlib. The message is misleading (filed upstream as
+`2026-08-12-agnosai-deps-misleading-stdlib-error`); what it means is that
+`./lib/` has not been provisioned yet. Cyrius deliberately does not
+auto-resolve stdlib — a supply-chain choice — so the consumer must declare the
+transitive modules **and** run `cyrius lib sync --full` *before* `cyrius deps`,
+which only overlays git deps on top. `DEPS-PATTERN.md` documented
+`git + tag + modules` and omitted both halves.
+
+⭐ **nein 1.6.0 vendored `bote-core.cyr` outright over this misread**; 1.6.1
+retired the vendoring and consumes it as an ordinary git dep. A documentation
+gap cost a downstream project a vendoring cycle. The section also records the
+two traps that have cost real time here: `cyrius build` does an implicit
+resolve (so verify vendored versions *after a build*), and a local `path =`
+beats `tag =` and can mask an unpushed tag.
+
+### Changed — the "Blocked on cyrius / external" table, re-derived item by item
+
+Every row was checked against the live pinned stdlib rather than its own
+prose. **Six of the seven premises had expired.** Only `$/cancelRequest`
+was still true.
+
+| Row | Was | Actually |
+|---|---|---|
+| Slowloris recv timeout (H5) | waiting on `sock_set_recv_timeout` | Shipped 5.11.13 (`lib/net.cyr:239`) — **and already in force**: bote owns no HTTP accept loop, `sandhi_server_run` applies a 30 s `SO_RCVTIMEO` by default |
+| WS `Sec-WebSocket-Key` validation (M4) | waiting on a `ws_server.cyr` fix | Fixed 5.11.16 — `lib/ws_server.cyr:97-98`, guard precedes the `alloc` it protects |
+| WS arena-per-frame | waiting on `fl_free` | `fl_free` shipped a month *before* the issue was filed; real primitive is `arena_reset`. Usable since 6.5.9 |
+| WS subprotocol negotiation | "header is read" | **Never read** — zero occurrences of `Sec-WebSocket-Protocol` anywhere. And never filed |
+| WS per-message deflate | waiting on LZ77+Huffman / a zlib binding | **sankoch** ships native DEFLATE, 16 entry points. Never filed |
+| DNS hostname SSRF | waiting on `getaddrinfo` | sandhi has a native RFC 1035 resolver. The old ask was the **wrong shape** |
+
+⚠ **Two things genuinely need filing upstream**, and neither ever was: a
+`ws_server` handshake / response-header seam (its exported surface offers no
+hook, which blocks subprotocol negotiation *and* deflate), and a sandhi client
+that accepts a pre-resolved address (without it, resolve-then-fetch means two
+resolutions with an attacker-controlled gap — a real DNS-rebinding window, so
+re-filing `getaddrinfo_hosts` would file the wrong thing).
+
+⚠ **A mechanical cause worth recording:** all four of bote's filings in
+cyrius's `issues/archived/` still read `**Status:** open.` in their bodies.
+Closure lives only in directory placement and cyrius's CHANGELOG — so checking
+a premise by opening the issue file, the obvious move, re-confirms a stale
+blocker. That is upstream's to fix, but knowing it explains why this class
+keeps recurring here.
+
+Also corrected: **"Per-thread request buffers — tracked upstream"** was false
+in three places. `thread_local_alloc` and the arena family all shipped, and
+nothing upstream tracks it.
+
+### Fixed — documentation
+
+- A historical CHANGELOG line claiming the WS subprotocol header was "read but
+  not enforced" is annotated with the correction rather than rewritten — it is
+  a record of what was believed, and the belief was wrong.
+
+### Not changed, deliberately
+
+⚠ **The WS 30 s idle-drop is NOT fixed here.** Auditing the slowloris row
+surfaced it: bote inherits sandhi's 30 s `SO_RCVTIMEO` — an HTTP-shaped
+default — onto the WebSocket socket, and it follows `cfd` into the long-lived
+frame loop, where `ws_server_recv_frame` maps *any* `sock_recv` error
+(EAGAIN included) to close. bote only answers PINGs, never initiates one.
+**Established by inspection; not reproduced against a live client**, and
+fixing it means moving the WS transport to `sandhi_server_run_opts` with an
+explicit idle value — a functional transport change that deserves its own
+release rather than a ride-along. Tracked in the roadmap.
+
+### Performance
+
+No change expected or claimed; this release adds a module to a bundle and
+edits docs. Benchmarks re-run on a quiet box (load 0.66) land within noise.
+Capacity unchanged from 3.3.5: `fn_table` **5586 / 32768** (17%),
+`identifiers` **180563 / 524288** (34%). Gate is 95%.
+
 ## [3.3.5] — 2026-08-23 — `cancel_token_new` no longer collides with the stdlib's
 
 **883** assertions green across 14 suites, 0 failed. `src/` is now **entirely
@@ -3269,6 +3397,9 @@ versus ~400 LOC if hand-rolled.
 - ✅ Close handshake with status code + optional reason
 - 🟡 Per-message deflate (RFC 7692) — deferred to stdlib
 - 🟡 Subprotocol negotiation (`Sec-WebSocket-Protocol`) — header read but not enforced
+  <br>⚠ **Correction (3.3.6): "header read" was never true.** `Sec-WebSocket-Protocol` has zero
+  occurrences in `src/` or `lib/ws_server.cyr`; the handshake reads only Upgrade / Connection /
+  Version / Key. See the roadmap's blocked-items table.
 
 ### Tests
 - 10 new unit assertions (**392 total**, was 382):

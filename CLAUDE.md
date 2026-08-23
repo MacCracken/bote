@@ -36,7 +36,7 @@ Two consumer bundles (see `DEPS-PATTERN.md` for the contract):
 | Artifact | Profile | Modules | Use when |
 |----------|---------|---------|----------|
 | `dist/bote.cyr` | default `[lib]` | 30 | Consumer needs the full transport surface |
-| `dist/bote-core.cyr` | `[lib.core]` | 11 | Consumer wraps Dispatcher / Registry / Prompts / Resources / Audit but supplies its own transport (e.g. t-ron's SecurityGate) |
+| `dist/bote-core.cyr` | `[lib.core]` | 12 | Consumer wraps Dispatcher / Registry / Prompts / Resources / Audit but supplies its own transport (e.g. t-ron's SecurityGate) |
 
 Regenerate with `cyrius distlib` (default) and `cyrius distlib core`. CI gates both bundles for freshness.
 
@@ -58,7 +58,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 
 ## Modules (src/)
 
-**Core 11** — included in both `dist/bote.cyr` and `dist/bote-core.cyr`:
+**Core 12** — included in both `dist/bote.cyr` and `dist/bote-core.cyr`:
 
 | Module | Purpose |
 |--------|---------|
@@ -73,6 +73,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `dispatch.cyr` | `Dispatcher` (2.0 handler ABI: `fn h(args, claims) → result_cstr`) |
 | `codec.cyr` | JSON-RPC encode / decode, batch processing |
 | `schema.cyr` | JSON Schema compile + validate |
+| `content.cyr` | Typed MCP content blocks + annotations (joined the core profile at 3.3.6 — content blocks are the tool-result format every handler emits, and hand-rolling them per consumer duplicates JSON escaping) |
 
 **Full bundle only** — included in `dist/bote.cyr`:
 
@@ -90,7 +91,6 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `bridge.cyr` | HTTP↔stdio TypeScript bridge with CORS |
 | `transport_streamable.cyr` | Streamable HTTP / SSE transport |
 | `transport_ws.cyr` | WebSocket transport (manually includes `lib/ws_server.cyr`) |
-| `content.cyr` | Typed MCP content blocks + annotations |
 | `host.cyr` | HostRegistry + IPv4/IPv6 SSRF guard + JSON config hot-reload |
 | `libro_tools.cyr` | libro audit-tool dispatch (5 tools; in default binary + bundle since 2.7.5, not in core) |
 | `fs_tools.cyr` | Filesystem MCP tools (`fs_write` / `fs_read` / `fs_mkdir`) — root-confined (`BOTE_FS_ROOT`); since 2.8.0 |

@@ -63,14 +63,25 @@ modules = [
     "src/web_tools.cyr",
 ]
 
-# Core-only opt-in bundle (2.7.2; 9 modules then, 11 since the 3.0.0
-# prompts/resources capabilities). Transport-free modules for
-# consumers that wrap bote's Dispatcher / Registry / Audit surface
-# but supply their own transport — e.g. t-ron 2.1.x's SecurityGate
-# middleware. Excludes the transports (stdio/http/unix/bridge/
-# streamable/ws), auth, session, discovery, content, host, audit_libro,
+# Core-only opt-in bundle (2.7.2; 9 modules then, 11 at the 3.0.0
+# prompts/resources capabilities, 12 since 3.3.6). Transport-free
+# modules for consumers that wrap bote's Dispatcher / Registry / Audit
+# surface but supply their own transport — e.g. t-ron 2.1.x's
+# SecurityGate middleware. Excludes the transports (stdio/http/unix/
+# bridge/streamable/ws), auth, session, discovery, host, audit_libro,
 # events_majra. Keeps consumers off the cyrius 2 MB compile-source cap
 # while still allowing the single-bundle DEPS-PATTERN.
+#
+# `content.cyr` JOINED at 3.3.6 and is deliberately LAST: cyrius is
+# single-pass and it calls `_json_emit_escaped`, which dispatch.cyr
+# defines. It adds no new stdlib leaves — its only external references
+# are `_json_emit_escaped`, `str_builder_*` / `str_data`, `vec_*` and
+# `alloc`, all already in the core closure, so `dist/bote-core.deps` is
+# unchanged. It is in core because content blocks are the tool-result
+# format EVERY handler emits, transport or not; without it core-profile
+# consumers hand-rolled `{"content":[…],"isError":…}` with a raw
+# str_builder, re-implementing JSON escaping per consumer — the exact
+# injection-surface duplication this profile exists to prevent.
 #
 # See docs/development/issues/archive/2026-05-10-opt-in-transport-profile.md
 # for the rationale and split derivation.
@@ -87,6 +98,7 @@ modules = [
     "src/dispatch.cyr",
     "src/codec.cyr",
     "src/schema.cyr",
+    "src/content.cyr",
 ]
 
 # ── Dependencies ─────────────────────────────────────────────────

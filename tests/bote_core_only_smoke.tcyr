@@ -18,6 +18,29 @@ fn h_echo(args, claims) {
     return args;
 }
 
+# Naive substring search over two NUL-terminated cstrs. Returns 1 if
+# `needle` occurs in `hay`, else 0.
+#
+# Hand-rolled on purpose: this file includes ONLY dist/bote-core.cyr plus
+# the stdlib cyrius auto-injects, and pulling in an assert/str helper for
+# one predicate would weaken the very thing the file is guarding — that
+# the core bundle stands up with nothing else linked.
+fn _smoke_has(hay, needle) {
+    if (hay == 0 || needle == 0) { return 0; }
+    var i = 0;
+    while (load8(hay + i) != 0) {
+        var j = 0;
+        while (load8(needle + j) != 0 && load8(hay + i + j) == load8(needle + j)) {
+            j = j + 1;
+        }
+        if (load8(needle + j) == 0) { return 1; }
+        i = i + 1;
+    }
+    # An empty needle trivially matches; keep that consistent for i==0.
+    if (load8(needle) == 0) { return 1; }
+    return 0;
+}
+
 fn main() {
     alloc_init();
     fl_init();
@@ -42,6 +65,34 @@ fn main() {
     if (disp == 0) { return 4; }
 
     dispatcher_handle(disp, "echo", &h_echo);
+
+    # --- content.cyr, added to [lib.core] at 3.3.6 ---
+    #
+    # This is the surface core-profile consumers were hand-rolling with a
+    # raw str_builder before it shipped here. The guard is deliberately
+    # stronger than "did it link": it checks the emitted BYTES, because the
+    # whole reason content.cyr belongs in core is that consumers were
+    # re-implementing JSON escaping themselves. If escaping regresses, a
+    # link-only check would not notice.
+    var ct = content_text("hi");
+    if (ct == 0) { return 5; }
+
+    # A quote and a backslash must come back escaped, not raw.
+    var esc = content_text_response("a\"b\\c");
+    if (esc == 0) { return 6; }
+    if (_smoke_has(esc, "a\\\"b\\\\c") == 0) { return 7; }
+
+    # The error variant carries the isError discriminator; the success
+    # variant deliberately omits the field entirely rather than emitting
+    # "isError":false, so assert the ABSENCE too — a regression that
+    # started emitting it would still contain "{\"content\":[".
+    var blocks = vec_new();
+    vec_push(blocks, content_text("x"));
+    var ok_arr = content_array(blocks);
+    if (_smoke_has(ok_arr, "{\"content\":[") == 0) { return 8; }
+    if (_smoke_has(ok_arr, "isError") == 1) { return 9; }
+    var err_arr = content_array_error(blocks);
+    if (_smoke_has(err_arr, "\"isError\":true") == 0) { return 10; }
 
     # Inline exit to avoid stdlib finalisers (libro / majra are
     # auto-injected by cyrius.cyml [deps] even though the core bundle

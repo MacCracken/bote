@@ -1,12 +1,12 @@
 # Bote Roadmap
 
-> **Current**: `3.3.5` (cyrius 6.5.35, libro 2.8.12, majra 2.7.0; sigil 3.12.9 / sakshi 2.4.11 / patra 1.13.10 arrive via the toolchain fold).
+> **Current**: `3.3.6` (cyrius 6.5.35, libro 2.8.12, majra 2.7.0; sigil 3.12.9 / sakshi 2.4.11 / patra 1.13.10 arrive via the toolchain fold).
 > 14 active test files, **883 unit assertions** + 1 drift-guard
 > smoke — green on **x86_64**; aarch64 cross-build gated in CI, runtime
 > sweep partial under qemu (no `getrandom` passthrough) — **14 criterion benchmarks**,
 > **dual** consumer bundles
 > (`dist/bote.cyr` full, 30 modules + `dist/bote-core.cyr` opt-in core via
-> `[lib.core]` profile, 11 modules), per-transport binary trio
+> `[lib.core]` profile, 12 modules), per-transport binary trio
 > (`bote` / `bote-streamable` / `bote-ws` — retained from the
 > 5.10.x cap workaround; reconsolidation unblocked on 6.1.x), CI capacity +
 > dual dist-freshness + **aarch64 portability** gates, full MCP capability
@@ -147,17 +147,44 @@ bote-side threading task, not a cyrius gate — needed because the
 single-threaded sandhi accept loop would otherwise deadlock (a held
 GET starves the POSTs that feed it).
 
-### Blocked on cyrius / external
+### Blocked on cyrius / external — ⚠ re-derived at 3.3.6; **six of seven had expired**
 
-| Item | Waiting on |
-|---|---|
-| **`$/cancelRequest` mid-stream handling** | Real-time (held-open) streaming dispatch first — itself a bote-side threading task, not a cyrius gate (see the notifications note above). |
-| **Slowloris recv timeout** (audit H5) | `sock_set_recv_timeout` helper in stdlib `lib/net.cyr`. |
-| **WebSocket `Sec-WebSocket-Key` length validation** (audit M4) | stdlib `lib/ws_server.cyr` fix. |
-| **WebSocket arena-per-frame allocator** | stdlib `fl_free` support for long-lived connections. |
-| **WS subprotocol negotiation** (`Sec-WebSocket-Protocol`) | Header is read; enforcement needs a registry design. |
-| **WS per-message deflate** (RFC 7692) | LZ77 + Huffman in stdlib; likely via a future `lib/dynlib.cyr` zlib binding. |
-| **DNS resolution for hostname SSRF** | cyrius `getaddrinfo` stub. Production callers pair with a network-policy egress block. |
+This table was audited at 3.3.6, item by item, against the live pinned
+stdlib rather than against its own prose. **Only one row was still true.**
+Every "waiting on" premise below was either satisfied upstream months ago,
+or was never filed with anyone in the first place.
+
+That is the same class of rot the JWT RS256 entry documented at 3.2.0 —
+a blocker whose premise expires silently, because nothing re-checks it.
+⚠ **A contributing mechanical cause is upstream and worth knowing:** all
+four of bote's filings in `cyrius/docs/development/issues/archived/` still
+read `**Status:** open.` in their bodies. Closure is recorded only by
+directory placement and cyrius's CHANGELOG — so re-checking a premise by
+opening the issue file, the obvious move, re-confirms a stale blocker.
+
+| Item | Filed? | Status at 3.3.6 |
+|---|---|---|
+| **`$/cancelRequest` mid-stream handling** | n/a | 🟢 **Still accurate.** Gated on real-time held-open streaming dispatch — a bote-side threading task, not a cyrius gate. The primitives (`chan_*`, `cancel_token_*`, `thread_local_*`, `arena_*`) all exist. The only honest row in this table. |
+| **Slowloris recv timeout** (audit H5) | ✅ cyrius `archived/2026-05-10-bote-net-stdlib-recv-timeout-and-getaddrinfo.md` | ✅ **Shipped AND already in force.** `sock_set_recv_timeout` (`lib/net.cyr:239`) landed in cyrius 5.11.13. bote owns no HTTP accept loop — `transport_http` / `transport_streamable` / `transport_ws` / `bridge` all delegate to `sandhi_server_run`, which applies a **30 s `SO_RCVTIMEO` to every accepted connection by default** (`SANDHI_SERVER_DEFAULT_IDLE_MS = 30000`, `lib/sandhi.cyr:13075`). H5 has been mitigated in running code the whole time. |
+| **WS `Sec-WebSocket-Key` length validation** (audit M4) | ✅ cyrius `archived/2026-05-10-bote-ws-server-handshake-key-validation.md` | ✅ **Fixed** in cyrius 5.11.16. `lib/ws_server.cyr:97-98` — `var klen = strlen(key); if (klen != 24) { return 0; }`, and the guard precedes the `alloc(concat_len)` it protects. |
+| **WS arena-per-frame allocator** | ✅ cyrius `archived/2026-05-10-bote-fl-free-for-arena-reuse.md` | ✅ **Unblocked.** `fl_free` (`lib/freelist.cyr:451`) predated the filing; the primitive actually needed was `arena_reset` (`lib/alloc.cyr:493`). ⚠ But only genuinely usable since **6.5.9** — the fixed-capacity arena returned 0 on exhaustion and segfaulted downstream (upstream `archived/2026-08-06-arena-is-fixed-capacity…`). Use `arena_new_growable` (`lib/alloc.cyr:391`). Now a **bote-side task**. |
+| **WS subprotocol negotiation** (`Sec-WebSocket-Protocol`) | ❌ **never filed** | ⚠ **The premise was false.** "Header is read" — it is not: zero occurrences of `Sec-WebSocket-Protocol` in `src/` or `lib/ws_server.cyr`. `ws_server_handshake` reads only Upgrade / Connection / Version / Key, and the 101 response emits only Upgrade / Connection / Accept. ⛔ Genuinely blocked, but on something never asked for: the exported `ws_server` surface has **no handshake hook and no response-header injection**, so a consumer cannot add one. Needs an upstream ask. |
+| **WS per-message deflate** (RFC 7692) | ❌ **never filed** | ✅ **Unblocked.** "LZ77 + Huffman in stdlib; likely via a future zlib binding" — no binding needed: **sankoch** (`lib/sankoch.cyr`, 2.7.8) ships a native DEFLATE with 16 `deflate_*` entry points (`deflate_compress`, `deflate_decompress`, streaming `deflate_enc_*` / `deflate_dec_*`, and `FORMAT_DEFLATE`). Not yet declared in bote's `[deps] stdlib`. ⚠ Still gated in practice by the row above — negotiating `permessage-deflate` needs the same `Sec-WebSocket-Extensions` handshake seam that does not exist. |
+| **DNS resolution for hostname SSRF** | 🟡 filed as Part B of the net issue, then **deferred and the forward-pin left no trace** | ⚠ **Partly unblocked, and the ask was wrong.** `getaddrinfo` never shipped, but sandhi carries a native RFC 1035 resolver — `sandhi_resolve_ipv4` (`lib/sandhi.cyr:4066`) / `sandhi_resolve_ipv6` (`:4022`) — written *because* `fdlopen_getaddrinfo` was blocked. ⛔ Re-filing `getaddrinfo_hosts` would file the **wrong thing**: sandhi's client resolves internally with no hook, so resolve-then-fetch means two resolutions with an attacker-controlled gap — a real DNS-rebinding window. The correct upstream ask is **a sandhi client that accepts a pre-resolved address, or a resolve hook**. Nothing tracks this anywhere today. |
+
+**Net: two things genuinely need filing upstream** — the `ws_server`
+handshake/response-header seam (blocks both subprotocol negotiation and
+per-message deflate), and a sandhi client resolve hook (blocks SSRF
+hostname guarding without a rebinding window). Everything else is now
+bote-side work or already done.
+
+### Found while auditing the above — new, not previously tracked
+
+| Item | Severity | Notes |
+|---|---|---|
+| **WS connections may be dropped after 30 s idle** | ⚠ Needs runtime confirmation | Established by inspection, **not yet reproduced against a live client.** bote inherits sandhi's 30 s `SO_RCVTIMEO` (an HTTP-shaped default) onto the WebSocket socket, and it follows `cfd` into the long-lived frame loop: `src/transport_ws.cyr:148` loops on `ws_server_recv`, while `ws_server_recv_frame` (`lib/ws_server.cyr:137-139`) maps *any* `sock_recv` error — including EAGAIN from that timeout — to `0 - 1`, which the loop treats as close. bote only *answers* PINGs, never initiates one, so nothing keeps the socket warm. Fix direction: `sandhi_server_run_opts` with an explicit `sandhi_server_options_new()` idle value for the WS transport. |
+| **`transport_unix` accept loop has no deadline** | Low (AF_UNIX, local-only) | The one accept loop bote does own. Its own comment at `src/transport_unix.cyr:108` says so: the listen fd is never made non-blocking and carries no `SO_RCVTIMEO`. |
+| **No send-side timeout on any path** | Low | `sandhi_server_run_opts` applies only `SO_RCVTIMEO`; `sock_set_send_timeout` (`lib/net.cyr:270`) is never reached, so a stalled *send* is unguarded — the case that primitive's own docstring warns about. |
 
 ### JWT — ✅ closed at 3.2.0 (two of three); RS256 remains an open decision
 
@@ -196,7 +223,7 @@ Three findings; the two with a consequence are fixed.
 | Item | Notes |
 |---|---|
 | **v1.2.1 libro-growth heisenbug** | Heap-layout sensitivity when the chain grows while libro+majra+bote are all loaded. Does not affect 1.6.0+ `libro_tools` (read-only). Isolated probes prove the adapter is correct. |
-| **Per-thread request buffers** | cyrius-side; affects future threaded dispatch. |
+| **Per-thread request buffers** | ⚠ **Not cyrius-side** — corrected at 3.3.6. `thread_local_alloc` + the arena family all shipped; nothing upstream tracks this. Bote-side, gated on threaded dispatch. |
 
 ---
 
@@ -248,8 +275,8 @@ Status against current cyrius (6.4.66):
 | `lib/http_server.cyr` folded into `lib/sandhi.cyr` (5.10.x) | ✅ Bridged in 2.6.0 via `src/_sandhi_compat.cyr` shim; retired in 2.6.1 |
 | `lib/tls.cyr` required by sandhi for `TLS_EARLY_DATA_ACCEPTED` | ✅ Added to `[deps] stdlib` in 2.6.0 |
 | `secret` is a storage-class keyword in 5.10.x | ✅ jwt.cyr parameter rename in 2.6.0 |
-| Per-thread request buffers (process-global today) | 🟡 Tracked upstream; affects future threaded dispatch |
-| Bump allocator without `fl_free` for general use | 🟡 Tracked; affects WS arena work |
+| Per-thread request buffers (process-global today) | ✅ **Unblocked at 3.3.6** — `thread_local_alloc` (`lib/thread_local.cyr:148`) + `arena_new`/`_alloc`/`_reset`/`_free` (`lib/alloc.cyr:370/447/493/540`) all exist, and `thread_local` is already in `[deps] stdlib`. ⚠ "Tracked upstream" was **false** — nothing upstream tracks it. Now a bote-side task, gated on threaded dispatch. |
+| Bump allocator without `fl_free` for general use | ✅ **Unblocked** — `fl_free` at `lib/freelist.cyr:451` (shipped cyrius 1.11.0, a month *before* the issue was filed). Use `arena_new_growable` for the WS work; the fixed-capacity arena crashed on exhaustion until 6.5.9. |
 | fn_table / identifier-buffer headroom at 88-89% with full integration | ✅ Relieved by the 6.1.x cap raise (2.7.3); 59% / 61% at 3.1.2 under the 2.6.4 CI capacity gate |
 
 No current open bugs. Future reports land under `docs/bugs/` during
