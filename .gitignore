@@ -25,6 +25,11 @@ cyrius-[0-9]*.[0-9]*.[0-9]*/
 Thumbs.db
 *.pdb
 core
+# qemu-user writes a full core dump next to the cwd when an aarch64
+# test SIGSEGVs (bote_pkce under qemu does — no getrandom passthrough).
+# ~265 MB each, and the bare `core` rule above does not match them.
+*.core
+qemu_test_bin_*
 core.*
 lcov.info
 tarpaulin-report.html

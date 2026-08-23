@@ -18,6 +18,126 @@ have per release.
 
 _(empty)_
 
+## [3.3.7] — 2026-08-23 — a healthy WebSocket client was being dropped after 30 seconds
+
+**887** assertions green across 14 suites, 0 failed (883 → 887).
+
+### Fixed — WebSocket connections dropped at 30 s idle, with no close frame
+
+bote does not own the accept loop its HTTP-family transports run on:
+`sandhi_server_run` sets a **30 s `SO_RCVTIMEO`** on every accepted connection
+as a slowloris guard. That is exactly right for HTTP — and it demonstrably
+works: an unterminated `POST` to bote's HTTP transport is dropped at **30.3 s**,
+measured.
+
+It is wrong once the connection has been **upgraded**. A WebSocket is
+long-lived and legitimately idle between messages, but the deadline follows
+`cfd` into the frame loop, where `ws_server_recv_frame` maps *any* `sock_recv`
+error — EAGAIN from that timeout included — to `-1`, which `ws_server_recv`
+reports as "peer closed". bote only *answers* PINGs and never initiates one, so
+nothing keeps the socket warm. A quiet but perfectly healthy client was
+disconnected at 30 s, and not even told: no close frame.
+
+`_bote_ws_handler` now replaces the inherited deadline immediately after a
+successful handshake. The upgrade request itself still runs under sandhi's
+guard, so slowloris protection on the HTTP phase is unchanged.
+
+⭐ **This defect was found by auditing a *documentation* row.** It surfaced
+while re-deriving the "Blocked on cyrius / external" table for 3.3.6 — the
+slowloris entry claimed bote was still waiting on `sock_set_recv_timeout`. It
+was not; the primitive had shipped and was already in force. Chasing *why* it
+was in force is what exposed the WebSocket side effect.
+
+### Added — `ws_config_with_idle_ms` / `ws_config_idle_ms`
+
+The frame-loop receive deadline is now explicit and configurable, defaulting to
+**0 = no deadline** (correct for WebSocket). An operator who wants idle peers
+reaped can set one.
+
+⚠ `WsConfig` grows **64 → 72 bytes**. The field is **APPENDED**, never
+inserted, so every existing offset is unchanged and a reader at the old offsets
+stays correct. That is the rule bote codified at 3.3.4 after libro 2.8.11
+PREPENDED a field to `struct error` and silently broke every raw-offset read of
+it. A test asserts the append did not disturb its neighbours.
+
+⚠ sandhi's server is single-threaded, so a connected peer occupies the server
+for as long as it is connected. A deadline bounds how long an *idle* peer can
+do that; it does not make the server concurrent.
+
+### ⚠ How this was verified, and how it was nearly missed
+
+Reproduced end to end against a real client, not inferred:
+`scripts/ws-idle-probe.py` — 3 s idle survives, 33 s got EOF before the fix,
+33 s survives after.
+
+⛔ **The first probe "disproved" the bug, and the probe was wrong.** It read
+`recv(4096)` once after the pre-idle request and got 4 of 138 bytes. Its
+post-idle read then returned the ~134 **stale buffered bytes** still sitting in
+the local socket buffer, so a dropped connection looked alive. Two runs (32 s
+and 65 s) reported ALIVE against a server that was in fact closing the
+connection. The fix was only found because the mechanism had been traced
+through the source first and the "it doesn't reproduce" result was treated as
+suspect rather than conclusive.
+
+The probe is committed with that hazard documented at the top, because the
+drain is load-bearing: **any rewrite that does not drain to a timeout before
+idling will pass while the bug is present.** The `.tcyr` assertions pin the
+*contract* (default 0, setter works, append did not clobber) — they cannot
+observe a wall-clock socket effect, and say so at the call site.
+
+### Fixed — `release.yml` never gated or shipped `dist/bote-core.cyr`
+
+`ci.yml` has gated both bundles since 2.7.2, but the release workflow
+regenerated, freshness-checked, archived and attached only `dist/bote.cyr`. A
+core-profile consumer (t-ron's SecurityGate, nein's `mcp` module) could be
+handed a tag whose core bundle was never verified and was not attached to the
+release at all. Both workflows now cover the same set, and
+`bote-<tag>-core.cyr` is a release asset with a checksum.
+
+### Changed — staleness sweep across docs, comments and CI
+
+A three-lens sweep with adversarial verification. Corrected, each verified
+against the live tree:
+
+- `cyrius.cyml` and `tests/bote_core_only_smoke.tcyr` still described the core
+  profile as **11** and **9** modules; it is 12.
+- Three transports claimed they were built on `lib/http_server.cyr`, which was
+  folded into `lib/sandhi.cyr` at 5.10.x.
+- `src/jsonx.cyr`, `src/registry.cyr` (×2) and `src/jwt.cyr` cited `lib/json.cyr`
+  and `lib/base64.cyr`, both subsumed by `lib/bayan.cyr` at 6.1.x.
+- The aarch64 denylist comment in `ci.yml` said the syscall peers define 95 and
+  88 constants; live counts are **96** and **91**. ⚠ The `17` x86-only figure
+  and the regex it feeds were re-derived and are **correct** — untouched.
+- `src/sandbox.cyr` and `README.md` carried a stale kavach version and a stale
+  `bote_libro_tools` assertion count (22 → 38).
+
+⭐ **Four "stale" findings were REFUTED by the verification pass and
+deliberately not applied** — applying them would have damaged correct
+documents. `README.md`'s `CancellationToken` is a *type* name still used in
+`src/stream.cyr`; 3.3.5 renamed functions, not the documented type.
+`CLAUDE.md`'s auto-inject rule is correctly stated (its conditional is "when
+only **one** module needs it" — `ws_server` is that case). `CLAUDE.md`'s
+`fn_table 5585` sits under an explicit "At 3.3.4" label and is right for that
+release. And a `cyrius.cyml` block flagged as a stale figure is a preserved
+diagnostic transcript — rewriting it would falsify a record.
+
+### Known, not fixed
+
+⚠ **`src/sandbox.cyr` ships in neither bundle.** It is absent from `[lib]` and
+`[lib.core]` and no `src/` file includes it, yet its own header tells consumers
+to wire a backend into it — they cannot reach it. Same orphan class as
+`jwt.cyr` / `pkce.cyr` before 3.2.0. ⚠ CI cannot see this: the
+manifest-completeness gate only walks `src/main.cyr` against `[lib]`, so a
+module included by no entry point is invisible by construction. Both need
+fixing together, and adding a module to a published bundle is not a patch-sized
+change.
+
+### Performance
+
+No change expected or claimed. Benchmarks re-run on a quiet box (load 0.50) and
+land within noise. Capacity unchanged: `fn_table` **5586 / 32768** (17%),
+`identifiers` **180563 / 524288** (34%).
+
 ## [3.3.6] — 2026-08-23 — content blocks reach the core profile; six of seven "external blockers" had already expired
 
 **883** assertions green across 14 suites, 0 failed, plus a materially

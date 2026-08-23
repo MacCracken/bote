@@ -2,7 +2,8 @@
 # Mirrors rust-old/src/transport/streamable.rs.
 #
 # Single endpoint serves both POST (JSON-RPC) and GET (SSE).
-# Built on stdlib lib/http_server.cyr (4.5.0+) chunked primitives.
+# Built on stdlib lib/sandhi.cyr chunked primitives (the 5.10.x fold of
+# the old lib/http_server.cyr).
 #
 # What's implemented in v1.4.0:
 #   - POST <endpoint>  → JSON-RPC dispatch (identical to transport_http)

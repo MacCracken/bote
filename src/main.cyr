@@ -11,7 +11,7 @@
 #     sites now use the direct sandhi_server_* names from lib/sandhi.cyr
 #   - 2.6.2: src/libro_tools.cyr ported to libro 2.6.x (raw struct
 #     offsets for the retired entry_*/error_*/merkle_* getters);
-#     tests/bote_libro_tools.tcyr (22 assertions) re-enabled. At this
+#     tests/bote_libro_tools.tcyr (38 assertions as of 3.3.4) re-enabled. At this
 #     point libro_tools was still held out of main.cyr by default —
 #     an opt-in module, kept out for fn_table headroom (89% util).
 #   - 2.7.5: libro_tools folded back into the default binary and the

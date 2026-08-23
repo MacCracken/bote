@@ -4,7 +4,7 @@
 # CompiledSchema integration is deferred until src/schema.cyr lands.
 # For now, validate_params performs:
 #   1. "params is JSON object" check (leading non-ws byte == '{')
-#   2. Required-field-present check via lib/json.cyr (flat parse)
+#   2. Required-field-present check via lib/bayan.cyr's json_parse (flat)
 
 include "lib/hashmap.cyr"
 include "lib/bayan.cyr"
@@ -327,7 +327,7 @@ fn registry_validate_params(r, name, params_cstr) {
         return 0;
     }
 
-    # 3. Fallback: required-field-present check via lib/json.cyr.
+    # 3. Fallback: required-field-present check via lib/bayan.cyr's json_parse.
     var schema = tool_def_input_schema(t);
     var required = schema_required(schema);
     if (required == 0) { return 0; }

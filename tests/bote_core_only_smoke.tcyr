@@ -1,6 +1,6 @@
 # bote_core_only_smoke.tcyr — drift guard for the opt-in core bundle.
 #
-# Includes ONLY dist/bote-core.cyr (the 9-module transport-free profile)
+# Includes ONLY dist/bote-core.cyr (the 12-module transport-free profile)
 # plus the minimal stdlib auto-injected by cyrius. If a future bote
 # change wires a core-module symbol against a transport-module helper,
 # the core bundle silently regresses and consumers that adopted the
@@ -9,7 +9,7 @@
 # Run: cyrius test tests/bote_core_only_smoke.tcyr
 #
 # 2.7.2: lands with the opt-in profile. See
-# docs/development/issues/2026-05-10-opt-in-transport-profile.md.
+# docs/development/issues/archive/2026-05-10-opt-in-transport-profile.md.
 
 include "dist/bote-core.cyr"
 

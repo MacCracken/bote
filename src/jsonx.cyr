@@ -1,6 +1,7 @@
 # bote::jsonx — nested-aware JSON value extractor
 #
-# Why: lib/json.cyr is flat-only — it truncates on nested objects/arrays.
+# Why: bayan's `json_parse` (lib/bayan.cyr, formerly lib/json.cyr) is
+# flat-only — it truncates on nested objects/arrays.
 # For dispatch we need to pull "name", "arguments", "version" out of a
 # tools/call params object whose "arguments" is itself an object.
 #

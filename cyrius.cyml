@@ -28,7 +28,7 @@ output = "build/bote"
 # audit_libro, it depends on a live libro chain, which the
 # transport-free core profile deliberately excludes.
 #   cyrius distlib       → dist/bote.cyr      (default [lib], full bundle — 30 modules)
-#   cyrius distlib core  → dist/bote-core.cyr ([lib.core], 11 transport-free modules)
+#   cyrius distlib core  → dist/bote-core.cyr ([lib.core], 12 transport-free modules)
 [lib]
 modules = [
     "src/error.cyr",

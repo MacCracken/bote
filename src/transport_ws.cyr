@@ -1,6 +1,7 @@
 # bote::transport::ws — MCP over WebSocket (RFC 6455)
 #
-# Built on stdlib lib/http_server.cyr (HTTP routing, 4.5.0+) and
+# Built on stdlib lib/sandhi.cyr (HTTP routing; the 5.10.x fold of the
+# old lib/http_server.cyr) and
 # lib/ws_server.cyr (WS upgrade + frame I/O, 4.5.1+).
 #
 # ws_server is pulled out of [deps] stdlib auto-inject so other test
@@ -29,7 +30,7 @@ include "lib/ws_server.cyr"
 # streaming dispatch lands (v1.6+); the WS socket itself is the session.
 
 # ================================================================
-# WsConfig (64 bytes):
+# WsConfig (72 bytes — was 64 before 3.3.7):
 #   +0  endpoint_path     cstr (e.g. "/mcp")
 #   +8  bind_addr         i64 (network-order IPv4)
 #   +16 port              i64
@@ -38,6 +39,7 @@ include "lib/ws_server.cyr"
 #   +40 dispatcher        Dispatcher ptr (set by transport_ws_run)
 #   +48 bearer_validator  fn ptr (token, ctx) → claims | 0, or 0 to disable
 #   +56 bearer_ctx        i64 ctx passed verbatim to validator
+#   +64 idle_ms           frame-loop receive deadline, 0 = none (3.3.7)
 #
 # Bearer auth applies on the upgrade HTTP request only, not per-frame —
 # WS has a single Upgrade and the connection's identity is fixed at
@@ -45,7 +47,7 @@ include "lib/ws_server.cyr"
 # ================================================================
 
 fn ws_config_new(path, addr, port) {
-    var c = alloc(64);
+    var c = alloc(72);
     store64(c, path);
     store64(c + 8, addr);
     store64(c + 16, port);
@@ -54,6 +56,16 @@ fn ws_config_new(path, addr, port) {
     store64(c + 40, 0);
     store64(c + 48, 0);
     store64(c + 56, 0);
+    # +64 idle_ms — APPENDED at 3.3.7 (64 -> 72 bytes). Appended, never
+    # inserted: every existing offset above is unchanged, so a reader of
+    # this struct at the old offsets stays correct. That is the rule bote
+    # codified after libro 2.8.11 PREPENDED a field to `struct error` and
+    # silently broke every raw-offset read of it (see CHANGELOG 3.3.4).
+    #
+    # 0 = no receive deadline, and that is the DEFAULT — see
+    # _bote_ws_handler for why an inherited HTTP-shaped deadline is wrong
+    # for a long-lived frame loop.
+    store64(c + 64, 0);
     return c;
 }
 
@@ -73,6 +85,19 @@ fn ws_config_require_protocol(c) { return load64(c + 32); }
 fn ws_config_dispatcher(c)       { return load64(c + 40); }
 fn ws_config_bearer_validator(c) { return load64(c + 48); }
 fn ws_config_bearer_ctx(c)       { return load64(c + 56); }
+
+# Receive deadline for the established WebSocket frame loop, in
+# milliseconds. 0 (the default) means no deadline.
+#
+# Set this only if you want idle connections reaped. It does NOT affect
+# the HTTP upgrade handshake, which keeps sandhi's own slowloris guard —
+# see _bote_ws_handler.
+#
+# ⚠ sandhi's server is single-threaded, so any connected peer occupies
+# the server for as long as it is connected. A deadline here bounds how
+# long an idle peer can do that; it does not make the server concurrent.
+fn ws_config_with_idle_ms(c, ms)  { store64(c + 64, ms); return c; }
+fn ws_config_idle_ms(c)           { return load64(c + 64); }
 
 # ================================================================
 # Middleware — same shape as transport_http, run pre-upgrade
@@ -142,6 +167,36 @@ fn _bote_ws_handler(config, cfd, buf, n) {
         return 0;
     }
     var ws_claims = load64(&claims_slot);
+
+    # ⚠ 3.3.7 — REPLACE the inherited receive deadline before entering the
+    # frame loop. This is a bug fix, not a tuning knob.
+    #
+    # bote does not own this accept loop: `sandhi_server_run` sets
+    # SO_RCVTIMEO on every accepted connection as a slowloris guard, with a
+    # 30 s default (SANDHI_SERVER_DEFAULT_IDLE_MS). That is exactly right
+    # for HTTP, where a request is expected promptly — and measured working:
+    # an unterminated POST to the HTTP transport is dropped at 30.3 s.
+    #
+    # It is wrong once the connection has been upgraded. A WebSocket is
+    # long-lived and legitimately idle between messages, but the deadline
+    # follows `cfd` into the frame loop, where `ws_server_recv_frame` maps
+    # ANY sock_recv error — EAGAIN from this timeout included — to -1, and
+    # `ws_server_recv` turns that into "peer closed". bote only answers
+    # PINGs, it never initiates one, so nothing keeps the socket warm.
+    # Result before this fix: a healthy but quiet client was silently
+    # dropped after 30 s, with no close frame.
+    #
+    # Reproduced end to end, not inferred: 3 s idle survives, 33 s gets EOF.
+    # ⚠ The first probe that "disproved" this was itself broken — it drained
+    # only 4 bytes of the pre-idle response, so its post-idle read returned
+    # STALE BUFFERED BYTES and looked alive. Any regression test here must
+    # drain the socket fully before idling, or it will pass while broken.
+    #
+    # Default is 0 = no deadline, which is what a WebSocket wants. An
+    # operator who does want idle peers reaped sets ws_config_with_idle_ms.
+    var idle_ms = ws_config_idle_ms(config);
+    var idle_s = idle_ms / 1000;
+    sock_set_recv_timeout(cfd, idle_s, (idle_ms - idle_s * 1000) * 1000);
 
     # Each frame is one JSON-RPC message. Loop until peer closes or the
     # socket errors out (ws_server_recv returns 0).

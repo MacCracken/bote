@@ -217,7 +217,7 @@ cyrius test tests/bote_content.tcyr       # 24 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 26 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 113 — host registry + SSRF guard (IPv4 + IPv6)
 cyrius test tests/bote_jwt.tcyr           # 53 — JWT HS256 verify + exact alg + exp enforcement
-cyrius test tests/bote_libro_tools.tcyr   # 22 — libro_tools wrappers
+cyrius test tests/bote_libro_tools.tcyr   # 38 — libro_tools wrappers
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals

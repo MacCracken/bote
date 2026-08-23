@@ -246,8 +246,8 @@ jobs:
         #
         # Two gates, both cheap and both deterministic (no emulator):
         #
-        #   1. Denylist. lib/syscalls_x86_64_linux.cyr defines 95 SYS_*
-        #      constants, lib/syscalls_aarch64_linux.cyr defines 88, and
+        #   1. Denylist. lib/syscalls_x86_64_linux.cyr defines 96 SYS_*
+        #      constants, lib/syscalls_aarch64_linux.cyr defines 91, and
         #      exactly 17 exist only on x86_64 — aarch64 Linux uses the
         #      generic table, which carries only the *at()/*at2() forms.
         #      Referencing one is a hard `undefined variable` error, not a

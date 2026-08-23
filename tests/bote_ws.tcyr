@@ -71,6 +71,29 @@ fn main() {
     ws_config_with_require_protocol(wcfg, 1);
     assert_eq(ws_config_require_protocol(wcfg), 1, "wcfg require_protocol");
 
+    # --- idle_ms, appended at 3.3.7 ---
+    #
+    # Default MUST be 0 = "no receive deadline". This is the fix for the
+    # 30 s idle drop: sandhi sets a 30 s SO_RCVTIMEO on every accepted
+    # connection (right for HTTP), it followed cfd into the WebSocket frame
+    # loop, and ws_server_recv_frame maps the resulting EAGAIN to "peer
+    # closed" — so a healthy but quiet client was dropped at 30 s with no
+    # close frame. _bote_ws_handler now overwrites it from this field.
+    #
+    # ⚠ These assertions pin the CONTRACT, not the behaviour: the drop is a
+    # wall-clock effect and cannot be unit-tested in-process. The runtime
+    # proof is scripts/ws-idle-probe.py (3 s survives, 33 s got EOF before
+    # the fix, 33 s survives after). If you change the default here, re-run
+    # that probe — this assertion alone will not catch a regression.
+    assert_eq(ws_config_idle_ms(wcfg), 0, "wcfg idle_ms defaults to 0 (no deadline)");
+    ws_config_with_idle_ms(wcfg, 45000);
+    assert_eq(ws_config_idle_ms(wcfg), 45000, "wcfg idle_ms settable");
+    # The append must not disturb the fields below it — that is the whole
+    # reason it was appended rather than inserted (libro 2.8.11 lesson).
+    ws_config_with_idle_ms(wcfg, 0);
+    assert_eq(ws_config_require_protocol(wcfg), 1, "idle_ms append did not clobber require_protocol");
+    assert(streq(ws_config_path(wcfg), "/mcp") == 1, "idle_ms append did not clobber path");
+
     assert(&_bote_ws_handler != 0, "_bote_ws_handler fp");
     var wdisp = dispatcher_new(tool_registry_new());
     store64(wcfg + 40, wdisp);

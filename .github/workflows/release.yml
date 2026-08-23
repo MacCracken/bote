@@ -81,23 +81,39 @@ jobs:
           cyrius build src/main.cyr build/bote
           echo "bote: $(wc -c < build/bote) bytes"
 
-      - name: Regenerate dist bundle (consumer distribution artifact)
+      - name: Regenerate dist bundles (consumer distribution artifacts)
         # Downstream consumers (phylax / t-ron / sutra / jalwa / rasa /
         # mneme) pull `dist/bote.cyr` via `[deps.bote] modules =
-        # ["dist/bote.cyr"]`. A tagged release without dist/bote.cyr
-        # = broken `cyrius deps` for every consumer. Mirrors
-        # libro / majra release flow.
+        # ["dist/bote.cyr"]`. A tagged release without it = broken
+        # `cyrius deps` for every consumer. Mirrors libro / majra.
+        #
+        # ⚠ 3.3.7: BOTH bundles, not just the full one. ci.yml has gated
+        # dist/bote-core.cyr since 2.7.2, but this workflow regenerated,
+        # verified, archived and shipped only dist/bote.cyr — so a
+        # core-profile consumer (t-ron's SecurityGate, nein's mcp module)
+        # could be handed a tag whose core bundle was never checked and
+        # never attached to the release. Found in the 3.3.7 staleness
+        # sweep; the two workflows now gate the same set.
         run: |
           cyrius distlib || true
-          test -s dist/bote.cyr || { echo "FAIL: dist/bote.cyr not produced"; exit 1; }
-          echo "dist/bote.cyr: $(wc -l < dist/bote.cyr) lines, $(wc -c < dist/bote.cyr) bytes"
+          cyrius distlib core || true
+          test -s dist/bote.cyr      || { echo "FAIL: dist/bote.cyr not produced"; exit 1; }
+          test -s dist/bote-core.cyr || { echo "FAIL: dist/bote-core.cyr not produced"; exit 1; }
+          echo "dist/bote.cyr:      $(wc -l < dist/bote.cyr) lines, $(wc -c < dist/bote.cyr) bytes"
+          echo "dist/bote-core.cyr: $(wc -l < dist/bote-core.cyr) lines, $(wc -c < dist/bote-core.cyr) bytes"
 
-      - name: Verify dist bundle matches committed copy
+      - name: Verify dist bundles match committed copies
         run: |
+          fail=0
           if ! git diff --exit-code dist/bote.cyr; then
             echo "FAIL: dist/bote.cyr is stale. Regenerate via 'cyrius distlib' and commit before tagging."
-            exit 1
+            fail=1
           fi
+          if ! git diff --exit-code dist/bote-core.cyr; then
+            echo "FAIL: dist/bote-core.cyr is stale. Regenerate via 'cyrius distlib core' and commit before tagging."
+            fail=1
+          fi
+          exit $fail
 
       - name: Smoke test
         # bote's default entry is the stdio transport — it blocks
@@ -114,8 +130,9 @@ jobs:
           TAG="${GITHUB_REF_NAME#v}"
           git archive --format=tar.gz --prefix="bote-${TAG}/" -o "bote-${TAG}-src.tar.gz" HEAD
           cp build/bote     "bote-${TAG}-x86_64-linux"
-          cp dist/bote.cyr  "bote-${TAG}.cyr"
-          sha256sum bote-*.tar.gz "bote-${TAG}-x86_64-linux" "bote-${TAG}.cyr" 2>/dev/null > SHA256SUMS
+          cp dist/bote.cyr      "bote-${TAG}.cyr"
+          cp dist/bote-core.cyr "bote-${TAG}-core.cyr"
+          sha256sum bote-*.tar.gz "bote-${TAG}-x86_64-linux" "bote-${TAG}.cyr" "bote-${TAG}-core.cyr" 2>/dev/null > SHA256SUMS
 
       - name: Extract changelog
         run: |

@@ -1,7 +1,8 @@
 # bote::transport::http — HTTP/1.1 transport for JSON-RPC
 # Mirrors rust-old/src/transport/http.rs (sync, single-conn-at-a-time).
 #
-# Built on cyrius stdlib `lib/http_server.cyr` (4.5.0+) — request reading,
+# Built on cyrius stdlib `lib/sandhi.cyr` (the 5.10.x fold of the old
+# lib/http_server.cyr) — request reading,
 # parsing, and response builders all live there. This file just wires the
 # MCP middleware (origin / protocol-version / session) and routes
 # `POST <endpoint>` to codec_process_message.

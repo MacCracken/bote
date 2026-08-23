@@ -42,7 +42,8 @@
 # NOT validated: `nbf`, `iss`, `aud`, `sub`, `jti`. A consumer that
 # needs those must check them itself — say so, do not assume.
 
-# base64url decode — uses cyrius stdlib's `lib/base64.cyr` (4.8.1+).
+# base64url decode — uses cyrius stdlib's `lib/bayan.cyr` (which subsumed
+# the standalone lib/base64.cyr at 6.1.x).
 # Wrapper translates the stdlib's `{ptr,len}` 16-byte return-pair to
 # our older `(ptr, *out_len)` shape so existing call sites and tests
 # stay unchanged.
