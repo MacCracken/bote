@@ -18,6 +18,90 @@ have per release.
 
 _(empty)_
 
+## [3.3.5] — 2026-08-23 — `cancel_token_new` no longer collides with the stdlib's
+
+**883** assertions green across 14 suites, 0 failed. `src/` is now **entirely
+free of duplicate-fn warnings** — previously one.
+
+### Breaking — bote's cancellation-token family is `bote_`-prefixed
+
+| removed | replacement |
+|---|---|
+| `cancel_token_new()` | `bote_cancel_token_new()` |
+| `cancel_token_cancel(t)` | `bote_cancel_token_cancel(t)` |
+| `cancel_token_is_cancelled(t)` | `bote_cancel_token_is_cancelled(t)` |
+
+**Migration:** rename the call sites. Signatures, semantics and the 8-byte
+layout are unchanged — this is a pure rename, no behavioural difference.
+
+Only `cancel_token_new` actually collided. The other two are renamed anyway
+because a token minted by `bote_cancel_token_new` and cancelled by a bare
+`cancel_token_cancel` is an incoherent surface: half a namespace is worse than
+either whole.
+
+⚠ Consumers of **`dist/bote-core.cyr` are unaffected** — `src/stream.cyr` is
+not in the `[lib.core]` profile, so the core bundle never carried these
+symbols.
+
+### Why it mattered, and why it was not a live bug
+
+`src/stream.cyr`'s `cancel_token_new` collided with stdlib
+`lib/async.cyr:1058`'s. Cyrius has **one flat function namespace with "last
+definition wins"**, and the winner is decided by include order — which the
+*consumer* controls, not bote.
+
+In bote's own binaries `src/` is included after `lib/`, so bote's definition
+won and nothing ever misbehaved. But a consumer vendoring `dist/bote.cyr` and
+including `async.cyr` **after** it silently got async's implementation instead,
+with no error and no warning on their side. Carried as a known-benign
+diagnostic since 3.3.0 — the two bodies are semantically identical (an 8-byte
+heap flag initialised to 0), which is exactly why it survived: it was a latent
+trap, not a visible failure.
+
+⭐ **The collision was hiding a function.** `fn_table` goes 5585 → **5586**
+(+1) and `identifiers` 180531 → **180563**. Nothing was added — under "last
+definition wins" async's `cancel_token_new` was being *overwritten* and
+occupied no slot of its own. Both now coexist. That +1 is the most concrete
+evidence available that a definition really was being replaced rather than
+merely shadowed.
+
+### Fixed
+
+- The `warning:src/stream.cyr:11:1: duplicate fn 'cancel_token_new'` emitted on
+  every build since at least cyrius 6.4.34 is gone. `src/` now produces **zero**
+  duplicate-fn warnings, so any future one is signal rather than noise buried in
+  a known-warning baseline.
+
+### Not fixed, and deliberately so
+
+⚠ `duplicate fn '_sub_new'` remains. It is a collision **between two deps**
+(`lib/libro.cyr` and `lib/majra.cyr`), not one bote can resolve from here — the
+fix belongs upstream in whichever library is willing to prefix. The
+`lib/sigil-mldsa.cyr` vs `lib/sigil.cyr` duplicates likewise remain and are
+benign: both files are the same sigil version and the bodies are
+byte-identical.
+
+### Performance
+
+No change expected and none claimed — this release is a rename. Benchmarks were
+re-run on a quiet box (load 0.61) and land within noise of the 3.3.4 block; the
+small differences in `benches/history.log` are host variance, not a code
+effect. Binary sizes are unchanged at 2,971,160 / 2,935,688 / 2,935,848 B.
+
+Capacity: `fn_table` **5586 / 32768** (17%), `identifiers` **180563 / 524288**
+(34%), `var_table` **2716 / 8192**. Gate is 95%.
+
+### Provenance
+
+⚠ This work was completed once before, in a background session on branch
+`claude/eloquent-taussig-ee16ed`, and **lost**: the branch carried zero commits
+(it pointed at an ancestor of `main`) and all of its work sat uncommitted in a
+worktree that was then removed. Nothing was recoverable — no stash, no dangling
+commit. The only surviving trace was that session's build logs, which did
+confirm the approach worked (zero `cancel_token_new` warnings, build `OK`). Redone
+here from scratch. The lesson is the ordinary one: work that is not committed
+does not exist.
+
 ## [3.3.4] — 2026-08-22 — libro 2.8.12 moved `struct error`, and bote's tamper-report path segfaulted on it
 
 ### Changed — cyrius 6.5.31 → 6.5.35, libro 2.8.10 → 2.8.12, majra 2.6.6 → 2.7.0

@@ -960,10 +960,10 @@ fn main() {
     assert_eq(bote_err_tag(tv), BOTE_ERR_SCHEMA_VIOLATION, "type err -> SCHEMA_VIOLATION");
 
     # ---------------- stream: cancellation token ----------------
-    var tok = cancel_token_new();
-    assert_eq(cancel_token_is_cancelled(tok), 0, "fresh token not cancelled");
-    cancel_token_cancel(tok);
-    assert_eq(cancel_token_is_cancelled(tok), 1, "after cancel set");
+    var tok = bote_cancel_token_new();
+    assert_eq(bote_cancel_token_is_cancelled(tok), 0, "fresh token not cancelled");
+    bote_cancel_token_cancel(tok);
+    assert_eq(bote_cancel_token_is_cancelled(tok), 1, "after cancel set");
 
     # ---------------- stream: progress sender + updates ----------------
     var ps_send = progress_sender_new();

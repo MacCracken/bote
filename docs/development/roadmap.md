@@ -1,6 +1,6 @@
 # Bote Roadmap
 
-> **Current**: `3.3.4` (cyrius 6.5.35, libro 2.8.12, majra 2.7.0; sigil 3.12.9 / sakshi 2.4.11 / patra 1.13.10 arrive via the toolchain fold).
+> **Current**: `3.3.5` (cyrius 6.5.35, libro 2.8.12, majra 2.7.0; sigil 3.12.9 / sakshi 2.4.11 / patra 1.13.10 arrive via the toolchain fold).
 > 14 active test files, **883 unit assertions** + 1 drift-guard
 > smoke — green on **x86_64**; aarch64 cross-build gated in CI, runtime
 > sweep partial under qemu (no `getrandom` passthrough) — **14 criterion benchmarks**,
@@ -89,6 +89,8 @@ surfaced. See the **2.6.x modernization arc** section below.
 | **3.3.2** | **Toolchain 6.5.20 → 6.5.31 + closing the transitive patra downgrade that reached agnosai.** libro 2.8.5 declared `[deps.patra] 1.13.8` while the toolchain folded 1.13.9, and `cyrius deps` applies a declared dep's copy ON TOP of the `lib sync --full` snapshot on every resolve — so the stale tag rewrote `lib/patra.cyr` for everything downstream. `deps --verify` cannot catch it: the lock is regenerated *from* the downgraded file. |
 | **3.3.3** | **libro 2.8.10** — a `PatraStore` read from another thread no longer crashes. Carried for the **agnosai → bote → libro** chain rather than for bote, which does not read a PatraStore off-thread. |
 | **3.3.4** | **Toolchain 6.5.35 + libro 2.8.12 / majra 2.7.0, and a SIGSEGV on the tamper-report path.** libro 2.8.11 PREPENDED `magic` to `struct error` (48 → 56 B, every field +8); bote's raw-offset accessors read the old layout and handed `_json_emit_escaped` an integer error code as a pointer — so `libro_verify` crashed precisely when the audit chain HAD been tampered with. Unreachable from any test, because the suite verified an EMPTY chain. Now read through libro's `#derive(accessors)` getters, mutation-proven, and covered end to end (`bote_libro_tools` 22 → 38). Also repairs `_bote_server_version()`, which had reported 3.3.2 since 3.3.1. Ran the 6.5.35 regalloc codegen differential upstream reported as unobtainable: 867/867 assertions agree compiler-for-compiler. |
+
+| **3.3.5** | **`cancel_token_new` no longer collides with the stdlib's.** `src/stream.cyr`'s definition had shadowed `lib/async.cyr`'s since 3.3.0 — benign in bote's own binaries (include order favoured bote) but a silent swap for any consumer vendoring `dist/bote.cyr` alongside `async.cyr`. Family renamed `bote_cancel_token_*` (**breaking**, pure rename). `src/` is now warning-clean. `fn_table` +1, because the shadowed definition had occupied no slot. |
 
 See [CHANGELOG.md](../../CHANGELOG.md) for the full detail per release.
 

@@ -149,7 +149,7 @@ clients see them in `tools/list` immediately.
 | Spec Requirement | Module | Status |
 |---|---|---|
 | `ProgressUpdate` (progress / total / message) | `progress_update_*` | ✅ |
-| `CancellationToken` (clone-shared flag) | `cancel_token_*` | ✅ |
+| `CancellationToken` (clone-shared flag) | `bote_cancel_token_*` | ✅ |
 | `notifications/progress` JSON builder | `progress_notification` | ✅ |
 | Threaded streaming dispatch | — | ⏳ deferred — waits on cyrius `lib/thread.cyr` MPSC + `lib/async.cyr` cancellation |
 | `$/cancelRequest` mid-stream handling | — | ⏳ pairs with streaming dispatch |

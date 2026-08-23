@@ -233,7 +233,8 @@ cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dis
 cyrius bench tests/bote.bcyr
 ```
 
-Measured at 3.3.4 on a quiet box (load < 1.0), best-of-5 interleaved.
+Measured at 3.3.4 on a quiet box (load < 1.0), best-of-5 interleaved, and
+re-confirmed unchanged at 3.3.5.
 The full history, including the host conditions each block was taken
 under, is in [`benches/history.log`](benches/history.log).
 
