@@ -1,8 +1,9 @@
 # Bote Roadmap
 
-> **Current**: `3.2.1` (cyrius 6.5.3, libro 2.8.4, majra 2.5.3, sigil 3.12.1, sakshi 2.4.7).
-> 13 active test files, **858 unit assertions** + 1 drift-guard
-> smoke — green on **x86_64 and aarch64** — **14 criterion benchmarks**,
+> **Current**: `3.3.4` (cyrius 6.5.35, libro 2.8.12, majra 2.7.0; sigil 3.12.9 / sakshi 2.4.11 / patra 1.13.10 arrive via the toolchain fold).
+> 14 active test files, **883 unit assertions** + 1 drift-guard
+> smoke — green on **x86_64**; aarch64 cross-build gated in CI, runtime
+> sweep partial under qemu (no `getrandom` passthrough) — **14 criterion benchmarks**,
 > **dual** consumer bundles
 > (`dist/bote.cyr` full, 30 modules + `dist/bote-core.cyr` opt-in core via
 > `[lib.core]` profile, 11 modules), per-transport binary trio
@@ -15,7 +16,7 @@
 > 6 transports, handler-claims ABI plumbed end-to-end, **JWT HS256
 > (exact `alg` field read + enforced `exp`) + RFC 7636 PKCE — both now
 > shipping in `dist/bote.cyr`**, bearer + allowlist + JWT validators,
-> pluggable sandbox runner (kavach 3.9.3 compatible), typed MCP content
+> pluggable sandbox runner (kavach 3.12.2 compatible), typed MCP content
 > blocks with annotations, HostRegistry + IPv4/IPv6 SSRF guard.
 >
 > **Spec**: MCP 2025-11-25 | **Compliance**: [spec-compliance.md](../spec-compliance.md)
@@ -82,6 +83,12 @@ surfaced. See the **2.6.x modernization arc** section below.
 | **3.1.4** | **libro 2.8.2 (`LIBRO_ERR_*`) + pin/lock realign** — `[deps.libro]` `2.8.1 → 2.8.2`. libro 2.8.2 namespaces its own `LibroErr` enum `ERR_* → LIBRO_ERR_*` — the upstream reciprocal of 3.1.3's `BOTE_ERR_*`; the bare `ERR_IO`/`ERR_JSON` clash is now resolved at the source on both sides. Also realigns the `[deps.libro]` tag with the lockfile (3.1.3 shipped tag `2.8.1` while the lock already held 2.8.2's content hash via the local `path` override — a clean `git+tag` CI checkout would fail hash verification). libro 2.8.2's own deps (sigil 3.12.1 / patra 1.12.12) sit inside its dist; bote keeps sigil 3.12.0 and its already-1.12.12 patra. No bote source change beyond the version string. 786/786 assertions, 14 benchmarks flat, capacity flat 60% / 62% |
 | **3.2.0** | **Toolchain 6.5.3 + full dep refresh + aarch64 + JWT repair.** cyrius 6.4.66 → 6.5.3 (onto the 6.5.x line); libro 2.8.4 / majra 2.5.3 / sigil 3.12.1 / sakshi 2.4.7. Two source changes the 6.5.x line forced: `bayan_json_v_parse_str` → `_parse_buf` (removed from the stdlib at 6.5.1) and 17 wrong-arity test/bench call sites (6.5.1 escalated arity from warning to hard error — those tests had been running with an unbound parameter). **aarch64 unblocked**: three x86_64-only syscall constants removed (`SYS_OPEN` ×2 via `random_bytes`, plus `SYS_UNLINK` / `SYS_CHMOD` that the filing missed), 811 assertions green under `cyrius test --aarch64`, new CI denylist + cross-build gate. **JWT**: the `exp` check documented since 2.2.0 and never implemented now runs (after the HMAC, fail-closed on malformed claims, no leeway); the `alg` substring scan — defeated by `{"alg":"none","kid":"HS256-2024"}` — is an exact field read; `src/jwt.cyr` + `src/pkce.cyr` finally ship in `dist/bote.cyr` (28 → 30 modules), deliberately not in core. Both gates mutation-proven. Capacity 15% / 31% (`fn_table 4974/32768` — denominators moved at 6.4.75/76). Bump proven perf-neutral by a same-host A/B/C against the 6.4.66 toolchain |
 | **3.2.1** | **`sys_accept4` + accept-loop error policy.** Closes the item 3.2.0 left open. `SYS_ACCEPT` is defined in neither syscall peer — its only definition is `lib/net.cyr`'s bare `var SYS_ACCEPT = 43` (the x86 number), correct on aarch64 only via the backend's runtime renumber chain, in which 43 would otherwise be `statfs`. `sys_accept4` uses the per-arch `SYS_ACCEPT4` (288 / 242) and needs no table entry. `sock_accept()` was considered and rejected — its own branch issues the same bare 43. Fixing it surfaced a worse defect in the same six lines: the loop had **no error branch**, so any persistent accept error spun at 100% CPU forever. Replaced with a pure, unit-testable errno policy (retry / capped-backoff / fatal; unknown errnos back off rather than kill the listener). New `tests/bote_transport_unix.tcyr` — 47 assertions, the module's first coverage ever, including the previously-untested 107-byte sockaddr clamp. CI now bans the bare `syscall(SYS_*)` *form* in `src/`, which the 3.2.0 constant denylist could never have caught. 858 assertions green on both arches |
+
+| **3.3.0** | **libro 2.8.5 + the defensive `[deps.sakshi]` shim retired.** Both preconditions landed at once: cyrius 6.5.20 re-folds patra 1.13.0, and libro 2.8.5 moves its own `[deps.patra]` to it — terminating a stale-sakshi chain three levels down that was never bote's. |
+| **3.3.1** | **`[deps.sigil]` and `[deps.sakshi]` removed.** Both were registry-lag pins that had gone stale and were overlaying the toolchain fold. sigil's held bote at 3.12.1, behind the 3.12.5 PKCS#1 v1.5 and 3.12.6 RSA-PSS authentication bypasses — on bote's own TLS peer-authentication path. ⚠ Recorded the trap: `cyrius build` does an implicit resolve, so a vendored version must be verified AFTER a build, not after `cyrius deps`. |
+| **3.3.2** | **Toolchain 6.5.20 → 6.5.31 + closing the transitive patra downgrade that reached agnosai.** libro 2.8.5 declared `[deps.patra] 1.13.8` while the toolchain folded 1.13.9, and `cyrius deps` applies a declared dep's copy ON TOP of the `lib sync --full` snapshot on every resolve — so the stale tag rewrote `lib/patra.cyr` for everything downstream. `deps --verify` cannot catch it: the lock is regenerated *from* the downgraded file. |
+| **3.3.3** | **libro 2.8.10** — a `PatraStore` read from another thread no longer crashes. Carried for the **agnosai → bote → libro** chain rather than for bote, which does not read a PatraStore off-thread. |
+| **3.3.4** | **Toolchain 6.5.35 + libro 2.8.12 / majra 2.7.0, and a SIGSEGV on the tamper-report path.** libro 2.8.11 PREPENDED `magic` to `struct error` (48 → 56 B, every field +8); bote's raw-offset accessors read the old layout and handed `_json_emit_escaped` an integer error code as a pointer — so `libro_verify` crashed precisely when the audit chain HAD been tampered with. Unreachable from any test, because the suite verified an EMPTY chain. Now read through libro's `#derive(accessors)` getters, mutation-proven, and covered end to end (`bote_libro_tools` 22 → 38). Also repairs `_bote_server_version()`, which had reported 3.3.2 since 3.3.1. Ran the 6.5.35 regalloc codegen differential upstream reported as unobtainable: 867/867 assertions agree compiler-for-compiler. |
 
 See [CHANGELOG.md](../../CHANGELOG.md) for the full detail per release.
 

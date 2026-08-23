@@ -95,6 +95,88 @@ fn main() {
     var rr_kc = libro_tool_retention("{\"policy\":\"keep_count\",\"value\":10}", 0);
     assert(rr_kc != 0, "retention keep_count returns non-null");
 
+    # ---------------- struct error offsets (3.3.4 regression) ----------------
+    #
+    # These pin _lt_err_code / _lt_err_msg / _lt_err_index to libro's
+    # `struct error` layout. libro 2.8.11 PREPENDED `magic` and grew the
+    # record 48 -> 56 bytes, shifting every field +8; bote kept the old
+    # offsets through the 2.8.12 bump and read magic-as-code,
+    # code-as-msg and field_name-as-index. Because `msg` is handed to
+    # `_json_emit_escaped` (which does `load8(cstr + i)`), decoding a
+    # tampered chain dereferenced the small integer error CODE as a
+    # pointer — SIGSEGV, exit 139.
+    #
+    # Nothing caught it because every pre-existing assertion above runs
+    # the HAPPY path, and `libro_tool_verify` only touches `_lt_err_*`
+    # when `chain_verify` returns non-zero — i.e. only on a TAMPERED
+    # chain. Mutation check: revert any offset to its pre-2.8.11 value
+    # and the matching assertion below turns red.
+    var terr = error_integrity(7, str_from("aaa"), str_from("bbb"));
+    assert(libro_is_error(terr) == 1, "error_integrity carries the libro magic");
+    assert_eq(_lt_err_code(terr), LIBRO_ERR_INTEGRITY, "_lt_err_code reads code, not magic");
+    assert_eq(_lt_err_index(terr), 7, "_lt_err_index reads index, not field_name");
+    assert_streq(_lt_err_msg(terr), "integrity violation", "_lt_err_msg reads msg cstr, not code");
+
+    # A non-libro pointer must NOT be decoded. This is the guard that
+    # turns a future layout move into a defined failure rather than
+    # another silent dereference.
+    var notanerr = alloc(56);
+    store64(notanerr, 0);
+    assert_eq(libro_is_error(notanerr), 0, "libro_is_error rejects a foreign record");
+
+    # ---------------- libro_verify on a TAMPERED chain (end-to-end) ----------------
+    #
+    # The path that crashed. Build a chain, corrupt entry 0's `source`
+    # so its recomputed hash no longer matches the stored one, and
+    # decode the violation through the real handler.
+    var tchain = chain_new();
+    chain_append(tchain, SEV_INFO, str_from("bote"), str_from("tool.completed"), str_from("{}"));
+    chain_append(tchain, SEV_INFO, str_from("bote"), str_from("tool.failed"), str_from("{}"));
+    libro_tools_init(tchain);
+    assert_streq(libro_tool_verify("{}", 0), "{\"ok\":true}", "verify clean chain reports ok");
+
+    var e0 = vec_get(load64(tchain), 0);      # struct chain +0 = entries vec
+    store64(e0 + 32, str_from("tampered"));   # struct entry +32 = source
+    var vres = libro_tool_verify("{}", 0);
+    assert(vres != 0, "verify tampered chain returns a result (no SIGSEGV)");
+    assert(jsonx_get_raw(vres, "ok") != 0, "tampered verify emits an ok field");
+    assert_streq(jsonx_get_raw(vres, "ok"), "false", "tampered chain reports ok:false");
+    assert_streq(jsonx_get_str(vres, "message"), "integrity violation",
+      "tampered chain decodes libro's message, not a garbage pointer");
+
+    # ---------------- libro_proof on a POPULATED chain (3.3.4) ----------------
+    #
+    # Every pre-existing proof assertion above runs against an EMPTY
+    # chain, so `libro_tool_proof` always bailed at the range check and
+    # merkle_build / merkle_inclusion_proof / merkle_tree_root were never
+    # invoked by any test. That matters for this release specifically:
+    # libro 2.8.11/2.8.12 changed the Merkle construction (RFC 9162 leaf
+    # and internal-node domain tags, and an odd trailing node is now
+    # PROMOTED rather than paired with itself), so the emitted root
+    # differs from 3.3.3 for identical input. Exercise the real path so a
+    # future construction change cannot pass unnoticed.
+    var pchain = chain_new();
+    chain_append(pchain, SEV_INFO, str_from("bote"), str_from("a"), str_from("{}"));
+    chain_append(pchain, SEV_INFO, str_from("bote"), str_from("b"), str_from("{}"));
+    chain_append(pchain, SEV_INFO, str_from("bote"), str_from("c"), str_from("{}"));
+    libro_tools_init(pchain);
+
+    var pres = libro_tool_proof("{\"index\":1}", 0);
+    assert(pres != 0, "proof on populated chain returns a result");
+    assert_streq(jsonx_get_raw(pres, "ok"), "true", "proof on populated chain reports ok:true");
+    assert_streq(jsonx_get_raw(pres, "leaf_count"), "3", "proof reports the leaf count");
+    var proot = jsonx_get_str(pres, "root");
+    assert(proot != 0, "proof emits a root");
+    assert_eq(str_len(str_from(proot)), 64, "proof root is a 64-char sha256 hex digest");
+
+    # An odd leaf count is the case libro's promote-vs-duplicate change
+    # touches; index 2 is that trailing node.
+    var pres2 = libro_tool_proof("{\"index\":2}", 0);
+    assert_streq(jsonx_get_raw(pres2, "ok"), "true", "proof for the odd trailing leaf succeeds");
+
+    # Restore the shared chain the earlier assertions installed.
+    libro_tools_init(chain_new());
+
     # ---------------- Handler fn pointers are addressable ----------------
     assert(&libro_tool_query != 0, "query fp addressable");
     assert(&libro_tool_verify != 0, "verify fp addressable");

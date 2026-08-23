@@ -4,14 +4,14 @@
 > resources registries, dispatch, six transports, bearer auth + JWT
 > HS256 + RFC 7636 PKCE, libro audit tools, fs + web tools, typed
 > content blocks (with annotations), host registry with SSRF guard,
-> pluggable sandbox runner (kavach 3.0).
+> pluggable sandbox runner (kavach 3.12.2).
 >
 > **Name**: Bote (German) — messenger.
 >
 > **Lineage**: Originally a Rust crate. Ported to Cyrius via `cyrius port`
 > on 2026-04-13 (v1.0.0). The Rust archive was retired in v1.0.1; the last
 > Rust snapshot is at git tag `0.92.0`. This doc describes the live Cyrius
-> implementation (current: **3.1.4**, cyrius 6.4.66).
+> implementation (current: **3.3.4**, cyrius 6.5.35).
 
 ---
 
@@ -132,7 +132,7 @@ src/
 ├── auth.cyr                — Bearer-token middleware (RFC 6750)
 ├── jwt.cyr                 — JWT HS256 verifier (RFC 7519 / 7515)
 ├── pkce.cyr                — RFC 7636 PKCE helpers (S256)
-├── sandbox.cyr             — pluggable sandbox runner adapter (kavach 3.0)
+├── sandbox.cyr             — pluggable sandbox runner adapter (kavach 3.12.2)
 ├── content.cyr             — Typed MCP content blocks (+ annotations)
 ├── host.cyr                — HostRegistry + SSRF guard (IPv4 + IPv6)
 ├── libro_tools.cyr         — Five built-in MCP tools over a libro chain
@@ -154,22 +154,28 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
                               thread_local, sakshi, ct, keccak, random,
                               sigil, tls, sandhi; ws_server manually
                               included by transport_ws.cyr only)
-[deps.libro]   git = "MacCracken/libro"   tag = "2.8.1"   (+ patra 1.12.10 transitive)
-[deps.majra]   git = "MacCracken/majra"   tag = "2.5.1"
-[deps.sakshi]  git = "MacCracken/sakshi"  tag = "2.4.6"   (registry-lag pin)
-[deps.sigil]   git = "MacCracken/sigil"   tag = "3.12.0"  (registry-lag pin)
+[deps.libro]   git = "MacCracken/libro"   tag = "2.8.12"  (+ patra 1.13.10 transitive)
+[deps.majra]   git = "MacCracken/majra"   tag = "2.7.0"
+
+  Those are the ONLY two [deps.<name>] blocks. sigil 3.12.9, sakshi 2.4.11
+  and bayan 1.5.2 arrive via the cyrius stdlib fold, not a git pin — the
+  former [deps.sigil] / [deps.sakshi] registry-lag pins were removed at
+  3.3.1 (sigil's had gone stale and was holding bote behind two
+  authentication bypasses).
 
 tests/
-├── bote.tcyr                  — 415 core assertions
+├── bote.tcyr                  — 424 core assertions
 ├── bote_auth.tcyr             — 38 (bearer + allowlist + JWT + PKCE validators)
 ├── bote_content.tcyr          — 24 (content blocks + annotations)
 ├── bote_fs_tools.tcyr         — 26 (fs_tools)
 ├── bote_host.tcyr             — 113 (host registry + SSRF)
-├── bote_jwt.tcyr              — 28 (JWT HS256 verify)
-├── bote_libro_tools.tcyr      — 22 (libro_tools)
+├── bote_jwt.tcyr              — 53 (JWT HS256 verify)
+├── bote_libro_tools.tcyr      — 38 (libro_tools; incl. the tampered-chain
+│                                 error decode + populated-chain proof paths)
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
-├── bote_sandbox.tcyr          — 13 (kavach 3.0 runner adapter)
+├── bote_sandbox.tcyr          — 13 (kavach 3.12.2 runner adapter)
 ├── bote_streamable.tcyr       — 53 (streamable HTTP / SSE)
+├── bote_transport_unix.tcyr   — 47 (unix socket transport + accept policy)
 ├── bote_web_tools.tcyr        — 27 (web_tools)
 ├── bote_ws.tcyr               — 10 (WebSocket)
 ├── bote_core_only_smoke.tcyr  — drift guard (includes only dist/bote-core.cyr)
@@ -192,7 +198,7 @@ docs/
 └── audit/                     — audit reports
 ```
 
-The per-module test-file split (eleven per-module `tests/bote_*.tcyr`
+The per-module test-file split (twelve per-module `tests/bote_*.tcyr`
 files plus the core-only drift smoke) is a
 deliberate organization choice — it mirrors `src/` layout and makes
 per-module compile times tight. (It originated as a workaround for the
@@ -285,8 +291,10 @@ Middleware (when configured on `HttpConfig`):
 - **Content-Length clamp** (`clen = min(clen, n - bo)` so a lying header can't make memcpy read past the request buffer; v1.5.1 hardening)
 
 If a `SessionStore` is configured and the request is `initialize`, the
-response includes a fresh `MCP-Session-Id` header (32-hex random from
-`/dev/urandom`).
+response includes a fresh `MCP-Session-Id` header (32 hex chars from
+`random_bytes()`, i.e. 16 bytes of kernel entropy via `SYS_GETRANDOM`).
+If the kernel CSPRNG is unavailable bote refuses to mint a session ID
+rather than fall back to anything guessable.
 
 ### Unix domain socket
 Same line-oriented protocol as stdio, but over `AF_UNIX`. Socket file
@@ -347,9 +355,9 @@ change.
 
 | Artifact | Count | Where |
 |---|---|---|
-| Core unit tests | 415 | `tests/bote.tcyr` |
-| Module tests | 371 | `tests/bote_auth.tcyr` (38) + `bote_content.tcyr` (24) + `bote_fs_tools.tcyr` (26) + `bote_host.tcyr` (113) + `bote_jwt.tcyr` (28) + `bote_libro_tools.tcyr` (22) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_web_tools.tcyr` (27) + `bote_ws.tcyr` (10) |
-| **Total assertions** | **786** | plus the `bote_core_only_smoke.tcyr` drift guard |
+| Core unit tests | 424 | `tests/bote.tcyr` |
+| Module tests | 459 | `tests/bote_auth.tcyr` (38) + `bote_content.tcyr` (24) + `bote_fs_tools.tcyr` (26) + `bote_host.tcyr` (113) + `bote_jwt.tcyr` (53) + `bote_libro_tools.tcyr` (38) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (47) + `bote_web_tools.tcyr` (27) + `bote_ws.tcyr` (10) |
+| **Total assertions** | **883** | plus the `bote_core_only_smoke.tcyr` drift guard |
 | Benchmarks | 14 | `tests/bote.bcyr` |
 | Fuzz harnesses | 4 | `fuzz/*.fcyr` |
 

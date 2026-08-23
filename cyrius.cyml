@@ -1,11 +1,11 @@
 [package]
 name = "bote"
 version = "${file:VERSION}"
-description = "MCP core service in Cyrius — stable 2.x. JSON-RPC 2.0, six transports, bearer auth + JWT HS256 + RFC 7636 PKCE, libro audit tools, content blocks (with annotations), host registry + IPv4/IPv6 SSRF guard, pluggable sandbox runner (kavach 3.9.3 shape)"
+description = "MCP core service in Cyrius — stable 2.x. JSON-RPC 2.0, six transports, bearer auth + JWT HS256 + RFC 7636 PKCE, libro audit tools, content blocks (with annotations), host registry + IPv4/IPv6 SSRF guard, pluggable sandbox runner (kavach 3.12.2 shape)"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/bote"
 language = "cyrius"
-cyrius = "6.5.31"
+cyrius = "6.5.35"
 
 [build]
 entry = "src/main.cyr"
@@ -165,14 +165,29 @@ stdlib = [
 #
 # patra (lib/patra.cyr, the audit store) arrives via libro's own
 # `[deps.patra]` manifest block — NOT via `dist/libro.deps`, which
-# lists only the 22 stdlib leaves and contains no patra entry. The
+# lists only the 27 stdlib leaves and contains no patra entry. The
 # mechanism matters: a sidecar leaf and a nested manifest dep resolve
 # differently. (Corrected at 3.2.0; the comment claimed the sidecar.)
 #
-# 2.8.4 appends a 5th field to `struct chain` (`streaming`, 32 -> 40
-# bytes) for the new `chain_new_streaming()` write-through
-# constructor. Appended, so src/libro_tools.cyr's raw +0 offset read
-# is unaffected; bote still calls plain `chain_new()`.
+# STRUCT LAYOUT CONTRACT — and the counter-example that cost a release.
+#
+# 2.8.4 APPENDED a 5th field to `struct chain` (`streaming`, 32 -> 40
+# bytes) for the new `chain_new_streaming()` write-through constructor.
+# Appended, so src/libro_tools.cyr's raw +0 offset read was unaffected;
+# bote still calls plain `chain_new()`. Still true at 2.8.12.
+#
+# ⚠ 2.8.11 did the OPPOSITE and it broke bote silently: it PREPENDED
+# `magic` to `struct error` (fl_alloc(48) -> (56)), shifting every field
+# by +8. The raw accessors reading that struct then returned
+# magic-as-code, code-as-msg and field_name-as-index, and because `msg`
+# goes to a `load8(cstr + i)` escaper, decoding a TAMPERED chain
+# dereferenced an integer as a pointer -> SIGSEGV. Fixed at 3.3.4 by
+# moving to libro's `#derive(accessors)` getters.
+#
+# The rule: a field APPENDED at the end is safe for a raw-offset reader
+# to ignore. A field INSERTED AT THE FRONT moves everything, and a
+# raw-offset reader has no way to notice. Prefer a dep's derived
+# accessors wherever it exposes them.
 # 2.8.5 is what lets bote's defensive `[deps.sakshi]` go: it bumps libro's own
 # `[deps.patra]` 1.12.12 -> 1.13.0, terminating the stale-sakshi chain three
 # levels down. It also moves `[deps.sigil]` / `[deps.sigil_tpm]` 3.12.1 -> 3.12.7
@@ -183,7 +198,7 @@ stdlib = [
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
 path = "../libro"
-tag = "2.8.10"
+tag = "2.8.12"
 modules = ["dist/libro.cyr"]
 
 # majra pub/sub — same single-file dist bundle pattern. The default
@@ -193,7 +208,7 @@ modules = ["dist/libro.cyr"]
 [deps.majra]
 git = "https://github.com/MacCracken/majra"
 path = "../majra"
-tag = "2.6.6"
+tag = "2.7.0"
 modules = ["dist/majra.cyr"]
 
 # ── `[deps.sakshi]` DELETED at 3.3.1 — both of its preconditions landed ──

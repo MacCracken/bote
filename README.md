@@ -51,7 +51,7 @@ apps don't each reimplement the same protocol.
 | **Audit / events sinks** — fn-pointer + ctx adapters, libro + majra wired | ✅ |
 | **Streaming primitives** — `ProgressUpdate`, `CancellationToken`, progress notifications | data layer ✅ / threaded dispatch ⏳ |
 | **OAuth 2.1 substrate** — bearer (RFC 6750), JWT HS256 verifier, PKCE-S256 helpers | ✅ |
-| **Sandbox runner** — fn-pointer + ctx adapter (kavach 3.9.3 shape), noop default | ✅ |
+| **Sandbox runner** — fn-pointer + ctx adapter (kavach 3.12.2 shape), noop default | ✅ |
 
 ---
 
@@ -178,7 +178,7 @@ src/events_majra.cyr       MajraEvents adapter
 src/auth.cyr               Bearer-token middleware (RFC 6750)
 src/jwt.cyr                JWT HS256 verifier (RFC 7519)
 src/pkce.cyr               RFC 7636 PKCE-S256 helpers
-src/sandbox.cyr            Pluggable sandbox runner (kavach 3.9.3 adapter shape)
+src/sandbox.cyr            Pluggable sandbox runner (kavach 3.12.2 adapter shape)
 src/content.cyr            Typed MCP content blocks (text/image/audio/resource/blob)
 src/host.cyr               HostRegistry + SSRF guard (IPv4 + IPv6)
 src/libro_tools.cyr        Five built-in MCP tools over a libro chain
@@ -197,7 +197,7 @@ src/main_common.cyr        Shared binary setup (dispatcher + env bearer wiring)
 ```
 
 Dependencies rehydrate into `lib/` (gitignored) via `cyrius deps`.
-Cross-project deps (libro, majra, sigil, sakshi) are git-pinned via
+Cross-project deps **libro and majra** are git-pinned via
 `[deps.<name>]` in `cyrius.cyml`. Two consumer bundles ship in `dist/`:
 `bote.cyr` (full, 30 modules) and `bote-core.cyr` (core 11,
 transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
@@ -206,12 +206,12 @@ transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ## Verification
 
-### Tests — 858 total across thirteen files (+ a core-only drift smoke)
+### Tests — 883 total across thirteen files (+ a core-only drift smoke)
 
 Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`).
 
 ```sh
-cyrius test tests/bote.tcyr               # 415 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/bote.tcyr               # 424 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/bote_auth.tcyr          # 38 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 24 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 26 — fs_write / fs_read / fs_mkdir
@@ -233,22 +233,32 @@ cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dis
 cyrius bench tests/bote.bcyr
 ```
 
+Measured at 3.3.4 on a quiet box (load < 1.0), best-of-5 interleaved.
+The full history, including the host conditions each block was taken
+under, is in [`benches/history.log`](benches/history.log).
+
 | Hot path | Avg |
 |---|---|
-| `dispatch_initialize` | ~2.9 µs |
-| `dispatch_tools_list` | ~3.5 µs |
-| `dispatch_tools_call` | ~6.6 µs |
-| `jsonx_get_str_flat` | ~1.5 µs |
-| `jsonx_get_raw_nested` | ~1.8 µs |
-| `codec_parse_request` | ~2.7 µs |
-| `codec_serialize_response` | ~1.9 µs |
-| `codec_process_message` (full pipeline) | ~8.8 µs |
-| `validate_compiled_simple` | ~1.9 µs |
-| `validate_compiled_nested` | ~3.6 µs |
-| `schema_compile_simple` | ~3.8 µs |
-| `schema_compile_nested` | ~7.5 µs |
-| `auth_bearer_check_unset` | ~1.3 µs |
-| `auth_bearer_check_set` | ~2.1 µs |
+| `dispatch_initialize` | ~1.37 µs |
+| `dispatch_tools_list` | ~2.05 µs |
+| `dispatch_tools_call` | ~5.54 µs |
+| `jsonx_get_str_flat` | ~134 ns |
+| `jsonx_get_raw_nested` | ~393 ns |
+| `codec_parse_request` | ~1.47 µs |
+| `codec_serialize_response` | ~472 ns |
+| `codec_process_message` (full pipeline) | ~7.65 µs |
+| `validate_compiled_simple` | ~486 ns |
+| `validate_compiled_nested` | ~2.16 µs |
+| `schema_compile_simple` | ~2.39 µs |
+| `schema_compile_nested` | ~5.75 µs |
+| `auth_bearer_check_unset` | ~8 ns |
+| `auth_bearer_check_set` | ~764 ns |
+
+> ⚠ These are roughly 2× better than the numbers published through 3.2.1.
+> **That is host state, not a code change.** The older block was recorded
+> on a loaded machine (every row carried a ~129 µs max outlier); this one
+> was not. A controlled interleaved A/B across the 3.3.4 dependency bump
+> measured **flat**. Do not read a speed-up into the difference.
 
 ### Fuzz
 
@@ -283,7 +293,7 @@ the same surface.
 | [docs/spec-compliance.md](docs/spec-compliance.md) | MCP 2025-11-25 conformance matrix |
 | [docs/benchmarks-rust-v-cyrius.md](docs/benchmarks-rust-v-cyrius.md) | Side-by-side performance: Rust v0.92.0 vs Cyrius |
 | [docs/cyrius-feedback.md](docs/cyrius-feedback.md) | Cyrius language issues found during the port |
-| [docs/development/issues/](docs/development/issues/) | Open cyrius language/toolchain issues with reproducers |
+| [docs/development/issues/](docs/development/issues/) | cyrius language/toolchain issues with reproducers (both current entries are ✅ RESOLVED in 3.2.0; `archive/` holds earlier ones) |
 | [docs/resolved-lang-issues.md](docs/resolved-lang-issues.md) | Historical index of resolved upstream cyrius issues |
 | [DEPS-PATTERN.md](DEPS-PATTERN.md) | Distribution contract (`dist/bote.cyr` / `dist/bote-core.cyr`) |
 | [SECURITY.md](SECURITY.md) | Threat model, reporting policy |

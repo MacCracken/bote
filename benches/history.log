@@ -169,3 +169,19 @@
 ### auth_bearer_check_unset 1.335 -> 1.346 us). Expected: the sys_accept4 swap and the
 ### accept-error policy are in the Unix transport's connection-accept path, which no
 ### benchmark touches — all 14 exercise dispatch / codec / schema / jsonx / auth.
+
+## 2026-08-23T05:03:59Z  v3.3.4 (8e1eeea)
+  dispatch_initialize: 1.369us avg (min=1.302us max=2.523us) [10000 iters]
+  dispatch_tools_list: 2.047us avg (min=1.929us max=3.965us) [10000 iters]
+  dispatch_tools_call: 5.536us avg (min=5.280us max=10.437us) [10000 iters]
+  jsonx_get_str_flat: 134ns avg (min=128ns max=155ns) [100000 iters]
+  jsonx_get_raw_nested: 393ns avg (min=371ns max=732ns) [100000 iters]
+  codec_parse_request: 1.470us avg (min=1.392us max=2.827us) [10000 iters]
+  codec_serialize_response: 472ns avg (min=438ns max=886ns) [10000 iters]
+  codec_process_message: 7.652us avg (min=6.842us max=15.839us) [10000 iters]
+  validate_compiled_simple: 486ns avg (min=461ns max=878ns) [10000 iters]
+  validate_compiled_nested: 2.157us avg (min=2.038us max=4.180us) [10000 iters]
+  schema_compile_simple: 2.390us avg (min=2.274us max=4.471us) [10000 iters]
+  schema_compile_nested: 5.754us avg (min=5.251us max=11.763us) [10000 iters]
+  auth_bearer_check_unset: 8ns avg (min=8ns max=33ns) [100000 iters]
+  auth_bearer_check_set: 764ns avg (min=726ns max=1.467us) [100000 iters]

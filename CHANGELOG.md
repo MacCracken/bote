@@ -18,11 +18,198 @@ have per release.
 
 _(empty)_
 
+## [3.3.4] — 2026-08-22 — libro 2.8.12 moved `struct error`, and bote's tamper-report path segfaulted on it
+
+### Changed — cyrius 6.5.31 → 6.5.35, libro 2.8.10 → 2.8.12, majra 2.6.6 → 2.7.0
+
+**883** assertions green across 14 suites, 0 failed — up from 867; the 16 new
+ones are the regression cover for the defect below.
+
+### Security — `libro_verify` crashed the server on a tampered audit chain
+
+libro **2.8.11 prepended `magic` to `struct error`** (`fl_alloc(48) → (56)`),
+shifting every field by **+8**. `src/libro_tools.cyr` read that struct by raw
+byte offset and was not moved with it, so the three accessors returned
+magic-as-code, code-as-msg and field_name-as-index. `msg` is handed to
+`_json_emit_escaped`, which does `load8(cstr + i)` — so decoding a violation
+dereferenced the small integer error **code** as a pointer: **SIGSEGV, exit
+139**, reproduced by mutation.
+
+⭐ **It fires only when the audit chain is tampered with.** `libro_tool_verify`
+touches the error struct only when `chain_verify` returns non-zero, so the
+crash sat exactly on the path whose job is to report that the audit trail was
+altered — fail-crash on the security-critical branch, while every happy-path
+assertion stayed green.
+
+⚠ **No test caught it, and the reason is structural, not an oversight.** The
+suite installed `libro_tools_init(chain_new())` on an **empty** chain;
+`chain_verify` short-circuits at `if (n == 0)`, so bote's only code touching a
+libro `error` struct was unreachable from any assertion. The same was true of
+`libro_tool_proof`: it always bailed at the range check, so `merkle_build` /
+`merkle_inclusion_proof` / `merkle_tree_root` were never invoked by a test
+either.
+
+Both are now covered end to end — a chain is built, entry 0's `source` is
+corrupted, and the violation is decoded through the real handler; a
+three-entry chain exercises the proof path including the odd trailing leaf.
+`tests/bote_libro_tools.tcyr` 22 → **38** assertions.
+
+The fix does not restore the offsets. `struct error` carries
+`#derive(accessors)` (`lib/libro.cyr:45`), so bote now reads it through
+libro's generated `error_code` / `error_msg` / `error_index`, which track the
+layout automatically — **this failure mode cannot recur.** The raw-offset
+convention is retained for `struct chain` and `struct entry`, where it remains
+correct and where libro exposes no getters.
+
+⭐ **The generalisable rule, now recorded beside the code:** a field APPENDED
+to a dep's struct is safe to ignore — that is why libro 2.8.4's `chain` growth
+(32 → 40 B) never mattered. A field INSERTED AT THE FRONT moves everything,
+and a raw-offset reader has no way to notice.
+
+### Breaking — inherited from libro, with nothing for bote itself to migrate
+
+libro 2.8.11 and 2.8.12 each changed the entry-hash preimage, and 2.8.12 also
+changed the Merkle construction (RFC 9162 leaf and internal-node domain tags;
+an odd trailing node is now **promoted** rather than paired with itself) and
+the tree-head signature, which now covers `tree_size`, `timestamp` and
+`algorithm` instead of the root alone.
+
+**bote has nothing to re-anchor.** `src/main.cyr` stands up a purely in-memory
+`chain_new()`; the tree has no `filestore_*` / `patrastore_*` / `memstore_*` /
+`anchor_*` / `sign_tree_head` call sites, so no chain outlives the process and
+there is no stored preimage or signature to invalidate. The observable
+consequence is confined to **values**: the `hash` strings emitted by
+`libro_export` / `libro_query` and the `root` emitted by `libro_proof` differ
+from 3.3.3 for identical input.
+
+⚠ **A consumer that persists a libro chain of its own must re-export and
+re-anchor before upgrading** — a chain written by libro ≤ 2.8.10 will not
+verify under 2.8.12, and neither will proofs or anchors over it. That reaches
+downstream through **agnosai → bote → libro**: anyone serving a durable audit
+trail behind bote's `libro_*` tools takes libro's migration, not bote's.
+
+### Fixed — the MCP `initialize` handshake had reported the wrong version since 3.3.1
+
+`_bote_server_version()` read **`"3.3.2"`** while `VERSION` said `3.3.3`, so
+3.3.3 shipped a handshake — and two `dist/` bundles — announcing 3.3.2. This
+is the exact drift `scripts/version-bump.sh` grew a guard for at 3.3.2; the
+guard is sound and fired correctly here, which is how it was found. 3.3.3 was
+cut without running the script.
+
+### Changed — the dependency chain, and what actually moved
+
+Resolved tag chain: **bote 3.3.4 → libro 2.8.12 → patra 1.13.10**, majra 2.7.0.
+
+`cyrius.lock` moves **exactly four hashes** — `libro`, `majra`, `bayan`
+(1.4.2 → 1.5.2) and `vani` (1.1.3 → 1.2.2). The entire 6.5.31 → 6.5.35 stdlib
+snapshot differs in only three files, and the third, `patra` (1.13.9 →
+1.13.10), is **net-zero for bote**: libro's `[deps.patra]` overlay already
+pinned 1.13.10, so the fold merely caught up to it. After 3.3.1 and 3.3.2
+spent two releases unpicking transitive patra drift, the pin and the fold are
+now level.
+
+⚠ Verified **after `cyrius build`, not after `cyrius deps`** — 3.3.1 recorded
+that build does an implicit resolve which has silently reverted a vendored
+file before. `lib/patra.cyr` holds at 1.13.10, `lib/sigil.cyr` at 3.12.9.
+
+⚠ `majra` and `sigil`'s sibling checkouts sit one commit past their tags, and
+`path =` vendors the working tree rather than the tag. Both post-tag commits
+are docs-only and leave `dist/` untouched, so the vendored bytes are
+byte-identical to the tags — checked rather than assumed, because this is the
+drift class that broke a CI lock-verify before.
+
+majra 2.7.0 is additive for bote: `pubsub_publish`'s signature and the 32-byte
+hub struct are unchanged, and `PUBSUB_LAG_BLOCK` remains the default, so the
+wire behaviour is identical. Its internal win is on bote's exact path — the
+per-publish `map_keys()` allocation (a `vec_new` + `vec_push` per key on
+**every** publish, bump-allocated and never freed) is gone.
+
+### Performance
+
+Capacity on `src/main.cyr`, both measurements freshly resolved rather than
+compared against a stale `lib/`: `fn_table` 5502 → **5585 / 32768** (17%),
+`identifiers` 178561 → **180531 / 524288** (34%), `var_table` 2702 → **2716 /
+8192**. Gate is 95%. The growth is almost entirely bayan 1.5.2, whose 368 new
+fns land in the unreachable set.
+
+⚠ **Benchmarks are FLAT and the first measurement saying otherwise was wrong.**
+An initial run showed a uniform 7–17% regression across all 14 benchmarks. It
+was taken while seven audit agents saturated the box (load 4.5). Re-measured
+as a controlled interleaved A/B — two binaries built from the two dep trees,
+run alternately, five rounds each, best-of-5, load 0.8 — twelve of fourteen
+land inside their own arm's spread, and the two that do not
+(`jsonx_get_str_flat` −11.1%, `codec_parse_request` +6.2%) move in **opposite**
+directions on sub-microsecond work. The honest result is: no change. Do not
+cite the first number.
+
+⚠ The `benches/history.log` block for 3.3.4 is ~2× better than the 3.2.1 block
+across every row. **That is host state, not this release.** Every 3.2.1 row
+carries a ~129 µs max outlier; the 3.3.4 maxima are under 16 µs.
+
+### The cyrius 6.5.35 codegen differential — which upstream reported as unobtainable
+
+6.5.35 is a register-allocator rewrite (linear-scan interval expiry plus
+loop-aware liveness), the first release whose picker can time-share a
+register; its own notes say reverting the prior behaviour fails 69 of 282
+corpus tests with **wrong answers rather than crashes**. That makes it the
+highest-risk bump class for a consumer, and libro 2.8.12 recorded that it
+could not run a differential because prepending a version's `bin` to `PATH`
+changes what `cyrius --version` reports but not which `cycc` `cyrius build`
+invokes.
+
+⭐ **On this host it is obtainable, and it was run.** Per-version compilers
+live at `~/.cyrius/versions/<V>/bin/cycc` and can be invoked directly on
+stdin; `~/.cyrius/bin/cycc` is byte-identical (sha256 `1f14ebff…`) to
+`6.5.35/bin/cycc`, confirming the wrapper always uses the installed one. The
+stdlib prelude the wrapper injects was reconstructed from `[deps] stdlib`
+order, so both compilers received **identical source**. Includes are deduped,
+so a full prelude composes with the test files' own includes.
+
+Result across all 13 assertion-bearing suites — **867 / 867 assertions agree,
+compiler for compiler**, with 6.5.35 emitting a smaller binary every time:
+
+| suite | 6.5.31 | 6.5.35 | delta | result |
+|---|---:|---:|---:|---|
+| `bote` | 2,888,080 | 2,863,504 | −24,576 | 424 = 424 |
+| `bote_streamable` | 2,836,304 | 2,811,728 | −24,576 | 53 = 53 |
+| `bote_host` | 2,542,896 | 2,522,416 | −20,480 | 113 = 113 |
+| `bote_jwt` | 2,529,256 | 2,512,872 | −16,384 | 53 = 53 |
+| `bote_libro_tools` | 2,734,952 | 2,714,472 | −20,480 | 22 = 22 |
+| _(9 more, all AGREE)_ | | | −4,096 … −20,480 | |
+
+⚠ **This is behavioural evidence, not proof against miscompilation.** It shows
+the paths the suite reaches are unaffected; the build reports 4,038 unreachable
+fns, `src/transport_http.cyr` has no dedicated test file, and
+`tests/bote_ws.tcyr` is 10 assertions of config wire-up. bote makes **no speed
+claim** from the regalloc rewrite — the toolchain's own notes say no runtime
+win is demonstrable on their corpus, and bote's A/B agrees.
+
+⚠ x86_64 only. aarch64 takes the `RA_SCAN_LOOPS` stub and keeps pre-.35
+behaviour — neither the win nor the risk.
+
+### Platform
+
+Cross-build green for all three binaries on **aarch64** (`EM_AARCH64`
+verified). ⚠ The aarch64 *runtime* sweep under `qemu-aarch64` 11.1.0 is
+**partial, and this is an emulator limit, not a regression**: a three-line
+probe shows `random_bytes(16)` returning a negative errno under qemu while
+returning 16 natively, so `getrandom` is not passed through. bote's
+fail-closed contract then refuses to mint a guessable session ID and exits 90,
+exactly as designed. 373 of 883 assertions execute; `bote.tcyr`,
+`bote_pkce.tcyr` and `bote_streamable.tcyr` cannot run there. CLAUDE.md's
+"green on x86_64 **and** aarch64" is corrected to say so.
+
+### Fixed — CHANGELOG figures that were wrong when written
+
+3.3.3 opened with "**116** assertions green across 14 suites" and 3.3.2 with
+"**881**". Both are **867**, freshly measured. Corrected in place rather than
+left as a record, because they are claims about a measurement, not narrative.
+
 ## [3.3.3] — 2026-08-21 — libro 2.8.10: a PatraStore read from another thread no longer crashes
 
 ### Changed — libro 2.8.8 → 2.8.10
 
-**116** assertions green across 14 suites, 0 failed.
+**867** assertions green across 14 suites, 0 failed.
 
 libro 2.8.9 removes `PatraStore`'s cross-thread prepared-statement cache, and
 2.8.10 declares the patra it is actually built against.
@@ -52,7 +239,7 @@ which is why this depends on .10 and not .9.)
 
 ### Changed — cyrius 6.5.20 → 6.5.31, libro 2.8.5 → 2.8.8, majra 2.6.3 → 2.6.6
 
-**881** assertions green across 14 suites, 0 failed.
+**867** assertions green across 14 suites, 0 failed.
 
 The toolchain pin was eleven patches behind and pulled the 6.5.20 stdlib
 snapshot; 6.5.31 brings the folds shipped since (sakshi 2.4.11, patra 1.13.9,

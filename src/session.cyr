@@ -54,7 +54,9 @@ fn validate_origin(origin, allowed_origins) {
 }
 
 # ================================================================
-# Session ID generation — 32 hex chars from /dev/urandom (16 random bytes)
+# Session ID generation — 32 hex chars from random_bytes() (16 bytes of
+# kernel entropy via SYS_GETRANDOM; the /dev/urandom read this comment
+# used to describe was replaced at 1.9.4 — see the note at _session_id).
 # ================================================================
 
 fn _hex_byte(b, out) {
