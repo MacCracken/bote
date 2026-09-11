@@ -237,6 +237,32 @@ jobs:
           done
           [ $fail -eq 0 ] || exit 1
 
+      - name: Fuzz
+        # Added 3.3.8. There was NO fuzz step: fuzz/*.fcyr was never run by CI, and
+        # all four harnesses had silently stopped compiling at cyrius 6.1.25
+        # (2026-06-10), when lib/json.cyr was carved into lib/bayan.cyr — four minors
+        # of rot nothing could see. Two of them ALSO compiled with 18 undefined
+        # functions and "passed" only because every call site was unreachable, so a
+        # bare exit code would not have caught that half. Hence both assertions.
+        run: |
+          set -o pipefail
+          fail=0
+          for f in fuzz/*.fcyr; do
+            [ -f "$f" ] || continue
+            out=$(cyrius fuzz "$f" 2>&1) || fail=1
+            echo "$out" | tail -3
+            if echo "$out" | grep -qE "^[0-9]+ passed, [^0]"; then
+              echo "FAIL: $f"; fail=1
+            fi
+            if echo "$out" | grep -q "undefined function"; then
+              echo "FAIL: $f compiles with undefined functions:"
+              echo "$out" | grep -oE "undefined function .[a-z_]*." | sort -u
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || exit 1
+          echo "fuzz: all harnesses clean"
+
       - name: aarch64 portability gate
         # Added 3.2.0. bote had no aarch64 lane, and the gap let three
         # x86_64-only syscall constants reach `src/` and (via

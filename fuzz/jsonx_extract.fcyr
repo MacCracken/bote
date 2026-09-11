@@ -8,7 +8,10 @@ include "lib/str.cyr"
 include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/hashmap.cyr"
-include "lib/json.cyr"
+# lib/json.cyr was carved into lib/bayan.cyr at cyrius 6.1.25 (2026-06-10).
+# src/jsonx.cyr already said so; these harnesses did not, and no CI step
+# runs them, so they stopped compiling four minors ago in silence.
+include "lib/bayan.cyr"
 include "lib/fnptr.cyr"
 
 include "src/error.cyr"

@@ -32,3 +32,12 @@ random
 sigil
 tls
 sandhi
+hashseed
+sha1
+syscalls_linux_common
+result
+boxed
+mmap
+process
+fs
+tls_native

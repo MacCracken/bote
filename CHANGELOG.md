@@ -16,6 +16,65 @@ have per release.
 
 ## [Unreleased]
 
+## [3.3.8] — 2026-09-10 · cyrius 6.6.2 + libro 2.10.0 / majra 2.7.2 — and four fuzz harnesses that had not compiled since 6.1.25
+
+Toolchain **6.5.35 → 6.6.2** (the `Result` / `Option` / `Either` value form) plus both
+dependency pins. **887** assertions across 14 suites, the benchmark, and — for the first
+time in CI — all four fuzz harnesses.
+
+### Changed — toolchain and dependency pins
+
+| dep | was | now |
+|---|---|---|
+| cyrius | 6.5.35 | **6.6.2** |
+| libro | 2.8.12 | **2.10.0** |
+| majra | 2.7.0 | **2.7.2** |
+
+⛔ **The majra bump is not housekeeping — it was a build-stopper, and bote was the
+source of it for the whole ecosystem.** majra ≤ 2.7.0 defines
+`_sub_new(chan, filter_fn)`; libro defines `_sub_new(pattern)`. bote declares both
+bundles, so both land in one compile unit. cyrius promoted that
+same-name/different-arity pair from a silent "last definition wins" warning to a
+**hard error at 6.5.37**, and bote pinned 6.5.35 — one release below it — so the
+defect sat latent and invisible here while every downstream consumer that pulled
+majra *through* bote inherited it. It surfaced in t-ron 2.1.10, whose CI could not
+produce a binary at all; t-ron and nein are only immune now because each carries an
+explicit `[deps.majra] ≥ 2.7.1` declared ahead of bote's. Those overrides can be
+retired against this release. majra 2.7.1 renamed the symbol `_majra_sub_new`.
+
+### Fixed — a retired accessor in `src/transport_unix.cyr`
+
+`_unix_handle_client` called `payload(n_r)`, the accessor cyrius **deleted at 6.6.0**.
+Unlike the collision above this one was never masked by anything: it fails locally and
+in CI alike the moment the toolchain is 6.6.x. Now binds both halves of the
+`sock_recv` result. No other site in `src/` used it, and a sweep for the *silent*
+variant — a `Result` compared against `< 0`, which can never fire once `Err`'s tag is
+`1` — found none.
+
+### Fixed — all four fuzz harnesses, broken since cyrius 6.1.25
+
+⛔ **`fuzz/*.fcyr` was never run by CI.** There was no fuzz step. Every harness
+included `lib/json.cyr`, which was carved into `lib/bayan.cyr` at cyrius **6.1.25
+(2026-06-10)** — so they stopped compiling roughly four minors ago and nothing could
+see it. `src/jsonx.cyr:3` has recorded the carve-out in a comment the whole time.
+
+Two further defects the repair exposed:
+
+- `fuzz/codec_process.fcyr` called `registry_new()`, renamed `tool_registry_new()`
+  when the prompt and resource registries arrived and the bare name became ambiguous.
+- Three harnesses include `src/dispatch.cyr`, which routes `prompts/*` and
+  `resources/*`, without including `src/prompts.cyr` or `src/resources.cyr` — so they
+  compiled with **18 undefined functions** and "passed" only because every call site
+  was unreachable. A bare exit-code gate would not have caught that half.
+
+### Added — a Fuzz step in CI
+
+Runs every `fuzz/*.fcyr` and fails on a non-zero failure count **or** on any
+`undefined function` in the output. The second assertion is the load-bearing one: it
+is what distinguishes a harness that passes from one that merely does not reach its
+own broken code.
+
+
 _(empty)_
 
 ## [3.3.7] — 2026-08-23 — a healthy WebSocket client was being dropped after 30 seconds

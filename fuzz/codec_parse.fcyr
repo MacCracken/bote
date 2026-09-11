@@ -9,7 +9,10 @@ include "lib/str.cyr"
 include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/hashmap.cyr"
-include "lib/json.cyr"
+# lib/json.cyr was carved into lib/bayan.cyr at cyrius 6.1.25 (2026-06-10).
+# src/jsonx.cyr already said so; these harnesses did not, and no CI step
+# runs them, so they stopped compiling four minors ago in silence.
+include "lib/bayan.cyr"
 include "lib/fnptr.cyr"
 include "lib/chrono.cyr"
 
@@ -17,6 +20,11 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/registry.cyr"
+# dispatch.cyr references the prompt/* and resource/* registries, so
+# without these the harness compiled with 18 undefined functions and
+# passed only because every call site was unreachable.
+include "src/prompts.cyr"
+include "src/resources.cyr"
 include "src/events.cyr"
 include "src/audit.cyr"
 include "src/dispatch.cyr"

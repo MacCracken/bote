@@ -8,7 +8,10 @@ include "lib/str.cyr"
 include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/hashmap.cyr"
-include "lib/json.cyr"
+# lib/json.cyr was carved into lib/bayan.cyr at cyrius 6.1.25 (2026-06-10).
+# src/jsonx.cyr already said so; these harnesses did not, and no CI step
+# runs them, so they stopped compiling four minors ago in silence.
+include "lib/bayan.cyr"
 include "lib/fnptr.cyr"
 include "lib/chrono.cyr"
 
@@ -16,6 +19,11 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/registry.cyr"
+# prompts + resources: dispatch routes prompts/* and resources/* to these,
+# so codec_process reaches them even though codec_parse does not. Their
+# absence left 14 undefined functions and the harness could not compile.
+include "src/prompts.cyr"
+include "src/resources.cyr"
 include "src/events.cyr"
 include "src/audit.cyr"
 include "src/dispatch.cyr"
@@ -27,7 +35,10 @@ fn h_echo_f(args, claims) { return args; }
 alloc_init();
 
 # Set up a minimal dispatcher
-var reg = registry_new();
+# `registry_new` was renamed `tool_registry_new` (the prompt/resource
+# registries arrived and the bare name became ambiguous). `registry_register`
+# kept its name, so only the constructor moved.
+var reg = tool_registry_new();
 registry_register(reg, tool_def_new("svc_echo", "echo", schema_new("object", 0, vec_new())));
 var d = dispatcher_new(reg);
 dispatcher_handle(d, "svc_echo", &h_echo_f);
