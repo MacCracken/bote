@@ -174,20 +174,43 @@ jobs:
           exit $fail
 
       - name: dist bundles are up-to-date
-        # `cyrius distlib` reads cyrius.cyml [lib] / [lib.<profile>]
-        # modules and emits dist/bote.cyr (default, full bundle) and
-        # dist/bote-core.cyr (opt-in core profile, 2.7.2+)
-        # deterministically. Both committed bundles must match the
-        # regenerated bundles byte-for-byte; otherwise a downstream
-        # consumer cloning at our tag gets stale code under
-        # `cyrius deps`. Mirrors libro / majra freshness gate.
-        # cyrius emits an informational note about unresolved symbols
-        # in consumer-included bundles (expected — stdlib is supplied
-        # by the consumer); the bundle is still emitted, we only fail
-        # on a stale diff.
+        # `cyrius distlib` reads cyrius.cyml [lib] / [lib.<profile>] modules and emits
+        # dist/bote.cyr (default, full bundle) and dist/bote-core.cyr (opt-in core
+        # profile, 2.7.2+) deterministically. Both committed bundles must match the
+        # regenerated bundles byte-for-byte; otherwise a downstream consumer cloning
+        # at our tag gets stale code under `cyrius deps`. Mirrors libro / majra.
+        #
+        # ⛔ THE `ulimit -v` IS LOAD-BEARING (3.3.8). distlib on the FULL profile
+        # allocates ~30 GB before it finishes — measured peak RSS 31,214 MB on a 59 GB
+        # box, against a standard runner's ~7 GB. Uncapped, the kernel OOM-killer takes
+        # the RUNNER down and Actions reports it as "Error: The operation was canceled",
+        # which is exactly what happened on the 3.3.8 push — the job died here, two
+        # steps before any assertion ran, so the log showed a cancellation rather than
+        # a diagnosis.
+        #
+        # The blow-up is in distlib's LEAF-VALIDATION pass, which splices every stdlib
+        # leaf plus the bundle into one buffer and compiles it. It is NOT driven by
+        # module count — measured at the same 6.6.2 toolchain under a 7 GB cap,
+        # kavach (44 modules), sankhya (36) and hisab (35) all COMPLETE, while bote's
+        # 30 dies. What bote has and they do not is `tls_native` in its leaf set (plus
+        # ws_server / sigil / sha1 / sync), dragged in by the transport and bridge
+        # modules; bote's own [lib.core] profile, which excludes them, finishes inside
+        # a 2 GB cap with rc=0. So the trigger is a specific leaf graph, not size.
+        #
+        # The bundle is EMITTED BEFORE that pass: at caps of 2, 3, 4 and 6 GB the
+        # emitted dist/bote.cyr came out byte-identical every time. Bounding the
+        # address space therefore converts a runner-killing OOM into a contained
+        # non-zero exit, and the freshness assertion below — the only thing this gate
+        # actually asserts — still runs.
+        #
+        # NOT present at 3.3.7's pin (6.5.35), and reproduced at 6.6.0, 6.6.1 AND 6.6.2,
+        # so the regression landed between them. Remove the cap once it is fixed.
+        # The core profile is small enough to finish validation inside the cap
+        # (measured rc=0 at 2 GB), so it keeps the complete check.
         run: |
           fail=0
-          cyrius distlib || true
+          ( ulimit -v 2097152; cyrius distlib ) \
+            || echo "::warning::distlib (full) hit the 2 GB cap - leaf validation skipped, bundle still emitted; see the step comment"
           test -s dist/bote.cyr || { echo "FAIL: dist/bote.cyr not produced"; exit 1; }
           if ! git diff --exit-code dist/bote.cyr; then
             echo "FAIL: dist/bote.cyr is stale. Run 'cyrius distlib' and commit."
@@ -195,7 +218,7 @@ jobs:
           else
             echo "dist/bote.cyr matches src/ ($(wc -l < dist/bote.cyr) lines)"
           fi
-          cyrius distlib core || true
+          ( ulimit -v 2097152; cyrius distlib core ) || true
           test -s dist/bote-core.cyr || { echo "FAIL: dist/bote-core.cyr not produced"; exit 1; }
           if ! git diff --exit-code dist/bote-core.cyr; then
             echo "FAIL: dist/bote-core.cyr is stale. Run 'cyrius distlib core' and commit."

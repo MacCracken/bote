@@ -67,6 +67,38 @@ Two further defects the repair exposed:
   compiled with **18 undefined functions** and "passed" only because every call site
   was unreachable. A bare exit-code gate would not have caught that half.
 
+### Fixed — CI died mid-run: `cyrius distlib` OOM-kills the runner
+
+⛔ **The 3.3.8 push failed with `Error: The operation was canceled` — no assertion,
+no diagnosis, the job simply stopped.** That is what GitHub reports when the kernel
+OOM-killer takes the runner down. `cyrius distlib` on bote's **full** profile
+allocates ~30 GB (measured peak RSS **31,214 MB**) against a standard runner's ~7 GB.
+The step already had `cyrius distlib || true`; that never helped, because the
+process was not exiting non-zero — the *runner* was being killed.
+
+Measured, not assumed:
+
+| probe | result |
+|---|---|
+| `ulimit -v 7GB`, pins 6.6.0 / 6.6.1 / 6.6.2 | dies at all three — the regression predates 6.6.0 |
+| libro reverted 2.10.0 → 2.8.12 | still dies — not caused by the dependency refresh |
+| caps of 2 / 3 / 4 / 6 GB | `dist/bote.cyr` emitted **byte-identical every time** |
+| `distlib core` @ 2 GB | **rc=0** — completes leaf validation |
+| kavach (44 modules) / sankhya (36) / hisab (35) @ 7 GB | all **complete** |
+
+That last row is the important one: it is **not** driven by module count — three repos
+with larger `[lib]` profiles finish on the same toolchain. What bote has and they do
+not is **`tls_native`** in its leaf set (with `ws_server` / `sigil` / `sha1` / `sync`),
+pulled in by the transport and bridge modules. bote's own `[lib.core]`, which excludes
+them, finishes inside a 2 GB cap. The trigger is a specific leaf graph, not size.
+
+Since the bundle is emitted *before* the validation pass, both workflows now run
+distlib under `ulimit -v 2` GB. The OOM becomes a contained non-zero exit instead of a
+dead runner, the freshness diff — the only thing the gate actually asserts — still
+runs, and a `::warning::` makes the skipped validation visible rather than silent.
+`release.yml` regenerates the same bundles and is capped identically. Remove both caps
+once the upstream defect is fixed.
+
 ### Added — a Fuzz step in CI
 
 Runs every `fuzz/*.fcyr` and fails on a non-zero failure count **or** on any
