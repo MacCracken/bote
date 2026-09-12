@@ -16,6 +16,36 @@ have per release.
 
 ## [Unreleased]
 
+## [3.3.9] — cyrius 6.6.3 · the distlib memory cap comes out
+
+`cyrius` 6.6.2 → **6.6.3**. No source change; this release retires a CI workaround.
+
+### Removed — the `ulimit -v` cap on the dist gate (3.3.8 → here)
+
+3.3.8 wrapped both `cyrius distlib` invocations in `( ulimit -v 2097152; ... )` because
+distlib's leaf-validation pass allocated ~30 GB on bote's full profile — measured peak RSS
+**31,214 MB** — and uncapped it OOM-killed the *runner*, which Actions reported as
+`Error: The operation was canceled`, two steps before any assertion ran. The cap converted a
+runner-killing OOM into a contained non-zero exit.
+
+cyrius 6.6.3 fixed the cause: the pass re-read every stdlib leaf for every leaf, and cyrius's
+arena allocator never frees, so an O(n×m) read pattern became O(n×m) *retained*. It now caches
+the snapshot. Re-measured here on the full profile, **uncapped**, at the 6.6.3 pin:
+
+| | 6.6.2 | 6.6.3 |
+|---|---|---|
+| peak RSS, full profile | 31,214 MB | **120 MB** |
+| exit code | OOM / cancelled | **0** |
+
+A 260× reduction, comfortably inside a standard runner's ~7 GB. Both bundles come out
+byte-identical to the committed copies, which also confirms 3.3.8's finding that the bundle was
+emitted *before* the failing pass.
+
+⭐ **The `|| echo "::warning::"` and `|| true` came out with it.** They existed only because a
+capped run was *expected* to fail; keeping them would have left the dist gate fail-open against a
+defect that no longer has an excuse. A `cyrius distlib` failure in CI is now a real failure and
+exits non-zero.
+
 ## [3.3.8] — 2026-09-10 · cyrius 6.6.2 + libro 2.10.0 / majra 2.7.2 — and four fuzz harnesses that had not compiled since 6.1.25
 
 Toolchain **6.5.35 → 6.6.2** (the `Result` / `Option` / `Either` value form) plus both

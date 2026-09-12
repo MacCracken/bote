@@ -95,16 +95,14 @@ jobs:
         # never attached to the release. Found in the 3.3.7 staleness
         # sweep; the two workflows now gate the same set.
         run: |
-          # ⛔ The `ulimit -v` is load-bearing — the same defect ci.yml's dist gate
-          # documents at length (3.3.8). distlib on the FULL profile allocates ~30 GB in
-          # its leaf-validation pass; uncapped, the kernel OOM-killer takes the RUNNER
-          # down and Actions reports "Error: The operation was canceled". The bundle is
-          # emitted BEFORE that pass and came out byte-identical at every cap tested
-          # (2/3/4/6 GB), and the step below still verifies both bundles against the
-          # committed copies. Remove the cap once the upstream fix lands.
-          ( ulimit -v 2097152; cyrius distlib ) \
-            || echo "::warning::distlib (full) hit the 2 GB cap - bundle emitted, leaf validation skipped"
-          ( ulimit -v 2097152; cyrius distlib core ) || true
+          # The `ulimit -v` cap 3.3.8 added here is GONE — cyrius 6.6.3 fixed the distlib
+          # leaf-validation blow-up it contained (O(n x m) reads against an arena that never frees
+          # => O(n x m) RETAINED; 31,214 MB peak, which OOM-killed the runner). Re-measured
+          # uncapped at the 6.6.3 pin: peak RSS 120 MB, rc=0. The accompanying `|| echo
+          # "::warning::"` / `|| true` are gone with it — they only made sense while a capped run
+          # was expected to fail, and keeping them would leave this step fail-open.
+          cyrius distlib
+          cyrius distlib core
           test -s dist/bote.cyr      || { echo "FAIL: dist/bote.cyr not produced"; exit 1; }
           test -s dist/bote-core.cyr || { echo "FAIL: dist/bote-core.cyr not produced"; exit 1; }
           echo "dist/bote.cyr:      $(wc -l < dist/bote.cyr) lines, $(wc -c < dist/bote.cyr) bytes"
