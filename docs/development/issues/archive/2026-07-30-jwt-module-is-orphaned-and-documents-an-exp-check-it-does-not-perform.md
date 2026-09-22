@@ -1,5 +1,21 @@
 # `src/jwt.cyr` ships in no bundle, and documents an `exp` check it does not perform
 
+> ## 📦 CLOSED — archived 2026-09-22 at bote 3.3.11
+>
+> Findings (1) and (2) were fixed at 3.2.0 (the note below); finding (3) was a
+> corrected premise whose open *decision* lives in the roadmap, not here. Re-verified
+> on the 3.3.11 tree before archiving: `_jwt_exp_ok` runs only after `_jwt_ct_eq`
+> short-circuits (`src/jwt.cyr:252` / `:268`); `_jwt_str_field_eq` reads `alg` as an
+> exact field; `jwt_verify_hs256` and `pkce_code_verifier` are in `dist/bote.cyr` and
+> absent from `dist/bote-core.cyr`; the alg-confusion and `exp` assertions pass
+> (53 / 53, natively and under `qemu-aarch64`); and `jwt_*` / `pkce_*` / `_jwt*` /
+> `_pkce*` have **zero** definitions across all 117 vendored `lib/**/*.cyr` — re-run
+> because the 3.2.0 check covered 71 files and the graph has since gained libro
+> 2.10.3, majra 2.9.1, sigil 3.12.18's thin modules and the 6.6.6 fold. The roadmap's
+> RS256 row gains a second expired premise: sigil 3.12.18 also exposes
+> `ecdsa_p256_verify` / `ecdsa_p256_verify_der`, so **ES256 is unblocked too**. See
+> `docs/development/roadmap.md` → "JWT".
+
 > ## ✅ RESOLVED in 3.2.0 — 2026-07-30
 >
 > Findings (1) and (2) are fixed, in the order the report insisted on. Finding (3) is

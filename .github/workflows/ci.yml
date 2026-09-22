@@ -278,7 +278,7 @@ jobs:
         # x86_64-only syscall constants reach `src/` and (via
         # src/session.cyr) the shipped dist/bote.cyr, breaking the
         # cross-build for bote and for every consumer that vendors the
-        # bundle. See docs/development/issues/2026-07-17-aarch64-sys-open-urandom.md.
+        # bundle. See docs/development/issues/archive/2026-07-17-aarch64-sys-open-urandom.md.
         #
         # Two gates, both cheap and both deterministic (no emulator):
         #
@@ -315,28 +315,35 @@ jobs:
             exit 1
           fi
           echo "  clean — no x86_64-only SYS_* outside comments"
-          echo "--- denylist: bare syscall(SYS_*) in src/ ---"
-          # Added 3.2.1. The denylist above only catches constants that
-          # are x86-only TODAY. It could not have caught SYS_ACCEPT,
+          echo "--- denylist: raw syscall(...) anywhere in bote's own sources ---"
+          # Added 3.2.1 for src/ and the `syscall(SYS_*` spelling; widened
+          # at 3.3.11 to ANY `syscall(` across src/, tests/, and fuzz/.
+          # The x86-only constant denylist above only catches constants
+          # that are x86-only TODAY. It could not have caught SYS_ACCEPT,
           # which is defined in NEITHER syscall peer — its only
           # definition is lib/net.cyr's bare `var SYS_ACCEPT = 43` (the
           # x86 number), so it resolved everywhere and worked on aarch64
           # only via the backend's runtime renumber chain, in which 43
-          # would otherwise be statfs.
+          # would otherwise be statfs. And the 3.2.1 form could not have
+          # caught a NUMERIC `syscall(60, rc)` — 60 is exit on x86_64
+          # only — which is exactly what the toolchain's own tests carry.
           #
           # Every syscall bote needs has an arch-portable stdlib wrapper
           # (sys_open / sys_close / sys_read / sys_write / sys_socket /
           # sys_bind / sys_listen / sys_accept4 / sys_unlink / sys_chmod
-          # / sys_exit / random_bytes), so src/ has no legitimate reason
-          # to issue a raw syscall() with a SYS_ constant. Banning the
-          # form is a stronger guard than enumerating bad constants.
-          raw=$(sed 's/#.*//' src/*.cyr | grep -nE 'syscall\(\s*SYS_' || true)
+          # / sys_exit / random_bytes), so nothing in-tree has a reason to
+          # issue a raw syscall(). Banning the form is a stronger guard
+          # than enumerating bad constants. Comments are stripped first,
+          # so prose that names a syscall is fine.
+          raw=$(for f in src/*.cyr tests/*.tcyr tests/*.bcyr fuzz/*.fcyr; do
+            sed 's/#.*//' "$f" | grep -nE '\bsyscall[[:space:]]*\(' | sed "s|^|$f:|"
+          done)
           if [ -n "$raw" ]; then
-            echo "::error::raw syscall(SYS_*) in src/ — use the arch-portable stdlib wrapper."
+            echo "::error::raw syscall(...) — call the arch-portable stdlib wrapper instead."
             echo "$raw"
             exit 1
           fi
-          echo "  clean — no raw syscall(SYS_*) in src/"
+          echo "  clean — no raw syscall(...) in src/, tests/, or fuzz/"
           echo "--- cross-build ---"
           for e in main:bote main_streamable:bote-streamable main_ws:bote-ws; do
             src="${e%%:*}"; out="${e##*:}"

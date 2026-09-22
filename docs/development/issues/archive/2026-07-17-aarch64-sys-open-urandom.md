@@ -1,5 +1,19 @@
 # `/dev/urandom` opened via raw `syscall(SYS_OPEN, ...)` — breaks aarch64 builds (`open(2)` doesn't exist on aarch64 Linux)
 
+> ## 📦 CLOSED — archived 2026-09-22 at bote 3.3.11
+>
+> Resolved at 3.2.0 (the note below) and its deliberately-open `SYS_ACCEPT` remainder
+> at 3.2.1. Re-verified on the 3.3.11 tree (cyrius 6.6.6, libro 2.10.3, majra 2.9.1)
+> before archiving: zero x86-only `SYS_*` constants in `src/` or `dist/` outside
+> comments; both entropy sites on `random_bytes()` and the accept loop on
+> `sys_accept4`; all three entries cross-build to `EM_AARCH64`; and — new since the
+> resolution was written — the **entire suite runs under `qemu-aarch64` 11.1.1:
+> 887 / 887**, where 3.2.0's sweep was 786 and the 3.3.x sweeps were partial (three
+> files exited 90 on the emulator's missing `getrandom` passthrough). 3.3.11 also
+> removed the last 26 raw `syscall(SYS_EXIT, …)` sites — all in tests / fuzz / bench,
+> none in `src/` — and CI now bans any `syscall(` across `src/`, `tests/` and `fuzz/`,
+> not only the `SYS_*` spelling in `src/`.
+
 > ## ✅ RESOLVED in 3.2.0 — 2026-07-30
 >
 > Fixed, but **wider than filed**: the report identified one of three build blockers,

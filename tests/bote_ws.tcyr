@@ -103,4 +103,4 @@ fn main() {
 }
 
 var rc = main();
-syscall(SYS_EXIT, rc);
+sys_exit(rc);

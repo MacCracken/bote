@@ -167,7 +167,7 @@ fn _jwt_parse_uint(buf, from, end) {
 # 3.2.0: this is new code. The module header has claimed this check
 # since 2.2.0 and no such check existed — `jwt_verify_hs256` accepted a
 # structurally valid, correctly signed, arbitrarily expired token. See
-# docs/development/issues/2026-07-30-jwt-module-is-orphaned-and-documents-an-exp-check-it-does-not-perform.md
+# docs/development/issues/archive/2026-07-30-jwt-module-is-orphaned-and-documents-an-exp-check-it-does-not-perform.md
 fn _jwt_exp_ok(payload, plen) {
     var pos = _jx_find_value_pos(payload, plen, "exp");
     # Absent `exp` is legal — RFC 7519 §4.1.4 makes the claim optional.

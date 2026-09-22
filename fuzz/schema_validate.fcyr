@@ -89,7 +89,7 @@ while (si < vec_len(schemas)) {
         var input = vec_get(inputs, ii);
         # Must always return a vec (possibly empty or with violations) without crashing.
         var v = compiled_validate(sc, input);
-        if (v == 0) { syscall(SYS_EXIT, 30); }
+        if (v == 0) { sys_exit(30); }
         # vec_len must be callable
         vec_len(v);
         ii = ii + 1;
@@ -97,4 +97,4 @@ while (si < vec_len(schemas)) {
     si = si + 1;
 }
 
-syscall(SYS_EXIT, 0);
+sys_exit(0);

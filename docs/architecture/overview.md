@@ -356,8 +356,8 @@ change.
 | Artifact | Count | Where |
 |---|---|---|
 | Core unit tests | 424 | `tests/bote.tcyr` |
-| Module tests | 459 | `tests/bote_auth.tcyr` (38) + `bote_content.tcyr` (24) + `bote_fs_tools.tcyr` (26) + `bote_host.tcyr` (113) + `bote_jwt.tcyr` (53) + `bote_libro_tools.tcyr` (38) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (47) + `bote_web_tools.tcyr` (27) + `bote_ws.tcyr` (10) |
-| **Total assertions** | **883** | plus the `bote_core_only_smoke.tcyr` drift guard |
+| Module tests | 463 | `tests/bote_auth.tcyr` (38) + `bote_content.tcyr` (24) + `bote_fs_tools.tcyr` (26) + `bote_host.tcyr` (113) + `bote_jwt.tcyr` (53) + `bote_libro_tools.tcyr` (38) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (47) + `bote_web_tools.tcyr` (27) + `bote_ws.tcyr` (14) |
+| **Total assertions** | **887** | plus the `bote_core_only_smoke.tcyr` drift guard; all 887 also pass under `qemu-aarch64` (`cyrius test --aarch64`) since 3.3.11 |
 | Benchmarks | 14 | `tests/bote.bcyr` |
 | Fuzz harnesses | 4 | `fuzz/*.fcyr` |
 

@@ -18,6 +18,98 @@ have per release.
 
 _(empty)_
 
+## [3.3.11] — 2026-09-22 · no raw syscalls left, and the two resolved issues finally archived
+
+No `src/` change beyond a comment path and the version literal. **887** assertions across 14
+suites, natively **and under `qemu-aarch64` — the first complete emulated sweep** (every
+earlier one was partial); all four fuzz harnesses; a six-transport round trip.
+
+### Changed — every kernel touch in bote's own sources goes through a stdlib wrapper
+
+`src/` was already clean — 3.2.1 routed its last eight sites — so the 26 that remained were
+all the same shape, `syscall(SYS_EXIT, n)`, in the test files (15), the benchmark (1) and the
+fuzz harnesses (10). Each is now `sys_exit(n)`. The same class libro cleared at 2.10.3.
+
+Why it is worth a release line when `SYS_EXIT` is defined on every syscall peer: the constant
+was never the hazard, the **form** is. A numeric `syscall(60, rc)` — 60 is `exit` on x86_64
+only, and it is the spelling the toolchain's own cross-OS tests carry — compiles on every
+target and exits through whatever 60 means there. `sys_exit` spells the call per target
+(`lib/syscalls_linux_common.cyr`, the agnos and Windows peers), and a wrapper call is what a
+reader can grep for the meaning of.
+
+- **A failing suite still fails.** Proven rather than assumed, because a wrong exit path would
+  have turned every test file green at once: a scratch `.tcyr` with `assert_eq(1, 2)` ending in
+  `sys_exit(assert_summary())` exits **1** as a binary and is reported `FAIL … (exit 1)` by
+  `cyrius test`.
+- **The CI gate now bans the form everywhere.** 3.2.1's gate matched `syscall(SYS_*` in `src/`
+  only, so it could not see a numeric syscall and did not look at tests, the bench or fuzz at
+  all. It now fails on any `syscall(` across `src/*.cyr`, `tests/*.tcyr`, `tests/*.bcyr` and
+  `fuzz/*.fcyr`, comments stripped first. Mutation-checked: a planted `syscall(60, 0)` in a test
+  file is reported with `file:line`; the same text inside a comment stays clean. The x86-only
+  `SYS_*` constant denylist over `src/` + `dist/` is kept as the second, independent axis.
+- **The adjacent class was inspected and deliberately left alone.** Wrapper calls that pass
+  literals — `sys_chmod(path, 0x180)`, `sys_mkdir(full, 0x1ED)`, `sys_listen(sfd, 16)`,
+  `sys_read(0, …)` / `sys_write(1, …)` — are POSIX mode bits, a listen backlog and the standard
+  fds, identical on every target; `AF_UNIX` / `SOCK_STREAM` are already the named constants.
+  Nothing to rename.
+
+### Changed — both open issues re-verified on the current tree and archived
+
+`docs/development/issues/` had carried two files marked ✅ RESOLVED since 3.2.0 / 3.2.1 that
+nobody moved. Each was re-verified against 3.3.11 (cyrius 6.6.6, libro 2.10.3, majra 2.9.1)
+before archiving, and each gained a dated closure banner recording what was re-checked. Every
+reference — `ci.yml`, `src/jwt.cyr`, the roadmap, the 3.2.0 CHANGELOG history — now points at
+`issues/archive/`, the convention the 2026-06 issues already used.
+
+- **`2026-07-17-aarch64-sys-open-urandom`** — zero x86-only `SYS_*` in `src/` or `dist/`
+  outside comments; both entropy sites on `random_bytes()`, the accept loop on `sys_accept4`;
+  all three entries cross-build to `EM_AARCH64`. ⭐ And the runtime sweep is **complete**:
+  `cyrius test --aarch64` runs all 14 files under `qemu-aarch64` 11.1.1 — **887 / 887** — where
+  `CLAUDE.md` recorded it as PARTIAL (three files exiting 90 on the emulator's missing
+  `getrandom` passthrough, 373 of 883 executing). Between that note and this one the toolchain
+  moved 6.5.35 → 6.6.6 (6.6.5 added sixteen aarch64 `ESYSXLAT` rows) and the emulator 11.1.0 →
+  11.1.1; which of the two closed it is not established here. Measured, not attributed.
+- **`2026-07-30-jwt-module-is-orphaned…`** — `_jwt_exp_ok` still runs only after `_jwt_ct_eq`
+  short-circuits; `_jwt_str_field_eq` still reads `alg` as an exact field; `jwt_verify_hs256`
+  and `pkce_code_verifier` are in `dist/bote.cyr` and absent from `dist/bote-core.cyr`; the
+  alg-confusion and `exp` assertions pass on both arches. The symbol-collision sweep was
+  **re-run, not reused**: 3.2.0 checked 71 `lib/` files, the graph has since gained libro
+  2.10.3, majra 2.9.1, sigil 3.12.18's thin modules and the 6.6.6 fold, and `jwt_*` / `pkce_*`
+  / `_jwt*` / `_pkce*` have zero definitions across all **117** `lib/**/*.cyr`. Finding (3) was
+  a corrected premise, not a defect; its open **decision** stays in the roadmap, where the row
+  gains a second expired premise — sigil 3.12.18 also exposes `ecdsa_p256_verify` /
+  `ecdsa_p256_verify_der`, so ES256 is unblocked exactly as RS256 is. Still not built, for the
+  reasons the row already gives: the one consumer that asked implements it locally because it
+  needs `iss` / `aud` validation bote has no concept of.
+
+`docs/development/issues/` holds only `archive/` for the first time since 2026-07-17.
+
+### Verified
+
+- **887 passed, 0 failed** natively and **887 / 887 under `qemu-aarch64`**, per file.
+- All four `fuzz/*.fcyr` clean, no undefined functions; the benchmark builds and runs.
+- `cyrius fmt --check` over `src/`: 0; `lint`: 0 warnings; `vet`: 29 deps, 0 untrusted; `deny`:
+  0 violations; `src/` warning-free; `cyrius distlib --check`: both profiles current.
+- One `tools/call` → `bote_echo` round trip over stdio, HTTP, Unix socket, bridge, Streamable
+  HTTP and WebSocket on the rebuilt binaries; `initialize` reports **3.3.11** on all three.
+- Raw-syscall gate: clean on the tree, red on the mutant.
+
+### Performance
+
+None claimed. The 3.3.10 and 3.3.11 bench binaries interleaved, three trials each, medians:
+twelve of fourteen rows within noise; `dispatch_tools_call` **+5.4%** and
+`codec_serialize_response` **+4.4%** with non-overlapping ranges, on sources that are
+byte-identical apart from the version literal. Isolated rather than waved off: a third build of
+the 3.3.11 tree with *only* the bench file's exit call reverted matches 3.3.11 to −0.2% / 0.0%,
+so the `sys_exit` change is not the cause. What does differ is the version literal's length —
+the 3.3.10 bench binary was built minutes before its own bump and carries `3.3.9`, five
+characters against six — a one-byte string-data shift that moves every following data address
+(2,539 differing bytes, all +1 relocations). Alignment, not code. The single-run `history.log`
+row also shows `dispatch_initialize` +10%, which the interleaved medians put at −1.2%; that is
+why the log is a history and the interleave is the measurement.
+
+_(empty)_
+
 ## [3.3.10] — 2026-09-21 · cyrius 6.6.6 + libro 2.10.3 / majra 2.9.1 — and the manifest stops being a changelog
 
 Toolchain **6.6.3 → 6.6.6** and both dependency pins to their latest tags. No source
@@ -1170,7 +1262,7 @@ worse defect in the same six lines: the loop had no error branch at all.
     the *identical* unguarded spin, so http / streamable / ws / bridge still inherit it. bote's
     policy is deliberately stricter than the house pattern rather than copying it; the sandhi side
     wants an upstream fix.
-- **Stale line citations** in `docs/development/issues/2026-07-17-aarch64-sys-open-urandom.md` and
+- **Stale line citations** in `docs/development/issues/archive/2026-07-17-aarch64-sys-open-urandom.md` and
   the 3.2.0 CHANGELOG entry (`transport_unix.cyr:113` → `:123`, `lib/net.cyr:331` → `:320`),
   caught while verifying this change.
 
@@ -1221,7 +1313,7 @@ and a `[deps.sigil]` tag/lock drift that had CI red at HEAD is realigned.
   verified. Severity was bounded only by the packaging defect below: no consumer could reach the
   module. Fixing the packaging without fixing this would have shipped the gap to every consumer at
   once, so it is fixed first. Resolves finding (2) of
-  `docs/development/issues/2026-07-30-jwt-module-is-orphaned-and-documents-an-exp-check-it-does-not-perform.md`.
+  `docs/development/issues/archive/2026-07-30-jwt-module-is-orphaned-and-documents-an-exp-check-it-does-not-perform.md`.
   - Runs **only after the HMAC verifies**. The constant-time compare was previously the function's
     terminal statement; it now short-circuits, and the payload is decoded below that line, so claim
     parsing never touches unauthenticated bytes.
@@ -1299,7 +1391,7 @@ and a `[deps.sigil]` tag/lock drift that had CI red at HEAD is realigned.
   the same reason and in the same shape as the libro drift fixed at 3.1.4. Tag, lock and vendored
   body now agree for all four AGNOS deps.
 - **aarch64 cross-build (`undefined variable 'SYS_OPEN'`).** Resolves
-  `docs/development/issues/2026-07-17-aarch64-sys-open-urandom.md`, filed by **daimon**. The
+  `docs/development/issues/archive/2026-07-17-aarch64-sys-open-urandom.md`, filed by **daimon**. The
   fix is **wider than the report**: the issue identified `SYS_OPEN` as "the *only* blocker", but
   set-differencing the two syscall peers (95 constants on x86_64, 88 on aarch64) shows 17 x86-only
   constants, of which bote referenced **three** — `SYS_OPEN` (`src/session.cyr`, `src/pkce.cyr`)

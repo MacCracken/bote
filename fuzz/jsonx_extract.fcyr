@@ -69,4 +69,4 @@ while (i < vec_len(inputs)) {
     i = i + 1;
 }
 
-syscall(SYS_EXIT, 0);
+sys_exit(0);

@@ -73,12 +73,12 @@ while (i < vec_len(corpus)) {
     # parses as JSON. We can't validate JSON here without a parser, so just
     # check it's a non-empty cstr.
     if (out != 0) {
-        if (strlen(out) == 0) { syscall(SYS_EXIT, 20); }
+        if (strlen(out) == 0) { sys_exit(20); }
         # Must start with `{` or `[`
         var c = load8(out);
-        if (c != 123) { if (c != 91) { syscall(SYS_EXIT, 21); } }
+        if (c != 123) { if (c != 91) { sys_exit(21); } }
     }
     i = i + 1;
 }
 
-syscall(SYS_EXIT, 0);
+sys_exit(0);

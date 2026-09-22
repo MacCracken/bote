@@ -98,9 +98,9 @@ fn main() {
     # auto-injected by cyrius.cyml [deps] even though the core bundle
     # doesn't reference them, and their teardown trips the heap
     # heisenbug documented in tests/bote.tcyr).
-    syscall(SYS_EXIT, 0);
+    sys_exit(0);
     return 0;
 }
 
 var r = main();
-syscall(SYS_EXIT, r);
+sys_exit(r);

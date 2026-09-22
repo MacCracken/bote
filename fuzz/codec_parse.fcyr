@@ -82,13 +82,13 @@ while (i < vec_len(corpus)) {
         var jr = req_jsonrpc(req);
         var m = req_method(req);
         # Both must be present (not 0).
-        if (jr == 0) { syscall(SYS_EXIT, 10); }
-        if (m == 0) { syscall(SYS_EXIT, 11); }
+        if (jr == 0) { sys_exit(10); }
+        if (m == 0) { sys_exit(11); }
         # is_notification must not crash
         var is_notif = req_is_notification(req);
-        if (is_notif != 0) { if (is_notif != 1) { syscall(SYS_EXIT, 12); } }
+        if (is_notif != 0) { if (is_notif != 1) { sys_exit(12); } }
     }
     i = i + 1;
 }
 
-syscall(SYS_EXIT, 0);
+sys_exit(0);
