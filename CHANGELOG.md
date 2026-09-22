@@ -91,8 +91,9 @@ profile exists to *bound* a consumer's compile set, **eight** repos vendor
 `content.cyr` earned its core place at 3.3.6 on evidence — core consumers were hand-rolling
 content envelopes and re-implementing JSON escaping each time — and there is no equivalent
 here. Adding it on the argument that it *might* be wanted is the speculative direction.
-Revisit when a core-profile consumer actually wires a backend; the rationale is recorded in
-`cyrius.cyml` next to the profile, not only here.
+Revisit when a core-profile consumer actually wires a backend. The reasoning lives in
+`DEPS-PATTERN.md`, which is the distribution contract; `cyrius.cyml` carries only the
+standing membership rule, because a manifest is not a ledger.
 
 Its header comment also drops the stale `kavach 3.12.2` pin (kavach is not a declared dep;
 CLAUDE.md's stack table tracks what it is checked against) and gains the one real mismatch a

@@ -19,8 +19,8 @@
 # is the superset on purpose, since a backend that CAN bound execution
 # should not have to invent a channel to be told the bound.
 #
-# In `dist/bote.cyr` since 3.3.13; not in `dist/bote-core.cyr` (see the
-# [lib.core] note in cyrius.cyml for why).
+# In `dist/bote.cyr`; deliberately not in `dist/bote-core.cyr` —
+# DEPS-PATTERN.md carries the reasoning.
 #
 # Tool handlers that don't use the sandbox are unaffected — the dispatcher
 # doesn't know about this module. Tool handlers that DO use it just call

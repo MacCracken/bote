@@ -17,10 +17,8 @@ output = "build/bote"
 # a module must follow everything it references.
 #
 # audit_libro and libro_tools need a live libro chain, which is why they are
-# here and not in [lib.core]. sandbox.cyr joined at 3.3.13 — it had been in
-# src/ and in no profile since 2.1.0, so the surface the README and the
-# package description advertise reached no consumer. It sits after
-# dispatch.cyr because its noop runner calls `_json_emit_escaped`.
+# here and not in [lib.core]. content.cyr and sandbox.cyr must follow
+# dispatch.cyr: both call `_json_emit_escaped`, which it defines.
 #
 #   cyrius distlib       → dist/bote.cyr       (this profile, 31 modules)
 #   cyrius distlib core  → dist/bote-core.cyr  ([lib.core], 12 modules)
@@ -64,19 +62,13 @@ modules = [
 # t-ron's SecurityGate). Excludes the transports, auth, session, discovery,
 # host, audit_libro and events_majra. Contract: DEPS-PATTERN.md.
 #
-# content.cyr is deliberately LAST: it calls `_json_emit_escaped`, which
-# dispatch.cyr defines. Its only other references are already in the core
-# closure, so it adds no stdlib leaf to dist/bote-core.deps.
+# content.cyr is LAST: it calls `_json_emit_escaped`, which dispatch.cyr
+# defines, and its other references are already in the core closure.
 #
-# `sandbox.cyr` is deliberately NOT here, decided at 3.3.13 when it joined
-# the full bundle. It would fit mechanically — it needs no sigil and no
-# transport, and adds no stdlib leaf — but this profile exists to BOUND a
-# consumer's compile set, and eight repos vendor bote-core.cyr while zero
-# reference a `sandbox_*` symbol. content.cyr earned its place on evidence
-# (core consumers were hand-rolling content envelopes, re-implementing JSON
-# escaping each time); there is no equivalent evidence here, and adding it
-# on the argument that it *might* be wanted is the speculative direction.
-# Revisit when a core-profile consumer actually wires a sandbox backend.
+# Membership bar: a transport-free consumer must demonstrably need the
+# module, not merely be able to compile it — this profile exists to bound
+# the consumer's compile set. src/sandbox.cyr fits mechanically and is
+# deliberately absent; DEPS-PATTERN.md carries the reasoning.
 [lib.core]
 modules = [
     "src/error.cyr",
