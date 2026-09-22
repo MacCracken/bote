@@ -16,6 +16,199 @@ have per release.
 
 ## [Unreleased]
 
+_(empty)_
+
+## [3.3.10] — 2026-09-21 · cyrius 6.6.6 + libro 2.10.3 / majra 2.9.1 — and the manifest stops being a changelog
+
+Toolchain **6.6.3 → 6.6.6** and both dependency pins to their latest tags. No source
+change beyond the version literal. **887** assertions across 14 suites, all four fuzz
+harnesses, the benchmark, and a clean-room consumer probe against the regenerated bundle.
+
+### Changed — toolchain and dependency pins
+
+| dep | was | now | arrives via |
+|---|---|---|---|
+| cyrius | 6.6.3 | **6.6.6** | `cyrius =` pin |
+| libro | 2.10.0 | **2.10.3** | `[deps.libro]` |
+| majra | 2.7.2 | **2.9.1** | `[deps.majra]` |
+| sigil | 3.12.17 | **3.12.18** | stdlib fold |
+| patra | 1.14.2 | **1.14.3** | stdlib fold (libro's `deps.patra` pins the same 1.14.3; `cyrius deps` keeps the snapshot's copy and says so) |
+| sakshi / bayan / sandhi | 2.5.2 / 1.5.6 / 1.9.17 | unchanged | stdlib fold |
+
+**The toolchain and libro pins move together or not at all.** libro 2.10.2 needs the
+`O_NOFOLLOW` / `O_DIRECTORY` symbols cyrius 6.6.4 introduced (libro's own CHANGELOG measured
+six `undefined variable` errors on a 2.10.1 manifest beside a 1.14.3 patra), so 2.10.3 on the
+old 6.6.3 pin is not a valid intermediate state.
+
+What the pre-flight checked against 6.6.4–6.6.6's consumer-visible changes, all empty in
+`src/`: no `O_APPEND` / `O_TRUNC` outside vendored `lib/` (the single write is
+`file_write_all` at `src/fs_tools.cyr`) and no Windows target, so the PE open-flag repair does
+not reach here; no `async fn`, `operator` fn, `ret2` / `rethi`, SIMD intrinsics, struct
+declarations, struct- or vector-typed parameters or `var`s (6.6.5's struct-local operator
+rule), top-level bare `{` blocks (6.6.6's block-scope rule), duplicated global declarations,
+`regression_*` call sites, or `vec_*` names colliding with `lib/vec.cyr`'s exports; no reach
+across a `private` boundary (6.6.4's visibility gates — the build would have refused). Arity
+and `: cstring` scans clean. Both bump notes that demand action were followed: `cyrius deps`
+re-run after the pin move (6.6.5 — the aarch64 `SYS_UNLINKAT` renumbering), and `lib/` rebuilt
+from the snapshot first (`rm -rf lib && cyrius lib sync --full && cyrius deps`).
+
+What the dependency bumps were checked against, unchanged across both:
+
+- **libro** `struct chain` / `struct entry` / `struct error` are byte-identical between 2.10.0
+  and 2.10.3, so `src/libro_tools.cyr`'s raw offsets (entry 16 / 24 / 32 / 40 / 56 / 72, chain
+  `entries` at +0) and the `#derive(accessors)` reads of `struct error` still hold. libro
+  2.10.1–2.10.3 are the TPM-arm `Result` fix, the syscall-wrapper sweep and the pin bump — "no
+  format change: every digest, proof and signature verifies exactly as under 2.10.1".
+- **majra** `pubsub_new()` / `pubsub_subscribe(ps, topic)` / `pubsub_publish(ps, topic,
+  payload)` keep their signatures and the 32-byte hub. 2.9.0's two **wire breaks** (encrypted
+  IPC handshake, signed-envelope domain separation) live in the `-backends` / `-signed`
+  profiles bote does not consume; 2.8.0's `ERR_*` → `MAJRA_ERR_*` rename keeps same-value
+  aliases and could not collide with bote's `BOTE_ERR_*` anyway; 2.8.1's borrowed-key fix is
+  on the hub bote publishes into and is the one behavioural change worth having.
+
+### Changed — `cyrius.cyml` is a manifest again, 300 → 174 lines
+
+The comment blocks had become a changelog: the libro_tools parking story through 2.6.x, the
+sakshi and sigil pin-removal write-ups from 3.3.1 (with their four-step `cyrius build`
+reversion transcript), the 3.2.0 tag↔lock realignment with its dist hash, the 2.8.4 / 2.8.11
+struct incidents, the bayan / bigint retirement notes, a kavach version in the package
+description, and "stable 2.x" in the same line two majors on. Every one of those facts is
+already recorded in this file (3.3.1, 3.3.4, 3.2.0, 2.7.x) or in `CLAUDE.md`'s stack table —
+grep-verified before cutting. What remains states the present rules only:
+
+- why the `[lib]` / `[lib.core]` order matters and why `content.cyr` is last in core;
+- the three load-bearing orderings in `[deps].stdlib` (`dynlib` → `fdlopen`, `thread` →
+  `thread_local` → `sigil`, `ct` / `keccak` / `random` → `sigil`), why `sakshi` is listed and
+  why `ws_server` is not;
+- the rule against a `deps.sigil` / `deps.sakshi` block over a folded module;
+- `path` beats `tag`, and transitive versions are verified after `cyrius build`;
+- the libro struct-layout contract (appended fields are safe for a raw reader, prepended ones
+  are not) as a rule, not a re-telling.
+
+Two hygiene rules come over from libro 2.10.2's own cleanup: no comments inside an array,
+and `deps.NAME` in prose rather than the bracketed header (distlib's sidecar scan is
+unanchored). The comments that sat inside the `stdlib = [...]` array moved above it.
+Resolution is proven unchanged: `cyrius lib sync --dry-run` before and after the rewrite
+selects the same 59 files, plus `alloc_cx.cyr`, the one file 6.6.6 added to the snapshot.
+
+### Changed — `dist/bote.deps` names 32 leaves, not 41
+
+Nine transitive leaves came out of the full-profile sidecar: `hashseed`, `sha1`,
+`syscalls_linux_common`, `result`, `boxed`, `mmap`, `process`, `fs`, `tls_native`.
+`dist/bote-core.deps` is unchanged at 12.
+
+This is 6.6.6's `distlib`, not the manifest rewrite — isolated by regenerating from the *old*
+manifest text with only the pins edited, under 6.6.6: byte-identical sidecar. The dropped
+names are exactly the include-closure of the declared modules, which the 6.6.x stdlib now
+pulls itself ("`lib/string.cyr` and `lib/fmt.cyr` are self-sufficient now — they include what
+they call", per 6.6.6; `lib/io.cyr` likewise).
+
+Proven safe the only way that counts — a **clean-room consumer**: a scratch project declaring
+`stdlib = ["assert"]` and `[deps.bote]` → `dist/bote.cyr`, nothing else. `cyrius deps` copied
+**81** files, all nine dropped leaves among them; a probe reaching `tool_registry_new`,
+`dispatcher_new`, `pubsub_new`, `chain_new` and `content_text_response` built with zero
+undefined functions and exited 0.
+
+### Fixed — the thin-sigil duplicates were not the same sigil for two releases
+
+`cyrius build` on `src/main.cyr` reports **232** `duplicate fn` warnings from libro's thin
+sigil selection landing beside the fold: `lib/sigil-mldsa.cyr` (201), `lib/sigil_sha256.cyr`
+(15), `lib/sigil_sha_ni.cyr` (8) and `lib/sigil_hex.cyr` (8), each "first defined in
+`lib/sigil.cyr`", so the **thin copy wins**. 3.3.5 recorded this class as benign on the
+premise *"both files are the same sigil version and the bodies are byte-identical"*.
+
+⚠ **That premise was false at 3.3.8 and 3.3.9, and nothing re-checked it.** 3.3.8 moved libro
+to 2.10.0, whose `deps.sigil` pinned the thin surface at **3.12.9**, while the 6.6.2 / 6.6.3
+folds carried **3.12.16 / 3.12.17** — so for those 232 functions (ed25519, ML-DSA, hybrid,
+sha512, crypto_scratch, sha256, SHA-NI dispatch, hex) bote linked the older body and the
+diagnostic said nothing new.
+
+Benign in effect, and diff-proven rather than assumed: `git diff 3.12.9 3.12.18` in sigil
+over `dist/sigil-mldsa.cyr` is a reindent plus the version banner (`-w` leaves one line: the
+banner); `src/sha256.cyr`, `src/sha_ni.cyr` and `src/hex.cyr` are byte-identical across the
+range. This release aligns both sides at **3.12.18** (libro 2.10.3's pin = the 6.6.6 fold),
+verified by extracting every one of the 232 duplicated bodies from the thin file and from
+`lib/sigil.cyr`: 232 of 232 identical.
+
+**The rule that replaces the premise:** on every libro or toolchain bump, compare libro's
+`deps.sigil` tag with `# Version:` in the fold's `lib/sigil.cyr`. They agree today; the day
+they do not, the thin copy is what bote's crypto runs.
+
+Also inventoried, unchanged and upstream: `duplicate fn 'uname_release'` (`lib/sys.cyr` vs
+`lib/sigil.cyr`, majra tracks it) and sigil's `array local over the per-fn frame budget gets
+STATIC storage` line, which 6.6.5 promoted from `note:` to `warning:` for the same storage.
+`_sub_new` is gone (majra 2.7.1 renamed it) and `src/` is still warning-clean.
+
+### Verified
+
+- **887 passed, 0 failed** across 14 suites, per-file (`bote` 424 · `auth` 38 · `content` 24 ·
+  `fs_tools` 26 · `host` 113 · `jwt` 53 · `libro_tools` 38 · `pkce` 17 · `sandbox` 13 ·
+  `streamable` 53 · `transport_unix` 47 · `web_tools` 27 · `ws` 14 · core-only drift smoke).
+- All four `fuzz/*.fcyr` clean, no undefined functions.
+- **One `tools/call` → `bote_echo` round trip over each of the six transports** on the rebuilt
+  binaries — stdio, HTTP, Unix socket, bridge (with CORS), Streamable HTTP (`initialize` →
+  `MCP-Session-Id` → call) and WebSocket (RFC 6455 handshake + one masked text frame) — each
+  answering `id: 7` with the echoed payload; `initialize` reports `serverInfo.version` **3.3.10**
+  on all three binaries. ⚠ The first pass of that check ran against binaries built *before*
+  `version-bump.sh` rewrote the literal and reported 3.3.9 — the same drift 3.3.1 shipped. Rebuild
+  after the bump, then check the handshake; the script cannot do the rebuild for you.
+- `cyrius fmt --check` over `src/`: 0; `cyrius lint src/main.cyr`: 0 warnings, 0 untracked
+  deferrals; `cyrius vet`: 29 deps, 0 untrusted; `cyrius deny`: 0 violations.
+- Capacity on `src/main.cyr` at 6.6.6: `fn_table 5708 / 131072`, `identifiers 184274 /
+  8388608`, `var_table 2763 / 1048576` — 4.4% / 2.2% / 0.3% (the 6.6.x ceilings; not
+  comparable with the 6.5.x percentages in `CLAUDE.md`'s history).
+- `cyrius.lock`: **117** hashes + the `cyrius<TAB>6.6.6` trailer (was 116, no trailer).
+  Reproducible: two independent `rm -rf lib && lib sync --full && deps` cycles wrote
+  byte-identical locks. Vendored `lib/libro.cyr` and `lib/majra.cyr` are byte-identical to
+  their tags, checked against `git diff <tag> -- dist/<pkg>.cyr` in each sibling — the
+  `path =` override was vendoring the same bytes the tag would.
+- Both bundles differ from 3.3.9's only in the two version lines; `cyrius distlib --check`
+  passes both profiles.
+
+### Performance
+
+None claimed. Toolchain-only A/B on this host — the same source and the same vendored deps
+built once under 6.6.3 and once under 6.6.6, run interleaved, three trials each, medians
+(load < 0.7):
+
+| bench | 6.6.3 | 6.6.6 | delta |
+|---|---|---|---|
+| dispatch_initialize | 1.410 µs | 1.305 µs | −7.4% |
+| dispatch_tools_list | 2.095 µs | 2.023 µs | −3.4% |
+| dispatch_tools_call | 3.330 µs | 3.175 µs | −4.7% |
+| jsonx_get_str_flat | 146 ns | 141 ns | −3.4% |
+| jsonx_get_raw_nested | 347 ns | 339 ns | −2.3% |
+| codec_parse_request | 1.246 µs | 1.254 µs | +0.6% |
+| codec_serialize_response | 445 ns | 425 ns | −4.5% |
+| codec_process_message | 5.005 µs | 4.982 µs | −0.5% |
+| validate_compiled_simple | 462 ns | 474 ns | +2.6% |
+| validate_compiled_nested | 2.041 µs | 2.057 µs | +0.8% |
+| schema_compile_simple | 2.216 µs | 2.278 µs | +2.8% |
+| schema_compile_nested | 5.213 µs | 5.284 µs | +1.4% |
+| auth_bearer_check_unset | 7 ns | 7 ns | 0.0% |
+| auth_bearer_check_set | 685 ns | 710 ns | +3.6% |
+
+The dispatch family moves down and the schema family up by a few percent, several rows with
+non-overlapping trial ranges — the 6.6.5 / 6.6.6 emitter work, the same shape majra recorded
+at 2.9.1. A wash. ⚠ The "6.6.3 side" vendored libro 2.10.3 / majra 2.9.1, not 3.3.9's
+2.10.0 / 2.7.2: `path = "../libro"` beat `tag = "2.10.0"` because the sibling checkouts sit at
+their latest tags — the exact hazard the manifest now states in one line. It makes this a
+cleaner *toolchain* control (none of the 14 benches reach libro or majra), not a 3.3.9
+reproduction. `benches/history.log` gains its first row since 3.3.7 — 3.3.8 and 3.3.9 never
+logged one.
+
+### Docs
+
+- `docs/development/roadmap.md`: the "Moving the cyrius pin to 6.6.6" pre-flight shipped and
+  is deleted; its measured claims are recorded above, as majra did at 2.9.1.
+- `CLAUDE.md` re-anchored to 3.3.10 — it had read "3.3.4 current" with libro 2.8.12 / majra
+  2.7.0 through two pin bumps. The toolchain-A/B principle is corrected: the `cyrius` wrapper
+  now re-execs the *pinned* compiler (`cyrius which` inside the repo resolves to
+  `~/.cyrius/versions/<pin>/bin/cycc`), so a pin edit alone selects both compiler and stdlib,
+  and the stdin-prelude reconstruction is no longer needed for an A/B.
+- `docs/architecture/overview.md` and `README.md` version / pin / assertion-count lines
+  re-anchored.
+
 ## [3.3.9] — cyrius 6.6.3 · the distlib memory cap comes out
 
 `cyrius` 6.6.2 → **6.6.3**. No source change; this release retires a CI workaround.

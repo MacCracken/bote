@@ -11,7 +11,7 @@
 > **Lineage**: Originally a Rust crate. Ported to Cyrius via `cyrius port`
 > on 2026-04-13 (v1.0.0). The Rust archive was retired in v1.0.1; the last
 > Rust snapshot is at git tag `0.92.0`. This doc describes the live Cyrius
-> implementation (current: **3.3.5**, cyrius 6.5.35).
+> implementation (current: **3.3.10**, cyrius 6.6.6).
 
 ---
 
@@ -154,11 +154,11 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
                               thread_local, sakshi, ct, keccak, random,
                               sigil, tls, sandhi; ws_server manually
                               included by transport_ws.cyr only)
-[deps.libro]   git = "MacCracken/libro"   tag = "2.8.12"  (+ patra 1.13.10 transitive)
-[deps.majra]   git = "MacCracken/majra"   tag = "2.7.0"
+[deps.libro]   git = "MacCracken/libro"   tag = "2.10.3"  (+ patra 1.14.3 transitive)
+[deps.majra]   git = "MacCracken/majra"   tag = "2.9.1"
 
-  Those are the ONLY two [deps.<name>] blocks. sigil 3.12.9, sakshi 2.4.11
-  and bayan 1.5.2 arrive via the cyrius stdlib fold, not a git pin — the
+  Those are the ONLY two [deps.<name>] blocks. sigil 3.12.18, sakshi 2.5.2,
+  patra 1.14.3 and bayan 1.5.6 arrive via the cyrius stdlib fold, not a git pin — the
   former [deps.sigil] / [deps.sakshi] registry-lag pins were removed at
   3.3.1 (sigil's had gone stale and was holding bote behind two
   authentication bypasses).

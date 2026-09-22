@@ -206,7 +206,7 @@ transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ## Verification
 
-### Tests — 883 total across thirteen files (+ a core-only drift smoke)
+### Tests — 887 total across thirteen files (+ a core-only drift smoke)
 
 Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`).
 
@@ -223,7 +223,7 @@ cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals
 cyrius test tests/bote_transport_unix.tcyr # 47 — Unix transport: sockaddr, accept-error policy, backoff
 cyrius test tests/bote_web_tools.tcyr     # 27 — web_fetch / web_search
-cyrius test tests/bote_ws.tcyr            # 10 — WebSocket config + wire-up
+cyrius test tests/bote_ws.tcyr            # 14 — WebSocket config + wire-up
 cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dist/bote-core.cyr
 ```
 
