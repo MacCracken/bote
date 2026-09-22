@@ -105,19 +105,19 @@ fn main() {
     # that replaced it.
 
     # ---- transient: retry immediately, listener is fine ----
-    assert_eq(_unix_accept_action(EINTR), BOTE_ACCEPT_RETRY,
+    assert_eq(_unix_accept_action(BOTE_ERRNO_EINTR), BOTE_ACCEPT_RETRY,
     "EINTR retries immediately");
     assert_eq(_unix_accept_action(BOTE_ERRNO_ECONNABORTED), BOTE_ACCEPT_RETRY,
     "ECONNABORTED retries immediately");
     assert_eq(_unix_accept_action(BOTE_ERRNO_EPROTO), BOTE_ACCEPT_RETRY,
     "EPROTO retries immediately");
-    assert_eq(_unix_accept_action(EAGAIN), BOTE_ACCEPT_RETRY,
+    assert_eq(_unix_accept_action(BOTE_ERRNO_EAGAIN), BOTE_ACCEPT_RETRY,
     "EAGAIN retries (unreachable on a blocking fd, kept defensively)");
 
     # ---- fatal: accept on this fd can never succeed again ----
     assert_eq(_unix_accept_action(BOTE_ERRNO_EBADF), BOTE_ACCEPT_FATAL,
     "EBADF is fatal");
-    assert_eq(_unix_accept_action(EINVAL), BOTE_ACCEPT_FATAL,
+    assert_eq(_unix_accept_action(BOTE_ERRNO_EINVAL), BOTE_ACCEPT_FATAL,
     "EINVAL is fatal");
     assert_eq(_unix_accept_action(BOTE_ERRNO_ENOTSOCK), BOTE_ACCEPT_FATAL,
     "ENOTSOCK is fatal");
@@ -125,9 +125,9 @@ fn main() {
     "EOPNOTSUPP is fatal");
 
     # ---- resource pressure: sleep and retry, self-healing ----
-    assert_eq(_unix_accept_action(EMFILE), BOTE_ACCEPT_BACKOFF,
+    assert_eq(_unix_accept_action(BOTE_ERRNO_EMFILE), BOTE_ACCEPT_BACKOFF,
     "EMFILE backs off (per-process fd limit, recoverable)");
-    assert_eq(_unix_accept_action(ENFILE), BOTE_ACCEPT_BACKOFF,
+    assert_eq(_unix_accept_action(BOTE_ERRNO_ENFILE), BOTE_ACCEPT_BACKOFF,
     "ENFILE backs off (system-wide fd limit, recoverable)");
     assert_eq(_unix_accept_action(BOTE_ERRNO_ENOBUFS), BOTE_ACCEPT_BACKOFF,
     "ENOBUFS backs off");
@@ -200,8 +200,16 @@ fn main() {
     # point: the old code was correct only by way of a compiler-internal
     # table in which 43 would otherwise be `statfs`. This one is correct
     # by way of the per-arch syscall peer.
+    #
+    # Not on agnos: its peer has no accept4 wrapper because the target
+    # has no AF_UNIX, and `transport_unix_run` fail-closes there before
+    # any socket call — so this probe is guarded exactly as the accept
+    # loop it exercises is (3.3.12; the file did not compile for
+    # --agnos before, which is how the sigil errno leak above was found).
+    #ifndef CYRIUS_TARGET_AGNOS
     assert_eq(sys_accept4(2, 0, 0, 0), 0 - 88,
     "sys_accept4 on a non-socket fd -> -ENOTSOCK (arch-correct SYS_ACCEPT4)");
+    #endif
 
     return assert_summary();
 }

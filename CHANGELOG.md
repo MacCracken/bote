@@ -18,6 +18,113 @@ have per release.
 
 _(empty)_
 
+## [3.3.12] — 2026-09-22 · the agnos target is gated — and building for it found two things Linux could not show
+
+`cyrius build --agnos` has compiled bote since 2.7.8, and 2.9.0 proved a live MCP flow on the
+real agnos kernel under QEMU — but no gate ever built for the target, so nothing could see it
+rot. Now CI does, and the sweep that established the baseline turned up an include gap five
+test files had carried since the codec / schema split, and a dependency's errno constants
+silently standing in for the stdlib's on agnos. **887** assertions natively and under
+`qemu-aarch64`; every entry and every unit clean for `CYRIUS_TARGET_AGNOS`.
+
+### Added — agnos portability gate in CI
+
+Two compile-time gates, modelled on the toolchain's own `scripts/agnos-crossbuild-gate.sh`.
+An agnos binary cannot run on the runner; behaviour is validated on the agnos QEMU image by
+the kernel-side `BOTE_SELFTEST` hook + `bote-mcp-smoke.sh` in the agnos repo, not here.
+
+1. **All three entries** cross-build to a valid agnos ring-3 binary — a static x86-64
+   `ET_EXEC` ELF (magic `7f454c46`, `e_type` 0x0002, `e_machine` 0x003e) — with **zero**
+   `undefined function` lines, reachable or not. "OK" alone is not the bar: cycc lowers an
+   unreachable undefined function to a `ud2` stub and still exits 0, and the day a call site
+   becomes reachable that is a SIGILL. Measured at this release: `bote-agnos` 2,664,888 B,
+   `bote-streamable-agnos` 2,625,264 B, `bote-ws-agnos` 2,629,544 B, 0 undefined each.
+2. **Every test, bench and fuzz unit** compiles for the target with the same zero-undefined
+   bar — 14 `.tcyr` + `bote.bcyr` + 4 `.fcyr`, compile-only. Before this release one of the
+   nineteen did not build for agnos at all (below).
+
+Also proven once, outside CI: the **clean-room consumer** probe from 3.3.10 (a project
+declaring only `[deps.bote]` → `dist/bote.cyr`) builds for `--agnos` from the sidecar alone —
+`ET_EXEC` x86-64, 0 undefined, reaching the registry, dispatcher, majra hub, libro chain and
+content blocks.
+
+### Fixed — five test files compiled with an undefined function, and passed
+
+`bote_content.tcyr` and `bote_sandbox.tcyr` included `src/dispatch.cyr` without `codec.cyr`
+or `schema.cyr`, so `dispatch`'s call to `compiled_validate` was undefined;
+`bote_fs_tools.tcyr`, `bote_libro_tools.tcyr` and `bote_web_tools.tcyr` included `schema.cyr`
+without `codec.cyr`, so `schema`'s `_cdc_skip_ws` was. All five linked with a `warning:` and
+passed every assertion, because nothing in those files reaches the gap — the exact shape
+3.3.8 found in the fuzz harnesses ("compiled with 18 undefined functions and passed only
+because every call site was unreachable"). The fuzz step has gated it since; the test step
+never did. Not agnos-specific — the native build carries the same five warnings — but the
+agnos sweep was the first thing to read every unit's build log. Each file now includes
+`dispatch → codec → schema` in `src/main.cyr` order.
+
+### Fixed — the CI test step could not fail on a test that failed to run
+
+`out=$(cyrius test "$tcyr" 2>&1)` discarded the exit code, and the only check was a grep for
+an explicit `N passed, M failed` with `M ≠ 0`. A file that **failed to compile**, or
+**SIGSEGV'd before printing its summary**, produced no such line and passed the step with an
+empty `tail -3`. Same class as cyrius 6.6.6's own runner repair ("a binary that ran nothing
+scored a PASS"). The step now fails on a non-zero exit, requires a `[1-9]… passed, 0 failed`
+line from every file that calls `assert_summary` (the core-only smoke is exit-code driven by
+design and exempt by that same test), and fails on any `undefined function`, as the fuzz step
+does. **Mutation-checked** with three scratch units: a syntax error → `FAIL (exit 1)` + no
+summary; a `sys_exit(0)` before the summary → `FAIL (no passing summary line)`; a copy of
+`bote_content.tcyr` with the two includes removed → `FAIL (undefined: compiled_validate)`. The
+pre-3.3.12 logic, run on the second mutant: PASS.
+
+### Fixed — on agnos, `transport_unix.cyr`'s errno names bound to sigil's, not the stdlib's
+
+`_unix_accept_action` classified accept(2) errnos with five bare stdlib names — `EINTR`,
+`EAGAIN`, `EINVAL`, `EMFILE`, `ENFILE` — and seven of its own `BOTE_ERRNO_*` for the ones the
+Linux peer's `Errno` enum stops short of. The agnos syscall peer defines **no** errno names at
+all. The build still resolved four of the five, because the `[deps] stdlib` prelude that
+precedes every unit carries `lib/sigil.cyr`, whose file-scope enum declares bare `EINTR = 4`
+… `EMFILE = 24` (`lib/sigil.cyr:44-58`) — so on agnos bote's accept policy was reading a
+**dependency's** constants, correct only because sigil happens to spell Linux's numbers.
+`ENFILE` is not in sigil's enum, which is how `bote_transport_unix.tcyr` failed to build for
+`--agnos` (`undefined variable 'ENFILE'`) and how the leak was found. This is the flat
+global namespace `CLAUDE.md` already warns about, from the other direction: not bote's
+constant aliasing a dep's, but a dep's constant standing in where the target's own is absent.
+
+The file now spells all twelve names it classifies — `BOTE_ERRNO_EINTR` / `EAGAIN` / `EINVAL`
+/ `ENFILE` / `EMFILE` join the existing seven — and the comment says why. The values are the
+Linux generic errno numbers, identical on x86_64 and aarch64, which is the only place the
+accept loop runs: `transport_unix_run` fail-closes on agnos before any socket call (2.7.8).
+The test uses the same names and guards its `sys_accept4` probe with `#ifndef
+CYRIUS_TARGET_AGNOS` — the agnos peer has no `accept4` wrapper because the target has no
+`AF_UNIX` — exactly as the loop it exercises is guarded. Everything else in the file
+(`_unix_sockaddr`, the policy table, the backoff curve, `sleep_ms`) compiles and is asserted
+on every target. Native and aarch64: 47 / 47, unchanged.
+
+Sweep result: those three were the **only** bare errno names in `src/`; no other module is
+exposed.
+
+### Verified
+
+- **887 passed, 0 failed** natively and **887 / 887 under `qemu-aarch64`**; zero
+  `undefined function` on any unit, either target.
+- agnos: three entries + nineteen units, 0 undefined, `ET_EXEC` x86-64; consumer probe likewise.
+- All four fuzz harnesses clean; `fmt` / `lint` / `vet` / `deny` clean; `src/` warning-free;
+  `cyrius distlib --check` current on both profiles.
+- Six-transport `tools/call` round trip on the rebuilt binaries; `initialize` reports **3.3.12**.
+
+### Performance
+
+None claimed; no benchmark reaches the changed code. Single-run row logged: every figure
+within the 3.3.10 ↔ 3.3.11 interleaved band, with `dispatch_initialize` back at 1.32 µs after
+3.3.11's 1.44 µs single-run outlier.
+
+### Docs
+
+`CLAUDE.md` gains the agnos gate in the CI/testing notes and the sigil-errno case as the
+worked example for the "dependency constants standing in" direction of the namespace rule;
+`README.md` states the target support; roadmap re-anchored.
+
+_(empty)_
+
 ## [3.3.11] — 2026-09-22 · no raw syscalls left, and the two resolved issues finally archived
 
 No `src/` change beyond a comment path and the version literal. **887** assertions across 14

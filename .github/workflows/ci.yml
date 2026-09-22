@@ -237,11 +237,40 @@ jobs:
                       tests/bote_ws.tcyr \
                       tests/bote_core_only_smoke.tcyr; do
             echo "--- $tcyr ---"
-            out=$(cyrius test "$tcyr" 2>&1)
+            # 3.3.12: the exit code is checked. Through 3.3.11 `out=$(...)`
+            # discarded it and only an explicit "N passed, M failed" with
+            # M != 0 was flagged — so a file that failed to COMPILE, or
+            # SIGSEGV'd before printing its summary, passed this step with
+            # no output at all. Same class as cyrius 6.6.6's own runner fix
+            # ("a binary that ran nothing scored a PASS").
+            out=$(cyrius test "$tcyr" 2>&1); rc=$?
             tail=$(echo "$out" | tail -3)
             echo "$tail"
+            if [ $rc -ne 0 ]; then
+              echo "FAIL: $tcyr (exit $rc)"
+              fail=1
+            fi
             if echo "$out" | grep -qE '^[0-9]+ passed, [^0]'; then
               echo "FAIL: $tcyr"
+              fail=1
+            fi
+            # Every file that calls assert_summary must print its line
+            # with a non-zero pass count; the exit code alone cannot tell
+            # "all passed" from "nothing ran". The core-only smoke is the
+            # one exit-code-driven file and is exempt by that same test.
+            if grep -q 'assert_summary' "$tcyr"; then
+              if ! echo "$out" | grep -qE '^[1-9][0-9]* passed, 0 failed'; then
+                echo "FAIL: $tcyr printed no passing summary line"
+                fail=1
+              fi
+            fi
+            # An `undefined function` on a unit that still links means a
+            # call site nothing reaches — an include gap (3.3.12 found five
+            # test files carrying one since the schema/codec split; the
+            # fuzz step has gated this since 3.3.8).
+            if echo "$out" | grep -q "undefined function"; then
+              echo "FAIL: $tcyr compiles with undefined functions:"
+              echo "$out" | grep -oE "undefined function '[a-z_0-9]*'" | sort -u
               fail=1
             fi
           done
@@ -353,6 +382,63 @@ jobs:
             [ "$mach" = "b700" ] || { echo "::error::$out-aarch64 is not EM_AARCH64 (e_machine=$mach)"; exit 1; }
             echo "  OK  build/$out-aarch64  ($(wc -c < "build/$out-aarch64") bytes, EM_AARCH64)"
           done
+
+      - name: agnos portability gate
+        # Added 3.3.12. bote has carried a CYRIUS_TARGET_AGNOS arm since the
+        # Unix transport learned to fail-close there, but nothing built for
+        # the target, so nothing could see it rot. Two gates, both
+        # compile-time — an agnos binary cannot run on the runner, and the
+        # toolchain's own scripts/agnos-crossbuild-gate.sh validates
+        # behaviour on the agnos QEMU image, not here:
+        #
+        #   1. All three entries cross-build to a valid agnos ring-3 binary
+        #      (static x86-64 ET_EXEC ELF: magic 7f454c46, e_type 0x0002,
+        #      e_machine 0x003e) with ZERO `undefined function` lines,
+        #      reachable or not. cycc lowers an unreachable undefined fn to a
+        #      ud2 stub and still exits 0, so "OK" alone is not the bar —
+        #      the day a call site becomes reachable it is a SIGILL.
+        #   2. Every test, bench and fuzz unit compiles for the target with
+        #      the same zero-undefined bar. bote_transport_unix.tcyr guards
+        #      its sys_accept4 probe by #ifndef, exactly as the accept loop
+        #      it exercises is guarded; it must still BUILD.
+        run: |
+          set -o pipefail
+          fail=0
+          echo "--- entries ---"
+          for e in main:bote main_streamable:bote-streamable main_ws:bote-ws; do
+            src="${e%%:*}"; out="${e##*:}"; log="build/$out-agnos.log"
+            if ! cyrius build --agnos "src/$src.cyr" "build/$out-agnos" > "$log" 2>&1; then
+              echo "::error::$out does not build for --agnos"; tail -5 "$log"; fail=1; continue
+            fi
+            magic=$(od -An -tx1 -N4 "build/$out-agnos" | tr -d ' ')
+            etype=$(od -An -tx1 -j16 -N2 "build/$out-agnos" | tr -d ' ')
+            mach=$(od -An -tx1 -j18 -N2 "build/$out-agnos" | tr -d ' ')
+            if [ "$magic" != "7f454c46" ] || [ "$etype" != "0200" ] || [ "$mach" != "3e00" ]; then
+              echo "::error::$out-agnos is not a static x86-64 ET_EXEC ELF (magic=$magic e_type=$etype e_machine=$mach)"
+              fail=1
+            fi
+            if grep -q "undefined function" "$log"; then
+              echo "::error::$out-agnos links with undefined functions (ud2 stubs at runtime):"
+              grep -oE "undefined function '[a-z_0-9]*'" "$log" | sort -u
+              fail=1
+            fi
+            echo "  OK  build/$out-agnos  ($(wc -c < "build/$out-agnos") bytes, ET_EXEC x86-64, 0 undefined)"
+          done
+          echo "--- test / bench / fuzz units (compile-only) ---"
+          for f in tests/*.tcyr tests/*.bcyr fuzz/*.fcyr; do
+            log="build/agnos-unit.log"
+            if ! cyrius build --agnos "$f" build/agnos-unit.bin > "$log" 2>&1; then
+              echo "::error::$f does not build for --agnos"; grep -E '^error' "$log" | head -5; fail=1; continue
+            fi
+            if grep -q "undefined function" "$log"; then
+              echo "::error::$f compiles for --agnos with undefined functions:"
+              grep -oE "undefined function '[a-z_0-9]*'" "$log" | sort -u
+              fail=1
+            fi
+            echo "  OK  $f"
+          done
+          [ $fail -eq 0 ] || exit 1
+          echo "agnos: all three entries + every unit build clean for CYRIUS_TARGET_AGNOS"
 
       - name: Build benchmarks (non-fatal)
         run: |

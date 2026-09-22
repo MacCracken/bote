@@ -1,6 +1,6 @@
 # Bote Roadmap
 
-> **Current**: `3.3.11` (cyrius 6.6.6, libro 2.10.3, majra 2.9.1; sigil 3.12.18 / sakshi 2.5.2 / patra 1.14.3 arrive via the toolchain fold).
+> **Current**: `3.3.12` (cyrius 6.6.6, libro 2.10.3, majra 2.9.1; sigil 3.12.18 / sakshi 2.5.2 / patra 1.14.3 arrive via the toolchain fold).
 > 14 active test files, **887 unit assertions** + 1 drift-guard
 > smoke — green on **x86_64**; aarch64 cross-build gated in CI, runtime
 > sweep partial under qemu (no `getrandom` passthrough) — **14 criterion benchmarks**,
@@ -97,6 +97,7 @@ surfaced. See the **2.6.x modernization arc** section below.
 | **3.3.9** | **cyrius 6.6.3** — the distlib leaf-validation pass no longer allocates ~30 GB (peak RSS 31,214 MB → 120 MB), so the 3.3.8 `ulimit` cap and its fail-open `\|\| true` come out of CI. |
 | **3.3.10** | **cyrius 6.6.6 + libro 2.10.3 / majra 2.9.1** — pin bump, no source change. `cyrius.cyml` rewritten as a manifest (300 → 174 lines) after six releases of changelog had accreted in its comments. Found and closed a two-release blind spot: libro's thin `deps.sigil` selection *wins* over the fold's `lib/sigil.cyr` for 232 functions, and at 3.3.8–3.3.9 the two were different sigil versions (3.12.9 vs 3.12.16/17; diff-proven harmless after the fact) — now aligned at 3.12.18 with a standing rule to compare them on every bump. `dist/bote.deps` 41 → 32 leaves (6.6.6's distlib stops listing the include-closure; clean-room consumer probe proves it resolves). Toolchain-only bench A/B: a wash. One `tools/call` round trip over all six transports. |
 | **3.3.11** | **No raw `syscall(` left in bote's own sources.** `src/` had been clean since 3.2.1; the 26 remaining `syscall(SYS_EXIT, …)` sites in tests / bench / fuzz became `sys_exit`, a failing suite proven to still exit non-zero, and CI now bans the form across `src/` + `tests/` + `fuzz/` (mutation-checked) rather than the `SYS_*` spelling in `src/` alone. Both July issues re-verified on the current tree and archived — including a fresh symbol-collision sweep over all 117 vendored `lib/**/*.cyr` and the finding that the `qemu-aarch64` sweep is now complete (887 / 887, was partial). ES256's premise found expired alongside RS256's; the decision row updated, nothing built. |
+| **3.3.12** | **agnos portability gate.** `--agnos` had compiled since 2.7.8 with nothing guarding it; CI now cross-builds all three entries (static x86-64 `ET_EXEC`, zero `undefined function`) and compiles every test / bench / fuzz unit for the target. The baseline sweep found five test files linking with an undefined function (an include gap since the codec/schema split — passed because unreachable), and `transport_unix.cyr`'s bare errno names binding to **sigil's** enum on agnos, where the syscall peer defines none; both fixed, and the CI test step now fails on a non-zero exit, a missing summary line, or an undefined fn (mutation-checked — the old step passed a test that died before its summary). |
 
 See [CHANGELOG.md](../../CHANGELOG.md) for the full detail per release.
 

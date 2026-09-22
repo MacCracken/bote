@@ -74,11 +74,23 @@ enum BoteUnixAccept {
     BOTE_ACCEPT_FATAL = 2;      # listener unusable — hand back to the caller
 }
 
-# errno values the stdlib `Errno` enum does not carry (it stops at
-# ENOSPC). BOTE_-prefixed per CLAUDE.md's flat-global-namespace rule —
-# a bare `ECONNABORTED` could alias a dep symbol.
+# Every errno `_unix_accept_action` classifies, spelled by this file.
+# BOTE_-prefixed per CLAUDE.md's flat-global-namespace rule — a bare
+# `ECONNABORTED` could alias a dep symbol. Through 3.3.11 the five
+# names the Linux syscall peer does carry (EINTR / EAGAIN / EINVAL /
+# EMFILE / ENFILE) were used bare, and on the agnos target — whose
+# peer defines NO errno names — they silently bound to sigil's own
+# bare errno enum (`lib/sigil.cyr:44`), i.e. a dependency's leaked
+# constants, correct only by coincidence of value. The loop these
+# classify runs on Linux alone (agnos fail-closes above), where the
+# generic errno numbers are identical on x86_64 and aarch64.
+var BOTE_ERRNO_EINTR = 4;
 var BOTE_ERRNO_EBADF = 9;
+var BOTE_ERRNO_EAGAIN = 11;
 var BOTE_ERRNO_ENOMEM = 12;
+var BOTE_ERRNO_EINVAL = 22;
+var BOTE_ERRNO_ENFILE = 23;
+var BOTE_ERRNO_EMFILE = 24;
 var BOTE_ERRNO_EPROTO = 71;
 var BOTE_ERRNO_ENOTSOCK = 88;
 var BOTE_ERRNO_EOPNOTSUPP = 95;
@@ -101,17 +113,17 @@ var BOTE_UNIX_ACCEPT_GIVEUP = 200;
 # give-up counter ends the loop. Sleeping is never as bad as spinning.
 fn _unix_accept_action(err) {
     # Transient — the connection attempt failed, the listener is fine.
-    if (err == EINTR) { return BOTE_ACCEPT_RETRY; }
+    if (err == BOTE_ERRNO_EINTR) { return BOTE_ACCEPT_RETRY; }
     if (err == BOTE_ERRNO_ECONNABORTED) { return BOTE_ACCEPT_RETRY; }
     if (err == BOTE_ERRNO_EPROTO) { return BOTE_ACCEPT_RETRY; }
     # Currently unreachable — the listen fd is never made non-blocking
     # and carries no SO_RCVTIMEO, so accept(2) cannot return EAGAIN.
     # Kept so the loop stays correct if that ever changes.
-    if (err == EAGAIN) { return BOTE_ACCEPT_RETRY; }
+    if (err == BOTE_ERRNO_EAGAIN) { return BOTE_ACCEPT_RETRY; }
 
     # Structurally fatal — accept on this fd can never succeed again.
     if (err == BOTE_ERRNO_EBADF) { return BOTE_ACCEPT_FATAL; }
-    if (err == EINVAL) { return BOTE_ACCEPT_FATAL; }
+    if (err == BOTE_ERRNO_EINVAL) { return BOTE_ACCEPT_FATAL; }
     if (err == BOTE_ERRNO_ENOTSOCK) { return BOTE_ACCEPT_FATAL; }
     if (err == BOTE_ERRNO_EOPNOTSUPP) { return BOTE_ACCEPT_FATAL; }
 

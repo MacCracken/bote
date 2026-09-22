@@ -35,6 +35,7 @@ include "src/resources.cyr"
 include "src/events.cyr"
 include "src/audit.cyr"
 include "src/dispatch.cyr"
+include "src/codec.cyr"
 include "src/schema.cyr"
 include "src/fs_tools.cyr"
 

@@ -208,7 +208,7 @@ transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ### Tests — 887 total across thirteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`).
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 887 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 424 — core protocol/dispatch/codec/schema/session/transports
