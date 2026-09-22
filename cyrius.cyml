@@ -17,9 +17,12 @@ output = "build/bote"
 # a module must follow everything it references.
 #
 # audit_libro and libro_tools need a live libro chain, which is why they are
-# here and not in [lib.core].
+# here and not in [lib.core]. sandbox.cyr joined at 3.3.13 — it had been in
+# src/ and in no profile since 2.1.0, so the surface the README and the
+# package description advertise reached no consumer. It sits after
+# dispatch.cyr because its noop runner calls `_json_emit_escaped`.
 #
-#   cyrius distlib       → dist/bote.cyr       (this profile, 30 modules)
+#   cyrius distlib       → dist/bote.cyr       (this profile, 31 modules)
 #   cyrius distlib core  → dist/bote-core.cyr  ([lib.core], 12 modules)
 [lib]
 modules = [
@@ -49,6 +52,7 @@ modules = [
     "src/transport_streamable.cyr",
     "src/transport_ws.cyr",
     "src/content.cyr",
+    "src/sandbox.cyr",
     "src/host.cyr",
     "src/libro_tools.cyr",
     "src/fs_tools.cyr",
@@ -63,6 +67,16 @@ modules = [
 # content.cyr is deliberately LAST: it calls `_json_emit_escaped`, which
 # dispatch.cyr defines. Its only other references are already in the core
 # closure, so it adds no stdlib leaf to dist/bote-core.deps.
+#
+# `sandbox.cyr` is deliberately NOT here, decided at 3.3.13 when it joined
+# the full bundle. It would fit mechanically — it needs no sigil and no
+# transport, and adds no stdlib leaf — but this profile exists to BOUND a
+# consumer's compile set, and eight repos vendor bote-core.cyr while zero
+# reference a `sandbox_*` symbol. content.cyr earned its place on evidence
+# (core consumers were hand-rolling content envelopes, re-implementing JSON
+# escaping each time); there is no equivalent evidence here, and adding it
+# on the argument that it *might* be wanted is the speculative direction.
+# Revisit when a core-profile consumer actually wires a sandbox backend.
 [lib.core]
 modules = [
     "src/error.cyr",

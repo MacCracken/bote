@@ -35,7 +35,7 @@ Two consumer bundles (see `DEPS-PATTERN.md` for the contract):
 
 | Artifact | Profile | Modules | Use when |
 |----------|---------|---------|----------|
-| `dist/bote.cyr` | default `[lib]` | 30 | Consumer needs the full transport surface |
+| `dist/bote.cyr` | default `[lib]` | 31 | Consumer needs the full transport surface |
 | `dist/bote-core.cyr` | `[lib.core]` | 12 | Consumer wraps Dispatcher / Registry / Prompts / Resources / Audit but supplies its own transport (e.g. t-ron's SecurityGate) |
 
 Regenerate with `cyrius distlib` (default) and `cyrius distlib core`. CI gates both bundles for freshness.
@@ -99,12 +99,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `web_tools.cyr` | Web MCP tools (`web_fetch` / `web_search` via SearXNG, sandhi client); since 3.1.0 |
 | `jwt.cyr` | JWT HS256 verifier (RFC 7519 / 7515) — exact `alg` field read + `exp` enforcement; `auth_validator_jwt_hs256` plugs into the bearer middleware. **In the bundle since 3.2.0** (orphaned before that) |
 | `pkce.cyr` | RFC 7636 PKCE — `pkce_code_verifier` (getrandom) + `pkce_code_challenge_s256`. **In the bundle since 3.2.0** |
-
-**In `src/` only — in neither bundle and neither binary** (found at the 3.3.12 doc sweep; roadmap, next patch):
-
-| Module | Purpose |
-|--------|---------|
-| `sandbox.cyr` | Pluggable sandbox runner (kavach-shaped fn-pointer + ctx adapter, noop default). Tested by `tests/bote_sandbox.tcyr` (13) and advertised in README + the package description, but not listed in `[lib]` / `[lib.core]` — the same orphan shape `jwt.cyr` / `pkce.cyr` had until 3.2.0. Needs no sigil and no transport, so core is admissible when it lands |
+| `sandbox.cyr` | Pluggable sandbox runner — kavach-shaped fn-pointer + ctx adapter, noop default, error envelope on a null runner. **In the bundle since 3.3.13**; it had been in `src/` and in no profile since 2.1.0, so no consumer could reach a `sandbox_*` symbol across thirteen minor lines — the same orphan shape `jwt.cyr` / `pkce.cyr` had until 3.2.0. Deliberately NOT in `[lib.core]`: eight repos vendor the core bundle and none references a `sandbox_*` symbol (rationale recorded in `cyrius.cyml`). ⭐ CI now fails on any `src/` module that is in no `[lib*]` profile and is not a declared entry point — the gate that would have caught this and the 3.2.0 pair |
 
 **Binary entries** — `src/main.cyr` + `src/main_streamable.cyr` + `src/main_ws.cyr` + `src/main_common.cyr` (shared helpers).
 
@@ -173,7 +168,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 
 | Test file | Assertions | Surface |
 |-----------|-----------:|---------|
-| `tests/bote.tcyr` | 424 | error / protocol / jsonx / registry / tool annotations + profiles / prompts / resources / completion / listChanged flag / dispatch / codec / schema / stream + notification builders / session (+ outbound slot) / HTTP helpers / discovery / bridge / events / audit / audit_libro / events_majra wire-up |
+| `tests/bote.tcyr` | 439 | error / protocol / jsonx / registry / tool annotations + profiles / prompts / resources / completion / listChanged flag / dispatch / codec / schema / stream + notification builders / session (+ outbound slot) / HTTP helpers / discovery / bridge / events / audit / audit_libro / events_majra wire-up |
 | `tests/bote_auth.tcyr` | 38 | Bearer + allowlist + JWT HS256 + PKCE validators |
 | `tests/bote_content.tcyr` | 24 | Typed MCP content blocks + annotations |
 | `tests/bote_fs_tools.tcyr` | 26 | Filesystem tools — path safety (`..` / absolute refusal), JSON unescape, root confinement |
@@ -187,7 +182,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `tests/bote_web_tools.tcyr` | 27 | Web tools — scheme guard, HTML→text stripper (incl. control-byte/NUL drop), url-encode, entity decode |
 | `tests/bote_ws.tcyr` | 14 | WebSocket — WsConfig + handler wire-up |
 | `tests/bote_core_only_smoke.tcyr` | drift guard | Includes only `dist/bote-core.cyr` — catches core/transport entanglement |
-| **Total** | **887** | + 1 drift smoke. Green on **x86_64** and, since 3.3.11, **all 887 under `qemu-aarch64` 11.1.1** (`cyrius test --aarch64 <file>`; the cross-build is gated in CI, the emulated sweep is local). Through 3.3.10 that sweep was PARTIAL — qemu 11.1.0 did not pass `getrandom` through, so `bote.tcyr`, `bote_pkce.tcyr` and `bote_streamable.tcyr` exited 90 on the fail-closed session-ID contract (373 of 883 executing). If it regresses to that shape, suspect the emulator or the toolchain's aarch64 `ESYSXLAT` rows before bote |
+| **Total** | **902** | + 1 drift smoke. Green on **x86_64** and, since 3.3.11, **all 887 under `qemu-aarch64` 11.1.1** (`cyrius test --aarch64 <file>`; the cross-build is gated in CI, the emulated sweep is local). Through 3.3.10 that sweep was PARTIAL — qemu 11.1.0 did not pass `getrandom` through, so `bote.tcyr`, `bote_pkce.tcyr` and `bote_streamable.tcyr` exited 90 on the fail-closed session-ID contract (373 of 883 executing). If it regresses to that shape, suspect the emulator or the toolchain's aarch64 `ESYSXLAT` rows before bote |
 
 Criterion benchmarks: **14** in `tests/bote.bcyr` (dispatch × 3, jsonx × 2, codec × 3, schema × 4, auth_bearer × 2).
 

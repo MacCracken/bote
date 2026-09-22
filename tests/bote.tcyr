@@ -426,6 +426,50 @@ fn main() {
     var bi_neg = jsonx_get_str(resp_result(bi_resp), "protocolVersion");
     assert(streq(bi_neg, "2025-11-25") == 1, "init falls back to latest");
 
+    # 2025-06-18 negotiates as itself, not as the default. Through 3.3.12
+    # this row would have passed for the WRONG reason — an unsupported
+    # version falls back to latest, which is also what a supported one
+    # returns when the client asks for latest. Asking for 2025-06-18 and
+    # getting 2025-06-18 back is the only shape that distinguishes them.
+    var v0618 = req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-06-18\"}");
+    var n0618 = jsonx_get_str(resp_result(dispatcher_dispatch(d, v0618, 0)), "protocolVersion");
+    assert(streq(n0618, "2025-06-18") == 1,
+    "initialize negotiates 2025-06-18 as itself (3.3.13) — not silently upgraded to latest");
+
+    # ---------------- dispatch: ping (3.3.13) ----------------
+    # The spec requires an empty result, promptly. Through 3.3.12 bote
+    # answered -32601, which an SDK client reads as an unhealthy server.
+    # ⚠ The body reads are guarded rather than chained into streq. On a
+    # -32601 response `resp_result` is 0, and `streq(0, "{}")` SIGSEGVs —
+    # which would take the ~500 assertions BELOW this point down with it
+    # and report a crash instead of a diagnosis. Measured: that is exactly
+    # what the mutant with the ping route deleted did before this guard.
+    var ping_resp = dispatcher_dispatch(d, req_new("9", "ping"), 0);
+    assert(ping_resp != 0, "ping is answered");
+    assert(streq(resp_id(ping_resp), "9") == 1, "ping echoes the request id");
+    assert_eq(resp_error_obj(ping_resp), 0, "ping is not an error response");
+    var ping_body = resp_result(ping_resp);
+    assert(ping_body != 0, "ping carries a result body");
+    if (ping_body != 0) {
+        assert(streq(ping_body, "{}") == 1, "ping result is an empty object");
+    }
+
+    # A ping must not depend on any capability being wired: `d` here has a
+    # registry but no prompts / resources / completion registry, which is
+    # the state a client probes at startup. A bare dispatcher answers too.
+    var ping_bare = dispatcher_new(tool_registry_new());
+    var pb_body = resp_result(dispatcher_dispatch(ping_bare, req_new("10", "ping"), 0));
+    assert(pb_body != 0, "a bare dispatcher answers ping with a body");
+    if (pb_body != 0) {
+        assert(streq(pb_body, "{}") == 1,
+        "ping answers on a dispatcher with no registries wired");
+    }
+
+    # A ping NOTIFICATION (no id) draws no response, like every other
+    # notification — the empty-result rule is for the request form.
+    assert_eq(dispatcher_dispatch(d, req_notification("ping"), 0), 0,
+    "a ping notification draws no response");
+
     # ---------------- dispatch: tools/list empty ----------------
     var ll_resp = dispatcher_dispatch(d, req_new("2", "tools/list"), 0);
     var ll_body = resp_result(ll_resp);
@@ -1016,8 +1060,26 @@ fn main() {
     assert_eq(validate_protocol_version("2025-11-25"), 0, "proto 2025-11-25 ok");
     assert_eq(validate_protocol_version("2025-03-26"), 0, "proto 2025-03-26 ok");
     assert_eq(validate_protocol_version("2024-11-05"), 0, "proto 2024-11-05 ok");
+    assert_eq(validate_protocol_version("2025-06-18"), 0, "proto 2025-06-18 ok (3.3.13)");
     assert(validate_protocol_version("1999-01-01") != 0, "proto 1999 rejected");
     assert(validate_protocol_version(0) != 0, "null proto rejected");
+
+    # The header validator and the negotiator must agree on every version.
+    # They carried SEPARATE lists through 3.3.12; validate_protocol_version
+    # now defers to _mcp_is_supported, and this pins that they cannot drift
+    # again. The asymmetry the split produced was invisible from either side
+    # alone: a version in one but not the other negotiates over stdio and
+    # 400s on the MCP-Protocol-Version header of every HTTP-family transport.
+    assert_eq(validate_protocol_version("2024-11-05"), _mcp_is_supported("2024-11-05") - 1,
+    "header validator agrees with the negotiator: 2024-11-05");
+    assert_eq(validate_protocol_version("2025-03-26"), _mcp_is_supported("2025-03-26") - 1,
+    "header validator agrees with the negotiator: 2025-03-26");
+    assert_eq(validate_protocol_version("2025-06-18"), _mcp_is_supported("2025-06-18") - 1,
+    "header validator agrees with the negotiator: 2025-06-18");
+    assert_eq(validate_protocol_version("2025-11-25"), _mcp_is_supported("2025-11-25") - 1,
+    "header validator agrees with the negotiator: 2025-11-25");
+    assert_eq(_mcp_is_supported("1999-01-01"), 0,
+    "and both reject the same unknown version");
 
     # ---------------- session: validate_origin ----------------
     assert_eq(validate_origin("", 0), 0, "empty origin allowed");

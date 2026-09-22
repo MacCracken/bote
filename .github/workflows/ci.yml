@@ -110,6 +110,47 @@ jobs:
           fi
           echo "Manifest covers all main.cyr src/ includes."
           echo "Excluded (entry-only): $(echo "$EXCLUDES" | tr '\n' ' ')"
+          # --- every src/ module reaches a consumer, or is named as an entry ---
+          # Added 3.3.13. The check above only proves main.cyr's includes are
+          # in [lib]; it is blind to a module that is in NEITHER — which is
+          # how src/sandbox.cyr sat in src/, tested and advertised in the
+          # README and the package description, but absent from both bundles
+          # and all three binaries from 2.1.0 to 3.3.12. jwt.cyr and pkce.cyr
+          # had the same shape until 3.2.0, so this is the second occurrence
+          # of the class, not the first.
+          #
+          # ENTRIES are the binary entry points and their shared helper: they
+          # are deliberately in no profile, because publishing a CLI's main()
+          # into dist/bote.cyr would put a second entry point in a consumer's
+          # compile unit.
+          ENTRIES=$(printf '%s\n' \
+            "src/main.cyr" \
+            "src/main_common.cyr" \
+            "src/main_streamable.cyr" \
+            "src/main_ws.cyr" \
+            | sort -u)
+          ONDISK=$(ls src/*.cyr | sort -u)
+          PROFILED=$(awk '/^\[lib(\.[a-z]+)?\]/{f=1;next} /^\[/{f=0} f' cyrius.cyml \
+            | grep -oE '"src/[^"]+\.cyr"' | tr -d '"' | sort -u)
+          ORPHANS=$(comm -23 <(echo "$ONDISK") <(printf '%s\n%s\n' "$PROFILED" "$ENTRIES" | sort -u))
+          if [ -n "$ORPHANS" ]; then
+            echo "::error::src/ modules in NO [lib] profile and not a known entry point —"
+            echo "  they are compiled and tested here but reach no consumer:"
+            echo "$ORPHANS"
+            echo
+            echo "Add each to [lib] (and [lib.core] if transport-free and wanted there),"
+            echo "or to ENTRIES above if it is a binary entry point."
+            exit 1
+          fi
+          # And the reverse: a profile naming a file that no longer exists
+          # would make `cyrius distlib` fail with a less obvious message.
+          GHOSTS=$(comm -13 <(echo "$ONDISK") <(echo "$PROFILED"))
+          if [ -n "$GHOSTS" ]; then
+            echo "::error::cyrius.cyml names src/ modules that do not exist:"
+            echo "$GHOSTS"
+            exit 1
+          fi
+          echo "Every src/ module is in a profile or is a declared entry point."
 
       - name: Build
         run: |

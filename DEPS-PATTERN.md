@@ -225,9 +225,12 @@ is a 3.4.x roadmap item. The bundles are unaffected either way.
 
 (The core profile grew 9 → 11 at 3.0.0, when the MCP prompts and
 resources capabilities landed, and 11 → 12 at **3.3.6** with
-`content.cyr`. `src/sandbox.cyr` is the next candidate — it needs
-no sigil and no transport — and is currently in *neither* profile;
-see the roadmap.)
+`content.cyr`. `src/sandbox.cyr` was weighed at 3.3.13 and kept
+OUT: it fits mechanically — no sigil, no transport, no new stdlib
+leaf — but this profile exists to bound a consumer's compile set,
+and while eight repos vendor `bote-core.cyr`, none references a
+`sandbox_*` symbol. It joined the FULL bundle in the same release.
+Revisit if a core-profile consumer wires a sandbox backend.)
 
 `content.cyr` is in core because content blocks are the tool-result
 format **every** handler emits, transport or not. Before 3.3.6,

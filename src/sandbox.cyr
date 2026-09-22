@@ -2,15 +2,25 @@
 #
 # Same fn-pointer + ctx adapter pattern as AuditSink (src/audit.cyr) and
 # EventSink (src/events.cyr). Bote ships the abstract surface and a noop
-# adapter; consumers wire their backend (kavach 3.12.2 — multi-backend
-# sandboxing — is the canonical choice in the AGNOS ecosystem) by
-# providing a fn pointer that satisfies the SandboxRunner shape:
+# adapter; consumers wire their backend (kavach — multi-backend sandboxing
+# — is the canonical choice in the AGNOS ecosystem; CLAUDE.md's stack table
+# tracks the version it is checked against, and kavach is NOT a declared
+# dep, so nothing here pins it) by providing a fn pointer that satisfies
+# the SandboxRunner shape:
 #
 #   fn run(ctx, command_cstr, timeout_ms) → result_cstr (JSON)
 #
 # Result is a JSON cstr the handler can return verbatim or post-process.
 # Suggested shape (matches kavach's ExecResult):
 #   {"exit_code":N,"stdout":"...","stderr":"...","duration_ms":N,"timed_out":0|1}
+#
+# ⚠ kavach's own `sandbox_exec(sandbox, command)` is 2-arg and has no
+# timeout, so an adapter bridging to it drops `timeout_ms` — bote's shape
+# is the superset on purpose, since a backend that CAN bound execution
+# should not have to invent a channel to be told the bound.
+#
+# In `dist/bote.cyr` since 3.3.13; not in `dist/bote-core.cyr` (see the
+# [lib.core] note in cyrius.cyml for why).
 #
 # Tool handlers that don't use the sandbox are unaffected — the dispatcher
 # doesn't know about this module. Tool handlers that DO use it just call

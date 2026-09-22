@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.3.12 (cyrius 6.6.6) | **Last Audited**: 2026-09-22
+> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.3.13 (cyrius 6.6.6) | **Last Audited**: 2026-09-22
 
 This file lists what the shipped Cyrius implementation **covers today**, including the
 gaps — a ❌ row is a defect on the released binary, a ⏳ row is planned work. Both are
@@ -15,13 +15,21 @@ scheduled in [`docs/development/roadmap.md`](development/roadmap.md). Re-audited
 |---|---|
 | `2024-11-05` | ✅ |
 | `2025-03-26` | ✅ |
-| `2025-06-18` | ❌ **not accepted** — `validate_protocol_version` does not list it. Over stdio an `initialize` naming it is negotiated up to the default; over the HTTP family the `MCP-Protocol-Version: 2025-06-18` header is a **400**, so a client pinned to that published revision cannot connect. Roadmap: next patch. |
+| `2025-06-18` | ✅ (3.3.13) |
 | `2025-11-25` | ✅ **default** |
 
 Negotiated via `initialize`. The server picks the highest mutually
-supported version. JSON-RPC batching was removed from the spec at `2025-06-18`;
-bote keeps accepting batch arrays (a superset is harmless to a client that never
-sends one).
+supported version. The list lives in exactly one place — `_mcp_is_supported`
+(`src/dispatch.cyr`); `session.cyr`'s header validator defers to it. Through
+3.3.12 there were two copies, and the drift they allowed was asymmetric: a
+version missing from the header validator 400s on every HTTP-family transport
+while stdio negotiates it happily. Four assertions now pin the two readers
+against each other per version.
+
+JSON-RPC batching was removed from the spec at `2025-06-18`; bote keeps accepting
+batch arrays on every version (a superset is harmless to a client that never
+sends one, and refusing them per-version would break the earlier clients that
+legitimately batch).
 
 ---
 
@@ -32,13 +40,13 @@ sends one).
 | JSON-RPC 2.0 — request, response, notification, batch | `protocol` + `codec` | ✅ |
 | Spec error codes (-32700, -32600, -32601, -32602, -32000, -32003, -32603, -32800) | `error` | ✅ |
 | `initialize` handshake (serverInfo + capabilities + version negotiation; `serverInfo` configurable via `dispatcher_set_server_info`) | `dispatch` | ✅ |
-| `ping` → empty `{}` result (spec: the receiver *MUST* respond promptly) | — | ❌ **answers `-32601 method not found`**. SDK clients send `ping` as a keepalive. Roadmap: next patch. |
+| `ping` → empty `{}` result (spec: the receiver *MUST* respond promptly) | `dispatch` | ✅ (3.3.13) — answered ahead of every capability gate, so a bare dispatcher replies; emits no audit or event record (liveness, not activity). bote answers pings, it does not originate them |
 | `notifications/initialized` / `notifications/cancelled` — accepted, never answered | `codec` (no response to any notification) | ✅ (`cancelled` is ignored: there is no in-flight work to cancel until threaded dispatch, 3.5.x) |
 | `tools/list` with full `inputSchema` | `dispatch` + `registry` | ✅ |
 | `tools/call` with arguments + version selection | `dispatch` + `schema` | ✅ |
 | `prompts/list` + `prompts/get` (capability advertised iff a `PromptRegistry` is present) | `dispatch` + `prompts` | ✅ |
 | `resources/list` + `resources/read` (capability advertised iff a `ResourceRegistry` is present) | `dispatch` + `resources` | ✅ |
-| `resources/templates/list` (optional in the spec) | — | ❌ answers `-32601`; some clients call it whenever `resources` is advertised. Roadmap: next patch, as an empty list. |
+| `resources/templates/list` (optional in the spec) | — | ❌ answers `-32601`; some clients call it whenever `resources` is advertised and read the error as a failure rather than "no templates". Roadmap — an empty list is the honest reply until a template registry exists. |
 | `resources/subscribe` / `unsubscribe` + `notifications/resources/updated`; `resources` `listChanged` | — | ⏳ not implemented and not advertised — wait on real-time push (roadmap 3.5.x) |
 | `completion/complete` (capability advertised iff a completion handler is set) | `dispatch` (`dispatcher_set_completion`) | ✅ |
 | `notifications/tools/list_changed` + `notifications/prompts/list_changed` (buffered per session, drained on the client's next streamable `GET`; `listChanged` advertised only by a transport with a drain path) | `dispatch` (`dispatcher_set_notifications`) + `transport_streamable` (`strm_notify_sink`) | ✅ streamable (polled) |
@@ -96,6 +104,7 @@ sends one).
 | **SSRF guard for outbound URL fetches** — IPv4 + IPv6 blocklists for loopback / private / link-local / cloud-metadata | `host::ssrf_check` | ✅ (1.8.0 / 1.9.1) |
 | **JWT HS256 verifier** (RFC 7519 / 7515) — `alg` read as an exact JSON field (not a substring scan), constant-time HMAC compare, `exp` enforced *after* the signature verifies with no leeway, malformed `exp` rejects, `exp` absent accepts; `auth_validator_jwt_hs256` plugs into the bearer middleware | `jwt::jwt_verify_hs256` | ✅ (2.2.0; `exp` + exact `alg` at 3.2.0; ships in `dist/bote.cyr` since 3.2.0) |
 | **RFC 7636 PKCE-S256** — `pkce_code_verifier` (CSPRNG) + `pkce_code_challenge_s256` | `pkce` | ✅ (2.3.0; ships in `dist/bote.cyr` since 3.2.0) |
+| **Pluggable sandbox runner** — fn-pointer + ctx adapter for tool handlers (kavach-shaped), noop default, error envelope on a null runner | `sandbox::sandbox_run` | ✅ (2.1.0; ships in `dist/bote.cyr` since **3.3.13** — before that it was in `src/` only and reached no consumer). Not in `dist/bote-core.cyr` |
 | Asymmetric JWT (RS256 / ES256) | — | ⏳ an open decision, not a dependency — see the roadmap |
 
 ## Transports
@@ -210,7 +219,7 @@ registered by default in the binaries.
 
 | Scope | Count | Source |
 |---|---|---|
-| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit | **424** | `tests/bote.tcyr` |
+| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch (incl. `ping` + version negotiation) / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit | **439** | `tests/bote.tcyr` |
 | Bearer + allowlist + JWT + PKCE validators | **38** | `tests/bote_auth.tcyr` |
 | Content blocks + annotations | **24** | `tests/bote_content.tcyr` |
 | `fs_tools` path safety + root confinement | **26** | `tests/bote_fs_tools.tcyr` |
@@ -223,14 +232,16 @@ registered by default in the binaries.
 | Unix transport — sockaddr, accept-error policy, backoff | **47** | `tests/bote_transport_unix.tcyr` |
 | `web_tools` — scheme guard, HTML stripper, entities | **27** | `tests/bote_web_tools.tcyr` |
 | WebSocket config + wire-up | **14** | `tests/bote_ws.tcyr` |
-| **Total assertions** | **887** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all 887 also run under `qemu-aarch64` |
+| **Total assertions** | **902** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all 902 also run under `qemu-aarch64` |
 | Hot-path benchmarks | **14** | `tests/bote.bcyr` |
 | Fuzz harnesses | **4** | `fuzz/*.fcyr` (in CI since 3.3.8) |
 | End-to-end transport round trips | 6 (stdio, HTTP, Unix, bridge, streamable, WS) | one `tools/call` per transport on the built binaries, run per release |
 
 The conformance test suite — 44 protocol-level scenarios in the Rust archive's
 `tests/conformance.rs` (tag `0.92.0`) — is **still not ported**. It would land as
-`tests/conformance.tcyr`, and the `ping` gap above is the argument for it: roadmap 3.4.x.
+`tests/conformance.tcyr`. The argument for it is 3.3.13: `ping` had been answering
+`-32601` since the port and no assertion covered it, because the suite tests the
+methods bote implements rather than the methods the spec requires. Roadmap 3.4.x.
 
 ---
 

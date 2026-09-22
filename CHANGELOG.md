@@ -16,11 +16,128 @@ have per release.
 
 ## [Unreleased]
 
-### Changed — documentation sweep (no code, no release; rides the next patch)
+_(empty)_
+
+## [3.3.13] — 2026-09-22 · three conformance repairs the documentation sweep turned up
+
+`ping` answers, `2025-06-18` is accepted, and `src/sandbox.cyr` reaches consumers for the
+first time since it was written. All three were found by the 3.3.12 documentation sweep
+(which ships in this release, below) — none by a test, which is the part worth noting: two
+of them have new CI gates so the class cannot recur. **902** assertions, natively and under
+`qemu-aarch64`.
+
+### Fixed — `ping` answered `-32601 method not found`
+
+Every MCP revision bote supports requires the receiver of a `ping` to respond promptly with
+an empty result; bote had no route for it, so it fell through to the unknown-method tail.
+SDK clients send `ping` as a keepalive and read an error as an unhealthy server — a client
+may tear the session down on it. Now `{"result":{}}`, verified over stdio and over HTTP.
+
+Placed ahead of every capability gate and taking no params, because a ping has to work on a
+bare dispatcher with no registries wired — the state a client probes at startup; the suite
+asserts exactly that case separately. It emits **no** audit or event record: a keepalive
+every few seconds is liveness, not activity, and would swamp the libro chain. bote answers
+pings; it does not originate them (server→client pings need the push path, roadmap 3.5.x).
+
+⚠ The test for this is **guarded rather than chained**: on a `-32601` response
+`resp_result` is 0 and `streq(0, "{}")` SIGSEGVs, which took the ~500 assertions *below* it
+down with it and reported a crash instead of a diagnosis. Measured on the mutant with the
+route deleted — before the guard it was one FAIL and a signal 11; after, three named
+failures and a complete run.
+
+### Fixed — protocol version `2025-06-18` was rejected, and the version list was in two places
+
+`2025-06-18` is a published MCP revision. bote listed three versions and not that one, and
+the effect was **asymmetric in a way neither side could see**: over stdio an `initialize`
+naming it was silently negotiated up to `2025-11-25`, while over the HTTP family its
+`MCP-Protocol-Version` header was a hard **400** — a client pinned to that revision could
+not connect at all.
+
+The root cause is why this is more than a one-line fix: the supported-version list existed
+**twice** — `_mcp_is_supported` (`src/dispatch.cyr`, the negotiator) and
+`validate_protocol_version` (`src/session.cyr`, what the HTTP-family transports run the
+header through). Both happened to name the same three versions, so the duplication was
+invisible until a fourth was needed. `validate_protocol_version` now defers to
+`_mcp_is_supported`; there is one list, and adding a version is one line. dispatch.cyr
+precedes session.cyr in every compile unit that has both (all three binaries, the test
+files, `dist/bote.cyr`), and `[lib.core]` carries dispatch without session, so the
+single-pass forward reference always resolves.
+
+Four new assertions pin the two readers against each other version by version, so they
+cannot drift again. Mutation-proven both ways: dropping `2025-06-18` from the one list
+fails 3, and restoring session's private copy fails 2 — including the agreement row, which
+is the one that would have caught the original split.
+
+`2025-06-18` removed JSON-RPC batching from the spec. bote keeps accepting batch arrays on
+every version: a superset is harmless to a client that never sends one, and refusing them
+per-version would break the 2024/2025-03 clients that legitimately batch.
+
+### Fixed — `src/sandbox.cyr` shipped in no bundle and no binary
+
+The kavach-shaped runner adapter has been in `src/`, tested (13 assertions) and advertised
+in the README and `[package].description` since 2.1.0 — and in neither `[lib]` profile, so
+**no consumer could reach a single `sandbox_*` symbol**. The same orphan shape `jwt.cyr` and
+`pkce.cyr` had until 3.2.0, which makes this the second occurrence of the class, not the
+first.
+
+It joins **`dist/bote.cyr`** (30 → 31 modules), placed after `dispatch.cyr` because its noop
+runner calls `_json_emit_escaped`. The sidecars are byte-identical: it adds no stdlib leaf.
+
+**Not in `[lib.core]`, decided rather than defaulted.** It would fit mechanically — no
+sigil, no transport, no new leaf — and the profile's audience (consumers that wrap the
+Dispatcher and run handlers) is plausibly who wants a sandbox slot. Against that: the core
+profile exists to *bound* a consumer's compile set, **eight** repos vendor
+`dist/bote-core.cyr`, and **zero** repos in the workspace reference any `sandbox_*` symbol.
+`content.cyr` earned its core place at 3.3.6 on evidence — core consumers were hand-rolling
+content envelopes and re-implementing JSON escaping each time — and there is no equivalent
+here. Adding it on the argument that it *might* be wanted is the speculative direction.
+Revisit when a core-profile consumer actually wires a backend; the rationale is recorded in
+`cyrius.cyml` next to the profile, not only here.
+
+Its header comment also drops the stale `kavach 3.12.2` pin (kavach is not a declared dep;
+CLAUDE.md's stack table tracks what it is checked against) and gains the one real mismatch a
+consumer adapter hits: kavach's `sandbox_exec(sandbox, command)` is 2-arg with no timeout,
+so an adapter drops bote's `timeout_ms`.
+
+### Added — a CI gate for the orphan class
+
+The manifest-completeness gate only proved that main.cyr's includes are in `[lib]`; it was
+blind to a module in **neither**, which is exactly how `sandbox.cyr` sat unreachable from
+2.1.0 to 3.3.12 — thirteen minor lines, and it was never in the manifest at any point in
+that span (checked with `git log -S` over `cyrius.cyml`, not assumed). CI now also asserts that every `src/*.cyr` is in some `[lib*]` profile or is
+one of four declared entry points, and — the reverse — that no profile names a file that
+does not exist. Mutation-checked against the 3.3.12 manifest: it reports `src/sandbox.cyr`
+and exits 1.
+
+### Verified
+
+- **902 passed, 0 failed** natively and under `qemu-aarch64` (887 → 902: +15 in
+  `tests/bote.tcyr`); zero `undefined function` on any unit, either target.
+- agnos: three entries + nineteen units, 0 undefined, `ET_EXEC` x86-64.
+- **Clean-room consumer**, native and `--agnos`: a project declaring only `[deps.bote]` →
+  `dist/bote.cyr` now builds a probe that calls `sandbox_runner_noop_new` / `sandbox_run`
+  (including the null-runner error envelope), answers a `ping` through the bundle's
+  dispatcher, and checks `2025-06-18` through both version readers — 0 undefined, exit 0.
+  Every one of those calls was unresolvable against the 3.3.12 bundle.
+- HTTP header path re-probed per version: `2024-11-05` / `2025-03-26` / `2025-06-18` /
+  `2025-11-25` → 200, an unknown version → 400.
+- Fuzz ×4 clean; `fmt` / `lint` / `vet` / `deny` clean; `src/` warning-free; raw-`syscall(`
+  gate clean; `cyrius distlib --check` current on both profiles.
+- Six-transport `tools/call` round trip; `initialize` reports **3.3.13**.
+
+### Performance
+
+None claimed. The logged row moves within the noise band established by the 3.3.10 ↔ 3.3.11
+interleave (±5% on the sub-microsecond rows): six rows down, seven up, largest +2.6%
+(`schema_compile_nested`), none touching changed code. `ping` adds one `streq` to the
+dispatch chain ahead of `tools/call`, whose +0.9% is inside that band.
+
+### Changed — documentation sweep
 
 Stale information cleaned out of every living document, and the roadmap rebuilt as a
-forward-facing plan. The CHANGELOG and `docs/development/issues/archive/` are records and
-were not touched beyond this entry.
+forward-facing plan. Done as its own pass before the fixes above — the three defects are
+what it found. The CHANGELOG and `docs/development/issues/archive/` are records and were not
+touched beyond this entry.
 
 - **`docs/development/roadmap.md` is forward-facing only.** The 53-row "Shipped" table,
   the 2.6.x modernization-arc table, the closed "Blocked on cyrius" audit and the
@@ -62,22 +179,22 @@ were not touched beyond this entry.
   **`docs/cyrius-feedback.md`** re-labelled as dated historical snapshots (they read as
   current). `scripts/build-all.sh` no longer promises a 5.11.x that never existed.
 
-### Found by the sweep — not fixed here, scheduled for 3.3.13
+### Found by the sweep
 
-Probing the released 3.3.12 binary while re-auditing the compliance matrix:
+Probing the released 3.3.12 binary while re-auditing the compliance matrix turned up four
+things no test covered. Three are **fixed above**: `ping`, `2025-06-18`, and the orphaned
+`src/sandbox.cyr`. The fourth is carried:
 
-- **`ping` answers `-32601 method not found`.** Every MCP revision bote supports requires
-  an empty `{}` result, and SDK clients use `ping` as a keepalive.
-- **Protocol version `2025-06-18` is not accepted.** Over the HTTP family its
-  `MCP-Protocol-Version` header is a hard 400, so a client pinned to that published
-  revision cannot connect; over stdio it is negotiated up to `2025-11-25`.
-- **`src/sandbox.cyr` ships in no bundle and no binary.** Tested (13 assertions),
-  advertised in the README and the package description, absent from both `[lib]`
-  profiles — the orphan shape `jwt.cyr` / `pkce.cyr` had until 3.2.0. Fixing it
-  regenerates `dist/` under a released version label, so it waits for the next bump.
-- `resources/templates/list` answers `-32601` (optional in the spec; an empty list is
-  the honest reply). The 44-scenario conformance suite in the Rust archive was never
-  ported — `ping` would not have survived it — and is now a 3.4.x item.
+- `resources/templates/list` answers `-32601`. Optional in the spec, but some clients call
+  it whenever `resources` is advertised and read the error as a failure rather than "no
+  templates"; an empty `{"resourceTemplates":[]}` is the honest reply. Left for a patch
+  that can weigh it against a real template registry — roadmap.
+
+⚠ **None of the three was found by a test**, which is the finding behind the finding. The
+44-scenario conformance suite in the Rust archive (tag `0.92.0`) was never ported; `ping`
+would not have survived it. That port is now a 3.4.x roadmap item, and two of the three
+fixes above ship with a gate (the cross-reader version agreement, the orphan-module check)
+rather than only an assertion.
 
 ## [3.3.12] — 2026-09-22 · the agnos target is gated — and building for it found two things Linux could not show
 

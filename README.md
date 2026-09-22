@@ -51,7 +51,7 @@ apps don't each reimplement the same protocol.
 | **Audit / events sinks** — fn-pointer + ctx adapters, libro + majra wired | ✅ |
 | **Streaming primitives** — `ProgressUpdate`, `CancellationToken`, progress notifications | data layer ✅ / threaded dispatch ⏳ (roadmap 3.5.x) |
 | **OAuth 2.1 substrate** — bearer (RFC 6750), JWT HS256 verifier, PKCE-S256 helpers | ✅ |
-| **Sandbox runner** — fn-pointer + ctx adapter (kavach-shaped), noop default | in `src/` + tested; **not in either bundle yet** (roadmap, next patch) |
+| **Sandbox runner** — fn-pointer + ctx adapter (kavach-shaped), noop default | ✅ in `dist/bote.cyr` (3.3.13); not in the core bundle |
 
 ---
 
@@ -123,11 +123,11 @@ bote implements [MCP](https://modelcontextprotocol.io/) over JSON-RPC 2.0.
 | `prompts/list` / `prompts/get` | Prompts capability (when a `PromptRegistry` is wired) | Prompt metadata / generated messages |
 | `resources/list` / `resources/read` | Resources capability (when a `ResourceRegistry` is wired) | Resource metadata / contents |
 | `completion/complete` | Completion capability | Argument completion values |
-| `ping` | Keepalive | ⚠ **answers `-32601` today** — the spec requires `{}`; fixed in the next patch (roadmap) |
+| `ping` | Keepalive | Empty result — answered even on a dispatcher with no registries wired |
 
-Supported MCP protocol versions: `2024-11-05`, `2025-03-26`,
-`2025-11-25` (default). ⚠ `2025-06-18` is not yet accepted — over the HTTP family
-its `MCP-Protocol-Version` header is a 400 (roadmap, next patch).
+Supported MCP protocol versions: `2024-11-05`, `2025-03-26`, `2025-06-18`,
+`2025-11-25` (default) — the same list for `initialize` negotiation and for the
+`MCP-Protocol-Version` header on every HTTP-family transport.
 
 ### Built-in tools (registered by default)
 
@@ -180,7 +180,7 @@ src/events_majra.cyr       MajraEvents adapter
 src/auth.cyr               Bearer-token middleware (RFC 6750)
 src/jwt.cyr                JWT HS256 verifier (RFC 7519)
 src/pkce.cyr               RFC 7636 PKCE-S256 helpers
-src/sandbox.cyr            Pluggable sandbox runner (kavach-shaped) — in no bundle yet (roadmap)
+src/sandbox.cyr            Pluggable sandbox runner (kavach-shaped)
 src/content.cyr            Typed MCP content blocks (text/image/audio/resource/blob)
 src/host.cyr               HostRegistry + SSRF guard (IPv4 + IPv6)
 src/libro_tools.cyr        Five built-in MCP tools over a libro chain
@@ -201,7 +201,7 @@ src/main_common.cyr        Shared binary setup (dispatcher + env bearer wiring)
 Dependencies rehydrate into `lib/` (gitignored) via `cyrius deps`.
 Cross-project deps **libro and majra** are git-pinned via
 `[deps.<name>]` in `cyrius.cyml`. Two consumer bundles ship in `dist/`:
-`bote.cyr` (full, 30 modules) and `bote-core.cyr` (core 12,
+`bote.cyr` (full, 31 modules) and `bote-core.cyr` (core 12,
 transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ---

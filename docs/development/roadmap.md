@@ -15,41 +15,36 @@
 The 2.0 handler ABI (`fn h(args, claims) → result_cstr`) and the six transports are
 stable across the 2.x → 3.x line; patch releases add capabilities, not shape changes. The
 protocol surface is `initialize`, `tools/*`, `prompts/*`, `resources/list` + `read`,
-`completion/complete`, and a polled push of `tools` / `prompts` `list_changed` (buffered per
-session, drained on the client's next Streamable HTTP `GET` or piggybacked on a `POST`).
+`completion/complete`, `ping`, and a polled push of `tools` / `prompts` `list_changed`
+(buffered per session, drained on the client's next Streamable HTTP `GET` or piggybacked on
+a `POST`). Four MCP protocol revisions are accepted, from one list.
 Two consumer bundles (`dist/bote.cyr`, `dist/bote-core.cyr`), three per-transport binaries,
 x86_64 + aarch64 + agnos targets, all CI-gated.
 
 What is **not** there, and where each item sits below: real-time *held-open* streaming
 (→ 3.5.x), which is what `resources/subscribe`, `logging` and `$/cancelRequest` wait on;
 WebSocket subprotocol / compression negotiation and DNS-aware SSRF (→ 3.6.x, both need an
-upstream seam); and a handful of conformance gaps the 3.3.12 documentation sweep found by
-probing the released binary (→ next patch).
+upstream seam); and `resources/templates/list`, the last gap the 3.3.12 documentation sweep
+found by probing the released binary (→ next patch).
 
 ---
 
-## Next patch — 3.3.13
+## Next patch
 
-Small, independent, each a bite. All three were found by the 3.3.12 documentation sweep
-and are recorded as ❌ in [spec-compliance.md](../spec-compliance.md) until they ship.
-
-| Item | Why now | Effort |
+| Item | Why | Effort |
 |---|---|---|
-| **`ping` answers `{}`.** The dispatcher routes no `ping`, so a `{"method":"ping"}` request gets `-32601 method not found`. Every MCP revision bote supports says the receiver *MUST* respond with an empty result, and SDK clients use it as a keepalive — an error reply reads as an unhealthy server. | Conformance defect on the released binary; one route in `dispatch.cyr` + an assertion. | Small |
-| **Accept protocol version `2025-06-18`.** `validate_protocol_version` lists `2024-11-05`, `2025-03-26`, `2025-11-25`. Over stdio a `2025-06-18` client is negotiated up to the default; over the HTTP family the `MCP-Protocol-Version: 2025-06-18` header is a hard **400**, so a client pinned to that published revision cannot talk to bote at all. `2025-06-18` removed JSON-RPC batching from the spec — bote may keep accepting batches (a superset is harmless), but it must not reject the version. | One line in `session.cyr`; the compliance doc's version table gains a row. | Small |
-| **Ship `src/sandbox.cyr`.** The kavach-shaped runner adapter is tested (`bote_sandbox.tcyr`, 13) and advertised in the README and the package description, but it is in neither `[lib]` profile, neither bundle and neither binary — the same orphan shape `jwt.cyr` / `pkce.cyr` had until 3.2.0. Decide the profile when it lands: it needs no sigil and no transport, so `[lib.core]` is admissible; whether a transport-free consumer wants a sandbox slot is the question. Update its header comment's kavach pin (3.12.2 → the current 3.12.x) in the same change. | Manifest line + `cyrius distlib`; the docs already say "not in either bundle". | Small |
+| **`resources/templates/list` answers `-32601`.** Optional in the spec, but some clients call it whenever `resources` is advertised and read the error as a failure rather than "no templates". An empty `{"resourceTemplates":[]}` is the honest reply; a real template registry (URI templates with variable expansion, RFC 6570) is a bigger question worth deciding separately. | The only ❌ left in [spec-compliance.md](../spec-compliance.md). | Small |
 
-Also worth taking in the same patch if it stays small: **`resources/templates/list`**
-answers `-32601`. The method is optional in the spec, but some clients call it whenever
-`resources` is advertised and treat an error as a failure rather than "no templates". An
-empty `{"resourceTemplates":[]}` is the honest answer until a template registry exists.
+Carried from the 3.3.13 sweep: nothing else. The three conformance repairs that section
+listed — `ping`, protocol version `2025-06-18`, and shipping `src/sandbox.cyr` — shipped in
+3.3.13, two of them with a CI gate rather than only an assertion.
 
 ## 3.4.x — Consolidation and timeouts
 
 | Item | Notes | Effort |
 |---|---|---|
 | **Reconsolidate the per-transport binaries** — fold `bote-streamable` + `bote-ws` back into one `bote`, transport selected by argv. | The split was a cyrius 5.10.x compile-source cap workaround; the cap was raised at 6.1.24 (bote 2.7.3) and the trio has been carried since. `build-all.sh`, `release.yml`, the README run table and the six-transport round trip all simplify. The `[lib]` bundle is unaffected. | Small |
-| **Port the conformance suite.** The Rust archive (tag `0.92.0`) carried 44 protocol-level scenarios; none was ported. `ping` would not have survived a conformance suite — that is the argument for doing this before, not after, the 3.5.x work adds more surface. Lands as `tests/conformance.tcyr`, driven through `codec_process_message` so it needs no live transport. | Medium |
+| **Port the conformance suite.** The Rust archive (tag `0.92.0`) carried 44 protocol-level scenarios; none was ported. 3.3.13 is the argument: `ping` had answered `-32601` since the port with 887 assertions passing, because the suite tests the methods bote implements rather than the ones the spec requires. Do it before the 3.5.x work adds surface. Lands as `tests/conformance.tcyr`, driven through `codec_process_message` so it needs no live transport. | Medium |
 | **`transport_unix` accept-loop deadline.** The one accept loop bote owns; its listen fd is never made non-blocking and carries no `SO_RCVTIMEO` (the file's own comment says so). Low severity — `AF_UNIX`, local-only, mode 0600. | Small |
 | **Send-side timeouts.** `sandhi_server_run_opts` applies only `SO_RCVTIMEO`; `sock_set_send_timeout` is never reached on any path, so a stalled *send* is unguarded — the case that primitive's own docstring warns about. Low severity. | Small |
 
@@ -96,9 +91,12 @@ with anyone:
   would be indirection over no shared code. Re-decide on a second consumer, not on a
   premise. Precondition already met: `_jwt_str_field_eq` reads `alg` as an exact field.
 - **`[lib.core]` membership.** The profile exists to bound a transport-free consumer's
-  compile set (t-ron's SecurityGate). `content.cyr` joined at 3.3.6 because every handler
-  emits content blocks; `sandbox.cyr` is the next candidate (above). JWT / PKCE stay out —
-  both need sigil, which the core footprint deliberately excludes.
+  compile set (t-ron's SecurityGate). `content.cyr` joined at 3.3.6 on evidence — core
+  consumers were hand-rolling content envelopes and re-implementing JSON escaping.
+  `sandbox.cyr` was weighed at 3.3.13 and **kept out**: it fits mechanically (no sigil, no
+  transport, no new stdlib leaf) but eight repos vendor the core bundle and none references
+  a `sandbox_*` symbol. Revisit when a core-profile consumer wires a backend. JWT / PKCE
+  stay out — both need sigil, which the core footprint deliberately excludes.
 
 ## Housekeeping — rides any patch
 

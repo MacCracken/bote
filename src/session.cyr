@@ -10,11 +10,22 @@ fn mcp_session_id_header() { return "MCP-Session-Id"; }
 # ================================================================
 # validate_protocol_version(version_cstr) → 0 ok / err_msg cstr
 # ================================================================
+# ⚠ The supported-version list is NOT here — `_mcp_is_supported`
+# (`src/dispatch.cyr`) is the one list, and this defers to it. Through
+# 3.3.12 this function carried a second copy; both happened to name the
+# same three versions, so the duplication was invisible until a fourth
+# was needed. The effect of the drift is asymmetric and easy to miss: a
+# version missing HERE is a hard 400 on the `MCP-Protocol-Version` header
+# in every HTTP-family transport, while stdio — which never reads the
+# header and negotiates through `_mcp_is_supported` — accepts it happily.
+#
+# dispatch.cyr precedes session.cyr in every compile unit that has both
+# (all three binaries, `tests/bote*.tcyr`, `dist/bote.cyr`), and the
+# transport-free `[lib.core]` profile carries dispatch without session,
+# so the single-pass forward reference always resolves.
 fn validate_protocol_version(v) {
     if (v == 0) { return "unsupported MCP protocol version: (null)"; }
-    if (streq(v, "2024-11-05") == 1) { return 0; }
-    if (streq(v, "2025-03-26") == 1) { return 0; }
-    if (streq(v, "2025-11-25") == 1) { return 0; }
+    if (_mcp_is_supported(v) == 1) { return 0; }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "unsupported MCP protocol version: ");
     str_builder_add_cstr(sb, v);
