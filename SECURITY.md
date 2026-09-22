@@ -29,9 +29,9 @@ The primary security-relevant surface areas are:
 
 | Version | Supported |
 | ------- | --------- |
-| 3.1.x   | Yes (current minor) |
-| 3.0.x   | Yes (prior minor) |
-| < 3.0   | No        |
+| 3.3.x   | Yes (current minor) |
+| 3.2.x   | Yes (prior minor) |
+| < 3.2   | No        |
 
 ## Reporting a Vulnerability
 

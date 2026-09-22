@@ -16,7 +16,68 @@ have per release.
 
 ## [Unreleased]
 
-_(empty)_
+### Changed — documentation sweep (no code, no release; rides the next patch)
+
+Stale information cleaned out of every living document, and the roadmap rebuilt as a
+forward-facing plan. The CHANGELOG and `docs/development/issues/archive/` are records and
+were not touched beyond this entry.
+
+- **`docs/development/roadmap.md` is forward-facing only.** The 53-row "Shipped" table,
+  the 2.6.x modernization-arc table, the closed "Blocked on cyrius" audit and the
+  all-✅ cyrius-issue status table are gone — every row paraphrased a CHANGELOG entry.
+  What remains is organised by where it lands: **3.3.13** (three conformance repairs),
+  **3.4.x** (binary reconsolidation, the conformance-suite port, the two Low timeout
+  items), **3.5.x** (threaded dispatch in seven bites, with what each unlocks),
+  **3.6.x** (WebSocket subprotocol / deflate and DNS-aware SSRF, each with the upstream
+  seam that has to be *filed*, not waited for), open decisions, housekeeping, a watch
+  list, and the 4.0 criteria. Every library-surface claim in it was verified against the
+  vendored `lib/` (`sandhi_resolve_ipv4`, sankoch's `deflate_*`, `arena_new_growable` /
+  `arena_reset`, `thread_local_alloc`, the unused `resources_list_changed_notification`).
+- **`docs/spec-compliance.md` re-audited against the built binary**, not the previous
+  table — it had been anchored at bote 1.9.2 / cyrius 4.7.0 (519 assertions, SID from
+  `/dev/urandom`, annotations "planned for 2.0", threaded dispatch "waits on cyrius").
+  Now 3.3.12: JWT / PKCE rows added, the polled push described, the coverage table at
+  887, and the gaps below recorded as ❌ rather than omitted.
+- **README**: the versioning section no longer names a version (it pointed at 3.2.1);
+  the benchmark table is the 3.3.12 `history.log` row with a note that a row is an
+  illustration and the interleaved A/Bs in this file are the measurement; the docs table
+  describes what each document is now; the sandbox row and `ping` / `2025-06-18` are
+  stated honestly.
+- **CLAUDE.md**: the pin line and the version line had become ledgers (every hop since
+  2.7.3, every release headline since 3.3.4) and are condensed to the current state with
+  pointers; the duplicated 6.1.x/6.2.x toolchain-syntax parentheticals in the dev loop,
+  the 5.10.x compile-cap history and the 3.3.3 → 3.3.4 capacity-delta narrative are
+  reduced to their rules; `sandbox.cyr` is listed as what it is.
+- **`docs/architecture/overview.md`**: the HTTP section described a hand-rolled
+  accept-loop server that 2.6.0 replaced with sandhi (`sandhi_server_run`, 30 s default
+  idle timeout, WS replaces it after the handshake); design principle 4 no longer waits
+  on a cyrius surface that shipped; counts, kavach pin and the docs tree re-anchored.
+- **`DEPS-PATTERN.md`**: the sidecar paragraph described the 3.2.0 shape ("three names,
+  partial hint"); since cyrius 6.6.6 it names exactly the declared 31 + `ws_server` and
+  `cyrius deps` pulls the include-closure itself (the 3.3.10 clean-room measurement).
+- **`SECURITY.md`** support table 3.1.x/3.0.x → 3.3.x/3.2.x. **`CONTRIBUTING.md`**: no
+  pinned toolchain number, siblings are `libro` + `majra` only, the sakshi-logging advice
+  replaced (bote references no sakshi symbol; audit and events go through the sinks), the
+  raw-`syscall(` rule added. **`docs/benchmarks-rust-v-cyrius.md`** and
+  **`docs/cyrius-feedback.md`** re-labelled as dated historical snapshots (they read as
+  current). `scripts/build-all.sh` no longer promises a 5.11.x that never existed.
+
+### Found by the sweep — not fixed here, scheduled for 3.3.13
+
+Probing the released 3.3.12 binary while re-auditing the compliance matrix:
+
+- **`ping` answers `-32601 method not found`.** Every MCP revision bote supports requires
+  an empty `{}` result, and SDK clients use `ping` as a keepalive.
+- **Protocol version `2025-06-18` is not accepted.** Over the HTTP family its
+  `MCP-Protocol-Version` header is a hard 400, so a client pinned to that published
+  revision cannot connect; over stdio it is negotiated up to `2025-11-25`.
+- **`src/sandbox.cyr` ships in no bundle and no binary.** Tested (13 assertions),
+  advertised in the README and the package description, absent from both `[lib]`
+  profiles — the orphan shape `jwt.cyr` / `pkce.cyr` had until 3.2.0. Fixing it
+  regenerates `dist/` under a released version label, so it waits for the next bump.
+- `resources/templates/list` answers `-32601` (optional in the spec; an empty list is
+  the honest reply). The 44-scenario conformance suite in the Rust archive was never
+  ported — `ping` would not have survived it — and is now a 3.4.x item.
 
 ## [3.3.12] — 2026-09-22 · the agnos target is gated — and building for it found two things Linux could not show
 

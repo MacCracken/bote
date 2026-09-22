@@ -1,10 +1,11 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 | **Bote Version**: 1.9.2 (cyrius 4.7.0) | **Last Audited**: 2026-04-14
+> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.3.12 (cyrius 6.6.6) | **Last Audited**: 2026-09-22
 
-This file lists what the shipped Cyrius implementation **covers today**.
-For deferred items see
-[`docs/development/roadmap.md`](development/roadmap.md).
+This file lists what the shipped Cyrius implementation **covers today**, including the
+gaps — a ❌ row is a defect on the released binary, a ⏳ row is planned work. Both are
+scheduled in [`docs/development/roadmap.md`](development/roadmap.md). Re-audited at the
+3.3.12 documentation sweep by probing the built binary, not by reading the previous table.
 
 ---
 
@@ -14,10 +15,13 @@ For deferred items see
 |---|---|
 | `2024-11-05` | ✅ |
 | `2025-03-26` | ✅ |
+| `2025-06-18` | ❌ **not accepted** — `validate_protocol_version` does not list it. Over stdio an `initialize` naming it is negotiated up to the default; over the HTTP family the `MCP-Protocol-Version: 2025-06-18` header is a **400**, so a client pinned to that published revision cannot connect. Roadmap: next patch. |
 | `2025-11-25` | ✅ **default** |
 
 Negotiated via `initialize`. The server picks the highest mutually
-supported version.
+supported version. JSON-RPC batching was removed from the spec at `2025-06-18`;
+bote keeps accepting batch arrays (a superset is harmless to a client that never
+sends one).
 
 ---
 
@@ -27,16 +31,20 @@ supported version.
 |---|---|---|
 | JSON-RPC 2.0 — request, response, notification, batch | `protocol` + `codec` | ✅ |
 | Spec error codes (-32700, -32600, -32601, -32602, -32000, -32003, -32603, -32800) | `error` | ✅ |
-| `initialize` handshake (serverInfo + capabilities + version negotiation) | `dispatch` | ✅ |
+| `initialize` handshake (serverInfo + capabilities + version negotiation; `serverInfo` configurable via `dispatcher_set_server_info`) | `dispatch` | ✅ |
+| `ping` → empty `{}` result (spec: the receiver *MUST* respond promptly) | — | ❌ **answers `-32601 method not found`**. SDK clients send `ping` as a keepalive. Roadmap: next patch. |
+| `notifications/initialized` / `notifications/cancelled` — accepted, never answered | `codec` (no response to any notification) | ✅ (`cancelled` is ignored: there is no in-flight work to cancel until threaded dispatch, 3.5.x) |
 | `tools/list` with full `inputSchema` | `dispatch` + `registry` | ✅ |
 | `tools/call` with arguments + version selection | `dispatch` + `schema` | ✅ |
 | `prompts/list` + `prompts/get` (capability advertised iff a `PromptRegistry` is present) | `dispatch` + `prompts` | ✅ |
-| `resources/list` + `resources/read` (capability advertised iff a `ResourceRegistry` is present; `subscribe`/`listChanged` deferred with the push path) | `dispatch` + `resources` | ✅ |
+| `resources/list` + `resources/read` (capability advertised iff a `ResourceRegistry` is present) | `dispatch` + `resources` | ✅ |
+| `resources/templates/list` (optional in the spec) | — | ❌ answers `-32601`; some clients call it whenever `resources` is advertised. Roadmap: next patch, as an empty list. |
+| `resources/subscribe` / `unsubscribe` + `notifications/resources/updated`; `resources` `listChanged` | — | ⏳ not implemented and not advertised — wait on real-time push (roadmap 3.5.x) |
 | `completion/complete` (capability advertised iff a completion handler is set) | `dispatch` (`dispatcher_set_completion`) | ✅ |
 | `notifications/tools/list_changed` + `notifications/prompts/list_changed` (buffered per session, drained on the client's next streamable `GET`; `listChanged` advertised only by a transport with a drain path) | `dispatch` (`dispatcher_set_notifications`) + `transport_streamable` (`strm_notify_sink`) | ✅ streamable (polled) |
-| `logging/setLevel` + `notifications/message` | — | ⏳ deferred with real-time (held-open) push |
+| `logging/setLevel` + `notifications/message` | — | ⏳ not advertised — advertising it would promise messages bote cannot deliver; waits on real-time push (roadmap 3.5.x) |
 | Notifications produce no response | `dispatch` + `codec` | ✅ |
-| Batch arrays — mixed req + notif return only req responses | `codec` | ✅ |
+| Batch arrays — mixed req + notif return only req responses (spec ≤ 2025-03-26; still accepted for later versions) | `codec` | ✅ |
 
 ## Tool Definitions
 
@@ -70,7 +78,7 @@ supported version.
 | `MCP-Session-Id` — server-issued on `initialize`, validated on subsequent | `session::SessionStore` + per-transport `_check_session` | ✅ HTTP / streamable / bridge |
 | Session creation on initialize (auto, returned in response header) | `session_store_create` + handler hook | ✅ |
 | Session timeout + pruning (configurable; default 1h) | `session_store_prune_expired` | ✅ |
-| Random 128-bit SID via `/dev/urandom`, 32-hex encoded | `_gen_session_id` | ✅ |
+| Random 128-bit SID, 32-hex encoded, from the kernel CSPRNG via `random_bytes()` (`getrandom(2)`); the process **refuses to mint a session ID** if that fails rather than fall back to anything guessable | `_gen_session_id` | ✅ (3.2.0; was `/dev/urandom` by raw syscall) |
 
 ## Security
 
@@ -86,6 +94,9 @@ supported version.
 | **`BOTE_BEARER_TOKENS` env var** wires an allowlist validator across all four HTTP-family transports at startup | `main::_bote_bearer_from_env` | ✅ (1.9.1) |
 | **HTTP body-length clamp** — `clen = min(clen, n - bo)` so a lying Content-Length can't make `memcpy` read past the request buffer | `transport_http`, `transport_streamable`, `bridge` | ✅ (1.5.1) |
 | **SSRF guard for outbound URL fetches** — IPv4 + IPv6 blocklists for loopback / private / link-local / cloud-metadata | `host::ssrf_check` | ✅ (1.8.0 / 1.9.1) |
+| **JWT HS256 verifier** (RFC 7519 / 7515) — `alg` read as an exact JSON field (not a substring scan), constant-time HMAC compare, `exp` enforced *after* the signature verifies with no leeway, malformed `exp` rejects, `exp` absent accepts; `auth_validator_jwt_hs256` plugs into the bearer middleware | `jwt::jwt_verify_hs256` | ✅ (2.2.0; `exp` + exact `alg` at 3.2.0; ships in `dist/bote.cyr` since 3.2.0) |
+| **RFC 7636 PKCE-S256** — `pkce_code_verifier` (CSPRNG) + `pkce_code_challenge_s256` | `pkce` | ✅ (2.3.0; ships in `dist/bote.cyr` since 3.2.0) |
+| Asymmetric JWT (RS256 / ES256) | — | ⏳ an open decision, not a dependency — see the roadmap |
 
 ## Transports
 
@@ -110,9 +121,11 @@ supported version.
 | `resource_link` (reference) | `content_resource_link(uri, name, mime)` | ✅ (1.7.0) |
 | Envelope: `{"content":[...]}` | `content_array(blocks)` / `content_single(block)` / `content_text_response(text)` | ✅ |
 | Tool-error envelope: `{"content":[...],"isError":true}` | `content_array_error(blocks)` | ✅ |
-| Block-level annotations (`audience`, `priority`) | `content_with_annotations` | ⏳ — reverted from 1.9.1 (cap), planned for 2.0 |
+| Block-level annotations (`audience`, `priority`) | `content_with_annotations`; preserved through `bridge::wrap_tool_result` | ✅ (1.9.6; propagation 2.7.0) |
 
-## Built-in `libro_*` Tools (1.6.0)
+## Built-in tools
+
+### `libro_*` (1.6.0)
 
 | Tool | Purpose | Module |
 |---|---|---|
@@ -124,6 +137,17 @@ supported version.
 
 Registered by default in `main.cyr` against an empty chain at startup;
 clients see them in `tools/list` immediately.
+
+### `fs_*` (2.8.0) and `web_*` (3.1.0)
+
+| Tool | Purpose | Guard |
+|---|---|---|
+| `fs_write` / `fs_read` / `fs_mkdir` | File operations | Root-confined to `BOTE_FS_ROOT` (default `.`); absolute and `..` paths refused |
+| `web_fetch` | GET a URL and strip HTML to readable text | `http` / `https` only, 64 KiB cap, control bytes dropped |
+| `web_search` | Query a SearXNG JSON endpoint | `BOTE_SEARXNG_URL` — self-hostable, no third-party key |
+
+All three families are opt-in via `*_tools_register()` for library consumers and
+registered by default in the binaries.
 
 ## Bridge (MCP envelope contract)
 
@@ -151,9 +175,10 @@ clients see them in `tools/list` immediately.
 | `ProgressUpdate` (progress / total / message) | `progress_update_*` | ✅ |
 | `CancellationToken` (clone-shared flag) | `bote_cancel_token_*` | ✅ |
 | `notifications/progress` JSON builder | `progress_notification` | ✅ |
-| Threaded streaming dispatch | — | ⏳ deferred — waits on cyrius `lib/thread.cyr` MPSC + `lib/async.cyr` cancellation |
-| `$/cancelRequest` mid-stream handling | — | ⏳ pairs with streaming dispatch |
-| Server-initiated event push on streamable GET stream | `transport_streamable` (data path) | 🟡 transport opens stream + replays buffer; live push waits on streaming dispatch |
+| Threaded streaming dispatch | — | ⏳ bote-side work (roadmap 3.5.x). The cyrius primitives this once waited on — `lib/thread.cyr` MPSC, `lib/async.cyr`, `thread_local_alloc`, `arena_*` — are complete and pinned |
+| `$/cancelRequest` mid-stream handling | — | ⏳ pairs with threaded dispatch |
+| Server → client push (`tools` / `prompts` `list_changed`) | `transport_streamable` (`SessionOutbound`) | ✅ polled — buffered per session at produce time, drained on the next `GET` or piggybacked as SSE on a `POST`; advertised only by a transport with a drain path (3.0.0) |
+| Held-open `GET` stream with live push | `transport_streamable` | 🟡 the stream opens and replays the resumption buffer; *live* delivery waits on threaded dispatch |
 
 ## Audit / Events Sinks
 
@@ -177,45 +202,36 @@ clients see them in `tools/list` immediately.
 | Hostname blocklist (`localhost`, `metadata.google.internal`, `metadata`) — case-insensitive | `host::_ssrf_classify_hostname` | ✅ |
 | `user:pass@` userinfo stripping before classification | `host::_ssrf_extract_host` | ✅ |
 | Scheme gate — only `http://` / `https://` | same | ✅ |
-| DNS resolution (catch `127.0.0.1.nip.io` style bypasses) | — | ⏳ needs cyrius DNS stub |
+| DNS resolution (catch `127.0.0.1.nip.io` style bypasses) | — | ⏳ needs a resolve hook on the sandhi HTTP *client* so the classified address is the connected one (roadmap 3.6.x); `sandhi_resolve_ipv4` itself exists |
 
 ---
 
-## Test Coverage (Cyrius v1.9.2)
+## Test Coverage (bote 3.3.12)
 
 | Scope | Count | Source |
 |---|---|---|
-| Unit assertions (core protocol/dispatch/codec/schema/session/transports) | **394** | `tests/bote.tcyr` |
-| `libro_tools` assertions | **22** | `tests/bote_libro_tools.tcyr` |
-| Content-block assertions | **18** | `tests/bote_content.tcyr` |
-| Host-registry + SSRF assertions | **56** | `tests/bote_host.tcyr` |
-| Bearer-middleware assertions | **29** | `tests/bote_auth.tcyr` |
-| **Total assertions** | **519** | (was 251 at v1.0.0) |
-| Hot-path benchmarks | **10** | `tests/bote.bcyr` |
-| Fuzz harnesses | **4** | `fuzz/*.fcyr` |
-| End-to-end transport smokes | 6 (stdio, HTTP, Unix, bridge, streamable, WS) | manual via `./build/bote` + curl/wscat |
+| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit | **424** | `tests/bote.tcyr` |
+| Bearer + allowlist + JWT + PKCE validators | **38** | `tests/bote_auth.tcyr` |
+| Content blocks + annotations | **24** | `tests/bote_content.tcyr` |
+| `fs_tools` path safety + root confinement | **26** | `tests/bote_fs_tools.tcyr` |
+| HostRegistry + IPv4 / IPv6 SSRF + hot-reload | **113** | `tests/bote_host.tcyr` |
+| JWT HS256 — signature, exact `alg`, `exp` (mutation-proven) | **53** | `tests/bote_jwt.tcyr` |
+| `libro_tools` incl. tampered-chain decode + populated-chain proof | **38** | `tests/bote_libro_tools.tcyr` |
+| RFC 7636 PKCE-S256 | **17** | `tests/bote_pkce.tcyr` |
+| Sandbox runner adapter | **13** | `tests/bote_sandbox.tcyr` |
+| Streamable HTTP — event ids, resumption, per-session outbound, drain selection | **53** | `tests/bote_streamable.tcyr` |
+| Unix transport — sockaddr, accept-error policy, backoff | **47** | `tests/bote_transport_unix.tcyr` |
+| `web_tools` — scheme guard, HTML stripper, entities | **27** | `tests/bote_web_tools.tcyr` |
+| WebSocket config + wire-up | **14** | `tests/bote_ws.tcyr` |
+| **Total assertions** | **887** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all 887 also run under `qemu-aarch64` |
+| Hot-path benchmarks | **14** | `tests/bote.bcyr` |
+| Fuzz harnesses | **4** | `fuzz/*.fcyr` (in CI since 3.3.8) |
+| End-to-end transport round trips | 6 (stdio, HTTP, Unix, bridge, streamable, WS) | one `tools/call` per transport on the built binaries, run per release |
 
-What the unit suite covers: every BoteError variant + format, every
-protocol struct + accessor, full registry lifecycle (register / get /
-list / contains / dereg / versioned / deprecate / annotations), every
-CompiledSchema type + bounds (including exact-min and exact-max
-boundaries), every codec path (single + batch + notification + parse
-error + invalid version + non-object), full dispatcher routing
-(initialize / tools/list / tools/call / unknown / dynamic register /
-dereg), session lifecycle + prune + origin + protocol-version
-validation, all jsonx extractors with truncated/escaped/nested inputs,
-bridge wrap variants + CORS origin selection, discovery announcements
-+ receiver queue, HTTP request parser, **streamable EventIdGenerator +
-ResumptionBuffer + StreamableConfig**, **WsConfig + handler addressability**,
-**libro_tools registration + empty-chain shape**, **every content
-block constructor**, **every SSRF block-list code path including IPv4
-edges and IPv6 prefix forms**, **bearer scheme parsing + OWS handling
-+ allowlist + middleware short-circuit**.
-
-Conformance test suite (44 protocol-level scenarios in the Rust
-archive) is **not yet ported** — would land as `tests/conformance.tcyr`.
-Tracked under v2.0.
+The conformance test suite — 44 protocol-level scenarios in the Rust archive's
+`tests/conformance.rs` (tag `0.92.0`) — is **still not ported**. It would land as
+`tests/conformance.tcyr`, and the `ping` gap above is the argument for it: roadmap 3.4.x.
 
 ---
 
-*Audit method: manual comparison against [MCP spec 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25). For the explicit security-property table see [SECURITY.md](../SECURITY.md).*
+*Audit method: manual comparison against [MCP spec 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25), with every method row probed against the built binary over stdio (the 3.3.12 sweep is how the `ping`, `2025-06-18` and `resources/templates/list` rows were found). For the explicit security-property table see [SECURITY.md](../SECURITY.md).*

@@ -1,14 +1,15 @@
 #!/bin/sh
 # build-all.sh — build the bote binary family.
 #
-# 2.7.2 (cyrius 5.10.x): per-transport binary split workaround for the
-# 2 MB compile-source cap. Builds three binaries from three entries:
+# Per-transport binary split — originally (2.7.2) a workaround for the
+# cyrius 5.10.x 2 MB compile-source cap, which 6.1.24 raised; folding the
+# three back into one `bote` is a 3.4.x roadmap item. Builds three
+# binaries from three entries:
 #
 #   build/bote              src/main.cyr            stdio + http + unix + bridge
 #   build/bote-streamable   src/main_streamable.cyr Streamable HTTP / SSE
 #   build/bote-ws           src/main_ws.cyr         WebSocket MCP
 #
-# Reconsolidates to a single `bote` binary on cyrius 5.11.x migration.
 set -e
 
 cyrius build src/main.cyr            build/bote

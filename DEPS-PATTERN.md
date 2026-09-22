@@ -51,15 +51,16 @@ that selected that profile break at `cyrius deps` time.
 
 The bundles are include-free by design — they carry **no**
 `include "lib/…"` lines, so the consumer's own `[deps] stdlib`
-has to cover every stdlib leaf the fold calls. The
-auto-generated `dist/bote.deps` sidecar is a **partial** hint,
-not the full set: at 3.2.0 it lists three names while the full
-bundle also reaches `syscalls`, `io`, `net`, `tls`, `sandhi`,
-`sigil`, `chrono`, `str`, `string`, `fmt`, `alloc`, `vec`,
-`slice`, `tagged`, `fnptr`, `freelist`, `thread`, `atomic`,
-`sync`, `thread_local`, `ct`, `keccak` and `random`. Mirror
-bote's own `[deps] stdlib` list in `cyrius.cyml` — including
-its **ordering**, which is load-bearing under single-pass
+has to cover every stdlib leaf the fold calls. Since cyrius
+6.6.6 the auto-generated `dist/bote.deps` sidecar names exactly
+that: the 31 modules in bote's `[deps] stdlib` plus `ws_server`
+(32 leaves; `dist/bote-core.deps` names 11). The include-closure
+behind them — `hashseed`, `sha1`, `tls_native`, `result`, … —
+is no longer listed because `cyrius deps` pulls it itself (a
+clean-room consumer resolving from the sidecar alone gets 81
+files and builds; measured at 3.3.10). Mirror bote's own
+`[deps] stdlib` list in `cyrius.cyml` — including its
+**ordering**, which is load-bearing under single-pass
 compilation.
 
 **New at 3.2.0: `random`.** `src/session.cyr`'s
@@ -201,9 +202,9 @@ the 2.7.2 bump.
 The cyrius major jump to 6.1.24 (bote 2.7.3) raised the cap and
 the core profile **stays** — it's still a smaller compile-source
 footprint and a faster CI for consumers that don't need the
-transports. The jump unblocks removing the per-transport binary
-split inside bote itself (still in place at 2.7.3; reconsolidation
-tracked as a follow-up — see CHANGELOG 2.7.3).
+transports. The same jump unblocked folding bote's own three
+per-transport binaries back into one; that is still in place and
+is a 3.4.x roadmap item. The bundles are unaffected either way.
 
 ## What lives in the core 12?
 
@@ -224,7 +225,9 @@ tracked as a follow-up — see CHANGELOG 2.7.3).
 
 (The core profile grew 9 → 11 at 3.0.0, when the MCP prompts and
 resources capabilities landed, and 11 → 12 at **3.3.6** with
-`content.cyr`. The table said 9 until 3.2.0.)
+`content.cyr`. `src/sandbox.cyr` is the next candidate — it needs
+no sigil and no transport — and is currently in *neither* profile;
+see the roadmap.)
 
 `content.cyr` is in core because content blocks are the tool-result
 format **every** handler emits, transport or not. Before 3.3.6,

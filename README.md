@@ -49,9 +49,9 @@ apps don't each reimplement the same protocol.
 | **Typed MCP content blocks** — text / image / audio / resource / resource_link / blob | ✅ |
 | **`HostRegistry` + SSRF guard** — IPv4 + IPv6 blocklists for loopback, private, link-local, cloud-metadata | ✅ |
 | **Audit / events sinks** — fn-pointer + ctx adapters, libro + majra wired | ✅ |
-| **Streaming primitives** — `ProgressUpdate`, `CancellationToken`, progress notifications | data layer ✅ / threaded dispatch ⏳ |
+| **Streaming primitives** — `ProgressUpdate`, `CancellationToken`, progress notifications | data layer ✅ / threaded dispatch ⏳ (roadmap 3.5.x) |
 | **OAuth 2.1 substrate** — bearer (RFC 6750), JWT HS256 verifier, PKCE-S256 helpers | ✅ |
-| **Sandbox runner** — fn-pointer + ctx adapter (kavach 3.12.2 shape), noop default | ✅ |
+| **Sandbox runner** — fn-pointer + ctx adapter (kavach-shaped), noop default | in `src/` + tested; **not in either bundle yet** (roadmap, next patch) |
 
 ---
 
@@ -123,9 +123,11 @@ bote implements [MCP](https://modelcontextprotocol.io/) over JSON-RPC 2.0.
 | `prompts/list` / `prompts/get` | Prompts capability (when a `PromptRegistry` is wired) | Prompt metadata / generated messages |
 | `resources/list` / `resources/read` | Resources capability (when a `ResourceRegistry` is wired) | Resource metadata / contents |
 | `completion/complete` | Completion capability | Argument completion values |
+| `ping` | Keepalive | ⚠ **answers `-32601` today** — the spec requires `{}`; fixed in the next patch (roadmap) |
 
 Supported MCP protocol versions: `2024-11-05`, `2025-03-26`,
-`2025-11-25` (default).
+`2025-11-25` (default). ⚠ `2025-06-18` is not yet accepted — over the HTTP family
+its `MCP-Protocol-Version` header is a 400 (roadmap, next patch).
 
 ### Built-in tools (registered by default)
 
@@ -178,7 +180,7 @@ src/events_majra.cyr       MajraEvents adapter
 src/auth.cyr               Bearer-token middleware (RFC 6750)
 src/jwt.cyr                JWT HS256 verifier (RFC 7519)
 src/pkce.cyr               RFC 7636 PKCE-S256 helpers
-src/sandbox.cyr            Pluggable sandbox runner (kavach 3.12.2 adapter shape)
+src/sandbox.cyr            Pluggable sandbox runner (kavach-shaped) — in no bundle yet (roadmap)
 src/content.cyr            Typed MCP content blocks (text/image/audio/resource/blob)
 src/host.cyr               HostRegistry + SSRF guard (IPv4 + IPv6)
 src/libro_tools.cyr        Five built-in MCP tools over a libro chain
@@ -233,33 +235,34 @@ cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dis
 cyrius bench tests/bote.bcyr
 ```
 
-Measured at 3.3.4 on a quiet box (load < 1.0), best-of-5 interleaved, and
-re-confirmed unchanged at 3.3.5.
-The full history, including the host conditions each block was taken
-under, is in [`benches/history.log`](benches/history.log).
+Latest logged row — bote 3.3.12 on cyrius 6.6.6, single run on a quiet box
+(load < 1.0), `AMD Ryzen 7 5800H`. The full history, with the host conditions
+each block was taken under, is [`benches/history.log`](benches/history.log).
 
 | Hot path | Avg |
 |---|---|
-| `dispatch_initialize` | ~1.37 µs |
+| `dispatch_initialize` | ~1.32 µs |
 | `dispatch_tools_list` | ~2.05 µs |
-| `dispatch_tools_call` | ~5.54 µs |
-| `jsonx_get_str_flat` | ~134 ns |
-| `jsonx_get_raw_nested` | ~393 ns |
-| `codec_parse_request` | ~1.47 µs |
-| `codec_serialize_response` | ~472 ns |
-| `codec_process_message` (full pipeline) | ~7.65 µs |
-| `validate_compiled_simple` | ~486 ns |
-| `validate_compiled_nested` | ~2.16 µs |
-| `schema_compile_simple` | ~2.39 µs |
-| `schema_compile_nested` | ~5.75 µs |
-| `auth_bearer_check_unset` | ~8 ns |
-| `auth_bearer_check_set` | ~764 ns |
+| `dispatch_tools_call` | ~3.33 µs |
+| `jsonx_get_str_flat` | ~140 ns |
+| `jsonx_get_raw_nested` | ~343 ns |
+| `codec_parse_request` | ~1.25 µs |
+| `codec_serialize_response` | ~448 ns |
+| `codec_process_message` (full pipeline) | ~5.00 µs |
+| `validate_compiled_simple` | ~474 ns |
+| `validate_compiled_nested` | ~2.05 µs |
+| `schema_compile_simple` | ~2.29 µs |
+| `schema_compile_nested` | ~5.27 µs |
+| `auth_bearer_check_unset` | ~7 ns |
+| `auth_bearer_check_set` | ~714 ns |
 
-> ⚠ These are roughly 2× better than the numbers published through 3.2.1.
-> **That is host state, not a code change.** The older block was recorded
-> on a loaded machine (every row carried a ~129 µs max outlier); this one
-> was not. A controlled interleaved A/B across the 3.3.4 dependency bump
-> measured **flat**. Do not read a speed-up into the difference.
+> A single row is an illustration, not a measurement: run-to-run swings of
+> 5–10 % on the sub-microsecond rows are host state, and a one-byte shift in
+> string data moves the alignment-sensitive ones. The measurements are the
+> **interleaved A/Bs** recorded in the CHANGELOG at each toolchain bump
+> (3.3.10 for 6.6.3 → 6.6.6: a wash). Numbers across toolchain lines are not
+> comparable — the 6.6.x emitter moved `dispatch_tools_call` and
+> `codec_process_message` well below their 6.5.x figures.
 
 ### Fuzz
 
@@ -290,12 +293,12 @@ the same surface.
 | Doc | Topic |
 |---|---|
 | [docs/architecture/overview.md](docs/architecture/overview.md) | Module map, data flow, six-transport surface |
-| [docs/development/roadmap.md](docs/development/roadmap.md) | Shipped per release, backlog, future |
+| [docs/development/roadmap.md](docs/development/roadmap.md) | Forward-facing only: next patch, 3.4.x → 3.6.x, open decisions, 4.0 criteria |
 | [docs/spec-compliance.md](docs/spec-compliance.md) | MCP 2025-11-25 conformance matrix |
 | [docs/benchmarks-rust-v-cyrius.md](docs/benchmarks-rust-v-cyrius.md) | Side-by-side performance: Rust v0.92.0 vs Cyrius |
-| [docs/cyrius-feedback.md](docs/cyrius-feedback.md) | Cyrius language issues found during the port |
-| [docs/development/issues/](docs/development/issues/) | cyrius language/toolchain issues with reproducers (both current entries are ✅ RESOLVED in 3.2.0; `archive/` holds earlier ones) |
-| [docs/resolved-lang-issues.md](docs/resolved-lang-issues.md) | Historical index of resolved upstream cyrius issues |
+| [docs/cyrius-feedback.md](docs/cyrius-feedback.md) | Port-era Cyrius language issues (historical — all resolved by cyrius 4.4.3) |
+| [docs/development/issues/](docs/development/issues/) | Consumer-filed bote issues with their resolutions; every one is closed and lives under `archive/` |
+| [docs/resolved-lang-issues.md](docs/resolved-lang-issues.md) | Historical index of bote's upstream cyrius filings and the fix each landed |
 | [DEPS-PATTERN.md](DEPS-PATTERN.md) | Distribution contract (`dist/bote.cyr` / `dist/bote-core.cyr`) |
 | [SECURITY.md](SECURITY.md) | Threat model, reporting policy |
 
@@ -303,13 +306,12 @@ the same surface.
 
 ## Versioning
 
-**Current**: `3.2.1` — full MCP capability suite (prompts / resources /
-completion + polled `list_changed` push), filesystem + web tools, six
-transports across three binaries, and a JWT/PKCE auth substrate that
-(since 3.2.0) actually ships in `dist/bote.cyr` with `exp` enforced.
-Builds and tests clean on aarch64. SemVer; the
-2.0 handler ABI is stable across the 2.x→3.x line. See
-[CHANGELOG.md](CHANGELOG.md) for the full history.
+**Current**: see [`VERSION`](VERSION) and the top of [CHANGELOG.md](CHANGELOG.md).
+SemVer. The 3.x line carries the full MCP capability suite (prompts / resources /
+completion + polled `list_changed` push), the fs / web / libro tool families, six
+transports across three binaries, and the bearer + JWT HS256 + PKCE auth substrate;
+the 2.0 handler ABI is stable across the 2.x → 3.x line. Builds and tests clean on
+x86_64 and aarch64; compiles for agnos.
 
 **Roadmap** — see [roadmap](docs/development/roadmap.md).
 

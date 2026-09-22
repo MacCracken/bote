@@ -1,5 +1,12 @@
 # Cyrius Language Feedback (from porting bote)
 
+> **Historical record.** Everything below was filed during the 1.0 port and
+> resolved by cyrius 4.4.3; it is kept because the workarounds it describes
+> are still readable in `src/` and the reasoning still explains them. Nothing
+> here is open. Current toolchain friction goes to the cyrius repo as an
+> issue; bote's own filings and their fixes are indexed in
+> [resolved-lang-issues.md](resolved-lang-issues.md).
+>
 > **Initially tested against**: a pre-4.x cyrius (`cyrius version` reported `0.1.0`).
 > **Re-verified against**: cyrius **4.4.3** (`cyriusly install 4.4.3 && cyriusly use 4.4.3`).
 >

@@ -1,11 +1,17 @@
 # Benchmarks: Rust vs Cyrius
 
-> **Final comparison.** All porting work from `rust-old/` is done — bote's
-> live implementation is Cyrius. This doc captures the last Rust bench
-> run (preserved at git tag `0.92.0`) alongside current Cyrius numbers
-> so the cost/benefit of the port stays auditable.
+> **Historical snapshot — 2026-04, bote 2.5.1 on cyrius 4.8.4.** All porting
+> work from `rust-old/` is done; bote's live implementation is Cyrius. This
+> doc captures the last Rust bench run (preserved at git tag `0.92.0`)
+> alongside the Cyrius numbers of the same week, so the cost/benefit of the
+> port stays auditable. It is **not** refreshed per release: the Rust side
+> cannot be re-run, and a comparison across toolchain lines and hosts would
+> not mean anything. Current Cyrius numbers are in
+> [`benches/history.log`](../benches/history.log) (one block per release)
+> and the README's benchmark table; the measurements behind them are the
+> interleaved A/Bs recorded in the CHANGELOG at each toolchain bump.
 
-| | Rust v0.92.0 (final) | Cyrius v2.5.1 (current) |
+| | Rust v0.92.0 (final) | Cyrius v2.5.1 (at the time) |
 |---|---|---|
 | **Source LOC** (`src/`) | 10,877 | 5,429 — **~2.0× smaller** |
 | **Tests + fuzz LOC** (`tests/` + `fuzz/`) | (Rust criterion + tests) | 2,589 |

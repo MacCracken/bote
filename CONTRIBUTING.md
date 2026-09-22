@@ -12,8 +12,8 @@ development workflow, code standards, and project conventions.
 
 ## Prerequisites
 
-- **Cyrius toolchain** — version pinned in `cyrius.cyml` (`cyrius = "5.10.34"` at time of writing). Install per the [cyrius README](https://github.com/MacCracken/cyrius).
-- Sibling-checkout the local AGNOS deps (`libro`, `majra`, `sigil`, `agnosys`) under `../` if you want `cyrius deps` to resolve via path overrides instead of fetching git tags.
+- **Cyrius toolchain** — the version is pinned in `cyrius.cyml` (`cyrius = "…"`); the `cyrius` wrapper re-execs that pinned toolchain, so install per the [cyrius README](https://github.com/MacCracken/cyrius) and let the pin pick. `cyrius lib sync --full && cyrius deps` provisions `lib/`.
+- Optionally sibling-checkout the two git-pinned AGNOS deps (`libro`, `majra`) under `../` so `cyrius deps` resolves via `path =` instead of fetching tags. ⚠ A sibling vendors its **working tree**, so keep it on the tag before you release (see `DEPS-PATTERN.md`). Everything else — sigil, sakshi, patra, sandhi — arrives through the toolchain's stdlib fold; do not add `[deps.<name>]` blocks for them.
 
 ## Common Commands
 
@@ -50,12 +50,13 @@ CI runs the same gates plus a capacity gate (fail if `fn_table` or `identifiers`
 
 ## Code Style
 
-- **No `panic!` or `unwrap()` in library code.** Cyrius doesn't have those, but the analogue is unguarded `syscall(SYS_EXIT, ...)` or implicit out-of-bounds — guard at the boundary.
+- **No `panic!` or `unwrap()` in library code.** Cyrius doesn't have those, but the analogue is an unguarded `sys_exit(...)` or an implicit out-of-bounds read — guard at the boundary and return 0 / -1 / an error tag.
+- **No raw `syscall(`** anywhere in `src/`, `tests/` or `fuzz/` — call the stdlib wrapper (`sys_exit`, `sys_open`, `random_bytes`, …). CI fails on the form itself.
 - **Constant-time comparisons** for any token / signature / secret material. The codebase has the pattern; mirror it.
-- **`tracing`-style structured logging** is not yet available in cyrius; for now, use `sakshi_debug` / `sakshi_info` / `sakshi_warn` consistently.
+- **No logging of bote's own.** Audit records go to the `AuditSink` (libro adapter) and events to the `EventSink` (majra adapter), both wired by the consumer; bote references no sakshi symbol and should not start to. Diagnostics that must reach a human go through `eprint` on a fail-closed path, as `session.cyr` does.
 - **`#[non_exhaustive]`-equivalent**: cyrius enums always allow tail-extension; rely on default-case handling in any `if (tag == BOTE_ERR_X)` chain. (Enum constants are global — prefix them `BOTE_`; see the `BOTE_ERR_*` namespacing note in CLAUDE.md.)
 - **Keep functions focused and testable** — `tests/bote_<module>.tcyr` is the contract.
-- **No nested 2-arg call inside `assert(...)` inside `streq(...)`** with certain JSON literal contexts — the 5.10.x parser occasionally chokes (`expected ')', got string`). Stage the inner call into a `var` first; same behaviour, parses.
+- **Stage nested calls into a `var` before asserting on them.** A 5.10.x-era parser limitation (`expected ')', got string` on a 2-arg call nested inside `assert(streq(...))` with JSON literals) is the origin; the staged form is also what the test files read like, so keep to it.
 
 ## Testing
 

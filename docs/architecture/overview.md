@@ -4,14 +4,16 @@
 > resources registries, dispatch, six transports, bearer auth + JWT
 > HS256 + RFC 7636 PKCE, libro audit tools, fs + web tools, typed
 > content blocks (with annotations), host registry with SSRF guard,
-> pluggable sandbox runner (kavach 3.12.2).
+> pluggable sandbox runner (kavach-shaped adapter — in `src/`, not yet in a
+> bundle).
 >
 > **Name**: Bote (German) — messenger.
 >
 > **Lineage**: Originally a Rust crate. Ported to Cyrius via `cyrius port`
 > on 2026-04-13 (v1.0.0). The Rust archive was retired in v1.0.1; the last
 > Rust snapshot is at git tag `0.92.0`. This doc describes the live Cyrius
-> implementation (current: **3.3.10**, cyrius 6.6.6).
+> implementation; the current version is in [`VERSION`](../../VERSION) and
+> the toolchain pin in [`cyrius.cyml`](../../cyrius.cyml).
 
 ---
 
@@ -20,7 +22,7 @@
 1. **One protocol implementation** — every consumer dispatches through bote instead of reimplementing JSON-RPC 2.0.
 2. **Registry-driven** — tools registered with schemas, dispatch validates automatically.
 3. **Transport-agnostic** — same `Dispatcher` powers six transports.
-4. **Streaming-ready data layer** — progress + cancellation primitives in place; threaded dispatch deferred until cyrius's thread/async surface firms up.
+4. **Streaming-ready data layer** — progress + cancellation primitives and a polled per-session push are in place; real-time held-open streaming is bote-side work (roadmap 3.5.x) — the cyrius thread / async / thread-local / arena primitives it needs are complete and pinned.
 5. **Audit + events as fn-pointer + ctx adapters** — libro and majra wired today; any other backend drops in via the same shape.
 6. **Auth as opt-in middleware** — bearer-token validator is a fn-pointer slot on each HTTP-family transport config; unset = no overhead, no behavior change.
 7. **No global state in the dispatcher** — caller owns the registry and dispatcher heap pointers; transports are per-instance.
@@ -132,7 +134,8 @@ src/
 ├── auth.cyr                — Bearer-token middleware (RFC 6750)
 ├── jwt.cyr                 — JWT HS256 verifier (RFC 7519 / 7515)
 ├── pkce.cyr                — RFC 7636 PKCE helpers (S256)
-├── sandbox.cyr             — pluggable sandbox runner adapter (kavach 3.12.2)
+├── sandbox.cyr             — pluggable sandbox runner adapter (kavach-shaped);
+│                             tested, but in NEITHER bundle nor binary — roadmap
 ├── content.cyr             — Typed MCP content blocks (+ annotations)
 ├── host.cyr                — HostRegistry + SSRF guard (IPv4 + IPv6)
 ├── libro_tools.cyr         — Five built-in MCP tools over a libro chain
@@ -173,11 +176,11 @@ tests/
 ├── bote_libro_tools.tcyr      — 38 (libro_tools; incl. the tampered-chain
 │                                 error decode + populated-chain proof paths)
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
-├── bote_sandbox.tcyr          — 13 (kavach 3.12.2 runner adapter)
+├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 53 (streamable HTTP / SSE)
 ├── bote_transport_unix.tcyr   — 47 (unix socket transport + accept policy)
 ├── bote_web_tools.tcyr        — 27 (web_tools)
-├── bote_ws.tcyr               — 10 (WebSocket)
+├── bote_ws.tcyr               — 14 (WebSocket)
 ├── bote_core_only_smoke.tcyr  — drift guard (includes only dist/bote-core.cyr)
 └── bote.bcyr                  — 14 hot-path benchmarks
 
@@ -190,12 +193,12 @@ fuzz/
 docs/
 ├── architecture/overview.md   — this file
 ├── benchmarks-rust-v-cyrius.md
-├── cyrius-feedback.md         — language issues found during the port
-├── resolved-lang-issues.md    — issues since fixed upstream
-├── spec-compliance.md         — MCP 2025-11-25 conformance matrix
-├── development/roadmap.md     — shipped per release, backlog
-├── development/issues/        — cyrius toolchain issues w/ reproducers
-└── audit/                     — audit reports
+├── cyrius-feedback.md         — port-era language issues (historical; all resolved)
+├── resolved-lang-issues.md    — bote's upstream cyrius filings + the fix each landed
+├── spec-compliance.md         — MCP 2025-11-25 conformance matrix (incl. the open gaps)
+├── development/roadmap.md     — forward-facing only: next patch → 3.6.x, decisions, 4.0 criteria
+├── development/issues/        — consumer-filed bote issues; all closed, under archive/
+└── audit/                     — dated audit reports
 ```
 
 The per-module test-file split (twelve per-module `tests/bote_*.tcyr`
@@ -275,8 +278,12 @@ a 128 KB heap-allocated buffer. EOF flushes any final non-terminated
 line.
 
 ### HTTP/1.1
-Own minimal server (no `axum` equivalent in cyrius stdlib). Bind to
-`127.0.0.1:port`, accept-loop, single-recv per connection. Routes:
+Runs on the stdlib's **sandhi** HTTP server (`sandhi_server_run_opts`, since
+2.6.0 — the pre-2.6 hand-rolled server is gone; none of the four HTTP-family
+transports issues a socket syscall of its own). Bound to `127.0.0.1:port`;
+sandhi owns the accept loop and applies its default per-connection receive
+timeout (`SANDHI_SERVER_DEFAULT_IDLE_MS`, 30 s — the WebSocket transport replaces
+it after the handshake, 3.3.7); bote's handler is the request callback. Routes:
 
 | Method/Path | Action |
 |---|---|

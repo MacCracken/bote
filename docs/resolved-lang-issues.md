@@ -6,9 +6,10 @@ investigation write-ups lived at `docs/bugs/<issue>.md` during active
 triage and were cleared once the upstream fix landed + bote adopted
 the new pin.
 
-For the rolling cyrius-language feedback loop (language-level
-friction, not specific bugs) see
-[docs/cyrius-feedback.md](cyrius-feedback.md).
+The port-era language-feedback log (all resolved by cyrius 4.4.3) is
+[docs/cyrius-feedback.md](cyrius-feedback.md). New toolchain issues are
+filed in the cyrius repo; bote's filings are archived there under
+`docs/development/issues/archived/` (five as of 3.3.12).
 
 ---
 
@@ -107,7 +108,7 @@ pre-trim count).
 Every one of these followed the same workflow:
 
 1. bote hits a real-world upstream limitation during a feature ship
-2. I write up the symptom + reproducer in a `docs/bugs/<issue>.md`
+2. The symptom + reproducer is written up as an issue — in the cyrius repo for a toolchain defect (where all five of bote's live today, under `docs/development/issues/archived/`), or under bote's `docs/development/issues/` for a bote-side one
 3. The cyrius agent picks it up on their own schedule
 4. Upstream fix ships in a cyrius release
 5. bote bumps its pin + adopts
