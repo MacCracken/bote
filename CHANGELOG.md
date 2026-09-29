@@ -63,6 +63,19 @@ A new `ci.yml` step compares the `# Version:` headers of `lib/sigil-mldsa.cyr` a
 silently; this one only surfaced because 3.13.x happened to change arities. The step passes
 when no thin copy is vendored. Verified to fail on a copy pinned to libro 2.10.3.
 
+### Added — CI checks the docs' fold versions against `lib/`
+
+The first cut of this release bumped the libro pin in the docs but left
+`docs/architecture/overview.md` naming sigil 3.12.18, sakshi 2.5.2, patra 1.14.3 and bayan
+1.5.6 as the fold versions, the CLAUDE.md sakshi row at 2.5.2, and the
+`docs/spec-compliance.md` header at 3.3.13 (cyrius 6.6.6). All now name what `lib/` holds:
+sigil 3.13.4, sakshi 2.5.5, patra 1.15.1, bayan 1.5.8; the compliance header reads 3.3.14
+(cyrius 6.6.10) and keeps its 2026-09-22 audit date, marked as taken at 3.3.13. Two CI checks
+keep them there: a Build & Test step compares every `<leaf> X.Y.Z` in the overview's fold
+sentence and in CLAUDE.md's sigil / sakshi rows with that leaf's `lib/<leaf>.cyr` header,
+and the Documentation job's version check now requires the compliance header to name
+`VERSION`. Both were verified to fail on the uncorrected docs.
+
 ## [3.3.13] — 2026-09-22 · three conformance repairs the documentation sweep turned up
 
 `ping` answers, `2025-06-18` is accepted, and `src/sandbox.cyr` reaches consumers for the

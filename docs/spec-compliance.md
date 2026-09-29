@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.3.13 (cyrius 6.6.6) | **Last Audited**: 2026-09-22
+> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.3.14 (cyrius 6.6.10) | **Last Audited**: 2026-09-22 (at 3.3.13)
 
 This file lists what the shipped Cyrius implementation **covers today**, including the
 gaps — a ❌ row is a defect on the released binary, a ⏳ row is planned work. Both are

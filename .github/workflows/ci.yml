@@ -95,6 +95,28 @@ jobs:
           fi
           echo "thin sigil == fold: $fold"
 
+      - name: Docs name the fold versions actually vendored
+        # 3.3.14. The fold-version sentence in docs/architecture/overview.md and
+        # the sigil / sakshi rows of CLAUDE.md's Stack table are hand-written;
+        # 3.3.14 bumped the libro pin and left them at sigil 3.12.18 / patra
+        # 1.14.3 / sakshi 2.5.2 while lib/ held 3.13.4 / 1.15.1 / 2.5.5.
+        # Each "<leaf> X.Y.Z" they name must equal lib/<leaf>.cyr's header.
+        run: |
+          ver() { sed -n -e 's/^# Version: //p' -e "s/^# Bundled distribution of $1 v//p" "lib/$1.cyr" | head -1; }
+          claims=$( { sed -n '/Those are the ONLY two \[deps/,/arrive via the cyrius stdlib fold/p' docs/architecture/overview.md \
+                      | grep -oE '(sigil|sakshi|patra|bayan) [0-9]+\.[0-9]+\.[0-9]+' || true; }
+                    { grep -oE '^\| (sigil|sakshi) [0-9]+\.[0-9]+\.[0-9]+ \|' CLAUDE.md | tr -d '|' || true; } )
+          [ -n "$claims" ] || { echo "::error::no fold-version claims found — the doc anchors moved; update this step"; exit 1; }
+          bad=0
+          while read -r leaf v; do
+            [ -n "$leaf" ] || continue
+            have=$(ver "$leaf")
+            if [ "$have" != "$v" ]; then echo "::error::docs say $leaf $v but lib/$leaf.cyr is '$have'"; bad=1; else echo "  ok: $leaf $v"; fi
+          done <<CLAIMS
+          $claims
+          CLAIMS
+          exit $bad
+
       - name: Manifest completeness ([lib] modules ⊇ main.cyr src/ includes)
         run: |
           # Every `include "src/<file>.cyr"` in src/main.cyr must be
@@ -538,4 +560,6 @@ jobs:
             exit 1
           fi
           grep -q "\[$FILE_VERSION\]" CHANGELOG.md || { echo "FAIL: version $FILE_VERSION not in CHANGELOG.md"; exit 1; }
+          # 3.3.14: spec-compliance.md's header sat at 3.3.13 after the bump.
+          grep -q "\*\*Bote Version\*\*: $FILE_VERSION " docs/spec-compliance.md || { echo "FAIL: docs/spec-compliance.md header does not name Bote Version $FILE_VERSION"; exit 1; }
           echo "Version consistent: $FILE_VERSION"
