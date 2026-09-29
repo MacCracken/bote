@@ -157,7 +157,7 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
                               thread_local, sakshi, ct, keccak, random,
                               sigil, tls, sandhi; ws_server manually
                               included by transport_ws.cyr only)
-[deps.libro]   git = "MacCracken/libro"   tag = "2.10.3"  (+ patra 1.14.3 transitive)
+[deps.libro]   git = "MacCracken/libro"   tag = "2.10.4"  (+ patra 1.14.3 transitive)
 [deps.majra]   git = "MacCracken/majra"   tag = "2.9.1"
 
   Those are the ONLY two [deps.<name>] blocks. sigil 3.12.18, sakshi 2.5.2,

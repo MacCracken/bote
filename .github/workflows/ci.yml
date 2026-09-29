@@ -77,6 +77,24 @@ jobs:
             echo "::warning::cyrius.lock not committed — skipping hash verification"
           fi
 
+      - name: libro's thin sigil matches the sigil fold
+        # 3.3.14. libro's `deps.sigil` lands lib/sigil-mldsa.cyr (+ sigil_*.cyr)
+        # next to the stdlib fold's lib/sigil.cyr, and last-definition-wins
+        # lets the thin copy replace ~236 fold functions. That is benign only
+        # while both are the same sigil version. At cyrius 6.6.10, libro
+        # 2.10.3's 3.12.18 against the 3.13.4 fold was 5 arity errors; a drift
+        # with no arity change would have compiled silently. Passes when no
+        # thin copy is vendored.
+        run: |
+          [ -f lib/sigil-mldsa.cyr ] || { echo "no thin sigil vendored"; exit 0; }
+          fold=$(sed -n 's/^# Version: //p' lib/sigil.cyr | head -1)
+          thin=$(sed -n 's/^# Version: //p' lib/sigil-mldsa.cyr | head -1)
+          if [ -z "$fold" ] || [ "$fold" != "$thin" ]; then
+            echo "::error::libro's thin sigil is '$thin' but the sigil fold is '$fold' — bump libro's deps.sigil to the version the pinned cyrius folds"
+            exit 1
+          fi
+          echo "thin sigil == fold: $fold"
+
       - name: Manifest completeness ([lib] modules ⊇ main.cyr src/ includes)
         run: |
           # Every `include "src/<file>.cyr"` in src/main.cyr must be

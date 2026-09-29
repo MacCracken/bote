@@ -18,6 +18,51 @@ have per release.
 
 _(empty)_
 
+## [3.3.14] — 2026-09-29 · libro 2.10.4 + cyrius 6.6.10: the thin sigil matches the fold again
+
+No bote source change beyond the `initialize` version literal.
+
+### Fixed — 5 arity errors at cyrius 6.6.10
+
+bote declares the `sigil` stdlib fold (`lib/sigil.cyr`) and also receives libro's thin sigil
+selection (`lib/sigil-mldsa.cyr` + `lib/sigil_{sha_ni,sha256,hex}.cyr`) through libro's
+`deps.sigil` block. Both land in one unit, which is benign only while the two sigil versions
+are equal (the CLAUDE.md stack-table rule). libro 2.10.3 pins sigil 3.12.18; cyrius 6.6.10
+folds 3.13.4, and 3.13.x changed the arity of five ML-DSA sponge helpers. So a clean resolve
+of 3.3.13 with the pin moved to 6.6.10 did not build:
+
+```
+lib/sigil-mldsa.cyr:3780-4194 against lib/sigil.cyr
+  _mldsa_shake_squeeze_blocks 3 vs 4, _mldsa_sv_init 0 vs 1, _mldsa_sv_absorb 2 vs 3,
+  _mldsa_sv_finalize 0 vs 1, _mldsa_sv_squeeze 2 vs 3
+```
+
+libro 2.10.4 moves its sigil pins to 3.13.4. With `deps.libro` at 2.10.4 and the toolchain at
+the released 6.6.10, the build is OK (2,743,112 B) with no arity error. The duplicate-fn
+baseline is now **236**: all of them are the thin 3.13.4 set against the fold, which is a strict
+subset of it with no arity mismatch (232 at 3.12.18).
+
+### Changed
+
+- **Toolchain `6.6.6` → `6.6.10`**, **libro `2.10.3` → `2.10.4`** (a pin-only libro release;
+  `struct chain`, `struct entry` and `struct error` are unchanged, per the struct-layout
+  contract). majra stays at 2.9.1.
+- patra now arrives as the 6.6.10 fold's **1.15.1**. libro still pins 1.14.3, and
+  `cyrius deps` keeps the snapshot's copy (`refusing to overwrite stdlib leaf 'patra'`).
+- `dist/bote.cyr` and `dist/bote-core.cyr` regenerated. `dist/bote-core.deps` drops
+  `tagged`, `fmt` and `io` (8 leaves), which is cyrius 6.6.10's `distlib`;
+  `dist/bote.deps` is unchanged (32 leaves).
+- `cyrius.lock` is the tag-mode lock a clean resolve writes: libro, majra, sigil and patra
+  are commit-pinned. All four were resolved from their tags with the `path = "../X"` lines
+  commented out, since the majra checkout is at 2.9.2, one past the pin.
+
+### Added — CI checks libro's thin sigil against the fold
+
+A new `ci.yml` step compares the `# Version:` headers of `lib/sigil-mldsa.cyr` and
+`lib/sigil.cyr` and fails when they differ. A version drift with no arity change would compile
+silently; this one only surfaced because 3.13.x happened to change arities. The step passes
+when no thin copy is vendored. Verified to fail on a copy pinned to libro 2.10.3.
+
 ## [3.3.13] — 2026-09-22 · three conformance repairs the documentation sweep turned up
 
 `ping` answers, `2025-06-18` is accepted, and `src/sandbox.cyr` reaches consumers for the
