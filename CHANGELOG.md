@@ -18,6 +18,30 @@ have per release.
 
 _(empty)_
 
+## [3.3.15] — 2026-09-30 · the aarch64 gate's raw-syscall denylist holds under pipefail
+
+CI-only. No bote source change beyond the `initialize` version literal; the libro 2.10.4
+and cyrius 6.6.10 pins are unchanged.
+
+### Fixed — the raw `syscall(...)` denylist failed under `pipefail`
+
+The second denylist in the "aarch64 portability gate" step builds
+`raw=$(for f in …; do sed | grep | sed; done)` with no `|| true` on the per-file
+pipeline. A clean file makes grep exit 1; under `pipefail` the last file's status becomes
+the loop's, the assignment fails, and `set -e` ends the step with rc 1 right after the
+`--- denylist: raw syscall(...)` banner, without an error line. The step is green on GitHub
+only because a step with no `shell:` runs as `bash -e`, without pipefail. The first
+denylist in the same step already carried `|| true`; the second now does too, per file.
+Run verbatim (both denylists, up to the cross-build): rc 0 and "clean" under `bash -e` and
+under `bash -eo pipefail`; with a planted `syscall(60, 0)` in `tests/`, rc 1 and the site
+named under both. The pre-fix step gives rc 1 with no message under `bash -eo pipefail`.
+
+### Changed
+
+- `dist/bote.cyr` and `dist/bote-core.cyr` regenerated (version header and the
+  `_bote_server_version()` literal).
+- `docs/spec-compliance.md` header names Bote Version 3.3.15.
+
 ## [3.3.14] — 2026-09-29 · libro 2.10.4 + cyrius 6.6.10: the thin sigil matches the fold again
 
 No bote source change beyond the `initialize` version literal.

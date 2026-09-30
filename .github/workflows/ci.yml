@@ -445,8 +445,11 @@ jobs:
           # issue a raw syscall(). Banning the form is a stronger guard
           # than enumerating bad constants. Comments are stripped first,
           # so prose that names a syscall is fine.
+          # `|| true` per file, like the first denylist: grep exits 1 on a
+          # clean file, and under pipefail that status becomes the loop's and
+          # aborts the step silently after the banner above (3.3.15).
           raw=$(for f in src/*.cyr tests/*.tcyr tests/*.bcyr fuzz/*.fcyr; do
-            sed 's/#.*//' "$f" | grep -nE '\bsyscall[[:space:]]*\(' | sed "s|^|$f:|"
+            sed 's/#.*//' "$f" | grep -nE '\bsyscall[[:space:]]*\(' | sed "s|^|$f:|" || true
           done)
           if [ -n "$raw" ]; then
             echo "::error::raw syscall(...) — call the arch-portable stdlib wrapper instead."
