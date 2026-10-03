@@ -157,17 +157,17 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
                               thread_local, sakshi, ct, keccak, random,
                               sigil, tls, sandhi; ws_server manually
                               included by transport_ws.cyr only)
-[deps.libro]   git = "MacCracken/libro"   tag = "2.10.4"  (its deps.patra 1.14.3 is shadowed by the fold's)
-[deps.majra]   git = "MacCracken/majra"   tag = "2.9.1"
+[deps.libro]   git = "MacCracken/libro"   tag = "2.10.6"  (its deps.patra 1.15.1 equals the fold's)
+[deps.majra]   git = "MacCracken/majra"   tag = "2.9.2"
 
-  Those are the ONLY two [deps.<name>] blocks. sigil 3.13.4, sakshi 2.5.5,
-  patra 1.15.1 and bayan 1.5.8 arrive via the cyrius stdlib fold, not a git pin — the
+  Those are the ONLY two [deps.<name>] blocks. sigil 3.13.7, sakshi 2.5.6,
+  patra 1.15.1 and bayan 1.5.11 arrive via the cyrius stdlib fold, not a git pin — the
   former [deps.sigil] / [deps.sakshi] registry-lag pins were removed at
   3.3.1 (sigil's had gone stale and was holding bote behind two
   authentication bypasses).
 
 tests/
-├── bote.tcyr                  — 424 core assertions
+├── bote.tcyr                  — 441 core assertions
 ├── bote_auth.tcyr             — 38 (bearer + allowlist + JWT + PKCE validators)
 ├── bote_content.tcyr          — 24 (content blocks + annotations)
 ├── bote_fs_tools.tcyr         — 26 (fs_tools)

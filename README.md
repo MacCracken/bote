@@ -235,26 +235,26 @@ cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dis
 cyrius bench tests/bote.bcyr
 ```
 
-Latest logged row — bote 3.3.12 on cyrius 6.6.6, single run on a quiet box
+Latest logged row — bote 3.3.16 on cyrius 6.6.14, single run on a quiet box
 (load < 1.0), `AMD Ryzen 7 5800H`. The full history, with the host conditions
 each block was taken under, is [`benches/history.log`](benches/history.log).
 
 | Hot path | Avg |
 |---|---|
-| `dispatch_initialize` | ~1.32 µs |
-| `dispatch_tools_list` | ~2.05 µs |
-| `dispatch_tools_call` | ~3.33 µs |
-| `jsonx_get_str_flat` | ~140 ns |
-| `jsonx_get_raw_nested` | ~343 ns |
-| `codec_parse_request` | ~1.25 µs |
-| `codec_serialize_response` | ~448 ns |
-| `codec_process_message` (full pipeline) | ~5.00 µs |
-| `validate_compiled_simple` | ~474 ns |
-| `validate_compiled_nested` | ~2.05 µs |
-| `schema_compile_simple` | ~2.29 µs |
+| `dispatch_initialize` | ~1.26 µs |
+| `dispatch_tools_list` | ~1.82 µs |
+| `dispatch_tools_call` | ~5.30 µs |
+| `jsonx_get_str_flat` | ~125 ns |
+| `jsonx_get_raw_nested` | ~367 ns |
+| `codec_parse_request` | ~1.31 µs |
+| `codec_serialize_response` | ~432 ns |
+| `codec_process_message` (full pipeline) | ~7.10 µs |
+| `validate_compiled_simple` | ~445 ns |
+| `validate_compiled_nested` | ~2.02 µs |
+| `schema_compile_simple` | ~2.13 µs |
 | `schema_compile_nested` | ~5.27 µs |
-| `auth_bearer_check_unset` | ~7 ns |
-| `auth_bearer_check_set` | ~714 ns |
+| `auth_bearer_check_unset` | ~8 ns |
+| `auth_bearer_check_set` | ~704 ns |
 
 > A single row is an illustration, not a measurement: run-to-run swings of
 > 5–10 % on the sub-microsecond rows are host state, and a one-byte shift in

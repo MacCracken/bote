@@ -244,6 +244,17 @@ fn main() {
     assert(miss_err != 0, "validate err on missing");
     assert_eq(bote_err_tag(miss_err), BOTE_ERR_INVALID_PARAMS, "missing -> INVALID_PARAMS");
 
+    # ---------------- registry: required fields around a nested object ----------------
+    # The fallback reads the top-level keys of bayan's flat `json_parse`. Before bayan 1.5.10 a
+    # nested object threw the key/value pairing off for the rest of the object, so `path` AFTER
+    # `cfg` was reported missing and valid params were refused as INVALID_PARAMS. 1.5.10 (folded
+    # from cyrius 6.6.13) returns a nested object as one value. Fails on 3.3.15.
+    var after_nested = registry_validate_params(reg2, "scan", "{\"cfg\":{\"x\":1},\"path\":\"/tmp\"}");
+    assert_eq(after_nested, 0, "a required field after a nested object is present");
+    # A key INSIDE the nested object still does not satisfy a top-level requirement.
+    var only_nested = registry_validate_params(reg2, "scan", "{\"cfg\":{\"path\":\"/tmp\"}}");
+    assert(only_nested != 0, "a required field nested in another object is missing");
+
     # ---------------- registry: validate_params unknown tool ----------------
     var unk_err = registry_validate_params(reg2, "nope", "{}");
     assert(unk_err != 0, "validate err on unknown");

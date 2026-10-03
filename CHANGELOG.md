@@ -18,6 +18,74 @@ have per release.
 
 _(empty)_
 
+## [3.3.16] — 2026-10-03 · cyrius 6.6.14 + libro 2.10.6: the lock names the folds, and no path lines
+
+cyrius 6.6.14, libro 2.10.6 and majra 2.9.2, with no `path` line left in `cyrius.cyml`. The
+only bote source change is that `src/web_tools.cyr`'s two `bayan_json_v_obj_get` calls take
+the getter's non-deprecated name.
+
+### Fixed — a required field after a nested object was reported missing
+
+`registry_validate_params` falls back to bayan's flat `json_parse` + `json_get` when a tool
+has no compiled schema. Before bayan 1.5.10, a nested object threw the parser's key/value
+pairing off for the rest of the object, so `{"cfg":{"x":1},"path":"/tmp"}` against
+`required: ["path"]` came back `BOTE_ERR_INVALID_PARAMS` ("missing required field: path")
+for params that were valid. bayan 1.5.10, folded from cyrius 6.6.13, returns a nested
+object as one value, and 6.6.14 folds 1.5.11. bote inherits the fix through the pin; its
+source is unchanged. `tests/bote.tcyr` gains two assertions. The first, a field after a
+nested object, fails on 3.3.15 (cyrius 6.6.10, bayan 1.5.8; measured on a clean 3.3.15
+tree). The second, a key inside the nested object not satisfying a top-level requirement,
+holds on both.
+
+### Changed
+
+- **cyrius 6.6.10 → 6.6.14.** The re-provisioned folds move sigil 3.13.4 → 3.13.7, bayan
+  1.5.8 → 1.5.11, sandhi 1.10.2 → 1.10.4, sakshi 2.5.5 → 2.5.6 and ganita 1.2.8 → 1.2.11.
+  patra (1.15.1) and sankoch (2.8.0) are unchanged. The TLS fixes of 6.6.13 / 6.6.14
+  (CVE-59 … CVE-67) come with the snapshot, and `lib/math.cyr` no longer defines the
+  `f64_le` / `f64_ge` / `f64_trunc` builtins 6.6.13 reserved.
+- **libro 2.10.4 → 2.10.6 and majra 2.9.1 → 2.9.2.** libro 2.10.5 and 2.10.6 and majra 2.9.2 are pin-only releases:
+  `dist/libro.cyr` and `dist/majra.cyr` differ from what 3.3.15 vendored only in their
+  version headers. So `struct chain` / `struct entry` / `struct error` are unchanged for
+  `src/libro_tools.cyr`. libro now declares patra 1.15.1 and sigil 3.13.7, the 6.6.14
+  folds, so the lock's patra and sigil commit pins name the code `lib/` holds; at 3.3.15
+  they named 1.14.3 and 3.13.4.
+- **libro's thin sigil no longer lands in `lib/`.** From cyrius 6.6.11 the resolver keeps
+  the stdlib fold over a thin profile of a package listed in `[deps] stdlib`. libro's
+  `deps.sigil` selection (`sigil-mldsa` + `sha_ni` / `sha256` / `hex`) is therefore noted
+  "not vendored", and only `lib/sigil.cyr` is compiled. The 236 `duplicate fn` warnings
+  every 3.3.15 binary printed (708 across the three) are gone. The CI step "libro's thin
+  sigil matches the sigil fold" passes as "no thin sigil vendored".
+- **No `path` line in `cyrius.cyml`** (the roadmap follow-up recorded by cyrius 6.6.13).
+  `path = "../libro"` and `path = "../majra"` made a local resolve vendor the sibling
+  working trees while CI vendored the tags. Rule 2 above the git deps now says a `path`
+  line is never committed.
+- Binaries, from 3.3.15 on 6.6.10 to 3.3.16 on 6.6.14: `bote` 2,743,112 → 2,710,608 B,
+  `bote-streamable` 2,707,600 → 2,670,984 B, `bote-ws` 2,711,856 → 2,675,256 B. All
+  three builds print no warning from bote's own source.
+- `dist/bote.cyr` and `dist/bote-core.cyr` regenerated (version header, the
+  `_bote_server_version()` literal, and in the full bundle the two `web_tools` calls).
+- CLAUDE.md's stack table, `docs/architecture/overview.md` and the compliance header name
+  the new pins and folds. The roadmap drops the done follow-up, and its thin-sigil watch item
+  now says what the CI step reports.
+
+### Performance
+
+- **The toolchain move is a wash.** `tests/bote.bcyr` was built by 3.3.15 on 6.6.10 and by
+  3.3.16 on 6.6.14, and the two binaries were run interleaved for 6 rounds (order
+  alternating) on a box other sessions held at a 1-minute load of 3.6–3.7. Medians: 13 of
+  the 14 benchmarks are within ±2.2% (`dispatch_initialize` 1.345 → 1.315 µs, −2.2%;
+  `codec_process_message` 7.428 → 7.461 µs, +0.5%; `validate_compiled_nested` 2.079 →
+  2.105 µs, +1.3%). `jsonx_get_str_flat` is 142 → 128 ns, −9.5%. The load makes these
+  medians fit only for comparing the two binaries. The README table is refreshed from a
+  separate quiet run (load 0.99), logged as the 3.3.16 block of `benches/history.log`.
+- ⚠ **Two rows moved before this release, not in it.** Against the last logged row (3.3.13
+  on cyrius 6.6.6), `dispatch_tools_call` is 3.358 → 5.295 µs (+58%) and
+  `codec_process_message` 5.033 → 7.104 µs (+41%), while the other twelve are flat or
+  faster. The A/B above puts 3.3.15 at the same level (5.452 / 7.428 µs under load, where
+  `dispatch_initialize` stayed at its quiet value). So the change came with 3.3.14 (cyrius
+  6.6.10, libro 2.10.4), which logged no benchmark row. Not investigated here.
+
 ## [3.3.15] — 2026-09-30 · the aarch64 gate's raw-syscall denylist holds under pipefail
 
 CI-only. No bote source change beyond the `initialize` version literal; the libro 2.10.4

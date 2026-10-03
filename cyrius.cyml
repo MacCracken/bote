@@ -5,7 +5,7 @@ description = "MCP core service in Cyrius — JSON-RPC 2.0, six transports, bear
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/bote"
 language = "cyrius"
-cyrius = "6.6.10"
+cyrius = "6.6.14"
 
 [build]
 entry = "src/main.cyr"
@@ -148,11 +148,12 @@ stdlib = [
 # 1. Write `deps.NAME` in comments, never the bracketed section header:
 #    distlib's sidecar scan is unanchored and can match comment prose.
 #
-# 2. `path` beats `tag` when the sibling checkout resolves, and skips
-#    commit-pin verification — a local checkout vendors the WORKING TREE and
-#    masks a wrong tag. Verify the vendored bytes against the tag before a
-#    release, and verify transitive versions AFTER `cyrius build` (it does an
-#    implicit resolve), never after `cyrius deps` alone.
+# 2. No `path` line is committed. `path` beats `tag` when the sibling checkout
+#    resolves and skips commit-pin verification, so a local resolve would vendor
+#    the WORKING TREE while CI vendors the tag. To build against a sibling's
+#    working tree, add the line locally and do not commit it. Verify transitive
+#    versions AFTER `cyrius build` (it does an implicit resolve), never after
+#    `cyrius deps` alone.
 
 # libro audit chain — self-contained single-file bundle. patra (lib/patra.cyr,
 # the audit store) arrives through libro's own `deps.patra` block, not through
@@ -165,8 +166,7 @@ stdlib = [
 # FRONT moves everything. Check both structs on every bump.
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
-path = "../libro"
-tag = "2.10.4"
+tag = "2.10.6"
 modules = ["dist/libro.cyr"]
 
 # majra pub/sub — default profile (core pubsub engine, no backends). bote uses
@@ -175,6 +175,5 @@ modules = ["dist/libro.cyr"]
 # envelopes or network backends.
 [deps.majra]
 git = "https://github.com/MacCracken/majra"
-path = "../majra"
-tag = "2.9.1"
+tag = "2.9.2"
 modules = ["dist/majra.cyr"]

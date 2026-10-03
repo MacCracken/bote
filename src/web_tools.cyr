@@ -291,7 +291,7 @@ fn web_search_handler(args, claims) {
     # reachable undefined function(s)`.
     var v = bayan_json_v_parse_buf(sandhi_http_body(r), sandhi_http_body_len(r));
     if (v == 0) { return _web_err("web_search: could not parse the SearXNG response"); }
-    var results = bayan_json_v_obj_get(v, "results");
+    var results = bayan_json_v_obj_get_by_cstr(v, "results");
     if (results == 0) { return _web_err("web_search: SearXNG response had no results array"); }
     var n = bayan_json_v_arr_len(results);
     var sb = str_builder_new();
@@ -321,7 +321,7 @@ fn web_search_handler(args, claims) {
 # _web_json_field: the cstr value of string field `key` on bayan object value `item`, or 0.
 fn _web_json_field(item, key) {
     if (item == 0) { return 0; }
-    var f = bayan_json_v_obj_get(item, key);
+    var f = bayan_json_v_obj_get_by_cstr(item, key);
     if (f == 0) { return 0; }
     var s = bayan_json_v_str(f);
     if (s == 0) { return 0; }

@@ -39,12 +39,6 @@ Carried from the 3.3.13 sweep: nothing else. The three conformance repairs that 
 listed — `ping`, protocol version `2025-06-18`, and shipping `src/sandbox.cyr` — shipped in
 3.3.13, two of them with a CI gate rather than only an assertion.
 
-**Recorded by cyrius 6.6.12 / 6.6.13 (2026-10-02):** `cyrius.cyml` still commits live
-`path = "../libro"` / `path = "../majra"` lines — the shape cyrius 6.6.12 removed from dhvani and libro. A
-sibling checkout beside the repo silently overrides the tag, so a local build and CI compile different
-code. Drop the `path` lines and resolve libro and majra from their tags. At the cyrius 6.6.13 pin bump,
-re-vendor `lib/math.cyr` with `cyrius deps` in the same commit — 6.6.13 made `f64_le` / `f64_ge` / `f64_trunc` compiler builtins (reserved names), and a pre-6.6.13 vendored copy still defines them (`reserved keyword`).
-
 ## 3.4.x — Consolidation and timeouts
 
 | Item | Notes | Effort |
@@ -118,9 +112,10 @@ with anyone:
 
 Not tasks. Things that have bitten once and are checked, not assumed:
 
-- **Thin-sigil vs fold version.** libro's `deps.sigil` selection wins over the fold's
-  `lib/sigil.cyr` for 232 functions under last-definition-wins; benign only while the two
-  are the same sigil (they diverged unnoticed at 3.3.8–3.3.9). Rule and check in CLAUDE.md.
+- **Thin-sigil vs fold version.** Since cyrius 6.6.11 libro's `deps.sigil` selection is
+  not vendored here (the fold wins over a thin profile of a stdlib leaf), so the CI step
+  reports "no thin sigil vendored". If it ever finds a thin copy again, the resolver rule has
+  changed: the two must then be the same sigil (they diverged unnoticed at 3.3.8–3.3.9).
 - **libro-growth heisenbug (v1.2.1 era).** Heap-layout sensitivity when the chain grows
   while libro + majra + bote are all loaded. Not reproduced on any 2.x / 3.x tree;
   `bote_core_only_smoke.tcyr` still exits inline because of it. Retire the note if the
