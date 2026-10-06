@@ -34,6 +34,7 @@ found by probing the released binary (→ next patch).
 | Item | Why | Effort |
 |---|---|---|
 | **`resources/templates/list` answers `-32601`.** Optional in the spec, but some clients call it whenever `resources` is advertised and read the error as a failure rather than "no templates". An empty `{"resourceTemplates":[]}` is the honest reply; a real template registry (URI templates with variable expansion, RFC 6570) is a bigger question worth deciding separately. | The only ❌ left in [spec-compliance.md](../spec-compliance.md). | Small |
+| **`dispatch_tools_call` +58% and `codec_process_message` +41% since 3.3.13, not investigated.** Against the 3.3.13 row of `benches/history.log` (cyrius 6.6.6), `dispatch_tools_call` is 3.358 → 5.295 µs and `codec_process_message` 5.033 → 7.104 µs; the other twelve rows are flat or faster. 3.3.15 measured at the same level, so the change came with 3.3.14, which moved cyrius 6.6.6 → 6.6.10 and libro to 2.10.4 in one release and logged no benchmark row. Bisect the two: 3.3.13's tree on cyrius 6.6.10, then libro 2.10.4 alone. Recorded in the 3.3.16 CHANGELOG entry. | Both rows are on every `tools/call`. | Small (two build+bench rounds) |
 
 Carried from the 3.3.13 sweep: nothing else. The three conformance repairs that section
 listed — `ping`, protocol version `2025-06-18`, and shipping `src/sandbox.cyr` — shipped in
