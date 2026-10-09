@@ -158,3 +158,14 @@ repo (`docs/development/issues/archived/`) and indexed with their fixes in
 resolved by cyrius 4.4.3 and kept as a record. New bote-side issues go under
 `docs/development/issues/` and move to `issues/archive/` with a closure banner when fixed;
 toolchain issues are filed in the cyrius repo.
+
+## Moved from cyrius's roadmap (2026-10-08) — for the next cyrius pin move
+
+cyrius no longer carries this repo's follow-ups; the items below were moved here from its roadmap. Each
+applies from the cyrius version it names. Everything else that changes between this repo's pin and cyrius
+6.7.6 is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-migration.md`.
+
+- **(cyrius ≥ 6.6.17) `cyrius lib sync` order** — after a pin move run `cyrius lib sync` BEFORE `cyrius deps` /
+  `cyrius build`: a `deps` / `build` first stamps the new pin over the lock rows of files `deps` does not vendor,
+  and `lib sync` then refuses (it names `--relock`). `lib sync --full` after a pin move leaves a lock that
+  `deps --verify` accepts.
