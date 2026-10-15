@@ -242,23 +242,23 @@ fn _bridge_handle(config, cfd, buf, n) {
             _bridge_send_health(cfd, allowed_origins, origin);
             return 0;
         }
-        sandhi_server_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        bote_http_refuse(cfd, SK_DEBUG, "bridge", HTTP_NOT_FOUND, "Not Found", "path");
         return 0;
     }
     # Anything other than POST is rejected.
     if (streq(method, "POST") == 0) {
-        sandhi_server_send_status(cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed");
+        bote_http_refuse(cfd, SK_DEBUG, "bridge", HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed", "method");
         return 0;
     }
     # Only "/" is the bridge endpoint.
     if (streq(sandhi_server_path_only(path), "/") == 0) {
-        sandhi_server_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        bote_http_refuse(cfd, SK_DEBUG, "bridge", HTTP_NOT_FOUND, "Not Found", "path");
         return 0;
     }
 
     # Reject ambiguous Transfer-Encoding (HTTP smuggling guard, RFC 9112)
     if (sandhi_server_find_header(buf, n, "Transfer-Encoding") != 0) {
-        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
+        bote_http_refuse(cfd, SK_WARN, "bridge", HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding"); return 0;
     }
     # Bearer auth (no-op when no validator configured)
     var claims_slot[8]; store64(&claims_slot, 0);
@@ -271,12 +271,12 @@ fn _bridge_handle(config, cfd, buf, n) {
     # keeps us inside the 64 KB recv buffer with room for headers.
     var declared_clen = sandhi_server_content_length(buf, n);
     if (declared_clen > 61440) {
-        sandhi_server_send_status(cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large"); return 0;
+        bote_http_refuse(cfd, SK_WARN, "bridge", HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large", "payload_too_large"); return 0;
     }
 
     var body_off = sandhi_server_body_offset(buf, n);
     if (body_off < 0 || body_off > n) {
-        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        bote_http_refuse(cfd, SK_DEBUG, "bridge", HTTP_BAD_REQUEST, "Bad Request", "malformed_request");
         return 0;
     }
     var clen = sandhi_server_content_length(buf, n);

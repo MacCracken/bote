@@ -12,7 +12,9 @@
 #   web_search {query, count?}  -> query a SearXNG JSON endpoint (BOTE_SEARXNG_URL, configurable, sovereign;
 #                                  no third-party key) and return the top results (title · url · snippet).
 #
-# SECURITY: web_fetch only follows http:// / https:// (no file:, no other schemes) — defense-in-depth beneath
+# SECURITY: web_fetch only follows http:// / https:// (no file:, no other schemes), and since 3.4.0 refuses a
+# URL that host.cyr's ssrf_check classifies as loopback / link-local / private / metadata / unspecified /
+# multicast (IP literals and a hostname blocklist; no DNS resolution) — defense-in-depth beneath
 # t-ron's per-tool authorization. web_search hits ONLY the operator-configured SearXNG base; absent config it
 # degrades honestly (no silent default to a third party). Both are network reads; there is no write surface.
 
@@ -224,6 +226,27 @@ fn web_fetch_handler(args, claims) {
     var url = jsonx_get_str(args, "url");
     if (url == 0) { return _web_err("web_fetch: missing 'url'"); }
     if (_web_is_http(url) == 0) { return _web_err("web_fetch: only http:// and https:// URLs are allowed"); }
+    # 3.4.0: the SSRF guard SECURITY.md has always promised for outbound
+    # requests. web_fetch is bote's one fetch of a CLIENT-supplied URL, and it
+    # never called ssrf_check, so a client could read loopback services and
+    # the cloud metadata endpoint through it. The guard classifies IP
+    # literals and a hostname blocklist; it does not resolve DNS, so a name
+    # that resolves to a private address still gets through (roadmap 3.6.x).
+    # web_search's endpoint is operator-configured (BOTE_SEARXNG_URL, often
+    # on localhost) and is deliberately NOT guarded.
+    var sc = ssrf_check(url);
+    if (sc != SSRF_OK) {
+        var ln[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&ln, SK_WARN, "web_fetch refused by the SSRF guard");
+        bote_log_str(&ln, "reason", ssrf_reason(sc));
+        bote_log_str(&ln, "host", ssrf_host(url));
+        bote_log_emit(&ln);
+        var sbr = str_builder_new();
+        str_builder_add_cstr(sbr, "web_fetch: refused (SSRF guard: ");
+        str_builder_add_cstr(sbr, ssrf_reason(sc));
+        str_builder_add_cstr(sbr, ")");
+        return _web_err(str_data(str_builder_build(sbr)));
+    }
     var r = _web_get(url);
     if (r == 0) { return _web_err("web_fetch: could not reach the URL (transport error)"); }
     var status = sandhi_http_status(r);

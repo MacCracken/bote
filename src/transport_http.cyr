@@ -65,7 +65,7 @@ fn _http_check_origin(cfd, buf, blen, config) {
     var orig = origin;
     if (orig == 0) { orig = ""; }
     if (validate_origin(orig, allowed) != 0) {
-        sandhi_server_send_status(cfd, HTTP_FORBIDDEN, "Forbidden");
+        bote_http_refuse(cfd, SK_WARN, "http", HTTP_FORBIDDEN, "Forbidden", "origin");
         return HTTP_FORBIDDEN;
     }
     return 0;
@@ -75,13 +75,13 @@ fn _http_check_protocol(cfd, buf, blen, config) {
     var v = sandhi_server_find_header(buf, blen, "MCP-Protocol-Version");
     if (v == 0) {
         if (http_config_require_protocol(config) == 1) {
-            sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+            bote_http_refuse(cfd, SK_DEBUG, "http", HTTP_BAD_REQUEST, "Bad Request", "protocol_version_missing");
             return HTTP_BAD_REQUEST;
         }
         return 0;
     }
     if (validate_protocol_version(v) != 0) {
-        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        bote_http_refuse(cfd, SK_DEBUG, "http", HTTP_BAD_REQUEST, "Bad Request", "protocol_version");
         return HTTP_BAD_REQUEST;
     }
     return 0;
@@ -93,11 +93,11 @@ fn _http_check_session(cfd, buf, blen, config, method) {
     var sid = sandhi_server_find_header(buf, blen, "MCP-Session-Id");
     if (sid == 0) {
         if (streq(method, "initialize") == 1) { return 0; }
-        sandhi_server_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        bote_http_refuse(cfd, SK_DEBUG, "http", HTTP_NOT_FOUND, "Not Found", "session_missing");
         return HTTP_NOT_FOUND;
     }
     if (session_store_validate(st, sid) == 0) {
-        sandhi_server_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        bote_http_refuse(cfd, SK_DEBUG, "http", HTTP_NOT_FOUND, "Not Found", "session_unknown");
         return HTTP_NOT_FOUND;
     }
     return 0;
@@ -118,17 +118,17 @@ fn _http_handle(config, cfd, buf, n) {
     var path   = sandhi_server_get_path(buf, n);
 
     if (streq(method, "POST") == 0) {
-        sandhi_server_send_status(cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed");
+        bote_http_refuse(cfd, SK_DEBUG, "http", HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed", "method");
         return 0;
     }
     if (streq(sandhi_server_path_only(path), http_config_path(config)) == 0) {
-        sandhi_server_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        bote_http_refuse(cfd, SK_DEBUG, "http", HTTP_NOT_FOUND, "Not Found", "path");
         return 0;
     }
 
     if (_http_check_origin(cfd, buf, n, config) != 0) { return 0; }
     if (sandhi_server_find_header(buf, n, "Transfer-Encoding") != 0) {
-        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
+        bote_http_refuse(cfd, SK_WARN, "http", HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding"); return 0;
     }
     var claims_slot[8]; store64(&claims_slot, 0);
     if (auth_bearer_check(cfd, buf, n,
@@ -139,13 +139,13 @@ fn _http_handle(config, cfd, buf, n) {
 
     var bo = sandhi_server_body_offset(buf, n);
     if (bo < 0 || bo > n) {
-        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        bote_http_refuse(cfd, SK_DEBUG, "http", HTTP_BAD_REQUEST, "Bad Request", "malformed_request");
         return 0;
     }
     var clen = sandhi_server_content_length(buf, n);
     # 1.9.6 audit M1: 413 on oversized declared body (before clamp).
     if (clen > 61440) {
-        sandhi_server_send_status(cfd, HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large"); return 0;
+        bote_http_refuse(cfd, SK_WARN, "http", HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large", "payload_too_large"); return 0;
     }
     if (clen <= 0) { clen = n - bo; }
     if (clen < 0) { clen = 0; }

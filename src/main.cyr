@@ -32,6 +32,8 @@
 
 # stdlib + libro + majra includes are auto-injected by cyrius from
 # cyrius.cyml [deps] — no manual lib/ includes needed (2.7.2).
+# log.cyr is first: every module below may log through it (3.4.0).
+include "src/log.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
@@ -98,6 +100,9 @@ include "src/main_common.cyr"
 fn main() {
     alloc_init();
     args_init();
+    # BOTE_LOG / BOTE_LOG_FILE -> sakshi (3.4.0). Lines go to stderr, never
+    # stdout, which is the JSON-RPC wire on the stdio transport.
+    bote_main_log_init();
 
     var dispatcher = bote_dispatcher_with_echo();
 
@@ -141,31 +146,41 @@ fn main() {
     if (argc() >= 2) {
         if (streq(argv(1), "http") == 1) {
             var port = 8390;
-            if (argc() >= 3) { port = _parse_uint(argv(2)); }
-            if (port == 0) { port = 8390; }
+            if (argc() >= 3) { port = bote_main_port(argv(2), 8390); }
             var cfg = http_config_new("/mcp", INADDR_LOOPBACK(), port);
             if (bearer_fp != 0) { http_config_with_bearer_validator(cfg, bearer_fp, bearer_ctx); }
-            return transport_http_run(dispatcher, cfg);
+            bote_main_log_start("http", port, 0, bearer_fp != 0);
+            return bote_main_log_exit("http", transport_http_run(dispatcher, cfg));
         }
         if (streq(argv(1), "unix") == 1) {
-            if (argc() < 3) { return 2; }
-            return transport_unix_run(dispatcher, argv(2));
+            if (argc() < 3) {
+                bote_log_error("usage: bote unix <socket-path>");
+                return 2;
+            }
+            bote_main_log_start("unix", 0, argv(2), 0);
+            return bote_main_log_exit("unix", transport_unix_run(dispatcher, argv(2)));
         }
         if (streq(argv(1), "bridge") == 1) {
             var bport = 8391;
-            if (argc() >= 3) { bport = _parse_uint(argv(2)); }
-            if (bport == 0) { bport = 8391; }
+            if (argc() >= 3) { bport = bote_main_port(argv(2), 8391); }
             var bcfg = bridge_config_new(INADDR_LOOPBACK(), bport);
             var origins = vec_new();
             vec_push(origins, "*");
             bridge_config_with_origins(bcfg, origins);
             if (bearer_fp != 0) { bridge_config_with_bearer_validator(bcfg, bearer_fp, bearer_ctx); }
-            return transport_bridge_run(dispatcher, bcfg);
+            bote_main_log_start("bridge", bport, 0, bearer_fp != 0);
+            return bote_main_log_exit("bridge", transport_bridge_run(dispatcher, bcfg));
         }
         # streamable + ws moved to bote-streamable / bote-ws binaries
         # (see comment above; reconsolidates on cyrius 5.11.x).
+        # Any other mode used to fall through to stdio without a word.
+        var un[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&un, SK_WARN, "unknown mode; serving stdio");
+        bote_log_str(&un, "mode", argv(1));
+        bote_log_emit(&un);
     }
-    return transport_stdio_run(dispatcher);
+    bote_main_log_start("stdio", 0, 0, 0);
+    return bote_main_log_exit("stdio", transport_stdio_run(dispatcher));
 }
 
 var r = main();

@@ -15,6 +15,7 @@ include "lib/fnptr.cyr"
 include "lib/tagged.cyr"
 include "lib/assert.cyr"
 
+include "src/log.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"

@@ -5,7 +5,7 @@ description = "MCP core service in Cyrius — JSON-RPC 2.0, six transports, bear
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/bote"
 language = "cyrius"
-cyrius = "6.6.20"
+cyrius = "6.7.9"
 
 [build]
 entry = "src/main.cyr"
@@ -20,10 +20,13 @@ output = "build/bote"
 # here and not in [lib.core]. content.cyr and sandbox.cyr must follow
 # dispatch.cyr: both call `_json_emit_escaped`, which it defines.
 #
-#   cyrius distlib       → dist/bote.cyr       (this profile, 31 modules)
-#   cyrius distlib core  → dist/bote-core.cyr  ([lib.core], 12 modules)
+# log.cyr is FIRST in both profiles: every other module may log through it.
+#
+#   cyrius distlib       → dist/bote.cyr       (this profile, 32 modules)
+#   cyrius distlib core  → dist/bote-core.cyr  ([lib.core], 13 modules)
 [lib]
 modules = [
+    "src/log.cyr",
     "src/error.cyr",
     "src/protocol.cyr",
     "src/jsonx.cyr",
@@ -71,6 +74,7 @@ modules = [
 # deliberately absent; DEPS-PATTERN.md carries the reasoning.
 [lib.core]
 modules = [
+    "src/log.cyr",
     "src/error.cyr",
     "src/protocol.cyr",
     "src/jsonx.cyr",
@@ -95,7 +99,7 @@ modules = [
 #   * ct, keccak, random before sigil — forward references to
 #     ct_eq_bytes_lens, ct_select, _keccak_*, shake256, random_bytes.
 #
-# sakshi is listed because libro links it, not because bote calls it.
+# sakshi is bote's logger (src/log.cyr), and libro logs through it too.
 #
 # sigil, sakshi and patra arrive through this fold. There is no `deps.sigil`
 # or `deps.sakshi` block and none should be added: a git dep over a folded
@@ -141,12 +145,13 @@ stdlib = [
     "sandhi",
 ]
 
-# No `path` line is committed for the git deps below. `path` beats `tag` when
-# the sibling checkout resolves and skips commit-pin verification, so a local
-# resolve would vendor the WORKING TREE while CI vendors the tag. To build
-# against a sibling's working tree, add the line locally and do not commit it.
-# Verify transitive versions AFTER `cyrius build` (it does an implicit
-# resolve), never after `cyrius deps` alone.
+# No `path` line is committed for the git deps below. A `path` beside `git` /
+# `tag` is a development override: a default resolve ignores it, builds the
+# tag (commit pin checked) and prints a "local checkout not in use" hint.
+# `CYRIUS_LOCAL=<dep>` builds the sibling checkout instead, into
+# build/local-deps/lib/, leaving lib/ and cyrius.lock alone. Verify transitive
+# versions AFTER `cyrius build` (it does an implicit resolve), never after
+# `cyrius deps` alone.
 
 # libro audit chain — self-contained single-file bundle. patra (lib/patra.cyr,
 # the audit store) arrives through libro's own `deps.patra` block, not through
@@ -159,7 +164,7 @@ stdlib = [
 # FRONT moves everything. Check both structs on every bump.
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
-tag = "2.10.8"
+tag = "2.11.0"
 modules = ["dist/libro.cyr"]
 
 # majra pub/sub — default profile (core pubsub engine, no backends). bote uses
@@ -168,5 +173,5 @@ modules = ["dist/libro.cyr"]
 # envelopes or network backends.
 [deps.majra]
 git = "https://github.com/MacCracken/majra"
-tag = "2.9.3"
+tag = "2.12.0"
 modules = ["dist/majra.cyr"]

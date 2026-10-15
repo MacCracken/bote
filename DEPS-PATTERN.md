@@ -33,8 +33,8 @@ bote ships **two** distribution artifacts:
 
 | Artifact              | Profile  | Modules | Use when                                     |
 |-----------------------|----------|---------|----------------------------------------------|
-| `dist/bote.cyr`       | default  | 31      | Consumer needs bote's full transport surface |
-| `dist/bote-core.cyr`  | `core`   | 12      | Consumer wraps Dispatcher / Registry / Prompts / Resources / Content / Audit but supplies its own transport |
+| `dist/bote.cyr`       | default  | 32      | Consumer needs bote's full transport surface |
+| `dist/bote-core.cyr`  | `core`   | 13      | Consumer wraps Dispatcher / Registry / Prompts / Resources / Content / Audit but supplies its own transport |
 
 - Every tagged release must commit **both** artifacts.
 - Each bundle is a single `.cyr` file. Every public function /
@@ -111,10 +111,11 @@ supply-chain choice, not an oversight. Two things follow, and the
    bundle plus libro/majra that means adding, beyond the obvious ones,
    `ct`, `keccak`, `random`, `slice`, `thread`, `thread_local`, `sync`,
    `atomic`, `result`, `sigil` and `ws_server`. **From 6.6.19** the
-   sidecars and the folds' own requires blocks carry the closure. A 6.6.20
-   consumer of `dist/bote.cyr` that declares only `string fmt alloc vec
-   str syscalls io freelist` builds with zero undefined names (measured at
-   3.3.17). Declare what your own code calls.
+   sidecars and the folds' own requires blocks carry the closure. A consumer
+   that declares only `string fmt alloc vec str syscalls io freelist` builds
+   with zero undefined names and runs: of `dist/bote.cyr` on 6.6.20 at
+   3.3.17, and of both `dist/bote.cyr` and `dist/bote-core.cyr` on 6.7.9 at
+   3.4.0 (the core one gets sakshi through libro → patra). Declare what your own code calls.
 2. Run **`cyrius lib sync --full`** to provision `./lib/` from the pinned
    toolchain snapshot, and only *then* `cyrius deps`, which **overlays**
    your declared `[deps.<name>]` git deps on top of that snapshot.
@@ -135,10 +136,12 @@ bote's own CI does, in this order — see `.github/workflows/ci.yml`.
   dependency's version *after a build*, not after `cyrius deps` — bote
   had a case (3.3.1) where the three-step ended correct and the very
   next build silently reverted a file.
-- **A local `path =` beats `tag =`** and vendors your working tree, which
-  can mask a wrong or unpushed tag. Your machine passes; a clean CI
-  checkout resolving from `git + tag` gets different bytes and fails
-  `cyrius deps --verify`.
+- **Below cyrius 6.7.6 a local `path =` beats `tag =`** and vendors your
+  working tree, which can mask a wrong or unpushed tag. Your machine
+  passes; a clean CI checkout resolving from `git + tag` gets different
+  bytes and fails `cyrius deps --verify`. From 6.7.6 a default resolve
+  builds the tag and only prints a hint; `CYRIUS_LOCAL=<dep>` opts into
+  the checkout, in `build/local-deps/lib/`.
 
 **nein 1.6.0 vendored `bote-core.cyr` outright over this misread; 1.6.1
 retired the vendoring** and consumes bote-core + sigil as ordinary git
@@ -227,10 +230,11 @@ transports. The same jump unblocked folding bote's own three
 per-transport binaries back into one; that is still in place and
 is a 3.4.x roadmap item. The bundles are unaffected either way.
 
-## What lives in the core 12?
+## What lives in the core 13?
 
 | #  | File                  | Role                                          |
 |----|-----------------------|-----------------------------------------------|
+| 0  | `src/log.cyr`         | Operational logging through sakshi (3.4.0)    |
 | 1  | `src/error.cyr`       | `BoteError` tagged enum                       |
 | 2  | `src/protocol.cyr`    | `JsonRpcRequest` / `Response` / `Error`       |
 | 3  | `src/jsonx.cyr`       | JSON helpers                                  |
@@ -245,8 +249,13 @@ is a 3.4.x roadmap item. The bundles are unaffected either way.
 | 12 | `src/content.cyr`     | Typed MCP content blocks + annotations        |
 
 (The core profile grew 9 → 11 at 3.0.0, when the MCP prompts and
-resources capabilities landed, and 11 → 12 at **3.3.6** with
-`content.cyr`. `src/sandbox.cyr` was weighed at 3.3.13 and kept
+resources capabilities landed, 11 → 12 at **3.3.6** with
+`content.cyr`, and 12 → 13 at **3.4.0** with `log.cyr`, listed first:
+`codec.cyr` emits a DEBUG line per request through it, so a core
+consumer that sets sakshi to DEBUG sees its dispatch traffic. bote
+never configures sakshi from library code — the consumer's
+`sakshi_set_level` / `sakshi_output_*` decide where, and whether, those
+lines go. `src/sandbox.cyr` was weighed at 3.3.13 and kept
 OUT: it fits mechanically — no sigil, no transport, no new stdlib
 leaf — but this profile exists to bound a consumer's compile set,
 and while eight repos vendor `bote-core.cyr`, none references a
@@ -264,9 +273,13 @@ stdlib leaves: its only external references are `_json_emit_escaped`
 `vec_*` and `alloc`. It is listed **last** in `[lib.core]` because
 cyrius is single-pass and it calls `_json_emit_escaped`.
 
-Stdlib footprint of the 12 modules: `string`, `fmt`, `alloc`,
+Stdlib footprint of the 13 modules: `string`, `fmt`, `alloc`,
 `vec`, `str`, `tagged`, `assert`, `fnptr`, `hashmap`, `bayan`,
-`chrono`, `freelist`. No core module calls into `tls` / `sandhi` /
+`chrono`, `freelist`, `sakshi`. `sakshi` is not on the sidecar: distlib's
+verify finds it already in scope through `lib/patra.cyr`'s own include
+(patra is libro's named dep), which is how a core consumer gets it too.
+⚠ `log.cyr` sizes its stack line buffer with a `const`, so the bundles
+need cyrius ≥ 6.7.2. No core module calls into `tls` / `sandhi` /
 `sigil` / `ws_server` / `slice`.
 
 ⚠ **`dist/bote-core.deps` names `sigil` and `ct` anyway (3.3.17).**

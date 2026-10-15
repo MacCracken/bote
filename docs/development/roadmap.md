@@ -18,7 +18,8 @@ protocol surface is `initialize`, `tools/*`, `prompts/*`, `resources/list` + `re
 `completion/complete`, `ping`, and a polled push of `tools` / `prompts` `list_changed`
 (buffered per session, drained on the client's next Streamable HTTP `GET` or piggybacked on
 a `POST`). Four MCP protocol revisions are accepted, from one list.
-Two consumer bundles (`dist/bote.cyr`, `dist/bote-core.cyr`), three per-transport binaries,
+Operational logging goes through sakshi (`src/log.cyr`, `BOTE_LOG`) — distinct from the MCP
+`logging` capability, which still waits on 3.5.x. Two consumer bundles (`dist/bote.cyr`, `dist/bote-core.cyr`), three per-transport binaries,
 x86_64 + aarch64 + agnos targets, all CI-gated.
 
 What is **not** there, and where each item sits below: real-time *held-open* streaming
@@ -80,7 +81,7 @@ with anyone:
 |---|---|---|
 | **WS subprotocol negotiation** (`Sec-WebSocket-Protocol`) | `lib/ws_server.cyr`'s handshake reads only Upgrade / Connection / Version / Key and exposes no hook to read a request header or add a response header. | Read the offered list, echo one — `mcp` — in the 101. |
 | **WS per-message deflate** (RFC 7692) | The same handshake / response-header seam. The codec is not a blocker: **sankoch** (`lib/sankoch.cyr`) ships a native DEFLATE with `deflate_compress` / `deflate_decompress`. | Negotiate `permessage-deflate`, wrap frames. |
-| **DNS-aware SSRF** — catch `127.0.0.1.nip.io`-style bypasses | A resolve hook on the sandhi HTTP *client*, so the address it connects to is the one bote classified (no rebinding window). sandhi already carries an RFC 1035 resolver (`sandhi_resolve_ipv4`); what is missing is the client calling back before connect. | `ssrf_check` resolves and classifies the address, not only the literal. |
+| **DNS-aware SSRF** — catch `127.0.0.1.nip.io`-style bypasses | A resolve hook on the sandhi HTTP *client*, so the address it connects to is the one bote classified (no rebinding window). sandhi already carries an RFC 1035 resolver (`sandhi_resolve_ipv4`); what is missing is the client calling back before connect. | `ssrf_check` resolves and classifies the address, not only the literal. `web_fetch` is the caller that needs it: since 3.4.0 it applies the literal-only guard. |
 
 ## Open decisions (no version)
 
@@ -107,12 +108,19 @@ with anyone:
 - **README benchmark table** is a copy of one `history.log` row and rots per toolchain;
   the 3.3.12 sweep re-anchored it. Refresh it only on a toolchain bump, with the
   interleaved A/B in the CHANGELOG as the measurement and the table as the illustration.
-- **Upstream filings** — the two seams in 3.6.x above.
+- **Upstream filings** — the two seams in 3.6.x above, and one for logging: `sandhi_server_run`
+  returns a bare `1` for a failed socket, bind, listen or fatal accept, with no errno, so bote's
+  `transport failed` line can only name all four. An errno-bearing return (or a sakshi line inside
+  sandhi at the failing step) would let it say which, the way the Unix transport now does.
 
 ## Watch list
 
 Not tasks. Things that have bitten once and are checked, not assumed:
 
+- **libro's sigil pin is one patch past the fold.** libro 2.11.0 pins sigil 3.13.12; cyrius 6.7.9
+  folds 3.13.11, so `cyrius.lock` commit-pins 3.13.12 while `lib/sigil.cyr` is 3.13.11. libro reports
+  the thin set differs only in its header; cyrius 6.7.10 folds 3.13.12, so the next pin move should
+  close it. Check the sigil `commit` row against `lib/sigil.cyr`'s header then.
 - **Thin-sigil vs fold version.** Since cyrius 6.6.11 libro's `deps.sigil` selection is
   not vendored here (the fold wins over a thin profile of a stdlib leaf), so the CI step
   reports "no thin sigil vendored". If it ever finds a thin copy again, the resolver rule has

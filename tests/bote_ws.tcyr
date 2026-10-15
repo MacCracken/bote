@@ -32,6 +32,7 @@ include "lib/libro.cyr"
 include "lib/majra.cyr"
 include "lib/assert.cyr"
 
+include "src/log.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"

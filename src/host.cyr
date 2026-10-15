@@ -225,9 +225,20 @@ fn host_registry_load_from_file(path) {
 fn host_registry_reload(r, path) {
     if (r == 0 || path == 0) { return 0 - 1; }
     var fresh = host_registry_load_from_file(path);
-    if (fresh == 0) { return 0 - 1; }
+    var ln[BOTE_LOG_LINE_BYTES];
+    if (fresh == 0) {
+        # 3.4.0: the old entries stay in force; say that the new ones did not.
+        bote_log_line(&ln, SK_WARN, "host config reload failed; keeping the previous entries");
+        bote_log_str(&ln, "path", path);
+        bote_log_emit(&ln);
+        return 0 - 1;
+    }
     store64(r,     host_registry_entries(fresh));
     store64(r + 8, host_registry_count(fresh));
+    bote_log_line(&ln, SK_INFO, "host config reloaded");
+    bote_log_str(&ln, "path", path);
+    bote_log_int(&ln, "hosts", host_registry_count(fresh));
+    bote_log_emit(&ln);
     return 0;
 }
 
@@ -583,4 +594,35 @@ fn ssrf_check(url) {
 fn ssrf_is_safe(url) {
     if (ssrf_check(url) == SSRF_OK) { return 1; }
     return 0;
+}
+
+# Lowercase name of an SSRF_* code, for a log line or an error message
+# (3.4.0). An unknown code is "unknown".
+fn ssrf_reason(code) {
+    if (code == SSRF_OK) { return "ok"; }
+    if (code == SSRF_PARSE) { return "parse"; }
+    if (code == SSRF_SCHEME) { return "scheme"; }
+    if (code == SSRF_LOOPBACK) { return "loopback"; }
+    if (code == SSRF_LINK_LOCAL) { return "link_local"; }
+    if (code == SSRF_PRIVATE) { return "private"; }
+    if (code == SSRF_METADATA) { return "metadata"; }
+    if (code == SSRF_UNSPEC) { return "unspecified"; }
+    if (code == SSRF_MULTICAST) { return "multicast"; }
+    return "unknown";
+}
+
+# The lowercased host of `url` as a fresh cstr (userinfo, port and IPv6
+# brackets stripped), or 0 when it does not parse. For logging which host a
+# request aimed at without logging the URL, whose userinfo or query string
+# may carry a credential (3.4.0).
+fn ssrf_host(url) {
+    var start_slot[8]; var end_slot[8];
+    store64(&start_slot, 0); store64(&end_slot, 0);
+    if (_ssrf_extract_host(url, &start_slot, &end_slot) != SSRF_OK) { return 0; }
+    var hp = load64(&start_slot);
+    var hl = load64(&end_slot) - hp;
+    var host = alloc(hl + 1);
+    memcpy(host, hp, hl);
+    store8(host + hl, 0);
+    return host;
 }

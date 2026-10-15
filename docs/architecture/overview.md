@@ -114,7 +114,11 @@ src/
 ├── main_streamable.cyr     — entry for build/bote-streamable
 ├── main_ws.cyr             — entry for build/bote-ws
 ├── main_common.cyr         — shared entry helpers (dispatcher setup,
-│                             BOTE_BEARER_TOKENS env-wires auth allowlist)
+│                             BOTE_BEARER_TOKENS env-wires auth allowlist,
+│                             BOTE_LOG init + starting / stopped / failed lines)
+├── log.cyr                 — operational logging through sakshi (3.4.0):
+│                             stack-buffer lines, logfmt-escaped values;
+│                             first in both profiles
 ├── error.cyr               — BoteErrTag (12 variants), rpc_code, format
 ├── protocol.cyr            — JsonRpcRequest / Response / Error data types
 ├── jsonx.cyr               — nested-aware JSON extractor
@@ -157,29 +161,31 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
                               thread_local, sakshi, ct, keccak, random,
                               sigil, tls, sandhi; ws_server manually
                               included by transport_ws.cyr only)
-[deps.libro]   git = "MacCracken/libro"   tag = "2.10.8"  (its deps.patra 1.15.2 equals the fold's)
-[deps.majra]   git = "MacCracken/majra"   tag = "2.9.3"
+[deps.libro]   git = "MacCracken/libro"   tag = "2.11.0"  (its deps.patra 1.16.0 equals the fold's;
+                                                   its deps.sigil 3.13.12 is one past the fold)
+[deps.majra]   git = "MacCracken/majra"   tag = "2.12.0"
 
-  Those are the ONLY two [deps.<name>] blocks. sigil 3.13.10, sakshi 2.5.7,
-  patra 1.15.2 and bayan 1.5.12 arrive via the cyrius stdlib fold, not a git pin — the
+  Those are the ONLY two [deps.<name>] blocks. sigil 3.13.11, sakshi 2.5.8,
+  patra 1.16.0 and bayan 1.5.13 arrive via the cyrius stdlib fold, not a git pin — the
   former [deps.sigil] / [deps.sakshi] registry-lag pins were removed at
   3.3.1 (sigil's had gone stale and was holding bote behind two
   authentication bypasses).
 
 tests/
-├── bote.tcyr                  — 441 core assertions
-├── bote_auth.tcyr             — 38 (bearer + allowlist + JWT + PKCE validators)
+├── bote.tcyr                  — 452 core assertions
+├── bote_auth.tcyr             — 45 (bearer + allowlist + JWT + PKCE validators; 401 log lines)
 ├── bote_content.tcyr          — 24 (content blocks + annotations)
-├── bote_fs_tools.tcyr         — 26 (fs_tools)
-├── bote_host.tcyr             — 113 (host registry + SSRF)
+├── bote_fs_tools.tcyr         — 31 (fs_tools; refused-path log lines)
+├── bote_host.tcyr             — 122 (host registry + SSRF + ssrf_reason / ssrf_host)
 ├── bote_jwt.tcyr              — 53 (JWT HS256 verify)
 ├── bote_libro_tools.tcyr      — 38 (libro_tools; incl. the tampered-chain
 │                                 error decode + populated-chain proof paths)
+├── bote_log.tcyr              — 50 (src/log.cyr: levels, line bytes, escaping, truncation)
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 53 (streamable HTTP / SSE)
 ├── bote_transport_unix.tcyr   — 49 (unix socket transport + accept policy + closed-peer write)
-├── bote_web_tools.tcyr        — 27 (web_tools)
+├── bote_web_tools.tcyr        — 37 (web_tools; SSRF guard on web_fetch)
 ├── bote_ws.tcyr               — 14 (WebSocket)
 ├── bote_core_only_smoke.tcyr  — drift guard (includes only dist/bote-core.cyr)
 └── bote.bcyr                  — 14 hot-path benchmarks
@@ -358,13 +364,34 @@ change.
 
 ---
 
+## Logging
+
+Every operational line goes through `src/log.cyr` to sakshi (3.4.0). A
+line is built in a buffer on the caller's stack — `bote_log_line` /
+`bote_log_str` / `bote_log_int` / `bote_log_emit` — and a filtered level
+marks it dead at the first call, so a suppressed line costs one compare
+and allocates nothing. Values are logfmt; anything client-supplied is
+escaped, so a method name holding a raw LF cannot forge a second line.
+
+```
+binary main ──► bote_main_log_init ──► bote_log_init: BOTE_LOG, BOTE_LOG_FILE ──► sakshi level / output
+                                     └─ at trace: sandhi_trace_enable(1)
+modules ──► bote_log_* ──► sakshi_<level> ──► stderr (or BOTE_LOG_FILE, or an embedder's sink)
+libro ─────────────────────► sakshi_<level> ──┘      (never stdout: the stdio wire)
+```
+
+Library code never calls `bote_log_init` or any `sakshi_set_*`: an
+embedder that vendors a bundle keeps its own sakshi configuration. What
+is logged at which level is tabled in the 3.4.0 CHANGELOG entry; the
+standing rules are in CLAUDE.md under Key Principles.
+
 ## Verification
 
 | Artifact | Count | Where |
 |---|---|---|
-| Core unit tests | 441 | `tests/bote.tcyr` |
-| Module tests | 465 | `tests/bote_auth.tcyr` (38) + `bote_content.tcyr` (24) + `bote_fs_tools.tcyr` (26) + `bote_host.tcyr` (113) + `bote_jwt.tcyr` (53) + `bote_libro_tools.tcyr` (38) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (49) + `bote_web_tools.tcyr` (27) + `bote_ws.tcyr` (14) |
-| **Total assertions** | **906** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
+| Core unit tests | 452 | `tests/bote.tcyr` |
+| Module tests | 546 | `tests/bote_auth.tcyr` (45) + `bote_content.tcyr` (24) + `bote_fs_tools.tcyr` (31) + `bote_host.tcyr` (122) + `bote_jwt.tcyr` (53) + `bote_libro_tools.tcyr` (38) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (49) + `bote_web_tools.tcyr` (37) + `bote_ws.tcyr` (14) |
+| **Total assertions** | **998** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
 | Benchmarks | 14 | `tests/bote.bcyr` |
 | Fuzz harnesses | 4 | `fuzz/*.fcyr` |
 

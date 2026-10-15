@@ -1,0 +1,343 @@
+# bote::log — operational logging through sakshi.
+#
+# ## Contract
+#
+# - **Every line goes through sakshi**, to sakshi's configured output, which
+#   is stderr unless an embedder or `BOTE_LOG_FILE` says otherwise. Never
+#   stdout: on the stdio transport stdout is the JSON-RPC wire, and one stray
+#   byte there corrupts the client's stream.
+# - **Library code never configures sakshi.** Modules call `bote_log_*` and
+#   sakshi's level filter decides. Only an entry point calls `bote_log_init`,
+#   which reads `BOTE_LOG` / `BOTE_LOG_FILE`. An embedder that vendors a dist
+#   bundle keeps its own `sakshi_set_level` / `sakshi_output_*` choices, and
+#   bote's lines land wherever it sends sakshi's.
+# - **Levels** (sakshi's): ERROR for a failure an operator must act on
+#   (a bind that failed, a listener given up), WARN for a refusal or an
+#   anomaly the process survives (an auth rejection, an SSRF block, a path
+#   escape), INFO for lifecycle (starting, listening, stopped), DEBUG for
+#   one line per request, TRACE for what is under a request (it also turns
+#   on sandhi's spans in the binaries).
+# - **Never log a secret.** No bearer token, JWT, cookie, request body or
+#   tool argument goes into a line. A tool name, a method name, a status,
+#   a length or an errno does.
+#
+# ## Building a line without the heap
+#
+# A line lives in a buffer on the caller's stack, `BOTE_LOG_LINE_BYTES` long:
+#
+#   var ln[BOTE_LOG_LINE_BYTES];
+#   bote_log_line(&ln, SK_INFO, "listening");
+#   bote_log_str(&ln, "transport", "http");
+#   bote_log_int(&ln, "port", port);
+#   bote_log_emit(&ln);
+#
+# renders `listening transport=http port=8390`. When the level is filtered
+# out, `bote_log_line` marks the buffer dead and every later call on it
+# returns at once, so a suppressed line costs one compare and builds nothing.
+# Nothing here allocates: the dispatch hot path can carry a DEBUG line at no
+# measurable cost while the level is INFO (benches: 3.4.0 CHANGELOG).
+#
+# Buffer layout: +0 level, +8 used bytes (-1 = dead), +16 truncated flag,
+# +24 text (`BOTE_LOG_TEXT_CAP` bytes).
+#
+# ## Values are logfmt, and request-derived ones are escaped
+#
+# `bote_log_str` writes `key=value`. A value made only of printable ASCII,
+# with no space, `"`, `=` or `\`, goes out bare. Anything else is quoted:
+# `"` and `\` are backslash-escaped, `\n` `\r` `\t` are spelled out, and any
+# other control byte (and 0x7F) is `\xHH`. Bytes 0x80 and up pass through, so
+# UTF-8 survives. A tool name or a JSON-RPC method comes from the client, so
+# without this a value holding `\n[1] [ERROR] ...` would forge a second log
+# line. A value longer than `BOTE_LOG_VALUE_MAX` bytes is cut and ends `...`.
+# A line that outgrows its buffer ends `...` too.
+
+const BOTE_LOG_LINE_BYTES = 280;
+const BOTE_LOG_TEXT_CAP = 256;
+
+var BOTE_LOG_OFF = 0 - 1;
+var BOTE_LOG_UNKNOWN = 0 - 100;
+var BOTE_LOG_VALUE_MAX = 96;
+
+# ================================================================
+# Level names
+# ================================================================
+
+# ASCII-case-insensitive equality of cstring `s` and lowercase literal `lit`.
+fn _bote_log_name_is(s, lit): i64 {
+    var i = 0;
+    while (1 == 1) {
+        var a = load8(s + i) & 0xFF;
+        var b = load8(lit + i) & 0xFF;
+        if (a >= 65 && a <= 90) { a = a + 32; }
+        if (a != b) { return 0; }
+        if (a == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Map a level name to sakshi's SK_*. `off` / `none` give BOTE_LOG_OFF, which
+# filters out even FATAL. Anything else, and a null pointer, gives
+# BOTE_LOG_UNKNOWN so the caller can leave the level where it is.
+fn bote_log_level_from_name(name): i64 {
+    if (name == 0) { return BOTE_LOG_UNKNOWN; }
+    if (_bote_log_name_is(name, "off") == 1) { return BOTE_LOG_OFF; }
+    if (_bote_log_name_is(name, "none") == 1) { return BOTE_LOG_OFF; }
+    if (_bote_log_name_is(name, "fatal") == 1) { return SK_FATAL; }
+    if (_bote_log_name_is(name, "error") == 1) { return SK_ERROR; }
+    if (_bote_log_name_is(name, "warn") == 1) { return SK_WARN; }
+    if (_bote_log_name_is(name, "warning") == 1) { return SK_WARN; }
+    if (_bote_log_name_is(name, "info") == 1) { return SK_INFO; }
+    if (_bote_log_name_is(name, "debug") == 1) { return SK_DEBUG; }
+    if (_bote_log_name_is(name, "trace") == 1) { return SK_TRACE; }
+    return BOTE_LOG_UNKNOWN;
+}
+
+# Lowercase name of a level, as `BOTE_LOG` spells it: the inverse of
+# bote_log_level_from_name for every level it returns. Below FATAL is "off".
+fn bote_log_level_name(level): i64 {
+    if (level < SK_FATAL) { return "off"; }
+    if (level == SK_FATAL) { return "fatal"; }
+    if (level == SK_ERROR) { return "error"; }
+    if (level == SK_WARN) { return "warn"; }
+    if (level == SK_INFO) { return "info"; }
+    if (level == SK_DEBUG) { return "debug"; }
+    return "trace";
+}
+
+# 1 when a line at `level` would be emitted at sakshi's current level.
+fn bote_log_enabled(level): i64 {
+    if (level <= sakshi_get_level()) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# Plain messages (a trusted cstring literal, no fields)
+# ================================================================
+
+# Hand `len` bytes at `msg` to sakshi at `level`. The per-level calls keep
+# sakshi's compile-time elision (`SAKSHI_LEVEL`, `SAKSHI_DISABLE_*`) working.
+fn _bote_log_send(level, msg, len): i64 {
+    if (level == SK_FATAL) { return sakshi_fatal(msg, len); }
+    if (level == SK_ERROR) { return sakshi_error(msg, len); }
+    if (level == SK_WARN) { return sakshi_warn(msg, len); }
+    if (level == SK_INFO) { return sakshi_info(msg, len); }
+    if (level == SK_DEBUG) { return sakshi_debug(msg, len); }
+    return sakshi_trace(msg, len);
+}
+
+# The level check here is a fast path that skips the strlen. sakshi's own
+# filter is the authority: its per-level calls check again, so dropping this
+# line changes cost, not output.
+fn bote_log(level, msg): i64 {
+    if (level > sakshi_get_level()) { return 0; }
+    return _bote_log_send(level, msg, strlen(msg));
+}
+
+fn bote_log_fatal(msg): i64 { return bote_log(SK_FATAL, msg); }
+fn bote_log_error(msg): i64 { return bote_log(SK_ERROR, msg); }
+fn bote_log_warn(msg): i64 { return bote_log(SK_WARN, msg); }
+fn bote_log_info(msg): i64 { return bote_log(SK_INFO, msg); }
+fn bote_log_debug(msg): i64 { return bote_log(SK_DEBUG, msg); }
+fn bote_log_trace(msg): i64 { return bote_log(SK_TRACE, msg); }
+
+# ================================================================
+# Lines with fields
+# ================================================================
+
+# Append one byte to the line. When it is full, end the text with "..."
+# once and drop the rest.
+fn _bote_log_put(ln, b): i64 {
+    var used = load64(ln + 8);
+    if (used < 0) { return 0; }
+    if (used >= BOTE_LOG_TEXT_CAP) {
+        if (load64(ln + 16) == 0) {
+            store64(ln + 16, 1);
+            store8(ln + 24 + BOTE_LOG_TEXT_CAP - 3, 46);
+            store8(ln + 24 + BOTE_LOG_TEXT_CAP - 2, 46);
+            store8(ln + 24 + BOTE_LOG_TEXT_CAP - 1, 46);
+        }
+        return 0;
+    }
+    store8(ln + 24 + used, b);
+    store64(ln + 8, used + 1);
+    return 0;
+}
+
+fn _bote_log_put_cstr(ln, s): i64 {
+    var i = 0;
+    while (load8(s + i) != 0) {
+        _bote_log_put(ln, load8(s + i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _bote_log_hex_digit(n): i64 {
+    if (n < 10) { return 48 + n; }
+    return 87 + n;                  # 'a' - 10
+}
+
+# 1 when byte `c` may appear in a bare (unquoted) logfmt value.
+fn _bote_log_bare_byte(c): i64 {
+    if (c <= 32) { return 0; }      # control bytes and space
+    if (c >= 127) { return 0; }     # DEL, and 0x80+ (quoted so UTF-8 stays one token)
+    if (c == 34) { return 0; }      # "
+    if (c == 61) { return 0; }      # =
+    if (c == 92) { return 0; }      # backslash
+    return 1;
+}
+
+# Start a line at `level` with the trusted message `msg`. When the level is
+# filtered out the line is dead, and every call on it is a no-op.
+fn bote_log_line(ln, level, msg): i64 {
+    store64(ln, level);
+    store64(ln + 16, 0);
+    if (level > sakshi_get_level()) {
+        store64(ln + 8, 0 - 1);
+        return 0;
+    }
+    store64(ln + 8, 0);
+    _bote_log_put_cstr(ln, msg);
+    return 0;
+}
+
+# Append ` key=value`. `key` is a trusted literal; `val` is any cstring
+# (request-derived or not) and is escaped as the header describes. A null
+# `val` is written as `""`.
+fn bote_log_str(ln, key, val): i64 {
+    if (load64(ln + 8) < 0) { return 0; }
+    _bote_log_put(ln, 32);
+    _bote_log_put_cstr(ln, key);
+    _bote_log_put(ln, 61);
+    if (val == 0) {
+        _bote_log_put(ln, 34);
+        _bote_log_put(ln, 34);
+        return 0;
+    }
+    var n = strlen(val);
+    var cut = 0;
+    if (n > BOTE_LOG_VALUE_MAX) { n = BOTE_LOG_VALUE_MAX; cut = 1; }
+    var bare = 1;
+    if (n == 0) { bare = 0; }
+    var i = 0;
+    while (i < n) {
+        if (_bote_log_bare_byte(load8(val + i) & 0xFF) == 0) { bare = 0; }
+        i = i + 1;
+    }
+    if (bare == 0) { _bote_log_put(ln, 34); }
+    i = 0;
+    while (i < n) {
+        var c = load8(val + i) & 0xFF;
+        if (bare == 1) {
+            _bote_log_put(ln, c);
+        } elif (c == 34 || c == 92) {
+            _bote_log_put(ln, 92);
+            _bote_log_put(ln, c);
+        } elif (c == 10) {
+            _bote_log_put(ln, 92); _bote_log_put(ln, 110);
+        } elif (c == 13) {
+            _bote_log_put(ln, 92); _bote_log_put(ln, 114);
+        } elif (c == 9) {
+            _bote_log_put(ln, 92); _bote_log_put(ln, 116);
+        } elif (c < 32 || c == 127) {
+            _bote_log_put(ln, 92); _bote_log_put(ln, 120);
+            _bote_log_put(ln, _bote_log_hex_digit(c >> 4));
+            _bote_log_put(ln, _bote_log_hex_digit(c & 15));
+        } else {
+            _bote_log_put(ln, c);
+        }
+        i = i + 1;
+    }
+    if (cut == 1) {
+        _bote_log_put(ln, 46); _bote_log_put(ln, 46); _bote_log_put(ln, 46);
+    }
+    if (bare == 0) { _bote_log_put(ln, 34); }
+    return 0;
+}
+
+# Append ` key=<decimal n>`.
+fn bote_log_int(ln, key, n): i64 {
+    if (load64(ln + 8) < 0) { return 0; }
+    _bote_log_put(ln, 32);
+    _bote_log_put_cstr(ln, key);
+    _bote_log_put(ln, 61);
+    if (n == 0) { return _bote_log_put(ln, 48); }
+    var digits[24];
+    var k = 0;
+    var neg = 0;
+    if (n < 0) { neg = 1; }
+    # Digits from the (possibly negative) value without negating it, so
+    # i64::MIN formats instead of overflowing back to itself.
+    while (n != 0) {
+        var q = n / 10;
+        var d = n - q * 10;
+        if (d < 0) { d = 0 - d; }
+        store8(&digits + k, 48 + d);
+        k = k + 1;
+        n = q;
+    }
+    if (neg == 1) { _bote_log_put(ln, 45); }
+    while (k > 0) {
+        k = k - 1;
+        _bote_log_put(ln, load8(&digits + k));
+    }
+    return 0;
+}
+
+# Hand the line to sakshi. A dead line emits nothing.
+fn bote_log_emit(ln): i64 {
+    var used = load64(ln + 8);
+    if (used < 0) { return 0; }
+    return _bote_log_send(load64(ln), ln + 24, used);
+}
+
+# The text built so far and its length — for tests, and for an embedder that
+# wants the rendered bytes without emitting them.
+fn bote_log_line_text(ln): i64 { return ln + 24; }
+fn bote_log_line_len(ln): i64 { return load64(ln + 8); }
+
+# ================================================================
+# Entry-point configuration
+# ================================================================
+
+# Configure sakshi from the environment. Call once, from a binary's main,
+# after alloc_init(). Library code must not call it.
+#
+#   BOTE_LOG       off | fatal | error | warn | info | debug | trace
+#                  (case-insensitive; `none` = off, `warning` = warn).
+#                  Default: info. An unrecognised value keeps the default
+#                  and is reported as a warning.
+#   BOTE_LOG_FILE  append lines to this file instead of stderr. When it
+#                  cannot be opened, lines stay on stderr and the failure is
+#                  reported. Operator-supplied, never request-derived.
+#
+# Returns the level now in force.
+fn bote_log_init(): i64 {
+    sakshi_set_level(SK_INFO);
+    var name = getenv("BOTE_LOG");
+    var unknown = 0;
+    if (name != 0) {
+        var lv = bote_log_level_from_name(name);
+        if (lv == BOTE_LOG_UNKNOWN) { unknown = 1; }
+        else { sakshi_set_level(lv); }
+    }
+    var path = getenv("BOTE_LOG_FILE");
+    if (path != 0 && load8(path) != 0) {
+        var fd = sakshi_output_file(path);
+        if (fd < 0) {
+            var ln[BOTE_LOG_LINE_BYTES];
+            bote_log_line(&ln, SK_WARN, "BOTE_LOG_FILE could not be opened; logging to stderr");
+            bote_log_str(&ln, "path", path);
+            bote_log_int(&ln, "errno", 0 - fd);
+            bote_log_emit(&ln);
+        }
+    }
+    if (unknown == 1) {
+        var ul[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&ul, SK_WARN, "BOTE_LOG not recognised; using info");
+        bote_log_str(&ul, "value", name);
+        bote_log_emit(&ul);
+    }
+    return sakshi_get_level();
+}

@@ -147,16 +147,46 @@ fn auth_send_unauthorized(cfd, realm) {
 # already on the wire, caller should `return 0;` to its handler frame.
 # ================================================================
 
+fn _auth_log_rejected(reason) {
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_WARN, "request refused");
+    bote_log_int(&ln, "status", HTTP_UNAUTHORIZED);
+    bote_log_str(&ln, "reason", reason);
+    bote_log_emit(&ln);
+    return 0;
+}
+
+# Send an HTTP refusal and log it in one call (3.4.0). The HTTP-family
+# transports refuse a request before dispatch for a dozen reasons, and each
+# used to answer with a bare status and say nothing. `level` is SK_WARN for
+# a security mitigation firing (403 origin, 413 oversized, a rejected
+# Transfer-Encoding) and SK_DEBUG for an ordinary client mistake (404, 405,
+# an unknown session, a protocol-version mismatch). Returns `status`.
+fn bote_http_refuse(cfd, level, transport, status, text, reason) {
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, level, "request refused");
+    bote_log_str(&ln, "transport", transport);
+    bote_log_int(&ln, "status", status);
+    bote_log_str(&ln, "reason", reason);
+    bote_log_emit(&ln);
+    sandhi_server_send_status(cfd, status, text);
+    return status;
+}
+
 fn auth_bearer_check(cfd, buf, blen, validator_fp, validator_ctx, claims_out) {
     if (validator_fp == 0) { return 0; }    # auth disabled
 
+    # 3.4.0: each rejection is a WARN line naming why. The token is never
+    # logged, valid or not.
     var token = auth_bearer_extract(buf, blen);
     if (token == 0) {
+        _auth_log_rejected("missing_token");
         auth_send_unauthorized(cfd, 0);
         return HTTP_UNAUTHORIZED;
     }
     var claims = fncall2(validator_fp, token, validator_ctx);
     if (claims == 0) {
+        _auth_log_rejected("invalid_token");
         auth_send_unauthorized(cfd, 0);
         return HTTP_UNAUTHORIZED;
     }

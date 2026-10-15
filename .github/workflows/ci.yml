@@ -315,6 +315,7 @@ jobs:
                       tests/bote_host.tcyr \
                       tests/bote_jwt.tcyr \
                       tests/bote_libro_tools.tcyr \
+                      tests/bote_log.tcyr \
                       tests/bote_pkce.tcyr \
                       tests/bote_sandbox.tcyr \
                       tests/bote_streamable.tcyr \
@@ -361,6 +362,42 @@ jobs:
             fi
           done
           [ $fail -eq 0 ] || exit 1
+
+      - name: Logging smoke (stderr carries the lines, stdout stays the wire)
+        # 3.4.0. bote logs through sakshi (src/log.cyr), to stderr. On the stdio
+        # transport stdout IS the JSON-RPC wire, so a single log byte there
+        # corrupts the client's stream. tests/bote_log.tcyr covers the logger
+        # in-process; this runs the built binary at every BOTE_LOG value, which is
+        # the only way to exercise bote_log_init's environment parsing.
+        run: |
+          set -o pipefail
+          req='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+          fail=0
+          for lv in off fatal error warn info debug trace TRACE bogus; do
+            printf '%s\n' "$req" | BOTE_LOG="$lv" ./build/bote > build/log-smoke.out 2> build/log-smoke.err || true
+            if [ "$(wc -l < build/log-smoke.out)" -ne 1 ] || ! grep -q '^{"jsonrpc":"2.0","id":1,"result":' build/log-smoke.out; then
+              echo "::error::BOTE_LOG=$lv: stdout is not exactly one JSON-RPC response line"; cat build/log-smoke.out; fail=1
+            fi
+            if grep -qE '\[(FATAL|ERROR|WARN|INFO|DEBUG|TRACE)\]' build/log-smoke.out; then
+              echo "::error::BOTE_LOG=$lv: a log line reached stdout"; fail=1
+            fi
+            case "$lv" in
+              off|fatal|error|warn)
+                if [ -s build/log-smoke.err ]; then echo "::error::BOTE_LOG=$lv: stderr should be empty"; cat build/log-smoke.err; fail=1; fi ;;
+              info|debug|trace|TRACE)
+                grep -q '\[INFO\] bote starting .*transport=stdio' build/log-smoke.err || { echo "::error::BOTE_LOG=$lv: no starting line"; fail=1; }
+                grep -q "log=$(echo "$lv" | tr 'A-Z' 'a-z')" build/log-smoke.err || { echo "::error::BOTE_LOG=$lv: starting line does not report the level"; fail=1; } ;;
+              bogus)
+                grep -q '\[WARN\] BOTE_LOG not recognised; using info value=bogus' build/log-smoke.err || { echo "::error::BOTE_LOG=bogus: no warning"; fail=1; }
+                grep -q 'log=info' build/log-smoke.err || { echo "::error::BOTE_LOG=bogus: did not fall back to info"; fail=1; } ;;
+            esac
+            [ "$lv" = debug ] && { grep -q '\[DEBUG\] request method=initialize id=1 status=ok' build/log-smoke.err || { echo "::error::BOTE_LOG=debug: no per-request line"; fail=1; }; }
+          done
+          # A missing unix path is a usage error with a line, not a silent rc 2.
+          rc=0; ./build/bote unix 2> build/log-smoke.err || rc=$?
+          [ "$rc" -eq 2 ] && grep -q '\[ERROR\] usage: bote unix' build/log-smoke.err || { echo "::error::'bote unix' with no path: rc=$rc, no usage line"; fail=1; }
+          [ $fail -eq 0 ] || exit 1
+          echo "logging smoke: stdout clean at every level; stderr as each level promises"
 
       - name: Fuzz
         # Added 3.3.8. There was NO fuzz step: fuzz/*.fcyr was never run by CI, and

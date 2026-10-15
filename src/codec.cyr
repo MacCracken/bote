@@ -103,10 +103,47 @@ fn _cdc_invalid_request(reason) {
     return codec_serialize_response(resp_error("null", 0 - 32600, str_data(str_builder_build(sb))));
 }
 
+# One DEBUG line for a dispatched request (3.4.0): method, id, the tool for
+# a tools/call, how it ended, and how long dispatch took. Method, id and tool
+# name are client-supplied and go through bote_log_str's escaping; params
+# and results are never logged.
+fn _cdc_log_request(req, resp, t0) {
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_DEBUG, "request");
+    var method = req_method(req);
+    bote_log_str(&ln, "method", method);
+    var id = req_id(req);
+    if (id != 0) { bote_log_str(&ln, "id", id); }
+    if (method != 0) {
+        if (streq(method, "tools/call") == 1) {
+            bote_log_str(&ln, "tool", jsonx_get_str(req_params(req), "name"));
+        }
+    }
+    if (resp == 0) {
+        bote_log_str(&ln, "status", "notification");
+    } elif (resp_error_obj(resp) != 0) {
+        bote_log_str(&ln, "status", "error");
+        bote_log_int(&ln, "code", rpc_err_code(resp_error_obj(resp)));
+    } else {
+        bote_log_str(&ln, "status", "ok");
+    }
+    bote_log_int(&ln, "us", (clock_now_ns() - t0) / 1000);
+    bote_log_emit(&ln);
+    return 0;
+}
+
 # Process a single request body. Returns serialized response cstr or 0 (notif).
 fn _cdc_process_single(line, dispatcher, claims) {
+    # The clock is read only when DEBUG is on; at the default level the
+    # per-request cost of logging is one level compare.
+    var dbg = bote_log_enabled(SK_DEBUG);
+    var t0 = 0;
+    if (dbg == 1) { t0 = clock_now_ns(); }
     var req = codec_parse_request(line);
-    if (req == 0) { return _cdc_invalid_request("malformed object"); }
+    if (req == 0) {
+        bote_log_debug("request rejected: malformed JSON-RPC object");
+        return _cdc_invalid_request("malformed object");
+    }
     if (streq(req_jsonrpc(req), "2.0") == 0) {
         var sb = str_builder_new();
         str_builder_add_cstr(sb, "unsupported jsonrpc version '");
@@ -117,6 +154,7 @@ fn _cdc_process_single(line, dispatcher, claims) {
         return codec_serialize_response(resp_error(id, 0 - 32600, str_data(str_builder_build(sb))));
     }
     var resp = dispatcher_dispatch(dispatcher, req, claims);
+    if (dbg == 1) { _cdc_log_request(req, resp, t0); }
     if (resp == 0) { return 0; }
     return codec_serialize_response(resp);
 }

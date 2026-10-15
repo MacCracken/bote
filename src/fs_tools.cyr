@@ -150,6 +150,18 @@ fn _fs_result(msg, is_err) {
     return str_data(str_builder_build(sb));
 }
 
+# A path the confinement check refused (3.4.0): a WARN line naming the tool
+# and the path, then the error result. The path is client-supplied, so it
+# goes through bote_log_str's escaping like any request-derived value.
+fn _fs_refuse(tool, path, msg) {
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_WARN, "fs tool refused an unsafe path");
+    bote_log_str(&ln, "tool", tool);
+    bote_log_str(&ln, "path", path);
+    bote_log_emit(&ln);
+    return _fs_result(msg, 1);
+}
+
 fn _fs_ok(msg)  { return _fs_result(msg, 0); }
 fn _fs_err(msg) { return _fs_result(msg, 1); }
 
@@ -159,7 +171,7 @@ fn _fs_err(msg) { return _fs_result(msg, 1); }
 fn fs_write_handler(args, claims) {
     var path = jsonx_get_str(args, "path");
     if (_fs_path_unsafe(path) == 1) {
-        return _fs_err("fs_write: refused unsafe path (must be relative, no '..')");
+        return _fs_refuse("fs_write", path, "fs_write: refused unsafe path (must be relative, no '..')");
     }
     var raw = jsonx_get_str(args, "content");
     if (raw == 0) { raw = ""; }
@@ -189,7 +201,7 @@ fn fs_write_handler(args, claims) {
 fn fs_read_handler(args, claims) {
     var path = jsonx_get_str(args, "path");
     if (_fs_path_unsafe(path) == 1) {
-        return _fs_err("fs_read: refused unsafe path (must be relative, no '..')");
+        return _fs_refuse("fs_read", path, "fs_read: refused unsafe path (must be relative, no '..')");
     }
     var full = _fs_join(path);
     var buf = alloc(FS_READ_CAP + 1);
@@ -210,7 +222,7 @@ fn fs_read_handler(args, claims) {
 fn fs_mkdir_handler(args, claims) {
     var path = jsonx_get_str(args, "path");
     if (_fs_path_unsafe(path) == 1) {
-        return _fs_err("fs_mkdir: refused unsafe path (must be relative, no '..')");
+        return _fs_refuse("fs_mkdir", path, "fs_mkdir: refused unsafe path (must be relative, no '..')");
     }
     var full = _fs_join(path);
     _fs_mkparents(full, 1);

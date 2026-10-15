@@ -1,0 +1,254 @@
+# bote_log.tcyr — src/log.cyr: bote's operational logging over sakshi.
+#
+# New at 3.4.0, with the module. Emitted lines are captured through sakshi's
+# emit hook, so these assertions see exactly the bytes and the level sakshi
+# is handed, with no pipe and no subprocess. `bote_log_init` reads the
+# environment and has no setenv to drive it from here; the binaries' use of
+# it is checked by CI's "Logging smoke" step instead.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fnptr.cyr"
+include "lib/atomic.cyr"
+include "lib/sakshi.cyr"
+include "lib/assert.cyr"
+
+include "src/log.cyr"
+
+# ---- capture hook ---------------------------------------------------------
+
+var _cap_buf = 0;
+var _cap_len = 0;
+var _cap_level = 0 - 1;
+var _cap_count = 0;
+
+fn _cap_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    memcpy(_cap_buf, msg, n);
+    store8(_cap_buf + n, 0);
+    _cap_len = msg_len;
+    _cap_level = level;
+    _cap_count = _cap_count + 1;
+    return 0;
+}
+
+fn _cap_reset() {
+    store8(_cap_buf, 0);
+    _cap_len = 0;
+    _cap_level = 0 - 1;
+    _cap_count = 0;
+    return 0;
+}
+
+# NUL-terminated copy of a line's text, for assert_streq.
+fn _line(ln) {
+    var n = bote_log_line_len(ln);
+    if (n < 0) { n = 0; }
+    var s = alloc(n + 1);
+    memcpy(s, bote_log_line_text(ln), n);
+    store8(s + n, 0);
+    return s;
+}
+
+fn main() {
+    alloc_init();
+    _cap_buf = alloc(1024);
+    sakshi_set_emit_hook(&_cap_hook);
+    sakshi_set_level(SK_TRACE);
+
+    # ================================================================
+    # Level names
+    # ================================================================
+    assert_eq(bote_log_level_from_name("off"), BOTE_LOG_OFF, "off -> BOTE_LOG_OFF");
+    assert_eq(bote_log_level_from_name("none"), BOTE_LOG_OFF, "none -> BOTE_LOG_OFF");
+    assert_eq(bote_log_level_from_name("fatal"), SK_FATAL, "fatal -> SK_FATAL");
+    assert_eq(bote_log_level_from_name("error"), SK_ERROR, "error -> SK_ERROR");
+    assert_eq(bote_log_level_from_name("warn"), SK_WARN, "warn -> SK_WARN");
+    assert_eq(bote_log_level_from_name("warning"), SK_WARN, "warning -> SK_WARN");
+    assert_eq(bote_log_level_from_name("info"), SK_INFO, "info -> SK_INFO");
+    assert_eq(bote_log_level_from_name("debug"), SK_DEBUG, "debug -> SK_DEBUG");
+    assert_eq(bote_log_level_from_name("trace"), SK_TRACE, "trace -> SK_TRACE");
+    assert_eq(bote_log_level_from_name("DEBUG"), SK_DEBUG, "names are case-insensitive (DEBUG)");
+    assert_eq(bote_log_level_from_name("Warn"), SK_WARN, "names are case-insensitive (Warn)");
+    assert_eq(bote_log_level_from_name("verbose"), BOTE_LOG_UNKNOWN, "an unknown name -> BOTE_LOG_UNKNOWN");
+    assert_eq(bote_log_level_from_name("info2"), BOTE_LOG_UNKNOWN, "a prefix match is not a match");
+    assert_eq(bote_log_level_from_name("inf"), BOTE_LOG_UNKNOWN, "a truncated name is not a match");
+    assert_eq(bote_log_level_from_name(""), BOTE_LOG_UNKNOWN, "an empty name -> BOTE_LOG_UNKNOWN");
+    assert_eq(bote_log_level_from_name(0), BOTE_LOG_UNKNOWN, "a null name -> BOTE_LOG_UNKNOWN");
+
+    # ================================================================
+    # bote_log_enabled follows sakshi's level
+    # ================================================================
+    sakshi_set_level(SK_INFO);
+    assert_eq(bote_log_enabled(SK_ERROR), 1, "INFO level: ERROR enabled");
+    assert_eq(bote_log_enabled(SK_INFO), 1, "INFO level: INFO enabled");
+    assert_eq(bote_log_enabled(SK_DEBUG), 0, "INFO level: DEBUG disabled");
+    sakshi_set_level(BOTE_LOG_OFF);
+    assert_eq(bote_log_enabled(SK_FATAL), 0, "off: even FATAL disabled");
+    sakshi_set_level(SK_TRACE);
+    assert_eq(bote_log_enabled(SK_TRACE), 1, "TRACE level: TRACE enabled");
+
+    # ================================================================
+    # Plain messages reach sakshi at the right level, and only when enabled
+    # ================================================================
+    _cap_reset();
+    bote_log_warn("plain warning");
+    assert_eq(_cap_count, 1, "bote_log_warn emits one event");
+    assert_eq(_cap_level, SK_WARN, "bote_log_warn emits at SK_WARN");
+    assert_streq(_cap_buf, "plain warning", "bote_log_warn passes the message through");
+
+    sakshi_set_level(SK_WARN);
+    _cap_reset();
+    bote_log_info("filtered");
+    bote_log_debug("filtered");
+    assert_eq(_cap_count, 0, "WARN level: info and debug emit nothing");
+    bote_log_error("kept");
+    assert_eq(_cap_level, SK_ERROR, "WARN level: error still emits, at SK_ERROR");
+    sakshi_set_level(SK_TRACE);
+
+    # ================================================================
+    # Fields: bare values, ints, and the line's exact bytes
+    # ================================================================
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_INFO, "listening");
+    bote_log_str(&ln, "transport", "http");
+    bote_log_str(&ln, "addr", "127.0.0.1");
+    bote_log_int(&ln, "port", 8390);
+    assert_streq(_line(&ln), "listening transport=http addr=127.0.0.1 port=8390",
+    "a line renders msg plus logfmt fields");
+
+    var li[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&li, SK_DEBUG, "ints");
+    bote_log_int(&li, "zero", 0);
+    bote_log_int(&li, "neg", 0 - 32);
+    bote_log_int(&li, "big", 1234567890123);
+    assert_streq(_line(&li), "ints zero=0 neg=-32 big=1234567890123", "ints: zero, negative, large");
+
+    var lm[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&lm, SK_DEBUG, "min");
+    bote_log_int(&lm, "v", 0 - 9223372036854775807 - 1);
+    assert_streq(_line(&lm), "min v=-9223372036854775808", "i64::MIN formats, it does not overflow");
+
+    # ================================================================
+    # Escaping: a client-controlled value cannot forge a line
+    # ================================================================
+    var lq[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&lq, SK_DEBUG, "q");
+    bote_log_str(&lq, "tool", "a b");
+    assert_streq(_line(&lq), "q tool=\"a b\"", "a space forces quotes");
+
+    var le[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&le, SK_DEBUG, "e");
+    bote_log_str(&le, "v", "say \"hi\" \\ x=1");
+    assert_streq(_line(&le), "e v=\"say \\\"hi\\\" \\\\ x=1\"", "quote and backslash are escaped, = forces quotes");
+
+    # The injection case: a method name carrying a newline and a fake line.
+    var lj[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&lj, SK_DEBUG, "request");
+    bote_log_str(&lj, "method", "ping\n[0] [ERROR] forged");
+    var lj_s = _line(&lj);
+    assert_streq(lj_s, "request method=\"ping\\n[0] [ERROR] forged\"", "a newline is spelled \\n, inside quotes");
+    var nl = 0;
+    var k = 0;
+    while (load8(lj_s + k) != 0) {
+        if (load8(lj_s + k) == 10) { nl = nl + 1; }
+        if (load8(lj_s + k) == 13) { nl = nl + 1; }
+        k = k + 1;
+    }
+    assert_eq(nl, 0, "the rendered line holds no raw CR or LF");
+
+    var lc[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&lc, SK_DEBUG, "c");
+    var ctl = alloc(8);
+    store8(ctl, 97); store8(ctl + 1, 1); store8(ctl + 2, 9); store8(ctl + 3, 13);
+    store8(ctl + 4, 127); store8(ctl + 5, 27); store8(ctl + 6, 98); store8(ctl + 7, 0);
+    bote_log_str(&lc, "v", ctl);
+    assert_streq(_line(&lc), "c v=\"a\\x01\\t\\r\\x7f\\x1bb\"", "control bytes and DEL are \\xHH, tab and CR spelled out");
+
+    var lu[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&lu, SK_DEBUG, "u");
+    bote_log_str(&lu, "name", "caf\xc3\xa9");
+    assert_streq(_line(&lu), "u name=\"caf\xc3\xa9\"", "UTF-8 bytes pass through (quoted)");
+
+    var ln0[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln0, SK_DEBUG, "n");
+    bote_log_str(&ln0, "empty", "");
+    bote_log_str(&ln0, "null", 0);
+    assert_streq(_line(&ln0), "n empty=\"\" null=\"\"", "empty and null values render as \"\"");
+
+    # ================================================================
+    # Truncation: a long value, and a line that outgrows its buffer
+    # ================================================================
+    var longv = alloc(201);
+    var i = 0;
+    while (i < 200) { store8(longv + i, 120); i = i + 1; }    # 'x' * 200
+    store8(longv + 200, 0);
+    var lt[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&lt, SK_DEBUG, "t");
+    bote_log_str(&lt, "v", longv);
+    # "t v=" (4) + 96 'x' + "..." (3)
+    assert_eq(bote_log_line_len(&lt), 4 + BOTE_LOG_VALUE_MAX + 3, "a value is cut at BOTE_LOG_VALUE_MAX and marked ...");
+    var lt_s = _line(&lt);
+    assert_eq(load8(lt_s + bote_log_line_len(&lt) - 1), 46, "a cut value ends with '.'");
+
+    var lo[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&lo, SK_DEBUG, "o");
+    i = 0;
+    while (i < 5) { bote_log_str(&lo, "v", longv); i = i + 1; }
+    assert_eq(bote_log_line_len(&lo), BOTE_LOG_TEXT_CAP, "an overfull line stops at BOTE_LOG_TEXT_CAP");
+    var lo_s = _line(&lo);
+    assert_eq(load8(lo_s + BOTE_LOG_TEXT_CAP - 3), 46, "an overfull line ends ... (1)");
+    assert_eq(load8(lo_s + BOTE_LOG_TEXT_CAP - 1), 46, "an overfull line ends ... (3)");
+
+    # A message that happens to end in '.' at the cap is still marked
+    # truncated exactly once and keeps its length.
+    var ld[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ld, SK_DEBUG, "d");
+    i = 0;
+    while (i < 300) { bote_log_str(&ld, "k", "...."); i = i + 1; }
+    assert_eq(bote_log_line_len(&ld), BOTE_LOG_TEXT_CAP, "repeated overflow does not grow the line");
+
+    # ================================================================
+    # Dead lines cost nothing and emit nothing
+    # ================================================================
+    sakshi_set_level(SK_INFO);
+    var dl[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&dl, SK_DEBUG, "per-request detail");
+    assert_eq(bote_log_line_len(&dl), 0 - 1, "a filtered level makes a dead line (len -1)");
+    bote_log_str(&dl, "tool", "x");
+    bote_log_int(&dl, "n", 5);
+    assert_eq(bote_log_line_len(&dl), 0 - 1, "fields on a dead line are no-ops");
+    _cap_reset();
+    bote_log_emit(&dl);
+    assert_eq(_cap_count, 0, "emitting a dead line sends nothing to sakshi");
+
+    # A live line is sent once, at its level, with its exact bytes.
+    var el[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&el, SK_WARN, "auth rejected");
+    bote_log_str(&el, "transport", "http");
+    _cap_reset();
+    bote_log_emit(&el);
+    assert_eq(_cap_count, 1, "emit sends one event");
+    assert_eq(_cap_level, SK_WARN, "emit sends at the line's level");
+    assert_streq(_cap_buf, "auth rejected transport=http", "emit sends the line's bytes");
+    assert_eq(_cap_len, strlen("auth rejected transport=http"), "emit sends the exact length (no NUL, no newline)");
+
+    # Lowering the level after building does not resurrect a dead line, and
+    # raising it does not kill a live one: the decision is made at line start.
+    sakshi_set_level(SK_TRACE);
+    _cap_reset();
+    bote_log_emit(&dl);
+    assert_eq(_cap_count, 0, "a line dead at start stays dead");
+
+    sakshi_clear_emit_hook();
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit(rc);

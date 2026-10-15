@@ -18,6 +18,182 @@ have per release.
 
 _(empty)_
 
+## [3.4.0] — 2026-10-15 · bote logs through sakshi; cyrius 6.7.9, libro 2.11.0, majra 2.12.0
+
+bote had no logging. sakshi was in `[deps] stdlib` only because libro links it, and bote's own
+diagnostic output was a single `eprint`, on a CSPRNG failure. A bind that failed, an accept loop that
+gave up, an auth rejection, a refused path: each returned a status code and said nothing. This
+release routes bote's operational output through sakshi. It also moves the toolchain to the 6.7
+language minor and takes the libro and majra tags that pin it. Wiring the WARN line for SSRF blocks
+showed that `web_fetch` never applied the SSRF guard SECURITY.md promises, so it does now.
+
+### Added — operational logging through sakshi (`src/log.cyr`)
+
+- **One module, first in both profiles.** `bote_log_line` / `bote_log_str` / `bote_log_int` /
+  `bote_log_emit` build a line in a buffer on the caller's stack (`var ln[BOTE_LOG_LINE_BYTES];`) and
+  hand it to sakshi. A level that is filtered out marks the line dead at `bote_log_line`, and every
+  later call returns at once, so a suppressed line costs one compare and nothing is allocated.
+  `bote_log_warn(msg)` and its siblings cover a plain message. `bote_log_level_from_name`,
+  `bote_log_level_name` and `bote_log_enabled` round it out.
+- **Library code never configures sakshi.** Only a binary's `main` calls `bote_log_init`. An embedder
+  that vendors a bundle keeps its own `sakshi_set_level` / `sakshi_output_*`, and bote's lines go
+  wherever it sends sakshi's.
+- **The binaries read two variables.**
+
+  | Variable | Values | Default |
+  |---|---|---|
+  | `BOTE_LOG` | `off` · `fatal` · `error` · `warn` · `info` · `debug` · `trace` (case-insensitive; `none`, `warning` accepted) | `info` |
+  | `BOTE_LOG_FILE` | a path; lines are appended there instead of stderr | stderr |
+
+  An unrecognised `BOTE_LOG` keeps `info` and says so. A `BOTE_LOG_FILE` that cannot be opened keeps
+  stderr and says so, with the errno. At `trace` the binaries also turn on sandhi's request spans,
+  which sandhi keeps off unless asked. libro already logs through sakshi (61 calls), so `BOTE_LOG`
+  now governs its lines too.
+- **Lines never reach stdout.** On the stdio transport stdout is the JSON-RPC wire. sakshi writes to
+  fd 2, and the new CI step "Logging smoke" runs the built binary at nine `BOTE_LOG` values. Each run
+  must give exactly one JSON-RPC line on stdout and the stderr that level promises. Planting
+  `sakshi_set_output_fd(1)` in `bote_log_init` fails the step (log lines on stdout, a stdout that is
+  no longer one JSON-RPC line, no starting line on stderr).
+- **What is logged, and at what level:**
+
+  | Level | Event |
+  |---|---|
+  | INFO | `bote starting` (version, transport, address and port or socket path, auth mode, log level) · `bote stopped` · `listening` (Unix) · `bearer auth enabled tokens=N` · `host config reloaded` · `unix accept recovered` |
+  | ERROR | `transport failed` with the rc (the four sandhi-served transports cannot say which of socket, bind, listen or accept failed, because sandhi returns a bare 1, so the line names all four) · `unix transport failed step=socket\|bind\|listen\|accept errno=N` · `unix transport gave up accepting` · `usage: bote unix <socket-path>` |
+  | WARN | `request refused` for 401 (`missing_token` / `invalid_token`; no `transport` field, since the shared `auth_bearer_check` is not told which transport called it), 403 origin, 413, and a rejected `Transfer-Encoding` · `web_fetch refused by the SSRF guard` (reason, host) · `fs tool refused an unsafe path` · `BOTE_BEARER_TOKENS is set but holds no token; bearer auth is OFF` · `unknown mode; serving stdio` · `port argument not usable` · `unix accept failing; backing off` (once per episode, not once per retry) · `host config reload failed` |
+  | DEBUG | one `request` line per JSON-RPC request (method, id, tool for `tools/call`, `status=ok\|error\|notification`, error code, elapsed µs) · `request refused` for 404, 405, an unknown session, a protocol-version mismatch, a malformed request |
+  | FATAL | the session-ID CSPRNG failure (was the raw `eprint`; the fail-closed `exit 90` is unchanged) |
+
+  The 34 refusals in the four HTTP-family transports now go through one helper,
+  `bote_http_refuse(cfd, level, transport, status, text, reason)`, which logs and sends. None of them
+  logged before, and the helper keeps each log line next to the status it describes.
+- **No secret goes into a line.** No bearer token, JWT, request body, tool argument or URL. A tool
+  name, a method, a status, a length, a host or an errno does. `web_fetch` logs `ssrf_host(url)`, the
+  host alone, because a URL's userinfo or query string can carry a credential. Tests check that
+  `Bearer sk-live-SECRETVALUE`, a `hunter2` in URL userinfo, and a tool argument never appear in the
+  line.
+- **Values are logfmt, and client-supplied ones cannot forge a line.** A value with a space, `"`, `=`,
+  `\`, a control byte or a byte ≥ 0x80 is quoted. `"` and `\` are escaped, `\n` `\r` `\t` are spelled
+  out, other control bytes and DEL are `\xHH`, UTF-8 passes through, and a value over 96 bytes is cut
+  and ends `...`. This is not theoretical: bote's JSON parser accepts a raw LF inside a string, so
+  `{"method":"y<LF>[0] [ERROR] forged"}` puts a newline byte in the method name. It is logged as
+  `method="y\n[0] [ERROR] forged"`, one line. Removing the escape fails 2 assertions in `bote.tcyr`
+  and 2 in `bote_log.tcyr`.
+- New public helpers in `src/host.cyr`: `ssrf_reason(code)` (the lowercase name of an `SSRF_*` code)
+  and `ssrf_host(url)` (the host only, with userinfo, port and IPv6 brackets stripped).
+- Tests:
+  - New `tests/bote_log.tcyr`, 50 assertions. It captures sakshi's output through its emit hook, so
+    it checks the exact bytes and level sakshi receives.
+  - Additions to existing files: `bote.tcyr` +11 (the per-request line: absent at INFO, its fields, a
+    tool name but never its arguments, both newline forms), `bote_auth.tcyr` +7, `bote_host.tcyr` +9,
+    `bote_web_tools.tcyr` +10, `bote_fs_tools.tcyr` +5.
+  - Mutations: three of four fail as they should. Removing the newline escape fails 2 assertions in
+    `bote_log.tcyr` and 2 in `bote.tcyr`; removing the dead-line check fails 1; the logging smoke's
+    stdout plant fails the step. The fourth, removing `bote_log`'s early level check, survives by
+    design: sakshi's per-level calls filter again, so that check saves a `strlen` and changes no
+    output. The code now says so.
+
+### Security
+
+- **`web_fetch` now applies the SSRF guard.** SECURITY.md has said since 2.x that "the `host` module's
+  SSRF guard rejects URLs targeting loopback / link-local / private / cloud-metadata endpoints … before
+  any network call". `web_fetch`, bote's one fetch of a client-supplied URL, never called
+  `ssrf_check`. So any client of the default `bote` binary could read loopback services and
+  `169.254.169.254` through it. It is refused now, with an `isError` result naming the reason and a
+  WARN line. `bote_web_tools.tcyr` checks loopback (IPv4 and IPv6), the metadata address and a
+  private address; each is refused before any socket opens. ⚠ The guard classifies IP literals and a
+  hostname blocklist, and does not resolve DNS. A name that resolves to a private address still gets
+  through, which is the roadmap's 3.6.x DNS-aware SSRF item. `web_search` is not guarded, by design:
+  its endpoint is the operator's `BOTE_SEARXNG_URL`, often on localhost.
+- **An empty `BOTE_BEARER_TOKENS` no longer turns auth off silently.** Set to `,` or `,,`, it parsed
+  to zero tokens and the HTTP transports ran with no auth while the operator believed it was on. Auth
+  is still off in that case, as before, but a WARN line now says so at startup.
+
+### Changed
+
+- **cyrius 6.6.20 → 6.7.9**, the 6.7 language minor. The re-provisioned folds move sigil 3.13.10 →
+  3.13.11, sakshi 2.5.7 → 2.5.8, patra 1.15.2 → 1.16.0, bayan 1.5.12 → 1.5.13, sandhi 1.10.8 →
+  1.10.9, ganita 1.2.14 → 1.2.15 and sankoch 2.8.1 → 2.8.3. A from-scratch resolve
+  (`rm -rf lib cyrius.lock`, `lib sync --full`, `deps`) locks the same 115 files; `deps --verify`
+  115/0. Every entry and unit built with no source change and no new warning.
+- **The 6.7.x silent-semantics changes do not reach bote.** Three 6.7.x changes alter what
+  already-compiling code computes, so a green suite proves nothing about them:
+  - before 6.7.3 the lexer dropped a lone `!`, so `if (!ok)` meant `if (ok)`;
+  - before 6.7.9 a unary `-` / `~` on a constant followed by an operator and a literal computed the
+    wrong value;
+  - before 6.7.9 a `*T` pointer's step leaked through operators.
+
+  A comment- and string-stripped scan of `src/`, `tests/` and `fuzz/` (54 files) for all three, and
+  for the newly reserved `trait` / `const` / `true` / `false` / `do` / `dyn`, found nothing. The
+  scanner was proven first on a planted file: it caught all five shapes and ignored `!` in comments,
+  in strings and in `!=`.
+- **libro 2.10.8 → 2.11.0 and majra 2.9.3 → 2.12.0**, the latest tags, both pinning 6.7.9.
+  - libro's bundle differs from 2.10.8's only in its version header, so `struct chain` /
+    `struct entry` / `struct error` are unchanged.
+  - ⚠ libro 2.11.0 pins sigil 3.13.12, one patch past the 6.7.9 fold (3.13.11), by libro's choice.
+    bote's lock therefore commit-pins sigil 3.13.12 while `lib/sigil.cyr` is 3.13.11: the thin
+    profile is still not vendored here, so the fold is what compiles. libro reports that its thin
+    set differs between the two only in the version header, and that cyrius 6.7.10 folds 3.13.12.
+    Patra's pin, 1.16.0, equals the fold.
+  - majra 2.10.0 – 2.12.0 are additive and change no signature or wire format; bote calls only
+    `pubsub_publish`.
+- **Both bundles carry `src/log.cyr`.** `[lib]` grows to 32 modules and `[lib.core]` to 13. The
+  sidecars are unchanged (`hashmap bayan ws_server syscalls` / `hashmap bayan sigil ct`). sakshi
+  reaches the core bundle's verify through `lib/patra.cyr`'s own include (patra is libro's named
+  dep), which is how a core consumer gets it too. Measured: scratch consumers of each bundle on
+  6.7.9, declaring only `string fmt alloc vec str syscalls io freelist`, build with zero undefined
+  names and answer a `ping`. That is independent of the sigil over-report filed
+  against cyrius at 3.3.17. ⚠ `log.cyr` sizes its line buffer with a `const`, so the bundles need
+  cyrius ≥ 6.7.2 to compile.
+- **A port argument that does not parse, or is outside 1–65535, warns and uses the default.** It
+  used to fall back in silence (a non-number) or be passed through (65536 and up). An unrecognised
+  mode (`bote frobnicate`) still serves stdio, as before, and now says so.
+- **The manifest's `path` rule is restated for cyrius 6.7.6**, verified on this tree. A `path` beside
+  `git` / `tag` is a development override: a default resolve built libro's tag, printed `hint: 1 dep
+  has a local checkout not in use`, and left `cyrius.lock` alone. `CYRIUS_LOCAL=libro` resolved into
+  `build/local-deps/lib/` and left `lib/libro.cyr` and the lock untouched. The comment used to say
+  `path` beats `tag`, which stopped being true at 6.7.6.
+- `cyrius.cyml`'s sakshi line said "sakshi is listed because libro links it, not because bote calls
+  it". Now it is bote's logger.
+- CI's "Run tests" list gains `tests/bote_log.tcyr`, and now matches `tests/*.tcyr` exactly.
+- `dist/bote.cyr` and `dist/bote-core.cyr` regenerated.
+- Binaries, from 3.3.17 on 6.6.20 to 3.4.0 on 6.7.9: `bote` 2,768,920 → 2,796,448 B,
+  `bote-streamable` 2,733,400 → 2,756,544 B, `bote-ws` 2,737,672 → 2,760,736 B. The toolchain alone
+  accounts for +14,032 B on `bote` (2,782,952 B before any logging code), and logging for +13,496 B.
+  The only build warning is `lib/sigil.cyr`'s static-array note, which was already there. Capacity
+  for `src/main.cyr`: `fn_table` 6,160 → 6,222 / 131,072 (4.7%), `identifiers` 196,472 → 198,201 /
+  8,388,608 (2.4%).
+
+### Performance
+
+Three bench binaries ran in one interleaved rotation, 15 rounds each with the order rotating, at a
+1-minute load of 1.6–2.1: 3.3.17 on 6.6.20, this tree on 6.7.9 before any logging code, and this
+tree as released. Medians:
+
+| Bench | 6.6.20 | 6.7.9 | Toolchain | 6.7.9 + logging | Logging |
+|---|---|---|---|---|---|
+| `dispatch_tools_call` | 5.866 µs | 5.888 µs | +0.4% | 5.744 µs | −2.4% |
+| `codec_process_message` | 7.630 µs | 7.676 µs | +0.6% | 7.696 µs | **+0.3%** |
+| `jsonx_get_str_flat` | 157 ns | 149 ns | −5.1% | 142 ns | −4.7% |
+| `validate_compiled_simple` | 529 ns | 492 ns | −7.0% | 501 ns | +1.8% |
+| `codec_parse_request` | 1.373 µs | 1.363 µs | −0.7% | 1.424 µs | +4.5% |
+| `validate_compiled_nested` | 2.136 µs | 2.129 µs | −0.3% | 2.224 µs | +4.5% |
+
+- **The toolchain move is a wash.** 12 of 14 rows are within ±0.8%; the two alignment-sensitive rows
+  are faster.
+- **Logging costs nothing measurable where it runs.** `codec_process_message` is the one benchmark
+  that passes through `_cdc_process_single`'s new level check, and it moved +0.3% with overlapping
+  ranges. The bench runs at sakshi's default INFO, the binaries' default, so this is the
+  suppressed-line cost: one compare per request.
+- **The ±4.5% rows run no new code.** Symbol maps (`CYRIUS_SYMS`) of the pre-logging and released
+  bench binaries show `jsonx_get_raw`, `_jx_find_value_pos`, `codec_parse_request` and
+  `compiled_validate` at identical sizes, differing in 4–8 bytes (call displacements). Each sits at
+  a new offset in its 64-byte line (`codec_parse_request` 43 → 31). The one function that grew is
+  `_cdc_process_single`, 486 → 650 bytes. Both reconstructed binaries are byte-identical to the
+  ones benchmarked.
+- `benches/history.log` gains the 3.4.0 block from a single run at load 1.9; the README table is
+  refreshed from it.
+
 ## [3.3.17] — 2026-10-15 · cyrius 6.6.20 + libro 2.10.8 + majra 2.9.3: the Unix transport survives a reset peer, and the sidecars are compile-verified
 
 This release moves the toolchain from 6.6.14 to 6.6.20 and takes the libro and majra tags that pin 6.6.20. Nothing

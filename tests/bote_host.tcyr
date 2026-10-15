@@ -17,8 +17,45 @@ include "lib/assert.cyr"
 # 2.7.1: hot-reload parser piggybacks on jsonx for whitespace /
 # string / struct skipping — same surface bote uses everywhere else
 # for JSON-ish handling.
+include "src/log.cyr"
 include "src/jsonx.cyr"
 include "src/host.cyr"
+
+# ---- sakshi capture (3.4.0 logging assertions) -----------------------------
+var _lc_buf = 0;
+var _lc_level = 0 - 1;
+var _lc_count = 0;
+fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    memcpy(_lc_buf, msg, n);
+    store8(_lc_buf + n, 0);
+    _lc_level = level;
+    _lc_count = _lc_count + 1;
+    return 0;
+}
+fn _lc_begin() {
+    if (_lc_buf == 0) { _lc_buf = alloc(1024); }
+    store8(_lc_buf, 0);
+    _lc_level = 0 - 1;
+    _lc_count = 0;
+    sakshi_set_emit_hook(&_lc_hook);
+    sakshi_set_level(SK_TRACE);
+    return 0;
+}
+fn _lc_end() { sakshi_clear_emit_hook(); return 0; }
+# 1 when cstr `hay` contains cstr `needle`.
+fn _lc_has(hay, needle) {
+    if (hay == 0 || needle == 0) { return 0; }
+    var i = 0;
+    while (load8(hay + i) != 0) {
+        var j = 0;
+        while (load8(needle + j) != 0 && load8(hay + i + j) == load8(needle + j)) { j = j + 1; }
+        if (load8(needle + j) == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
 
 fn main() {
     alloc_init();
@@ -257,6 +294,20 @@ fn main() {
     host_registry_clear(rf);
     assert_eq(host_registry_count(rf), 0, "clear empties count");
     assert_eq(host_registry_has(rf, "svc-2"), 0, "clear removes entries");
+
+
+    # ================================================================
+    # 3.4.0 — ssrf_reason / ssrf_host (what the web_fetch WARN line uses)
+    # ================================================================
+    assert_streq(ssrf_reason(SSRF_OK), "ok", "ssrf_reason(OK)");
+    assert_streq(ssrf_reason(SSRF_LOOPBACK), "loopback", "ssrf_reason(LOOPBACK)");
+    assert_streq(ssrf_reason(SSRF_METADATA), "metadata", "ssrf_reason(METADATA)");
+    assert_streq(ssrf_reason(SSRF_PRIVATE), "private", "ssrf_reason(PRIVATE)");
+    assert_streq(ssrf_reason(99), "unknown", "ssrf_reason(unknown code)");
+    assert_streq(ssrf_host("http://Example.COM/x?y=1"), "example.com", "ssrf_host lowercases and drops path + query");
+    assert_streq(ssrf_host("https://user:pw@10.0.0.5:8443/a"), "10.0.0.5", "ssrf_host drops userinfo and port");
+    assert_streq(ssrf_host("http://[::1]:80/"), "::1", "ssrf_host drops IPv6 brackets");
+    assert_eq(ssrf_host("not a url"), 0, "ssrf_host of an unparseable URL is 0");
 
     return assert_summary();
 }

@@ -21,7 +21,20 @@ The primary security-relevant surface areas are:
   failures are returned as error responses, not propagated.
 - **Outbound requests** — the `host` module's SSRF guard rejects URLs targeting
   loopback / link-local / private / cloud-metadata endpoints (IPv4 and IPv6)
-  before any network call.
+  before any network call. `web_fetch`, the built-in tool that fetches a
+  client-supplied URL, applies it since **3.4.0**; before that it checked only
+  the scheme, so this statement did not hold for it. The guard classifies IP
+  literals and a hostname blocklist and does not resolve DNS: a name that
+  resolves to a private address is not caught (roadmap: DNS-aware SSRF).
+- **Logging** — operational logs go through sakshi to stderr (or
+  `BOTE_LOG_FILE`), never to stdout, which carries the stdio transport's
+  JSON-RPC stream. No bearer token, JWT, request body, tool argument or full
+  URL is written to a log line. Client-supplied values that are logged (a
+  method or tool name, a refused path) are logfmt-escaped, so a value holding
+  a newline cannot forge a second log line. Refusals (401, 403, 413, a rejected
+  `Transfer-Encoding`, an SSRF block, a filesystem path escape) are logged at
+  WARN; one line per refused request, so a flood of bad requests is a flood of
+  lines — rate-limit at the edge if that matters for your deployment.
 - **Audit chain** — the optional libro integration uses SHA-256 hash linking
   for tamper detection.
 

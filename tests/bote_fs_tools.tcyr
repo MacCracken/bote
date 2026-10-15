@@ -26,6 +26,7 @@ include "lib/thread_local.cyr"
 include "lib/sakshi.cyr"
 include "lib/assert.cyr"
 
+include "src/log.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
@@ -38,6 +39,42 @@ include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
 include "src/fs_tools.cyr"
+
+# ---- sakshi capture (3.4.0 logging assertions) -----------------------------
+var _lc_buf = 0;
+var _lc_level = 0 - 1;
+var _lc_count = 0;
+fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    memcpy(_lc_buf, msg, n);
+    store8(_lc_buf + n, 0);
+    _lc_level = level;
+    _lc_count = _lc_count + 1;
+    return 0;
+}
+fn _lc_begin() {
+    if (_lc_buf == 0) { _lc_buf = alloc(1024); }
+    store8(_lc_buf, 0);
+    _lc_level = 0 - 1;
+    _lc_count = 0;
+    sakshi_set_emit_hook(&_lc_hook);
+    sakshi_set_level(SK_TRACE);
+    return 0;
+}
+fn _lc_end() { sakshi_clear_emit_hook(); return 0; }
+# 1 when cstr `hay` contains cstr `needle`.
+fn _lc_has(hay, needle) {
+    if (hay == 0 || needle == 0) { return 0; }
+    var i = 0;
+    while (load8(hay + i) != 0) {
+        var j = 0;
+        while (load8(needle + j) != 0 && load8(hay + i + j) == load8(needle + j)) { j = j + 1; }
+        if (load8(needle + j) == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
 
 fn main() {
     alloc_init();
@@ -101,6 +138,20 @@ fn main() {
     var refused = fs_write_handler("{\"path\":\"../evil\",\"content\":\"x\"}", 0);
     assert(refused != 0, "unsafe write returns a result");
     assert_eq(load8(refused), 123, "result is a JSON object (starts with '{')");
+
+
+    # ================================================================
+    # 3.4.0 — a refused path is a WARN line naming the tool and the path
+    # ================================================================
+    _lc_begin();
+    var rr = fs_read_handler("{\"path\":\"../../etc/shadow\"}", 0);
+    assert(_lc_has(rr, "refused unsafe path") == 1, "fs_read still refuses ..");
+    assert_eq(_lc_level, SK_WARN, "the refusal is logged at WARN");
+    assert(_lc_has(_lc_buf, "tool=fs_read") == 1, "the line names the tool");
+    assert(_lc_has(_lc_buf, "path=../../etc/shadow") == 1, "the line names the refused path");
+    fs_write_handler("{\"path\":\"/etc/x\",\"content\":\"y\"}", 0);
+    assert(_lc_has(_lc_buf, "tool=fs_write") == 1, "fs_write refusal is logged");
+    _lc_end();
 
     return assert_summary();
 }

@@ -98,10 +98,85 @@ fn _bote_bearer_from_env(out_fp, out_ctx) {
     var csv = getenv("BOTE_BEARER_TOKENS");
     if (csv == 0) { store64(out_fp, 0); store64(out_ctx, 0); return 0; }
     var allowed = _split_csv_tokens(csv);
-    if (vec_len(allowed) == 0) { store64(out_fp, 0); store64(out_ctx, 0); return 0; }
+    if (vec_len(allowed) == 0) {
+        # Set but empty (or only commas): the operator asked for auth and is
+        # not getting it. Say so; the token values themselves never reach a log.
+        bote_log_warn("BOTE_BEARER_TOKENS is set but holds no token; bearer auth is OFF");
+        store64(out_fp, 0); store64(out_ctx, 0); return 0;
+    }
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_INFO, "bearer auth enabled");
+    bote_log_int(&ln, "tokens", vec_len(allowed));
+    bote_log_emit(&ln);
     store64(out_fp, &auth_validator_allowlist);
     store64(out_ctx, allowed);
     return 1;
+}
+
+# ================================================================
+# Logging for the binaries (3.4.0)
+# ================================================================
+
+# Configure sakshi from BOTE_LOG / BOTE_LOG_FILE (src/log.cyr), and at
+# `trace` also turn on sandhi's request spans, which sandhi keeps off unless
+# asked. Call right after alloc_init() / args_init().
+fn bote_main_log_init() {
+    var lv = bote_log_init();
+    if (lv >= SK_TRACE) { sandhi_trace_enable(1); }
+    return lv;
+}
+
+# A port argument that does not parse falls back to the default; say so
+# rather than listening somewhere the operator did not ask for.
+fn bote_main_port(arg, default_port) {
+    if (arg == 0) { return default_port; }
+    var p = _parse_uint(arg);
+    if (p > 0 && p < 65536) { return p; }
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_WARN, "port argument not usable; using the default");
+    bote_log_str(&ln, "arg", arg);
+    bote_log_int(&ln, "port", default_port);
+    bote_log_emit(&ln);
+    return default_port;
+}
+
+# The startup line. `port` 0 and `path` 0 are omitted.
+fn bote_main_log_start(transport, port, path, auth_on) {
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_INFO, "bote starting");
+    bote_log_str(&ln, "version", _bote_server_version());
+    bote_log_str(&ln, "transport", transport);
+    if (port != 0) {
+        bote_log_str(&ln, "addr", "127.0.0.1");
+        bote_log_int(&ln, "port", port);
+    }
+    if (path != 0) { bote_log_str(&ln, "path", path); }
+    if (auth_on == 1) { bote_log_str(&ln, "auth", "bearer"); }
+    else { bote_log_str(&ln, "auth", "none"); }
+    bote_log_str(&ln, "log", bote_log_level_name(sakshi_get_level()));
+    bote_log_emit(&ln);
+    return 0;
+}
+
+# The exit line. A clean stop is INFO; a transport that returned non-zero is
+# ERROR. The four sandhi-served transports return a bare 1 for a failed
+# socket, bind, listen or a fatal accept, with no errno, so the line names
+# all four; the Unix transport logs its own errno before returning.
+fn bote_main_log_exit(transport, rc) {
+    var ln[BOTE_LOG_LINE_BYTES];
+    if (rc == 0) {
+        bote_log_line(&ln, SK_INFO, "bote stopped");
+        bote_log_str(&ln, "transport", transport);
+    } else {
+        bote_log_line(&ln, SK_ERROR, "transport failed");
+        bote_log_str(&ln, "transport", transport);
+        bote_log_int(&ln, "rc", rc);
+        if (streq(transport, "stdio") == 0 && streq(transport, "unix") == 0) {
+            bote_log_str(&ln, "cause", "socket, bind, listen or accept failed (is the port in use?)");
+        }
+    }
+    bote_log_emit(&ln);
+    return rc;
 }
 
 # Register the bote_echo demo tool on a fresh dispatcher.

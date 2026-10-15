@@ -104,8 +104,13 @@ fn _gen_session_id() {
     # acceptable substitute for kernel entropy here — refuse to mint a
     # session ID rather than ship a guessable one. That fail-closed
     # contract is preserved exactly; only the source of the bytes changed.
-    if (random_bytes(raw, 16) != 16) {
-        eprint("fatal: kernel CSPRNG unavailable for session id\n", 48);
+    var got = random_bytes(raw, 16);
+    if (got != 16) {
+        # 3.4.0: through sakshi (was a raw eprint). The exit is unchanged.
+        var ln[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&ln, SK_FATAL, "kernel CSPRNG unavailable for session id; exiting 90");
+        bote_log_int(&ln, "rc", got);
+        bote_log_emit(&ln);
         sys_exit(90);
     }
     var i = 0;

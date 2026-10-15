@@ -90,6 +90,38 @@ BOTE_BEARER_TOKENS="tok-a,tok-b" ./build/bote http 8390
 
 Stdio + Unix sockets are local-only and skip the bearer check.
 
+### Logging
+
+bote logs through [sakshi](https://github.com/MacCracken/sakshi) to **stderr** — never stdout,
+which is the JSON-RPC wire on the stdio transport.
+
+```sh
+BOTE_LOG=debug ./build/bote http 8390        # off | fatal | error | warn | info (default) | debug | trace
+BOTE_LOG_FILE=/var/log/bote.log ./build/bote # append lines to a file instead of stderr
+```
+
+Captured from `BOTE_LOG=debug BOTE_BEARER_TOKENS=tok-a ./build/bote http 18390` and five `curl`
+requests (two authorized, a wrong token, no token, a `GET`):
+
+```
+[1127760397684945] [INFO] bearer auth enabled tokens=1
+[1127760397713810] [INFO] bote starting version=3.4.0 transport=http addr=127.0.0.1 port=18390 auth=bearer log=debug
+[1127760893749315] [DEBUG] request method=initialize id=1 status=ok us=10
+[1127760900255149] [DEBUG] request method=tools/call id=4 tool=bote_echo status=ok us=22
+[1127760906066760] [WARN] request refused status=401 reason=invalid_token
+[1127760911987918] [WARN] request refused status=401 reason=missing_token
+[1127760917921870] [DEBUG] request refused transport=http status=405 reason=method
+```
+
+The bracketed number is sakshi's monotonic nanosecond clock, not wall time.
+
+INFO is lifecycle (starting, listening, stopped), WARN a refusal the server survived (401 / 403 / 413,
+an SSRF block, a path escape), ERROR something an operator must fix (a bind that failed), DEBUG one
+line per request, and `trace` also turns on sandhi's request spans. No token, request body, tool
+argument or full URL is ever logged; client-supplied values (a method or tool name) are logfmt-escaped
+so they cannot forge a line. Library code never configures sakshi: an application that vendors
+`dist/bote.cyr` keeps its own `sakshi_set_level` / `sakshi_output_*`.
+
 ### Try it
 
 ```sh
@@ -140,7 +172,7 @@ Supported MCP protocol versions: `2024-11-05`, `2025-03-26`, `2025-06-18`,
 | `libro_proof` | Merkle inclusion proof for an entry by index |
 | `libro_retention` | Apply a policy (`keep_count` / `keep_duration` / `keep_after` / `pci_dss` / `hipaa` / `sox`) |
 | `fs_write` / `fs_read` / `fs_mkdir` | Filesystem ops confined to `BOTE_FS_ROOT` (default `.`) |
-| `web_fetch` | GET a URL (http/https only), strip HTML to readable text, size-capped |
+| `web_fetch` | GET a URL (http/https only; loopback / private / link-local / metadata refused by the SSRF guard), strip HTML to readable text, size-capped |
 | `web_search` | Query a SearXNG JSON endpoint (`BOTE_SEARXNG_URL`) |
 
 ### Error codes
@@ -161,6 +193,7 @@ Supported MCP protocol versions: `2024-11-05`, `2025-03-26`, `2025-06-18`,
 ## Modules
 
 ```
+src/log.cyr                Operational logging through sakshi (BOTE_LOG, BOTE_LOG_FILE)
 src/error.cyr              BoteErrTag enum, rpc_code mapping, format
 src/protocol.cyr           JsonRpcRequest / Response / Error
 src/jsonx.cyr              Nested-aware JSON value extractor
@@ -201,30 +234,31 @@ src/main_common.cyr        Shared binary setup (dispatcher + env bearer wiring)
 Dependencies rehydrate into `lib/` (gitignored) via `cyrius deps`.
 Cross-project deps **libro and majra** are git-pinned via
 `[deps.<name>]` in `cyrius.cyml`. Two consumer bundles ship in `dist/`:
-`bote.cyr` (full, 31 modules) and `bote-core.cyr` (core 12,
+`bote.cyr` (full, 32 modules) and `bote-core.cyr` (core 13,
 transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ---
 
 ## Verification
 
-### Tests — 906 total across thirteen files (+ a core-only drift smoke)
+### Tests — 998 total across fourteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 906 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 998 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 441 — core protocol/dispatch/codec/schema/session/transports
-cyrius test tests/bote_auth.tcyr          # 38 — bearer + allowlist + JWT + PKCE validators
+cyrius test tests/bote.tcyr               # 452 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/bote_auth.tcyr          # 45 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 24 — typed content blocks
-cyrius test tests/bote_fs_tools.tcyr      # 26 — fs_write / fs_read / fs_mkdir
-cyrius test tests/bote_host.tcyr          # 113 — host registry + SSRF guard (IPv4 + IPv6)
+cyrius test tests/bote_fs_tools.tcyr      # 31 — fs_write / fs_read / fs_mkdir
+cyrius test tests/bote_host.tcyr          # 122 — host registry + SSRF guard (IPv4 + IPv6)
 cyrius test tests/bote_jwt.tcyr           # 53 — JWT HS256 verify + exact alg + exp enforcement
 cyrius test tests/bote_libro_tools.tcyr   # 38 — libro_tools wrappers
+cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals
 cyrius test tests/bote_transport_unix.tcyr # 49 — Unix transport: sockaddr, accept-error policy, backoff, closed-peer write
-cyrius test tests/bote_web_tools.tcyr     # 27 — web_fetch / web_search
+cyrius test tests/bote_web_tools.tcyr     # 37 — web_fetch / web_search + the SSRF guard
 cyrius test tests/bote_ws.tcyr            # 14 — WebSocket config + wire-up
 cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dist/bote-core.cyr
 ```
@@ -235,32 +269,32 @@ cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dis
 cyrius bench tests/bote.bcyr
 ```
 
-Latest logged row — bote 3.3.17 on cyrius 6.6.20, single run on a quiet box
-(load < 1.0), `AMD Ryzen 7 5800H`. The full history, with the host conditions
+Latest logged row — bote 3.4.0 on cyrius 6.7.9, single run (1-minute load 1.9), `AMD Ryzen 7 5800H`. The full history, with the host conditions
 each block was taken under, is [`benches/history.log`](benches/history.log).
 
 | Hot path | Avg |
 |---|---|
-| `dispatch_initialize` | ~1.33 µs |
-| `dispatch_tools_list` | ~1.91 µs |
-| `dispatch_tools_call` | ~5.43 µs |
-| `jsonx_get_str_flat` | ~150 ns |
-| `jsonx_get_raw_nested` | ~357 ns |
-| `codec_parse_request` | ~1.27 µs |
-| `codec_serialize_response` | ~412 ns |
-| `codec_process_message` (full pipeline) | ~7.07 µs |
-| `validate_compiled_simple` | ~480 ns |
-| `validate_compiled_nested` | ~1.99 µs |
-| `schema_compile_simple` | ~2.22 µs |
-| `schema_compile_nested` | ~5.26 µs |
+| `dispatch_initialize` | ~1.39 µs |
+| `dispatch_tools_list` | ~1.99 µs |
+| `dispatch_tools_call` | ~5.71 µs |
+| `jsonx_get_str_flat` | ~140 ns |
+| `jsonx_get_raw_nested` | ~408 ns |
+| `codec_parse_request` | ~1.42 µs |
+| `codec_serialize_response` | ~449 ns |
+| `codec_process_message` (full pipeline) | ~7.67 µs |
+| `validate_compiled_simple` | ~497 ns |
+| `validate_compiled_nested` | ~2.20 µs |
+| `schema_compile_simple` | ~2.36 µs |
+| `schema_compile_nested` | ~5.75 µs |
 | `auth_bearer_check_unset` | ~8 ns |
-| `auth_bearer_check_set` | ~717 ns |
+| `auth_bearer_check_set` | ~757 ns |
 
 > A single row is an illustration, not a measurement: run-to-run swings of
 > 5–10 % on the sub-microsecond rows are host state, and a one-byte shift in
 > string data moves the alignment-sensitive ones. The measurements are the
 > **interleaved A/Bs** recorded in the CHANGELOG at each toolchain bump
-> (3.3.10 for 6.6.3 → 6.6.6: a wash; 3.3.17 for 6.6.14 → 6.6.20, where
+> (3.3.10 for 6.6.3 → 6.6.6: a wash; 3.4.0 for 6.6.20 → 6.7.9: a wash, and the
+> logging added at no measurable cost; 3.3.17 for 6.6.14 → 6.6.20, where
 > `jsonx_get_str_flat`'s +16% is identical code sitting 4 bytes later in
 > its cache line). Numbers across toolchain lines are not comparable — the
 > 6.6.x emitter moved `dispatch_tools_call` and `codec_process_message`

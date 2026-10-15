@@ -9,6 +9,7 @@
 # back into src/main.cyr and retire this file. See companion proposal
 # in cyrius/docs/development/proposals/2026-05-10-raise-compile-source-cap.md.
 
+include "src/log.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
@@ -34,6 +35,7 @@ include "src/main_common.cyr"
 fn main() {
     alloc_init();
     args_init();
+    bote_main_log_init();
 
     var dispatcher = bote_dispatcher_with_echo();
 
@@ -45,11 +47,11 @@ fn main() {
 
     # Usage: bote-ws [port]   (default 8393)
     var port = 8393;
-    if (argc() >= 2) { port = _parse_uint(argv(1)); }
-    if (port == 0) { port = 8393; }
+    if (argc() >= 2) { port = bote_main_port(argv(1), 8393); }
     var cfg = ws_config_new("/mcp", INADDR_LOOPBACK(), port);
     if (bearer_fp != 0) { ws_config_with_bearer_validator(cfg, bearer_fp, bearer_ctx); }
-    return transport_ws_run(dispatcher, cfg);
+    bote_main_log_start("ws", port, 0, bearer_fp != 0);
+    return bote_main_log_exit("ws", transport_ws_run(dispatcher, cfg));
 }
 
 var r = main();

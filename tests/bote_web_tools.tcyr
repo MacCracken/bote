@@ -27,6 +27,7 @@ include "lib/thread_local.cyr"
 include "lib/sakshi.cyr"
 include "lib/assert.cyr"
 
+include "src/log.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
@@ -38,6 +39,7 @@ include "src/audit.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
+include "src/host.cyr"
 include "src/web_tools.cyr"
 
 # _t_txt: run _web_html_to_text over `src` and NUL-terminate into `dst`; return dst for streq.
@@ -45,6 +47,42 @@ fn _t_txt(src, dst) {
     var n = _web_html_to_text(src, strlen(src), dst, 256);
     store8(dst + n, 0);
     return dst;
+}
+
+# ---- sakshi capture (3.4.0 logging assertions) -----------------------------
+var _lc_buf = 0;
+var _lc_level = 0 - 1;
+var _lc_count = 0;
+fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    memcpy(_lc_buf, msg, n);
+    store8(_lc_buf + n, 0);
+    _lc_level = level;
+    _lc_count = _lc_count + 1;
+    return 0;
+}
+fn _lc_begin() {
+    if (_lc_buf == 0) { _lc_buf = alloc(1024); }
+    store8(_lc_buf, 0);
+    _lc_level = 0 - 1;
+    _lc_count = 0;
+    sakshi_set_emit_hook(&_lc_hook);
+    sakshi_set_level(SK_TRACE);
+    return 0;
+}
+fn _lc_end() { sakshi_clear_emit_hook(); return 0; }
+# 1 when cstr `hay` contains cstr `needle`.
+fn _lc_has(hay, needle) {
+    if (hay == 0 || needle == 0) { return 0; }
+    var i = 0;
+    while (load8(hay + i) != 0) {
+        var j = 0;
+        while (load8(needle + j) != 0 && load8(hay + i + j) == load8(needle + j)) { j = j + 1; }
+        if (load8(needle + j) == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
 }
 
 fn main() {
@@ -93,6 +131,28 @@ fn main() {
     assert_eq(e / 1048576, 38, "&amp; -> '&' (0x26)");
     assert_eq(e % 1048576, 5,  "&amp; consumes 5 bytes");
     assert_eq(_web_decode_entity("&bogus;", 7, 0), 0, "unknown entity -> 0 (left literal)");
+
+
+    # ================================================================
+    # 3.4.0 — web_fetch applies the SSRF guard before any network call
+    # ================================================================
+    # Each of these is refused before _web_get, so no request leaves the box.
+    _lc_begin();
+    var lo = web_fetch_handler("{\"url\":\"http://127.0.0.1:8080/admin\"}", 0);
+    assert(_lc_has(lo, "SSRF guard: loopback") == 1, "web_fetch refuses loopback");
+    assert(_lc_has(lo, "\"isError\":true") == 1, "the refusal is an isError result");
+    assert_eq(_lc_level, SK_WARN, "the refusal is logged at WARN");
+    assert(_lc_has(_lc_buf, "reason=loopback") == 1, "the line names the reason");
+    assert(_lc_has(_lc_buf, "host=127.0.0.1") == 1, "the line names the host");
+    var md = web_fetch_handler("{\"url\":\"http://169.254.169.254/latest/meta-data/\"}", 0);
+    assert(_lc_has(md, "SSRF guard:") == 1, "web_fetch refuses the cloud metadata address");
+    var pv = web_fetch_handler("{\"url\":\"http://admin:hunter2@10.1.2.3/\"}", 0);
+    assert(_lc_has(pv, "SSRF guard: private") == 1, "web_fetch refuses a private address");
+    assert(_lc_has(_lc_buf, "host=10.1.2.3") == 1, "the line names the private host");
+    assert_eq(_lc_has(_lc_buf, "hunter2"), 0, "URL userinfo never reaches the log line");
+    var v6 = web_fetch_handler("{\"url\":\"http://[::1]/\"}", 0);
+    assert(_lc_has(v6, "SSRF guard: loopback") == 1, "web_fetch refuses IPv6 loopback");
+    _lc_end();
 
     return assert_summary();
 }

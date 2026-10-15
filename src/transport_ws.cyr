@@ -110,7 +110,7 @@ fn _ws_check_origin(cfd, buf, blen, config) {
     var orig = origin;
     if (orig == 0) { orig = ""; }
     if (validate_origin(orig, allowed) != 0) {
-        sandhi_server_send_status(cfd, HTTP_FORBIDDEN, "Forbidden");
+        bote_http_refuse(cfd, SK_WARN, "ws", HTTP_FORBIDDEN, "Forbidden", "origin");
         return HTTP_FORBIDDEN;
     }
     return 0;
@@ -120,13 +120,13 @@ fn _ws_check_protocol(cfd, buf, blen, config) {
     var v = sandhi_server_find_header(buf, blen, "MCP-Protocol-Version");
     if (v == 0) {
         if (ws_config_require_protocol(config) == 1) {
-            sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+            bote_http_refuse(cfd, SK_DEBUG, "ws", HTTP_BAD_REQUEST, "Bad Request", "protocol_version_missing");
             return HTTP_BAD_REQUEST;
         }
         return 0;
     }
     if (validate_protocol_version(v) != 0) {
-        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        bote_http_refuse(cfd, SK_DEBUG, "ws", HTTP_BAD_REQUEST, "Bad Request", "protocol_version");
         return HTTP_BAD_REQUEST;
     }
     return 0;
@@ -142,17 +142,17 @@ fn _bote_ws_handler(config, cfd, buf, n) {
 
     # Only GET on the configured endpoint is valid for a WS upgrade.
     if (streq(method, "GET") == 0) {
-        sandhi_server_send_status(cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed");
+        bote_http_refuse(cfd, SK_DEBUG, "ws", HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed", "method");
         return 0;
     }
     if (streq(sandhi_server_path_only(path), ws_config_path(config)) == 0) {
-        sandhi_server_send_status(cfd, HTTP_NOT_FOUND, "Not Found");
+        bote_http_refuse(cfd, SK_DEBUG, "ws", HTTP_NOT_FOUND, "Not Found", "path");
         return 0;
     }
 
     if (_ws_check_origin(cfd, buf, n, config) != 0) { return 0; }
     if (sandhi_server_find_header(buf, n, "Transfer-Encoding") != 0) {
-        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request"); return 0;
+        bote_http_refuse(cfd, SK_WARN, "ws", HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding"); return 0;
     }
     var claims_slot[8]; store64(&claims_slot, 0);
     if (auth_bearer_check(cfd, buf, n,
@@ -163,7 +163,7 @@ fn _bote_ws_handler(config, cfd, buf, n) {
 
     var ws = ws_server_handshake(cfd, buf, n);
     if (ws == 0) {
-        sandhi_server_send_status(cfd, HTTP_BAD_REQUEST, "Bad Request");
+        bote_http_refuse(cfd, SK_DEBUG, "ws", HTTP_BAD_REQUEST, "Bad Request", "ws_handshake");
         return 0;
     }
     var ws_claims = load64(&claims_slot);
