@@ -33,13 +33,22 @@ bote ships **two** distribution artifacts:
 
 | Artifact              | Profile  | Modules | Use when                                     |
 |-----------------------|----------|---------|----------------------------------------------|
-| `dist/bote.cyr`       | default  | 30      | Consumer needs bote's full transport surface |
+| `dist/bote.cyr`       | default  | 31      | Consumer needs bote's full transport surface |
 | `dist/bote-core.cyr`  | `core`   | 12      | Consumer wraps Dispatcher / Registry / Prompts / Resources / Content / Audit but supplies its own transport |
 
 - Every tagged release must commit **both** artifacts.
-- Each bundle is a self-contained, include-free single `.cyr`
-  file. Every public function / struct / global the profile
-  exports lives in that one file.
+- Each bundle is a single `.cyr` file. Every public function /
+  struct / global the profile exports lives in that one file.
+  Since cyrius 6.6.18 (bote 3.3.17) it opens with a
+  compile-verified `# Requires` block, one
+  `include "lib/<leaf>.cyr"` per leaf of its `.deps` sidecar, so
+  `include "dist/bote.cyr"` alone compiles. It carries no other
+  `include`. For a `cyrius deps` consumer the block changes
+  nothing: include-once is keyed on the literal path, and these are
+  the same lines it auto-prepends.
+- Each bundle ships with its sidecar (`dist/bote.deps`,
+  `dist/bote-core.deps`). CI gates both files of each pair
+  byte-for-byte against `cyrius distlib`.
 - The file paths and names are fixed: `dist/bote.cyr` and
   `dist/bote-core.cyr`. Not `dist/bote-2.7.2.cyr`. Not
   `build/bote.cyr`. Not `bote.cyr` at the repo root.
@@ -49,17 +58,24 @@ that selected that profile break at `cyrius deps` time.
 
 ### Stdlib the consumer must supply
 
-The bundles are include-free by design — they carry **no**
-`include "lib/…"` lines, so the consumer's own `[deps] stdlib`
-has to cover every stdlib leaf the fold calls. Since cyrius
-6.6.6 the auto-generated `dist/bote.deps` sidecar names exactly
-that: the 31 modules in bote's `[deps] stdlib` plus `ws_server`
-(32 leaves; `dist/bote-core.deps` names 11). The include-closure
-behind them — `hashseed`, `sha1`, `tls_native`, `result`, … —
-is no longer listed because `cyrius deps` pulls it itself (a
-clean-room consumer resolving from the sidecar alone gets 81
-files and builds; measured at 3.3.10). Mirror bote's own
-`[deps] stdlib` list in `cyrius.cyml` — including its
+Since cyrius 6.6.18 a sidecar names exactly the stdlib leaves
+`distlib`'s compile-verify proves the bundle needs, and nothing
+from the producer's own `[deps] stdlib`. Everything those leaves
+need arrives through their own requires blocks. At 3.3.17:
+
+| Sidecar | Leaves |
+|---|---|
+| `dist/bote.deps` | `hashmap bayan ws_server syscalls` (4; was 32 through 3.3.16) |
+| `dist/bote-core.deps` | `hashmap bayan sigil ct` (4; was 8) |
+
+`cyrius deps` reads the sidecar and vendors those leaves. **A
+consumer that calls a stdlib family from its OWN code declares it
+in its own `[deps] stdlib`.** Through 3.3.16 bote's 32-leaf
+sidecar happened to supply most of the stdlib, which let a consumer
+lean on it. Now it does not, and the cyrius 6.6.18+ CLI prints a
+`hint:` line naming the leaf to add. A consumer that builds the
+bundle by hand, without `cyrius deps`, still mirrors bote's own
+`[deps] stdlib` list in `cyrius.cyml`, including its
 **ordering**, which is load-bearing under single-pass
 compilation.
 
@@ -89,11 +105,16 @@ Cyrius deliberately does **not** auto-resolve stdlib — that is a
 supply-chain choice, not an oversight. Two things follow, and the
 **order matters**:
 
-1. Declare every transitive stdlib module your graph reaches in your own
-   `[deps] stdlib`. For the full bote bundle plus libro/majra that means
-   adding, beyond the obvious ones, `ct`, `keccak`, `random`, `slice`,
-   `thread`, `thread_local`, `sync`, `atomic`, `result`, `sigil` — and
-   `ws_server` only if you use the WebSocket transport.
+1. **Below cyrius 6.6.19**, declare every transitive stdlib module your
+   graph reaches in your own `[deps] stdlib`: your snapshot's folds carry
+   no requires blocks, so nothing else brings them. For the full bote
+   bundle plus libro/majra that means adding, beyond the obvious ones,
+   `ct`, `keccak`, `random`, `slice`, `thread`, `thread_local`, `sync`,
+   `atomic`, `result`, `sigil` and `ws_server`. **From 6.6.19** the
+   sidecars and the folds' own requires blocks carry the closure. A 6.6.20
+   consumer of `dist/bote.cyr` that declares only `string fmt alloc vec
+   str syscalls io freelist` builds with zero undefined names (measured at
+   3.3.17). Declare what your own code calls.
 2. Run **`cyrius lib sync --full`** to provision `./lib/` from the pinned
    toolchain snapshot, and only *then* `cyrius deps`, which **overlays**
    your declared `[deps.<name>]` git deps on top of that snapshot.
@@ -243,11 +264,26 @@ stdlib leaves: its only external references are `_json_emit_escaped`
 `vec_*` and `alloc`. It is listed **last** in `[lib.core]` because
 cyrius is single-pass and it calls `_json_emit_escaped`.
 
-Stdlib footprint: `string`, `fmt`, `alloc`, `vec`, `str`,
-`tagged`, `assert`, `fnptr`, `hashmap`, `bayan`, `chrono`,
-`freelist`. No `tls` / `sandhi` / `sigil` / `ws_server` / `slice`.
+Stdlib footprint of the 12 modules: `string`, `fmt`, `alloc`,
+`vec`, `str`, `tagged`, `assert`, `fnptr`, `hashmap`, `bayan`,
+`chrono`, `freelist`. No core module calls into `tls` / `sandhi` /
+`sigil` / `ws_server` / `slice`.
 
-That "no `sigil`" is why `src/jwt.cyr` and `src/pkce.cyr` are in
+⚠ **`dist/bote-core.deps` names `sigil` and `ct` anyway (3.3.17).**
+They are libro's needs, not core's. A core consumer gets libro
+transitively through bote's `deps.libro`, whatever profile it
+selects. libro 2.10.7+ leaves its sigil needs to its thin
+`sigil-mldsa` requires block, which bote never vendors because
+`sigil` is a stdlib leaf here. So `distlib`'s verify records the two
+leaves against the core bundle. Measured with a one-`ping` core
+consumer: 2,079,184 B on 3.3.17, against 2,628,808 B on 3.3.16,
+which also compiled the whole sigil fold (through libro's old
+27-leaf sidecar). With the two leaves removed, libro's thin sigil
+would serve instead at 1,209,096 B. The bundle ships as `distlib`
+writes it. The defect is cyrius's and is filed there
+(`2026-10-15-bote-distlib-kept-fold-over-thin-profile-records-named-deps-need.md`).
+
+That "no core module calls sigil" is why `src/jwt.cyr` and `src/pkce.cyr` are in
 `[lib]` only and **not** in `[lib.core]`, even though both ship
 in the full bundle from 3.2.0: jwt needs `hmac_sha256` and pkce
 needs `sha256`. Pulling the sigil bundle into the transport-free

@@ -157,11 +157,11 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
                               thread_local, sakshi, ct, keccak, random,
                               sigil, tls, sandhi; ws_server manually
                               included by transport_ws.cyr only)
-[deps.libro]   git = "MacCracken/libro"   tag = "2.10.6"  (its deps.patra 1.15.1 equals the fold's)
-[deps.majra]   git = "MacCracken/majra"   tag = "2.9.2"
+[deps.libro]   git = "MacCracken/libro"   tag = "2.10.8"  (its deps.patra 1.15.2 equals the fold's)
+[deps.majra]   git = "MacCracken/majra"   tag = "2.9.3"
 
-  Those are the ONLY two [deps.<name>] blocks. sigil 3.13.7, sakshi 2.5.6,
-  patra 1.15.1 and bayan 1.5.11 arrive via the cyrius stdlib fold, not a git pin — the
+  Those are the ONLY two [deps.<name>] blocks. sigil 3.13.10, sakshi 2.5.7,
+  patra 1.15.2 and bayan 1.5.12 arrive via the cyrius stdlib fold, not a git pin — the
   former [deps.sigil] / [deps.sakshi] registry-lag pins were removed at
   3.3.1 (sigil's had gone stale and was holding bote behind two
   authentication bypasses).
@@ -178,7 +178,7 @@ tests/
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 53 (streamable HTTP / SSE)
-├── bote_transport_unix.tcyr   — 47 (unix socket transport + accept policy)
+├── bote_transport_unix.tcyr   — 49 (unix socket transport + accept policy + closed-peer write)
 ├── bote_web_tools.tcyr        — 27 (web_tools)
 ├── bote_ws.tcyr               — 14 (WebSocket)
 ├── bote_core_only_smoke.tcyr  — drift guard (includes only dist/bote-core.cyr)
@@ -362,9 +362,9 @@ change.
 
 | Artifact | Count | Where |
 |---|---|---|
-| Core unit tests | 424 | `tests/bote.tcyr` |
-| Module tests | 463 | `tests/bote_auth.tcyr` (38) + `bote_content.tcyr` (24) + `bote_fs_tools.tcyr` (26) + `bote_host.tcyr` (113) + `bote_jwt.tcyr` (53) + `bote_libro_tools.tcyr` (38) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (47) + `bote_web_tools.tcyr` (27) + `bote_ws.tcyr` (14) |
-| **Total assertions** | **887** | plus the `bote_core_only_smoke.tcyr` drift guard; all 887 also pass under `qemu-aarch64` (`cyrius test --aarch64`) since 3.3.11 |
+| Core unit tests | 441 | `tests/bote.tcyr` |
+| Module tests | 465 | `tests/bote_auth.tcyr` (38) + `bote_content.tcyr` (24) + `bote_fs_tools.tcyr` (26) + `bote_host.tcyr` (113) + `bote_jwt.tcyr` (53) + `bote_libro_tools.tcyr` (38) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (49) + `bote_web_tools.tcyr` (27) + `bote_ws.tcyr` (14) |
+| **Total assertions** | **906** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
 | Benchmarks | 14 | `tests/bote.bcyr` |
 | Fuzz harnesses | 4 | `fuzz/*.fcyr` |
 

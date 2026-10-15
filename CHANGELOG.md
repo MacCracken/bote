@@ -18,6 +18,136 @@ have per release.
 
 _(empty)_
 
+## [3.3.17] — 2026-10-15 · cyrius 6.6.20 + libro 2.10.8 + majra 2.9.3: the Unix transport survives a reset peer, and the sidecars are compile-verified
+
+This release moves the toolchain from 6.6.14 to 6.6.20 and takes the libro and majra tags that pin 6.6.20. Nothing
+broke on the way: all three entries, every test / bench / fuzz unit and both bundles built clean at the new pins with
+no source change. bote's own changes are one regression assertion, the dist gate learning to compare the `.deps`
+sidecars, and two `cyrius.cyml` rules retired because the toolchain no longer needs them.
+
+### Security — a Unix-socket client could kill bote by resetting the connection (inherited fix)
+
+`_unix_handle_client` writes each reply with `sock_send`. Through cyrius 6.6.15 that was a flagless `write(2)`, so a
+client that reset the connection before reading its reply raised SIGPIPE, and SIGPIPE's default action ended the
+process. The four sandhi-served transports (HTTP, bridge, Streamable HTTP, WebSocket) were not exposed: sandhi's
+server has installed a process-wide `SIG_IGN` for SIGPIPE since sandhi 1.6.6. The Unix transport runs bote's own
+accept loop and never installed one. Reproduced against the binaries: `bote unix <path>`, then a client that sends
+2,000 `tools/list` lines and closes with `SO_LINGER {1, 0}` (an RST):
+
+| Build | Runs | Outcome |
+|---|---|---|
+| 3.3.16 (cyrius 6.6.14) | 3 | died, exit 141, all three runs |
+| 3.3.17 (cyrius 6.6.20) | 3 | alive, all three runs; the next client's `ping` is answered |
+
+cyrius 6.6.16 (its CVE-74) routes every socket write through `_fd_write_nosigpipe` (`send` with `MSG_NOSIGNAL` on
+Linux), so a reset peer is now a `-EPIPE` return. Severity is limited by the socket itself: `AF_UNIX`, mode 0600, so
+the client has to be the same user or root. `tests/bote_transport_unix.tcyr` gains two assertions (47 → 49). They write
+to the closed half of a `socketpair` with `sock_send` and `sock_send_all` and expect `-EPIPE`. Getting past those
+writes is the real assertion: on the 6.6.14 toolchain the file is killed by signal 13 before it prints a verdict
+(rc 141, measured).
+
+### Changed
+
+- **cyrius 6.6.14 → 6.6.20.** The re-provisioned folds move sigil 3.13.7 → 3.13.10, sakshi 2.5.6 → 2.5.7, patra
+  1.15.1 → 1.15.2, bayan 1.5.11 → 1.5.12, sandhi 1.10.4 → 1.10.8, ganita 1.2.11 → 1.2.14 and sankoch 2.8.0 → 2.8.1.
+  The snapshot gains one leaf, `poison` (6.6.18's `freelist` includes it), so a clean resolve locks 115 entries, up
+  from 114. The lock was regenerated from scratch (`rm cyrius.lock`, `lib sync --full`, `deps`) because 6.6.20 keeps
+  a commit pin once it is recorded: a resolve over 3.3.16's lock left the 2.10.6 / 2.9.2 / 3.13.7 / 1.15.1 rows
+  beside the new ones. `deps --verify`: 115 verified, 0 failed.
+- **sandhi 1.10.7's whole-request budget now applies to the four sandhi-served transports.** bote calls
+  `sandhi_server_run` with null options. Reading sandhi's source, that takes the new default
+  `SANDHI_SERVER_DEFAULT_REQUEST_MS = 60000`: a connection must deliver a complete request within 60 s of accept, or
+  it gets `408 Request Timeout` (plaintext) and is closed. This is the Slowloris guard `idle_ms` alone could not
+  give. It was not exercised here. A client that streams a large POST body over a slow link for more than a minute
+  is the case it would cut.
+- **libro 2.10.6 → 2.10.8 and majra 2.9.2 → 2.9.3**, the releases that pin cyrius 6.6.20.
+  - libro 2.10.7 declares sigil 3.13.10 and patra 1.15.2, equal to the 6.6.20 folds, so the lock's four commit pins
+    (libro `53401e7`, majra `ddf26f1`, patra `2bc1925`, sigil `6d065da`) name the code `lib/` holds. 2.10.8 makes
+    `patrastore_*` fail cleanly before `patra_init()` and on a null handle. bote calls neither.
+  - `struct chain`, `struct entry` and `struct error` are byte-identical to 2.10.6's, so the struct-layout contract
+    holds for `src/libro_tools.cyr`.
+  - majra 2.9.3 adds a `# Requires` block to its bundle and changes comments. The pubsub surface bote uses is
+    unchanged.
+  - libro's thin sigil is still not vendored here (the four "not vendored" notes), and the build prints no
+    `duplicate fn` warning.
+- **The bundles open with a `# Requires` block, and the sidecars are what the compile-verify proves** (cyrius 6.6.18's
+  `distlib`). `dist/bote.deps` goes from 32 leaves to 4 (`hashmap bayan ws_server syscalls`) and
+  `dist/bote-core.deps` from 8 to 4 (`hashmap bayan sigil ct`). The rest arrive through those leaves' own requires
+  blocks. **Consumer impact:** a consumer that calls a stdlib family from its own code, and got that leaf only through
+  bote's old sidecar, now lists it in its own `[deps] stdlib` (cyrius `docs/development/ecosystem-migration-6.6.18.md`).
+  The cyrius 6.6.18 CLI prints a `hint:` line naming the leaf.
+- ⚠ **`dist/bote-core.deps` names `sigil` and `ct`, which no core module uses.** distlib's verify compiles the bundle
+  with bote's named deps in scope. libro calls `ct_eq_bytes_lens` and `SIG_ALG_ED25519`, and libro 2.10.7's sidecar
+  shrank to `hashmap`, leaving those needs to its thin `sigil-mldsa` requires block. In bote that file is never
+  vendored, because `sigil` is a stdlib leaf here. So the verify records the two leaves against the core bundle. The
+  cost was measured with a scratch consumer that declares `[deps.bote] modules = ["dist/bote-core.cyr"]` and answers
+  one `ping`:
+
+  | Core bundle | Sigil in the consumer's unit | Binary |
+  |---|---|---|
+  | 3.3.16, consumer on 6.6.14 | the whole fold (through libro 2.10.6's 27-leaf sidecar) | 2,628,808 B |
+  | 3.3.17 as shipped, consumer on 6.6.20 | the whole fold | 2,079,184 B |
+  | 3.3.17 with the two leaves removed by hand | libro's thin `sigil-mldsa` 3.13.10 | 1,209,096 B |
+
+  So core consumers pay nothing they did not pay at 3.3.16, but they miss the drop the thin profile would give. All
+  three builds print zero `undefined` lines and answer the `ping` correctly. The bundle ships as `distlib` writes it,
+  because CI gates `dist/` byte-for-byte. The cause is in cyrius (`cbt/deps.cyr`'s keep-the-fold branch never records
+  the fold as standing in for the dep's module) and is filed there as
+  `docs/development/issues/2026-10-15-bote-distlib-kept-fold-over-thin-profile-records-named-deps-need.md`.
+- **distlib reports six names undefined on x86_64-windows**: majra's `SYS_FUTEX` / `FUTEX_WAIT` / `FUTEX_WAKE`,
+  `sys_lstat`, `sys_fchmod` and bote's `sys_accept4`. This is a warning, the exit status is 0, and Windows is not a
+  bote target.
+- **Two `cyrius.cyml` rules retired.** Their reasons are gone at this pin. Both were verified on this tree with
+  6.6.20: the probes below left the lock entries, all four `dist/` files and the `bote` binary byte-identical.
+  - "No comments inside the array": 6.6.17 reads the manifest with a single reader that skips comments. Probe: a
+    comment containing `]`, placed mid-`stdlib`.
+  - "Write `deps.NAME` in comments, never the bracketed section header": 6.6.20 anchors distlib's header match.
+    Probe: `[deps.hashmap]`, `[deps.patra]` and `[deps.sigil]` in comment prose.
+
+  The `path` rule stays.
+- Binaries, from 3.3.16 on 6.6.14 to 3.3.17 on 6.6.20: `bote` 2,710,608 → 2,768,920 B, `bote-streamable` 2,670,984 →
+  2,733,400 B, `bote-ws` 2,675,256 → 2,737,672 B. The only build warning is `lib/sigil.cyr`'s static-array note,
+  which was already there. Capacity for `src/main.cyr`: `fn_table` 6,060 → 6,160 / 131,072 (4.7%), `identifiers`
+  193,298 → 196,472 / 8,388,608 (2.3%), `var_table` 2,737 → 2,794 / 1,048,576 (0.3%).
+- `dist/bote.cyr` and `dist/bote-core.cyr` regenerated (the requires block, the version header and the
+  `_bote_server_version()` literal).
+- CLAUDE.md, `docs/architecture/overview.md`, `DEPS-PATTERN.md`, the README and the compliance header name the new pins,
+  folds, sidecars and test counts. The README and overview test counts had stayed at 887 since 3.3.13; they now
+  read 906. The roadmap drops its done follow-up (the `lib sync` before `deps` order) and lists the cyrius filing.
+
+### Fixed — CI did not compare the `.deps` sidecars
+
+The "dist bundles are up-to-date" step in `ci.yml`, and "Verify dist bundles match committed copies" in
+`release.yml`, diffed only `dist/bote.cyr` and `dist/bote-core.cyr`. A stale or hand-edited sidecar passed both. From
+cyrius 6.6.18 the sidecar is a compile-verified consumer contract, and the bundle's requires block is generated from
+it. Both steps now diff each bundle together with its sidecar. Run verbatim under `bash -eo pipefail` on a committed
+copy of this tree, the CI step returns rc 0. With `assert` appended to a committed `dist/bote-core.deps` it returns
+rc 1 and names the file. The old step passes that plant.
+
+### Performance
+
+- **The toolchain move is a wash on 12 of 14 rows.** `tests/bote.bcyr` was built by 3.3.16 on 6.6.14 and by 3.3.17 on
+  6.6.20. The two binaries ran interleaved for 10 rounds, order alternating, at a 1-minute load of 1.5. Medians:
+
+  | Bench | 6.6.14 | 6.6.20 | Change |
+  |---|---|---|---|
+  | `dispatch_initialize` | 1.272 µs | 1.309 µs | +2.9% |
+  | `dispatch_tools_call` | 5.300 µs | 5.454 µs | +2.9% |
+  | `codec_process_message` | 7.185 µs | 7.107 µs | −1.1% |
+  | `codec_serialize_response` | 441 ns | 420 ns | −4.9% |
+  | `jsonx_get_str_flat` | 125 ns | 145 ns | **+16.0%** |
+  | `validate_compiled_simple` | 452 ns | 484 ns | **+7.1%** |
+
+  The other eight rows are within −4.3% … +3.2%. An earlier interleaved run at load 4.4 gave the same shape:
+  `jsonx_get_str_flat` +15.8%, `validate_compiled_simple` +8.9%, the rest within ±5.5%.
+- **The `jsonx_get_str_flat` move is placement, not codegen.** Symbol maps (`CYRIUS_SYMS`) of the two bench binaries
+  show `_jx_skip_ws`, `_jx_skip_string` and `_jx_find_value_pos` with identical sizes. Their bytes differ in 0, 2 and
+  15 places, consistent with call and global displacements. Each function sits 4 bytes later in its 64-byte line
+  (`_jx_skip_ws` at offset 38 → 42). This is the alignment sensitivity the README's benchmark note describes; 3.3.16
+  measured the same row −9.5% on its own toolchain move. `compiled_validate` shows the same +4 shift.
+- `benches/history.log` gains the 3.3.17 block from a separate single run at load 0.78. The README table is refreshed
+  from it.
+
 ## [3.3.16] — 2026-10-03 · cyrius 6.6.14 + libro 2.10.6: the lock names the folds, and no path lines
 
 cyrius 6.6.14, libro 2.10.6 and majra 2.9.2, with no `path` line left in `cyrius.cyml`. The

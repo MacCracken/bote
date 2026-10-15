@@ -208,12 +208,12 @@ transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ## Verification
 
-### Tests — 887 total across thirteen files (+ a core-only drift smoke)
+### Tests — 906 total across thirteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 887 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 906 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 424 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/bote.tcyr               # 441 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/bote_auth.tcyr          # 38 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 24 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 26 — fs_write / fs_read / fs_mkdir
@@ -223,7 +223,7 @@ cyrius test tests/bote_libro_tools.tcyr   # 38 — libro_tools wrappers
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals
-cyrius test tests/bote_transport_unix.tcyr # 47 — Unix transport: sockaddr, accept-error policy, backoff
+cyrius test tests/bote_transport_unix.tcyr # 49 — Unix transport: sockaddr, accept-error policy, backoff, closed-peer write
 cyrius test tests/bote_web_tools.tcyr     # 27 — web_fetch / web_search
 cyrius test tests/bote_ws.tcyr            # 14 — WebSocket config + wire-up
 cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dist/bote-core.cyr
@@ -235,34 +235,36 @@ cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dis
 cyrius bench tests/bote.bcyr
 ```
 
-Latest logged row — bote 3.3.16 on cyrius 6.6.14, single run on a quiet box
+Latest logged row — bote 3.3.17 on cyrius 6.6.20, single run on a quiet box
 (load < 1.0), `AMD Ryzen 7 5800H`. The full history, with the host conditions
 each block was taken under, is [`benches/history.log`](benches/history.log).
 
 | Hot path | Avg |
 |---|---|
-| `dispatch_initialize` | ~1.26 µs |
-| `dispatch_tools_list` | ~1.82 µs |
-| `dispatch_tools_call` | ~5.30 µs |
-| `jsonx_get_str_flat` | ~125 ns |
-| `jsonx_get_raw_nested` | ~367 ns |
-| `codec_parse_request` | ~1.31 µs |
-| `codec_serialize_response` | ~432 ns |
-| `codec_process_message` (full pipeline) | ~7.10 µs |
-| `validate_compiled_simple` | ~445 ns |
-| `validate_compiled_nested` | ~2.02 µs |
-| `schema_compile_simple` | ~2.13 µs |
-| `schema_compile_nested` | ~5.27 µs |
+| `dispatch_initialize` | ~1.33 µs |
+| `dispatch_tools_list` | ~1.91 µs |
+| `dispatch_tools_call` | ~5.43 µs |
+| `jsonx_get_str_flat` | ~150 ns |
+| `jsonx_get_raw_nested` | ~357 ns |
+| `codec_parse_request` | ~1.27 µs |
+| `codec_serialize_response` | ~412 ns |
+| `codec_process_message` (full pipeline) | ~7.07 µs |
+| `validate_compiled_simple` | ~480 ns |
+| `validate_compiled_nested` | ~1.99 µs |
+| `schema_compile_simple` | ~2.22 µs |
+| `schema_compile_nested` | ~5.26 µs |
 | `auth_bearer_check_unset` | ~8 ns |
-| `auth_bearer_check_set` | ~704 ns |
+| `auth_bearer_check_set` | ~717 ns |
 
 > A single row is an illustration, not a measurement: run-to-run swings of
 > 5–10 % on the sub-microsecond rows are host state, and a one-byte shift in
 > string data moves the alignment-sensitive ones. The measurements are the
 > **interleaved A/Bs** recorded in the CHANGELOG at each toolchain bump
-> (3.3.10 for 6.6.3 → 6.6.6: a wash). Numbers across toolchain lines are not
-> comparable — the 6.6.x emitter moved `dispatch_tools_call` and
-> `codec_process_message` well below their 6.5.x figures.
+> (3.3.10 for 6.6.3 → 6.6.6: a wash; 3.3.17 for 6.6.14 → 6.6.20, where
+> `jsonx_get_str_flat`'s +16% is identical code sitting 4 bytes later in
+> its cache line). Numbers across toolchain lines are not comparable — the
+> 6.6.x emitter moved `dispatch_tools_call` and `codec_process_message`
+> well below their 6.5.x figures.
 
 ### Fuzz
 

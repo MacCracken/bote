@@ -111,12 +111,12 @@ jobs:
       - name: Verify dist bundles match committed copies
         run: |
           fail=0
-          if ! git diff --exit-code dist/bote.cyr; then
-            echo "FAIL: dist/bote.cyr is stale. Regenerate via 'cyrius distlib' and commit before tagging."
+          if ! git diff --exit-code dist/bote.cyr dist/bote.deps; then
+            echo "FAIL: dist/bote.cyr or dist/bote.deps is stale. Regenerate via 'cyrius distlib' and commit before tagging."
             fail=1
           fi
-          if ! git diff --exit-code dist/bote-core.cyr; then
-            echo "FAIL: dist/bote-core.cyr is stale. Regenerate via 'cyrius distlib core' and commit before tagging."
+          if ! git diff --exit-code dist/bote-core.cyr dist/bote-core.deps; then
+            echo "FAIL: dist/bote-core.cyr or dist/bote-core.deps is stale. Regenerate via 'cyrius distlib core' and commit before tagging."
             fail=1
           fi
           exit $fail

@@ -276,23 +276,28 @@ jobs:
         # They existed only because a capped run was EXPECTED to fail; leaving them would keep
         # this gate fail-open against a defect that no longer has an excuse. A distlib failure
         # here is now a real one, and it exits non-zero.
+        #
+        # The .deps sidecars are diffed too (3.3.17). From cyrius 6.6.18 a sidecar is what
+        # distlib's compile-verify proves the bundle needs, and the bundle opens with a
+        # matching `# Requires` include block, so the sidecar is a consumer contract in its
+        # own right. Until 3.3.17 this step compared only the .cyr files.
         run: |
           fail=0
           cyrius distlib
           test -s dist/bote.cyr || { echo "FAIL: dist/bote.cyr not produced"; exit 1; }
-          if ! git diff --exit-code dist/bote.cyr; then
-            echo "FAIL: dist/bote.cyr is stale. Run 'cyrius distlib' and commit."
+          if ! git diff --exit-code dist/bote.cyr dist/bote.deps; then
+            echo "FAIL: dist/bote.cyr or dist/bote.deps is stale. Run 'cyrius distlib' and commit."
             fail=1
           else
-            echo "dist/bote.cyr matches src/ ($(wc -l < dist/bote.cyr) lines)"
+            echo "dist/bote.cyr matches src/ ($(wc -l < dist/bote.cyr) lines); dist/bote.deps: $(grep -vc '^#' dist/bote.deps) leaves"
           fi
           cyrius distlib core
           test -s dist/bote-core.cyr || { echo "FAIL: dist/bote-core.cyr not produced"; exit 1; }
-          if ! git diff --exit-code dist/bote-core.cyr; then
-            echo "FAIL: dist/bote-core.cyr is stale. Run 'cyrius distlib core' and commit."
+          if ! git diff --exit-code dist/bote-core.cyr dist/bote-core.deps; then
+            echo "FAIL: dist/bote-core.cyr or dist/bote-core.deps is stale. Run 'cyrius distlib core' and commit."
             fail=1
           else
-            echo "dist/bote-core.cyr matches src/ ($(wc -l < dist/bote-core.cyr) lines)"
+            echo "dist/bote-core.cyr matches src/ ($(wc -l < dist/bote-core.cyr) lines); dist/bote-core.deps: $(grep -vc '^#' dist/bote-core.deps) leaves"
           fi
           exit $fail
 

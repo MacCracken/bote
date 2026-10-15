@@ -211,6 +211,29 @@ fn main() {
     "sys_accept4 on a non-socket fd -> -ENOTSOCK (arch-correct SYS_ACCEPT4)");
     #endif
 
+    # ================================================================
+    # A reply to a peer that has gone is an error, not SIGPIPE (3.3.17)
+    # ================================================================
+    # `_unix_handle_client` writes each reply with `sock_send`. Through
+    # cyrius 6.6.15 that was a flagless write(2), so a client that reset
+    # the connection before reading killed bote with SIGPIPE (exit 141).
+    # This was reproduced against the 3.3.16 binary: 3 of 3 runs died.
+    # The four sandhi-served transports were covered by sandhi's
+    # process-wide SIG_IGN, but this accept loop is bote's own and never
+    # installed one. cyrius 6.6.16 (CVE-74) sends with MSG_NOSIGNAL.
+    # Getting past the two writes below IS the assertion: on the 6.6.14
+    # toolchain this file dies here with 141 and prints no summary.
+    #ifndef CYRIUS_TARGET_AGNOS
+    var sp[16];
+    assert_eq(sys_socketpair(1, 1, 0, &sp), 0, "socketpair(AF_UNIX, SOCK_STREAM)");
+    var sp_a = load32(&sp);
+    sys_close(load32(&sp + 4));
+    sock_send(sp_a, "x", 1);
+    assert_eq(sock_send_all(sp_a, "x", 1), 0 - 32,
+    "a write to a closed peer returns -EPIPE and the process survives");
+    sys_close(sp_a);
+    #endif
+
     return assert_summary();
 }
 

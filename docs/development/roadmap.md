@@ -124,6 +124,11 @@ Not tasks. Things that have bitten once and are checked, not assumed:
 - **`qemu-aarch64` `getrandom`.** The full suite runs under qemu since 3.3.11; through
   3.3.10 three files exited 90 there on a missing passthrough. If it regresses to that
   shape, suspect the emulator or the toolchain's `ESYSXLAT` rows before bote.
+- **`dist/bote-core.deps` should drop `sigil` and `ct`** once cyrius fixes the filing under
+  Upstream. At each pin move, regenerate and read the sidecar: if it is still
+  `hashmap bayan sigil ct`, the filing is open. If it is `hashmap bayan`, the fix has landed;
+  say so in the CHANGELOG, since core consumers then fall back to libro's thin sigil (about
+  −870 KB for a one-call consumer, measured at 3.3.17).
 - **Dependency pins move together.** libro ≥ 2.10.2 needs `O_NOFOLLOW` / `O_DIRECTORY`
   from cyrius ≥ 6.6.4; `cyrius deps` keeps the snapshot's `patra` over libro's transitive
   one and warns, which is the expected shape.
@@ -151,21 +156,16 @@ None planned. Any one of these would:
 
 ## Upstream
 
-No open cyrius blockers. bote's five historical toolchain filings are archived in the cyrius
+No open cyrius blockers. One open filing, not blocking:
+`cyrius/docs/development/issues/2026-10-15-bote-distlib-kept-fold-over-thin-profile-records-named-deps-need.md`.
+`distlib` records libro's sigil needs (`sigil`, `ct`) on `dist/bote-core.deps` because the
+resolver keeps the sigil fold over libro's thin profile and never credits the fold to libro.
+Measured cost and consumer numbers are in the 3.3.17 CHANGELOG entry.
+
+bote's five historical toolchain filings are archived in the cyrius
 repo (`docs/development/issues/archived/`) and indexed with their fixes in
 [resolved-lang-issues.md](../resolved-lang-issues.md);
 [cyrius-feedback.md](../cyrius-feedback.md) is the port-era language-issue log, all of it
 resolved by cyrius 4.4.3 and kept as a record. New bote-side issues go under
 `docs/development/issues/` and move to `issues/archive/` with a closure banner when fixed;
 toolchain issues are filed in the cyrius repo.
-
-## Moved from cyrius's roadmap (2026-10-08) — for the next cyrius pin move
-
-cyrius no longer carries this repo's follow-ups; the items below were moved here from its roadmap. Each
-applies from the cyrius version it names. Everything else that changes between this repo's pin and cyrius
-6.7.6 is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-migration.md`.
-
-- **(cyrius ≥ 6.6.17) `cyrius lib sync` order** — after a pin move run `cyrius lib sync` BEFORE `cyrius deps` /
-  `cyrius build`: a `deps` / `build` first stamps the new pin over the lock rows of files `deps` does not vendor,
-  and `lib sync` then refuses (it names `--relock`). `lib sync --full` after a pin move leaves a lock that
-  `deps --verify` accepts.
