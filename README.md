@@ -153,7 +153,7 @@ bote implements [MCP](https://modelcontextprotocol.io/) over JSON-RPC 2.0.
 | `tools/list` | Discovery | Array of tool definitions with schemas |
 | `tools/call` | Execution | Tool result or JSON-RPC error |
 | `prompts/list` / `prompts/get` | Prompts capability (when a `PromptRegistry` is wired) | Prompt metadata / generated messages |
-| `resources/list` / `resources/read` | Resources capability (when a `ResourceRegistry` is wired) | Resource metadata / contents |
+| `resources/list` / `resources/read` / `resources/templates/list` | Resources capability (when a `ResourceRegistry` is wired) | Resource metadata / contents / `{"resourceTemplates":[]}` (no URI-template registry) |
 | `completion/complete` | Completion capability | Argument completion values |
 | `ping` | Keepalive | Empty result — answered even on a dispatcher with no registries wired |
 
@@ -241,12 +241,12 @@ transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ## Verification
 
-### Tests — 998 total across fourteen files (+ a core-only drift smoke)
+### Tests — 1019 total across fourteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 998 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1019 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 452 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/bote.tcyr               # 473 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/bote_auth.tcyr          # 45 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 24 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 31 — fs_write / fs_read / fs_mkdir
@@ -269,32 +269,33 @@ cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dis
 cyrius bench tests/bote.bcyr
 ```
 
-Latest logged row — bote 3.4.0 on cyrius 6.7.9, single run (1-minute load 1.9), `AMD Ryzen 7 5800H`. The full history, with the host conditions
+Latest logged row — bote 3.4.1 on cyrius 6.7.9, single run (1-minute load 2.1), `AMD Ryzen 7 5800H`. The full history, with the host conditions
 each block was taken under, is [`benches/history.log`](benches/history.log).
 
 | Hot path | Avg |
 |---|---|
-| `dispatch_initialize` | ~1.39 µs |
-| `dispatch_tools_list` | ~1.99 µs |
-| `dispatch_tools_call` | ~5.71 µs |
-| `jsonx_get_str_flat` | ~140 ns |
-| `jsonx_get_raw_nested` | ~408 ns |
-| `codec_parse_request` | ~1.42 µs |
-| `codec_serialize_response` | ~449 ns |
-| `codec_process_message` (full pipeline) | ~7.67 µs |
-| `validate_compiled_simple` | ~497 ns |
-| `validate_compiled_nested` | ~2.20 µs |
-| `schema_compile_simple` | ~2.36 µs |
-| `schema_compile_nested` | ~5.75 µs |
+| `dispatch_initialize` | ~1.34 µs |
+| `dispatch_tools_list` | ~1.89 µs |
+| `dispatch_tools_call` (no audit / event sink) | ~1.79 µs |
+| `jsonx_get_str_flat` | ~135 ns |
+| `jsonx_get_raw_nested` | ~370 ns |
+| `codec_parse_request` | ~1.36 µs |
+| `codec_serialize_response` | ~439 ns |
+| `codec_process_message` (full pipeline) | ~3.70 µs |
+| `validate_compiled_simple` | ~480 ns |
+| `validate_compiled_nested` | ~2.13 µs |
+| `schema_compile_simple` | ~2.27 µs |
+| `schema_compile_nested` | ~5.41 µs |
 | `auth_bearer_check_unset` | ~8 ns |
-| `auth_bearer_check_set` | ~757 ns |
+| `auth_bearer_check_set` | ~737 ns |
 
 > A single row is an illustration, not a measurement: run-to-run swings of
 > 5–10 % on the sub-microsecond rows are host state, and a one-byte shift in
 > string data moves the alignment-sensitive ones. The measurements are the
 > **interleaved A/Bs** recorded in the CHANGELOG at each toolchain bump
 > (3.3.10 for 6.6.3 → 6.6.6: a wash; 3.4.0 for 6.6.20 → 6.7.9: a wash, and the
-> logging added at no measurable cost; 3.3.17 for 6.6.14 → 6.6.20, where
+> logging added at no measurable cost; 3.4.1, where an unobserved `tools/call`
+> stopped making two `clock_gettime` syscalls, 1.35 µs each on this host; 3.3.17 for 6.6.14 → 6.6.20, where
 > `jsonx_get_str_flat`'s +16% is identical code sitting 4 bytes later in
 > its cache line). Numbers across toolchain lines are not comparable — the
 > 6.6.x emitter moved `dispatch_tools_call` and `codec_process_message`

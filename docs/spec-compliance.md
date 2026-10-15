@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.4.0 (cyrius 6.7.9) | **Last Audited**: 2026-09-22 (at 3.3.13)
+> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.4.1 (cyrius 6.7.9) | **Last Audited**: 2026-09-22 (at 3.3.13)
 
 This file lists what the shipped Cyrius implementation **covers today**, including the
 gaps — a ❌ row is a defect on the released binary, a ⏳ row is planned work. Both are
@@ -46,7 +46,7 @@ legitimately batch).
 | `tools/call` with arguments + version selection | `dispatch` + `schema` | ✅ |
 | `prompts/list` + `prompts/get` (capability advertised iff a `PromptRegistry` is present) | `dispatch` + `prompts` | ✅ |
 | `resources/list` + `resources/read` (capability advertised iff a `ResourceRegistry` is present) | `dispatch` + `resources` | ✅ |
-| `resources/templates/list` (optional in the spec) | — | ❌ answers `-32601`; some clients call it whenever `resources` is advertised and read the error as a failure rather than "no templates". Roadmap — an empty list is the honest reply until a template registry exists. |
+| `resources/templates/list` (optional in the spec) | `dispatch` | ✅ (3.4.1) — answers `{"resourceTemplates":[]}` whenever resources are advertised (gated like `resources/list`; no registry → `-32601`). It answered `-32601` until 3.4.1, which some clients read as a failure rather than "no templates". bote has no URI-template registry (RFC 6570); the empty list is the honest reply, and a `cursor` is ignored because there is never a next page |
 | `resources/subscribe` / `unsubscribe` + `notifications/resources/updated`; `resources` `listChanged` | — | ⏳ not implemented and not advertised — wait on real-time push (roadmap 3.5.x) |
 | `completion/complete` (capability advertised iff a completion handler is set) | `dispatch` (`dispatcher_set_completion`) | ✅ |
 | `notifications/tools/list_changed` + `notifications/prompts/list_changed` (buffered per session, drained on the client's next streamable `GET`; `listChanged` advertised only by a transport with a drain path) | `dispatch` (`dispatcher_set_notifications`) + `transport_streamable` (`strm_notify_sink`) | ✅ streamable (polled) |

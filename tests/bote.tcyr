@@ -688,6 +688,10 @@ fn main() {
     "no resources → capabilities tools-only");
     var rs_ll0 = dispatcher_dispatch(rs_d, req_new("2", "resources/list"), 0);
     assert(resp_error_obj(rs_ll0) != 0, "resources/list without registry → error");
+    # 3.4.1: resources/templates/list is gated like its siblings — no registry, -32601.
+    var rs_tl0 = dispatcher_dispatch(rs_d, req_new("4", "resources/templates/list"), 0);
+    assert(resp_error_obj(rs_tl0) != 0, "resources/templates/list without registry → error");
+    assert_eq(rpc_err_code(resp_error_obj(rs_tl0)), 0 - 32601, "resources/templates/list without registry → -32601");
 
     # Register a resource with description + mimeType.
     dispatcher_register_resource(rs_d,
@@ -719,6 +723,26 @@ fn main() {
     var rs_nouri = dispatcher_dispatch(rs_d,
     req_with_params(req_new("3", "resources/read"), "{}"), 0);
     assert(resp_error_obj(rs_nouri) != 0, "resources/read missing uri → error");
+
+    # 3.4.1: resources/templates/list answers an empty list once resources are
+    # advertised (it was -32601, which clients read as a server failure).
+    var rs_tl = dispatcher_dispatch(rs_d, req_new("4", "resources/templates/list"), 0);
+    assert_eq(resp_error_obj(rs_tl), 0, "resources/templates/list with registry → success");
+    # A null result (the method missing) compares as "" so a failure reports
+    # instead of crashing streq.
+    var rs_tl_r = resp_result(rs_tl);
+    if (rs_tl_r == 0) { rs_tl_r = ""; }
+    assert(streq(rs_tl_r, "{\"resourceTemplates\":[]}") == 1,
+    "resources/templates/list → {\"resourceTemplates\":[]}");
+    var rs_tlc = dispatcher_dispatch(rs_d,
+    req_with_params(req_new("5", "resources/templates/list"), "{\"cursor\":\"abc\"}"), 0);
+    var rs_tlc_r = resp_result(rs_tlc);
+    if (rs_tlc_r == 0) { rs_tlc_r = ""; }
+    assert(streq(rs_tlc_r, "{\"resourceTemplates\":[]}") == 1,
+    "resources/templates/list ignores a pagination cursor (there is never a next page)");
+    var rs_tlw = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"resources/templates/list\"}", rs_d, 0);
+    assert(streq(rs_tlw, "{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"resourceTemplates\":[]}}") == 1,
+    "resources/templates/list on the wire");
 
     assert_eq(resource_registry_len(dispatcher_resources(rs_d)), 1, "one resource registered");
     assert_eq(resource_registry_contains(dispatcher_resources(rs_d), "test://doc"), 1, "registry contains doc");
@@ -1565,6 +1589,57 @@ fn main() {
     # v1.7.0: content-block tests live in tests/bote_content.tcyr
     # (splitting for the same cyrius 4.5.1 parser-cap reason).
 
+
+    # ================================================================
+    # 3.4.1 — tools/call builds the duration + event only for a live sink
+    # ================================================================
+    # Each sink is gated on its own: audit-only must still audit, events-only
+    # must still publish, and a sink whose callback is null counts as absent.
+    var sreg = tool_registry_new();
+    registry_register(sreg, tool_def_new("svc_echo", "echo", schema_new("object", 0, vec_new())));
+    registry_register(sreg, tool_def_new("svc_unhandled", "no handler", schema_new("object", 0, vec_new())));
+    var s_call = req_with_params(req_new("1", "tools/call"), "{\"name\":\"svc_echo\",\"arguments\":{}}");
+    var s_unh = req_with_params(req_new("2", "tools/call"), "{\"name\":\"svc_unhandled\",\"arguments\":{}}");
+
+    var sd_a = dispatcher_new(sreg);
+    dispatcher_handle(sd_a, "svc_echo", &h_echo);
+    dispatcher_set_audit(sd_a, audit_sink_new(&test_audit_log, 0));
+    _ev_reset(); _audit_reset();
+    assert_eq(resp_error_obj(dispatcher_dispatch(sd_a, s_call, 0)), 0, "audit-only: call succeeds");
+    assert_eq(vec_len(_audit_events), 1, "audit-only: success audited");
+    assert_eq(vec_len(_ev_topics), 0, "audit-only: nothing published");
+    dispatcher_dispatch(sd_a, s_unh, 0);
+    assert_eq(vec_len(_audit_events), 2, "audit-only: unhandled tool audited");
+    assert_eq(tool_call_event_success(vec_get(_audit_events, 1)), 0, "audit-only: unhandled success=0");
+
+    var sd_e = dispatcher_new(sreg);
+    dispatcher_handle(sd_e, "svc_echo", &h_echo);
+    dispatcher_set_events(sd_e, event_sink_new(&test_event_publish, 0));
+    _ev_reset(); _audit_reset();
+    dispatcher_dispatch(sd_e, s_call, 0);
+    dispatcher_dispatch(sd_e, s_unh, 0);
+    assert_eq(vec_len(_ev_topics), 2, "events-only: success and failure published");
+    assert(streq(vec_get(_ev_topics, 0), "bote/tool/completed") == 1, "events-only: completed topic");
+    assert(streq(vec_get(_ev_topics, 1), "bote/tool/failed") == 1, "events-only: failed topic");
+    assert_eq(vec_len(_audit_events), 0, "events-only: nothing audited");
+
+    var sd_n = dispatcher_new(sreg);
+    dispatcher_handle(sd_n, "svc_echo", &h_echo);
+    dispatcher_set_audit(sd_n, audit_sink_new(0, 0));
+    dispatcher_set_events(sd_n, event_sink_new(0, 0));
+    _ev_reset(); _audit_reset();
+    var sn_r = dispatcher_dispatch(sd_n, s_call, 0);
+    assert_eq(resp_error_obj(sn_r), 0, "null-callback sinks: call succeeds");
+    assert_eq(vec_len(_audit_events) + vec_len(_ev_topics), 0, "null-callback sinks: nothing called");
+    assert(resp_error_obj(dispatcher_dispatch(sd_n, s_unh, 0)) != 0, "null-callback sinks: unhandled tool still errors");
+
+    var sd_0 = dispatcher_new(sreg);
+    dispatcher_handle(sd_0, "svc_echo", &h_echo);
+    var s0_r = dispatcher_dispatch(sd_0, s_call, 0);
+    assert_eq(resp_error_obj(s0_r), 0, "no sinks: call succeeds");
+    assert(resp_result(s0_r) != 0, "no sinks: result present");
+    var s0_u = dispatcher_dispatch(sd_0, s_unh, 0);
+    assert_eq(rpc_err_code(resp_error_obj(s0_u)), 0 - 32601, "no sinks: unhandled tool → tool-not-found code");
 
     # ================================================================
     # 3.4.0 — one DEBUG line per request, from codec_process_message

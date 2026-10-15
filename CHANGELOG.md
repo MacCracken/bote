@@ -18,6 +18,92 @@ have per release.
 
 _(empty)_
 
+## [3.4.1] — 2026-10-15 · resources/templates/list; the "+58%" was the host's syscalls, and tools/call stops paying them
+
+The two items that sat under "next patch": `resources/templates/list`, the last ❌ in
+`docs/spec-compliance.md`, and the `dispatch_tools_call` regression that had been open since
+3.3.16. The regression turned out not to be bote's, and bote no longer pays for it. The roadmap
+is reorganised to say what each remaining 3.4.x patch carries.
+
+### Added — `resources/templates/list`
+
+- **It answers `{"resourceTemplates":[]}` whenever resources are advertised.** Until now it
+  answered `-32601`, and some clients send it whenever `resources` is in the capabilities and read
+  that error as a server failure rather than "no templates". bote has no URI-template registry
+  (RFC 6570), so the empty list is the honest reply. A pagination `cursor` is ignored, because
+  there is never a next page. The method is gated like `resources/list`: with no
+  `ResourceRegistry` it is still `-32601`, matching the capability that is not advertised.
+  Verified on the built binary over stdio.
+- `tests/bote.tcyr` +6 assertions: `-32601` without a registry, the empty list with one, a `cursor`
+  ignored, and the serialized wire line. Removing the dispatch branch fails 4 of them. Each check
+  treats a null result as `""`, so a missing method reports a failure instead of crashing
+  `streq`, which an earlier draft of the test did.
+
+### Performance — `tools/call` reads the clock only when something consumes the duration
+
+- **Where the "+58%" went.** Since 3.3.16 the roadmap carried `dispatch_tools_call` +58% and
+  `codec_process_message` +41% against the 3.3.13 row of `benches/history.log`, blamed on 3.3.14
+  (cyrius 6.6.6 → 6.6.10, libro 2.10.4). The roadmap's planned bisect could not build: 3.3.13
+  does not compile on 6.6.10 (libro 2.10.3's thin sigil against the 3.13.4 fold, the five arity
+  errors 3.3.14 fixed). The control that could build:
+  - **3.3.13 rebuilt from its tag, on cyrius 6.6.6 with libro 2.10.3, today** runs
+    `dispatch_tools_call` within 1.7% of 3.4.0 and `codec_process_message` within 2%
+    (interleaved). The 3.358 µs logged on 2026-09-22 does not reproduce with the same code on
+    today's host.
+  - Those are the only two benchmarks that make a syscall. Every `tools/call` read
+    `clock_now_ns()` twice (a raw `clock_gettime`, unchanged in `lib/chrono.cyr` across 6.6.6 →
+    6.6.10), and one costs **1,344–1,350 ns** on this host now (1M-call loop, five runs). Two of
+    them account for the whole +1.94 µs.
+  - The box took a kernel update on 2026-10-02 (7.2.7 → 7.2.8, the reboot that started its
+    current uptime). Every slow measurement, 3.3.15 onward, postdates it; 3.3.13's fast row
+    predates it. The CPU runs `spec_rstack_overflow: Mitigation: Safe RET`. The kernel step
+    itself is not proven, since that needs a reboot into the old kernel. What is proven is that
+    bote, its toolchain and libro did not regress, and that the time is two syscalls.
+- **The fix.** The duration and the `ToolCallEvent` exist only for an audit sink or an event
+  sink. With neither installed, `audit_sink_log` and `event_sink_publish` return without calling
+  anything, so `tools/call` now skips the clock reads, the event and its JSON. Each sink is gated
+  on its own (`_dsp_sink_live`: installed with a non-null callback), so an audit-only dispatcher
+  no longer builds the JSON only an event sink reads. Behaviour for every installed sink is
+  unchanged.
+- **Measured.** 3.4.0 against this tree, interleaved, 12 rounds, at a 1-minute load of 4–7 with
+  other sessions busy:
+
+  | Bench | 3.4.0 | 3.4.1 | Change |
+  |---|---|---|---|
+  | `dispatch_tools_call` | 5.636 µs | 1.853 µs | **−67.1%** (ranges 5,578–5,776 vs 1,804–1,913 ns) |
+  | `codec_process_message` | 7.542 µs | 3.838 µs | **−49.1%** |
+
+  The other twelve rows are within −1.9% … +3.4%, and they run none of the changed code. Removing
+  only the two clock reads, in a scratch copy, gives 2.506 µs. The remaining 0.65 µs is the event
+  object and its JSON, now also skipped. `dispatch_tools_call` is now below 3.3.13's logged
+  3.358 µs.
+- Where the binaries run: `bote` (stdio / http / unix / bridge) installs no audit or event sink,
+  so every `tools/call` there skips both syscalls. `bote-streamable` installs the notification
+  event sink, so it keeps the timing, as it should.
+- `tests/bote.tcyr` +15 assertions cover each sink on its own:
+  - audit-only: still audits, publishes nothing;
+  - events-only: publishes completed and failed, audits nothing;
+  - null-callback sinks: count as absent;
+  - no sinks: results and error codes unchanged.
+
+  Gating the audit call on the events flag fails 2 of them.
+
+### Changed
+
+- **Roadmap.** Every item was checked against the code:
+  - "Next patch" is now 3.4.2, the binary reconsolidation.
+  - The 3.4.x table assigns each remaining item to a patch: 3.4.3 the Unix accept deadline and
+    send-side timeouts, 3.4.4 DNS-aware SSRF, 3.4.5 the conformance suite.
+  - **DNS-aware SSRF moves from 3.6.x to 3.4.4.** Its "upstream seam not yet filed" was stale:
+    bote filed it at 3.3.7 and sandhi 1.9.14 shipped `sandhi_client_set_resolver`, which is in
+    `lib/` today.
+  - The sandhi errno filing moves from Housekeeping to Upstream, as filed.
+  - The watch list gains the syscall-cost note above.
+- `docs/spec-compliance.md`: `resources/templates/list` is ✅. No ❌ row remains.
+- README and `docs/architecture/overview.md` list the method.
+- `dist/bote.cyr` and `dist/bote-core.cyr` regenerated. `benches/history.log` gains the 3.4.1
+  block (load 2.1); the README table is refreshed from it.
+
 ## [3.4.0] — 2026-10-15 · bote logs through sakshi; cyrius 6.7.9, libro 2.11.0, majra 2.12.0
 
 bote had no logging. sakshi was in `[deps] stdlib` only because libro links it, and bote's own
