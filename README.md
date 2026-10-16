@@ -95,6 +95,18 @@ BOTE_BEARER_TOKENS="tok-a,tok-b" ./build/bote http 8390
 
 Stdio + Unix sockets are local-only and skip the bearer check.
 
+### Connection deadlines
+
+Every transport serves one client at a time, so each connection gets a **send deadline**:
+a client that stops reading for `BOTE_SEND_TIMEOUT_MS` (default 30000) is dropped instead of
+wedging the server. The Unix transport's receive deadline, `BOTE_UNIX_IDLE_MS`, is **off** by
+default, because a Unix client may legitimately keep its connection quiet between requests; set it
+to reap idle peers. Both take milliseconds, and `0` disables.
+
+```sh
+BOTE_SEND_TIMEOUT_MS=10000 BOTE_UNIX_IDLE_MS=60000 ./build/bote unix /run/bote.sock
+```
+
 ### Logging
 
 bote logs through [sakshi](https://github.com/MacCracken/sakshi) to **stderr** — never stdout,
@@ -244,9 +256,9 @@ transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ## Verification
 
-### Tests — 1019 total across fourteen files (+ a core-only drift smoke)
+### Tests — 1045 total across fourteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1019 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1045 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 473 — core protocol/dispatch/codec/schema/session/transports
@@ -260,9 +272,9 @@ cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line 
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals
-cyrius test tests/bote_transport_unix.tcyr # 49 — Unix transport: sockaddr, accept-error policy, backoff, closed-peer write
+cyrius test tests/bote_transport_unix.tcyr # 68 — Unix transport: sockaddr, accept-error policy, backoff, deadlines, closed-peer write
 cyrius test tests/bote_web_tools.tcyr     # 37 — web_fetch / web_search + the SSRF guard
-cyrius test tests/bote_ws.tcyr            # 14 — WebSocket config + wire-up
+cyrius test tests/bote_ws.tcyr            # 21 — WebSocket config + wire-up + the send-deadline drop
 cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dist/bote-core.cyr
 ```
 

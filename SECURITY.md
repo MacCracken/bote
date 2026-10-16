@@ -15,7 +15,13 @@ The primary security-relevant surface areas are:
 - **Transport layer** — HTTP, Streamable HTTP/SSE, WebSocket, Unix socket, and
   bridge transports accept network connections. Opt-in auth validators (bearer,
   allowlist, JWT HS256, PKCE) are built in; TLS is expected to be handled by
-  the deployment environment.
+  the deployment environment. Each transport serves one connection at a time;
+  since 3.4.3 every connection carries a send deadline (`BOTE_SEND_TIMEOUT_MS`,
+  default 30 s), so a client that stops reading is dropped instead of wedging
+  the server for everyone. Read deadlines: sandhi's idle and whole-request
+  budgets on the HTTP family, opt-in `ws_config_with_idle_ms` on an upgraded
+  WebSocket, opt-in `BOTE_UNIX_IDLE_MS` on the Unix transport — a quiet client
+  holds those two single-threaded servers unless the operator opts in.
 - **Tool dispatch** — handler functions are user-provided. Arguments are
   validated against the registered JSON Schema before invocation; validation
   failures are returned as error responses, not propagated.

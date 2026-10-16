@@ -223,6 +223,8 @@ fn _bridge_send_health(cfd, allowed_origins, request_origin) {
 # bridge_config_with_dispatcher below). We pass the config as ctx.
 
 fn _bridge_handle(config, cfd, buf, n) {
+    # 3.4.3: bound every write to this client (src/conn.cyr).
+    bote_conn_send_deadline(cfd);
     var allowed_origins = bridge_config_origins(config);
     var dispatcher      = bridge_config_dispatcher(config);
 

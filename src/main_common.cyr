@@ -182,6 +182,51 @@ fn bote_main_port(arg, default_port) {
     return default_port;
 }
 
+# A millisecond count from the environment variable `name`: the value when
+# it is all digits (0 included, which disables the deadline), `cur` when the
+# variable is unset, and `cur` with a WARN when it is anything else.
+# _parse_uint is not used because it reads "0" and garbage alike as 0.
+fn _bote_env_ms(name, cur) {
+    var v = getenv(name);
+    if (v == 0) { return cur; }
+    var n = 0;
+    var i = 0;
+    var ok = 1;
+    if (load8(v) == 0) { ok = 0; }
+    while (load8(v + i) != 0) {
+        var c = load8(v + i);
+        if (c < 48 || c > 57 || i >= 9) { ok = 0; }
+        else { n = n * 10 + (c - 48); }
+        i = i + 1;
+    }
+    if (ok == 0) {
+        var ln[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&ln, SK_WARN, "deadline variable not a millisecond count; keeping the default");
+        bote_log_str(&ln, "var", name);
+        bote_log_str(&ln, "value", v);
+        bote_log_int(&ln, "ms", cur);
+        bote_log_emit(&ln);
+        return cur;
+    }
+    return n;
+}
+
+# Connection deadlines from the environment (src/conn.cyr): BOTE_SEND_TIMEOUT_MS
+# (default 30000) and BOTE_UNIX_IDLE_MS (default 0, none). Logged at INFO when
+# either differs from its default.
+fn bote_main_conn_from_env() {
+    BOTE_SEND_TIMEOUT_MS = _bote_env_ms("BOTE_SEND_TIMEOUT_MS", BOTE_SEND_TIMEOUT_MS);
+    BOTE_UNIX_IDLE_MS = _bote_env_ms("BOTE_UNIX_IDLE_MS", BOTE_UNIX_IDLE_MS);
+    if (BOTE_SEND_TIMEOUT_MS != 30000 || BOTE_UNIX_IDLE_MS != 0) {
+        var ln[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&ln, SK_INFO, "connection deadlines");
+        bote_log_int(&ln, "send_timeout_ms", BOTE_SEND_TIMEOUT_MS);
+        bote_log_int(&ln, "unix_idle_ms", BOTE_UNIX_IDLE_MS);
+        bote_log_emit(&ln);
+    }
+    return 0;
+}
+
 # The startup line. `port` 0 and `path` 0 are omitted.
 fn bote_main_log_start(transport, port, path, auth_on) {
     var ln[BOTE_LOG_LINE_BYTES];

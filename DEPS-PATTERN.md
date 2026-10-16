@@ -33,7 +33,7 @@ bote ships **two** distribution artifacts:
 
 | Artifact              | Profile  | Modules | Use when                                     |
 |-----------------------|----------|---------|----------------------------------------------|
-| `dist/bote.cyr`       | default  | 32      | Consumer needs bote's full transport surface |
+| `dist/bote.cyr`       | default  | 33      | Consumer needs bote's full transport surface |
 | `dist/bote-core.cyr`  | `core`   | 13      | Consumer wraps Dispatcher / Registry / Prompts / Resources / Content / Audit but supplies its own transport |
 
 - Every tagged release must commit **both** artifacts.

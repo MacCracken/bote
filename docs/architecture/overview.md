@@ -147,6 +147,8 @@ src/
 ├── libro_tools.cyr         — Five built-in MCP tools over a libro chain
 ├── fs_tools.cyr            — fs_write / fs_read / fs_mkdir MCP tools (BOTE_FS_ROOT-confined)
 ├── web_tools.cyr           — web_fetch / web_search MCP tools (sandhi HTTP client)
+├── conn.cyr                — per-connection deadlines (3.4.3): send timeout on
+│                             every connection, opt-in Unix idle timeout
 ├── transport_stdio.cyr     — line-oriented stdin/stdout loop
 ├── transport_http.cyr      — HTTP/1.1 server + middleware
 ├── transport_unix.cyr      — AF_UNIX line-oriented loop
@@ -186,9 +188,9 @@ tests/
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 53 (streamable HTTP / SSE)
-├── bote_transport_unix.tcyr   — 49 (unix socket transport + accept policy + closed-peer write)
+├── bote_transport_unix.tcyr   — 68 (unix socket transport + accept policy + deadlines + closed-peer write)
 ├── bote_web_tools.tcyr        — 37 (web_tools; SSRF guard on web_fetch)
-├── bote_ws.tcyr               — 14 (WebSocket)
+├── bote_ws.tcyr               — 21 (WebSocket; send-deadline drop)
 ├── bote_core_only_smoke.tcyr  — drift guard (includes only dist/bote-core.cyr)
 └── bote.bcyr                  — 14 hot-path benchmarks
 
@@ -392,8 +394,8 @@ standing rules are in CLAUDE.md under Key Principles.
 | Artifact | Count | Where |
 |---|---|---|
 | Core unit tests | 473 | `tests/bote.tcyr` |
-| Module tests | 546 | `tests/bote_auth.tcyr` (45) + `bote_content.tcyr` (24) + `bote_fs_tools.tcyr` (31) + `bote_host.tcyr` (122) + `bote_jwt.tcyr` (53) + `bote_libro_tools.tcyr` (38) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (49) + `bote_web_tools.tcyr` (37) + `bote_ws.tcyr` (14) |
-| **Total assertions** | **1019** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
+| Module tests | 572 | `tests/bote_auth.tcyr` (45) + `bote_content.tcyr` (24) + `bote_fs_tools.tcyr` (31) + `bote_host.tcyr` (122) + `bote_jwt.tcyr` (53) + `bote_libro_tools.tcyr` (38) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (68) + `bote_web_tools.tcyr` (37) + `bote_ws.tcyr` (21) |
+| **Total assertions** | **1045** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
 | Benchmarks | 14 | `tests/bote.bcyr` |
 | Fuzz harnesses | 4 | `fuzz/*.fcyr` |
 

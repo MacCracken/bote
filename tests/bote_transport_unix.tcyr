@@ -40,7 +40,30 @@ include "src/audit.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
+include "src/conn.cyr"
 include "src/transport_unix.cyr"
+
+# ---- sakshi capture (3.4.3 drop-line assertions) ---------------------------
+var _ux_log = 0;
+var _ux_level = 0 - 1;
+fn _ux_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 511) { n = 511; }
+    memcpy(_ux_log, msg, n);
+    store8(_ux_log + n, 0);
+    _ux_level = level;
+    return 0;
+}
+fn _ux_has(hay, needle) {
+    var i = 0;
+    while (load8(hay + i) != 0) {
+        var j = 0;
+        while (load8(needle + j) != 0 && load8(hay + i + j) == load8(needle + j)) { j = j + 1; }
+        if (load8(needle + j) == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
 
 fn main() {
     alloc_init();
@@ -233,6 +256,98 @@ fn main() {
     assert_eq(sock_send_all(sp_a, "x", 1), 0 - 32,
     "a write to a closed peer returns -EPIPE and the process survives");
     sys_close(sp_a);
+    #endif
+
+
+    # ================================================================
+    # Connection deadlines (3.4.3, src/conn.cyr)
+    # ================================================================
+    # The transport serves one client at a time, so a client that floods
+    # requests and never reads the replies used to park it in write(2) for
+    # good. Reproduced live on 3.4.2: a second client's `ping` went
+    # unanswered. Every client now gets a send deadline; a write it cuts
+    # short drops that client. If the drop regresses, the handler test below
+    # blocks and the unit fails at the runner's timeout instead of passing.
+    #
+    # The sockets here shrink SO_SNDBUF (SOL_SOCKET 1, SO_SNDBUF 7: Linux on
+    # both arches). AF_UNIX charges in-flight bytes to the SENDER's buffer,
+    # so a small send buffer on the server end is what makes its replies
+    # back up. Not on agnos: no AF_UNIX there.
+    #ifndef CYRIUS_TARGET_AGNOS
+    var small[8];
+    store32(&small, 4096);
+
+    var dp[16];
+    assert_eq(sys_socketpair(1, 1, 0, &dp), 0, "deadline: socketpair");
+    var da = load32(&dp);
+    var db = load32(&dp + 4);
+    sys_setsockopt(da, 1, 7, &small, 4);
+    BOTE_SEND_TIMEOUT_MS = 200;
+    assert_eq(bote_conn_send_deadline(da), 0, "send deadline applies");
+    var big = alloc(1048576);
+    memset(big, 120, 1048576);
+    var ds0 = clock_now_ms();
+    var dsr = sock_send_all(da, big, 1048576);
+    var dsel = clock_now_ms() - ds0;
+    assert_eq(dsr, 0 - 11, "a write to a peer that never reads fails with EAGAIN under the deadline");
+    assert(dsel >= 150, "the send deadline waits roughly its 200 ms (>= 150 ms)");
+    assert(dsel < 5000, "the send deadline returns promptly (< 5 s)");
+    sys_close(da);
+    sys_close(db);
+
+    BOTE_SEND_TIMEOUT_MS = 0;
+    assert_eq(bote_conn_send_deadline(2), 0, "BOTE_SEND_TIMEOUT_MS 0 disables: the helper leaves the fd alone");
+
+    var ip[16];
+    assert_eq(sys_socketpair(1, 1, 0, &ip), 0, "idle: socketpair");
+    var ia = load32(&ip);
+    assert_eq(bote_conn_unix_idle_deadline(ia), 0, "BOTE_UNIX_IDLE_MS defaults to 0: no receive deadline set");
+    BOTE_UNIX_IDLE_MS = 200;
+    assert_eq(bote_conn_unix_idle_deadline(ia), 0, "idle deadline applies when configured");
+    var ibuf = alloc(64);
+    var is0 = clock_now_ms();
+    var it, iv = sock_recv(ia, ibuf, 64);
+    var isel = clock_now_ms() - is0;
+    assert_eq(is_err_result(it), 1, "a silent peer's read fails under the idle deadline");
+    assert_eq(iv, 11, "the idle deadline reports EAGAIN");
+    assert(isel >= 150 && isel < 5000, "the idle deadline waits roughly its 200 ms");
+    sys_close(ia);
+    sys_close(load32(&ip + 4));
+    BOTE_UNIX_IDLE_MS = 0;
+
+    # The handler itself: 2,000 pings from a peer that reads nothing back.
+    var fp[16];
+    assert_eq(sys_socketpair(1, 1, 0, &fp), 0, "flood: socketpair");
+    var fa = load32(&fp);
+    var fb = load32(&fp + 4);
+    sys_setsockopt(fa, 1, 7, &small, 4);
+    BOTE_SEND_TIMEOUT_MS = 200;
+    bote_conn_send_deadline(fa);
+    var line = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
+    var ll = strlen(line);
+    var flood = alloc(ll * 2000);
+    var fi = 0;
+    while (fi < 2000) { memcpy(flood + fi * ll, line, ll); fi = fi + 1; }
+    assert_eq(sock_send_all(fb, flood, ll * 2000), ll * 2000, "flood: 2,000 requests queued for the server");
+    _ux_log = alloc(512);
+    sakshi_set_emit_hook(&_ux_hook);
+    sakshi_set_level(SK_DEBUG);
+    var fdisp = dispatcher_new(tool_registry_new());
+    var fs0 = clock_now_ms();
+    _unix_handle_client(fa, fdisp);
+    var fsel = clock_now_ms() - fs0;
+    sakshi_clear_emit_hook();
+    sakshi_set_level(SK_INFO);
+    assert(fsel < 10000, "_unix_handle_client returns on a peer that never reads (it used to block for good)");
+    assert(_ux_has(_ux_log, "client dropped") == 1, "the drop is logged");
+    assert(_ux_has(_ux_log, "transport=unix errno=11") == 1, "the drop line names the transport and EAGAIN");
+    assert_eq(_ux_level, SK_WARN, "the drop is a WARN");
+    var got = alloc(4096);
+    var gt, gv = sock_recv(fb, got, 4096);
+    assert(gv > 0 && _ux_has(got, "\"result\":{}") == 1, "replies were written before the peer was dropped");
+    sys_close(fa);
+    sys_close(fb);
+    BOTE_SEND_TIMEOUT_MS = 30000;
     #endif
 
     return assert_summary();

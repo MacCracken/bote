@@ -1,0 +1,74 @@
+# bote::conn — per-connection socket deadlines for the transports (3.4.3).
+#
+# Every bote transport serves one connection at a time: the Unix transport
+# runs its own accept loop, and the HTTP-family ones run inside sandhi's
+# single-threaded `sandhi_server_run`. A connection that blocks the server
+# therefore blocks every other client too.
+#
+# ## Send: on by default
+#
+# A blocking write parks once the kernel send buffer and the peer's receive
+# window are both full, which happens only when the peer has stopped reading.
+# Without a deadline, a client that floods requests and never reads the
+# replies wedges the server for good. That was measured on 3.4.2 against both
+# the Unix and the WebSocket transport: a healthy client's `ping` went
+# unanswered. No healthy client leaves its receive window full for
+# BOTE_SEND_TIMEOUT_MS, so a send deadline only ever drops a peer that is
+# already broken. Each transport applies it to every connection it serves,
+# and drops the connection when a write fails.
+#
+# ## Receive on Unix clients: off by default
+#
+# The Unix transport is line-oriented and persistent: an MCP client may keep
+# its connection open and quiet between requests, exactly as a WebSocket
+# client may. A default receive deadline would drop those healthy clients,
+# which is the defect 3.3.7 fixed for WebSocket (`ws_config_with_idle_ms`,
+# default off). So BOTE_UNIX_IDLE_MS defaults to 0, no deadline. An operator
+# who prefers to reap quiet peers, so that one idle client cannot hold the
+# single-threaded server, sets it. The HTTP-family transports keep sandhi's
+# own read deadlines (a 30 s idle budget and a 60 s whole-request budget per
+# connection), and WebSocket keeps `ws_config_with_idle_ms`.
+#
+# ## Configuration
+#
+# Both are plain globals. An embedder assigns them before starting a
+# transport; the binaries read BOTE_SEND_TIMEOUT_MS / BOTE_UNIX_IDLE_MS from
+# the environment (src/main_common.cyr). Milliseconds; 0 disables. On agnos
+# the stdlib records the deadline in its syscall peer instead of a socket
+# option, and a 0 there means the peer's 30 s default, not "never".
+
+var BOTE_SEND_TIMEOUT_MS = 30000;
+var BOTE_UNIX_IDLE_MS = 0;
+
+# Apply `ms` as fd's send (`send` = 1) or receive (`send` = 0) deadline.
+# ms <= 0 leaves the socket as it is. Returns 0 or the stdlib's -errno.
+fn _bote_conn_deadline(fd, ms, send) {
+    if (ms <= 0) { return 0; }
+    var secs = ms / 1000;
+    var usecs = (ms - secs * 1000) * 1000;
+    if (send == 1) { return sock_set_send_timeout(fd, secs, usecs); }
+    return sock_set_recv_timeout(fd, secs, usecs);
+}
+
+# Give a connection the send deadline every transport applies.
+fn bote_conn_send_deadline(fd) {
+    return _bote_conn_deadline(fd, BOTE_SEND_TIMEOUT_MS, 1);
+}
+
+# Give a Unix-transport client its receive deadline, if one is configured.
+fn bote_conn_unix_idle_deadline(fd) {
+    return _bote_conn_deadline(fd, BOTE_UNIX_IDLE_MS, 0);
+}
+
+# One WARN line for a peer dropped because a write to it failed: with the
+# send deadline in place, that means it stopped reading for
+# BOTE_SEND_TIMEOUT_MS. `err` is the stdlib's negative errno.
+fn bote_conn_log_send_drop(transport, err) {
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_WARN, "client dropped: a write to it failed (stopped reading?)");
+    bote_log_str(&ln, "transport", transport);
+    bote_log_int(&ln, "errno", 0 - err);
+    bote_log_int(&ln, "send_timeout_ms", BOTE_SEND_TIMEOUT_MS);
+    bote_log_emit(&ln);
+    return 0;
+}

@@ -49,7 +49,44 @@ include "src/schema.cyr"
 include "src/stream.cyr"
 include "src/session.cyr"
 include "src/auth.cyr"
+include "src/conn.cyr"
 include "src/transport_ws.cyr"
+
+# ---- 3.4.3 send-deadline helpers --------------------------------------------
+var _wx_log = 0;
+var _wx_level = 0 - 1;
+fn _wx_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 511) { n = 511; }
+    memcpy(_wx_log, msg, n);
+    store8(_wx_log + n, 0);
+    _wx_level = level;
+    return 0;
+}
+fn _wx_has(hay, needle) {
+    var i = 0;
+    while (load8(hay + i) != 0) {
+        var j = 0;
+        while (load8(needle + j) != 0 && load8(hay + i + j) == load8(needle + j)) { j = j + 1; }
+        if (load8(needle + j) == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+# A masked client TEXT frame (RFC 6455 §5.2; payload under 126 bytes) at
+# `dst`. Returns its length.
+fn _wx_client_frame(dst, payload) {
+    var n = strlen(payload);
+    store8(dst, 0x81);
+    store8(dst + 1, 0x80 | n);
+    store8(dst + 2, 0x11); store8(dst + 3, 0x22); store8(dst + 4, 0x33); store8(dst + 5, 0x44);
+    var i = 0;
+    while (i < n) {
+        store8(dst + 6 + i, load8(payload + i) ^ load8(dst + 2 + (i & 3)));
+        i = i + 1;
+    }
+    return 6 + n;
+}
 
 fn main() {
     alloc_init();
@@ -99,6 +136,53 @@ fn main() {
     var wdisp = dispatcher_new(tool_registry_new());
     store64(wcfg + 40, wdisp);
     assert_eq(ws_config_dispatcher(wcfg), wdisp, "wcfg dispatcher wired");
+
+
+    # ---------------- 3.4.3: a peer that never reads is dropped ----------------
+    # Reproduced live on 3.4.2: a WebSocket client that floods requests and
+    # reads nothing parked the single-threaded server in write(2) for good,
+    # and a second client's request went unanswered. The handler now applies
+    # the send deadline (src/conn.cyr) and returns when a frame write fails.
+    # If that regresses, this call blocks and the unit fails at the runner's
+    # timeout. AF_UNIX charges in-flight bytes to the sender, so the server
+    # end's SO_SNDBUF (SOL_SOCKET 1, SO_SNDBUF 7, Linux) is shrunk.
+    #ifndef CYRIUS_TARGET_AGNOS
+    var xp[16];
+    assert_eq(sys_socketpair(1, 1, 0, &xp), 0, "ws flood: socketpair");
+    var xa = load32(&xp);
+    var xb = load32(&xp + 4);
+    var xsmall[8];
+    store32(&xsmall, 4096);
+    sys_setsockopt(xa, 1, 7, &xsmall, 4);
+    var xcfg = ws_config_new("/mcp", 0x0100007F, 8393);
+    store64(xcfg + 40, dispatcher_new(tool_registry_new()));
+    var xframe = alloc(128);
+    var xfl = _wx_client_frame(xframe, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
+    var xflood = alloc(xfl * 1500);
+    var xi = 0;
+    while (xi < 1500) { memcpy(xflood + xi * xfl, xframe, xfl); xi = xi + 1; }
+    assert_eq(sock_send_all(xb, xflood, xfl * 1500), xfl * 1500, "ws flood: 1,500 frames queued");
+    var xreq = "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    _wx_log = alloc(512);
+    sakshi_set_emit_hook(&_wx_hook);
+    sakshi_set_level(SK_DEBUG);
+    BOTE_SEND_TIMEOUT_MS = 200;
+    var xs0 = clock_now_ms();
+    _bote_ws_handler(xcfg, xa, xreq, strlen(xreq));
+    var xsel = clock_now_ms() - xs0;
+    BOTE_SEND_TIMEOUT_MS = 30000;
+    sakshi_clear_emit_hook();
+    sakshi_set_level(SK_INFO);
+    assert(xsel < 10000, "_bote_ws_handler returns on a peer that never reads (it used to block for good)");
+    assert(_wx_has(_wx_log, "client dropped") == 1, "the ws drop is logged");
+    assert(_wx_has(_wx_log, "transport=ws errno=11") == 1, "the ws drop line names the transport and EAGAIN");
+    assert_eq(_wx_level, SK_WARN, "the ws drop is a WARN");
+    var xgot = alloc(4096);
+    var xgt, xgv = sock_recv(xb, xgot, 4096);
+    assert(xgv > 0 && _wx_has(xgot, "101 Switching Protocols") == 1, "the handshake completed before the flood was dropped");
+    sys_close(xa);
+    sys_close(xb);
+    #endif
 
     return assert_summary();
 }

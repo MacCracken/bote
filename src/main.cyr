@@ -70,6 +70,8 @@ include "src/auth.cyr"
 # pulling the whole sigil bundle into the transport-free profile.
 include "src/jwt.cyr"
 include "src/pkce.cyr"
+# conn.cyr — per-connection send / idle deadlines every transport applies (3.4.3).
+include "src/conn.cyr"
 include "src/transport_stdio.cyr"
 include "src/transport_http.cyr"
 include "src/transport_unix.cyr"
@@ -101,6 +103,8 @@ fn main() {
     # BOTE_LOG / BOTE_LOG_FILE -> sakshi (3.4.0). Lines go to stderr, never
     # stdout, which is the JSON-RPC wire on the stdio transport.
     bote_main_log_init();
+    # BOTE_SEND_TIMEOUT_MS / BOTE_UNIX_IDLE_MS -> src/conn.cyr (3.4.3).
+    bote_main_conn_from_env();
 
     # Mode selection (src/main_common.cyr bote_main_mode):
     #   bote                       stdio (default)

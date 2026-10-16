@@ -17,8 +17,28 @@ fn _unix_sockaddr(addr_buf, path) {
     return 2 + plen + 1;
 }
 
+# Write one reply line: `resp` and its newline, whole. 0, or the stdlib's
+# -errno when the write failed, in which case the connection is unusable and
+# is dropped (logged once here).
+#
+# 3.4.3: was two bare `sock_send` calls whose results were ignored, and a
+# peer that stopped reading parked the transport in write(2) forever. Every
+# client now carries a send deadline (src/conn.cyr); a write it cuts short
+# lands here and drops the peer. `sock_send_all` finishes the line or reports
+# why not, where a bare `sock_send` could leave half a line on the wire.
+fn _unix_reply(cfd, resp) {
+    var r = sock_send_all(cfd, resp, strlen(resp));
+    if (r >= 0) { r = sock_send_all(cfd, "\n", 1); }
+    if (r < 0) {
+        bote_conn_log_send_drop("unix", r);
+        return r;
+    }
+    return 0;
+}
+
 # Process complete (newline-terminated) lines in the per-connection buffer.
-# Returns 1 if any was processed.
+# Returns 1 if any was processed, 0 if none, and -1 when a reply could not be
+# written: the caller then drops the connection.
 fn _unix_process_lines(cfd, dispatcher, buf, blen_ptr) {
     var blen = load64(blen_ptr);
     var processed = 0;
@@ -31,8 +51,7 @@ fn _unix_process_lines(cfd, dispatcher, buf, blen_ptr) {
             if (line_len > 0) {
                 var resp = codec_process_message(buf + line_start, dispatcher, 0);
                 if (resp != 0) {
-                    sock_send(cfd, resp, strlen(resp));
-                    sock_send(cfd, "\n", 1);
+                    if (_unix_reply(cfd, resp) < 0) { return 0 - 1; }
                 }
                 processed = 1;
             }
@@ -152,22 +171,32 @@ fn _unix_handle_client(cfd, dispatcher) {
             space = UNIX_BUF_SIZE;
         }
         var n_t, n_v = sock_recv(cfd, buf + blen, space);
-        if (is_err_result(n_t) == 1) { return 0; }
+        if (is_err_result(n_t) == 1) {
+            # EAGAIN is the opt-in idle deadline (BOTE_UNIX_IDLE_MS) firing;
+            # anything else is the peer going away. Either way, close.
+            var rl[BOTE_LOG_LINE_BYTES];
+            if (n_v == BOTE_ERRNO_EAGAIN) {
+                bote_log_line(&rl, SK_DEBUG, "unix client idle; closed");
+                bote_log_int(&rl, "idle_ms", BOTE_UNIX_IDLE_MS);
+            } else {
+                bote_log_line(&rl, SK_DEBUG, "unix client read failed; closed");
+                bote_log_int(&rl, "errno", n_v);
+            }
+            bote_log_emit(&rl);
+            return 0;
+        }
         var n = n_v;
         if (n <= 0) {
             # EOF — flush any final unterminated line.
             if (blen > 0) {
                 store8(buf + blen, 0);
                 var resp = codec_process_message(buf, dispatcher, 0);
-                if (resp != 0) {
-                    sock_send(cfd, resp, strlen(resp));
-                    sock_send(cfd, "\n", 1);
-                }
+                if (resp != 0) { _unix_reply(cfd, resp); }
             }
             return 0;
         }
         store64(blen_slot, blen + n);
-        _unix_process_lines(cfd, dispatcher, buf, blen_slot);
+        if (_unix_process_lines(cfd, dispatcher, buf, blen_slot) < 0) { return 0; }
     }
     return 0;
 }
@@ -278,6 +307,11 @@ fn transport_unix_run(dispatcher, path) {
             }
             backoff_ms = 0;
             consecutive = 0;
+            # 3.4.3: a send deadline on every client, and the idle deadline
+            # when an operator configured one (src/conn.cyr explains why the
+            # first is on by default and the second is not).
+            bote_conn_send_deadline(cfd);
+            bote_conn_unix_idle_deadline(cfd);
             _unix_handle_client(cfd, dispatcher);
             sys_close(cfd);
         } else {

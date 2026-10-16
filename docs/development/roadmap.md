@@ -29,12 +29,11 @@ subprotocol / compression negotiation (→ 3.6.x, needs an upstream seam).
 
 ---
 
-## Next patch — 3.4.3
+## Next patch — 3.4.4
 
 | Item | Notes | Effort |
 |---|---|---|
-| **`transport_unix` accept-loop deadline.** | The one accept loop bote owns; its listen fd is never made non-blocking and carries no `SO_RCVTIMEO` (the file's own comment says so). Low severity — `AF_UNIX`, local-only, mode 0600. | Small |
-| **Send-side timeouts.** | `sandhi_server_run_opts` applies only `SO_RCVTIMEO` (plus, since sandhi 1.10.7, a whole-request budget on the *read* side); sandhi's server options carry no send timeout, and bote never calls `sock_set_send_timeout`, so a stalled *send* is unguarded. bote-side: each HTTP-family handler owns its `cfd` and can set `SO_SNDTIMEO` before it writes. Low severity. | Small |
+| **DNS-aware SSRF for `web_fetch`.** | The guard (applied since 3.4.0) classifies IP literals and a hostname blocklist only, so `127.0.0.1.nip.io` or any name resolving to a private address gets through. The upstream seam is **already shipped**: bote filed it at 3.3.7 (sandhi `docs/development/issues/archive/2026-08-23-bote-ssrf-needs-preresolved-client-connect.md`) and sandhi 1.9.14 added `sandhi_client_set_resolver(lookup_fn, ctx)` — the client asks the hook for the address it will connect to, including on redirect hops, so classifying there leaves no rebinding window. bote-side: install a hook that resolves (sandhi's own resolver), classifies the address with the existing IPv4 / IPv6 classifiers, and refuses. | Medium |
 
 ## 3.4.x — the rest of the minor, one bite per patch
 
@@ -43,7 +42,6 @@ intended order, not a promise.
 
 | Patch | Item | Notes | Effort |
 |---|---|---|---|
-| 3.4.4 | **DNS-aware SSRF for `web_fetch`.** | The guard (applied since 3.4.0) classifies IP literals and a hostname blocklist only, so `127.0.0.1.nip.io` or any name resolving to a private address gets through. The upstream seam is **already shipped**: bote filed it at 3.3.7 (sandhi `docs/development/issues/archive/2026-08-23-bote-ssrf-needs-preresolved-client-connect.md`) and sandhi 1.9.14 added `sandhi_client_set_resolver(lookup_fn, ctx)` — the client asks the hook for the address it will connect to, including on redirect hops, so classifying there leaves no rebinding window. bote-side: install a hook that resolves (sandhi's own resolver), classifies the address with the existing IPv4 / IPv6 classifiers, and refuses. | Medium |
 | 3.4.5 | **Port the conformance suite.** | The Rust archive (tag `0.92.0`) carried 44 protocol-level scenarios; none was ported. 3.3.13 is the argument: `ping` had answered `-32601` since the port with 887 assertions passing, because the suite tests the methods bote implements rather than the ones the spec requires. Do it before the 3.5.x work adds surface. Lands as `tests/conformance.tcyr`, driven through `codec_process_message` so it needs no live transport. | Medium |
 
 ## 3.5.x — Threaded dispatch (real-time push)

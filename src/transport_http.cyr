@@ -114,6 +114,9 @@ fn _http_peek_method(body) {
 # ================================================================
 
 fn _http_handle(config, cfd, buf, n) {
+    # 3.4.3: bound every write to this client (src/conn.cyr). sandhi's
+    # server sets only read deadlines on the connections it accepts.
+    bote_conn_send_deadline(cfd);
     var method = sandhi_server_get_method(buf, n);
     var path   = sandhi_server_get_path(buf, n);
 

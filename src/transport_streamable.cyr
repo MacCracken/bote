@@ -504,8 +504,12 @@ fn _strm_handle_get(cfd, buf, n, config) {
         }
     }
 
-    # Open the SSE stream.
-    sandhi_server_send_chunked_start(cfd, HTTP_OK, "text/event-stream", 0);
+    # Open the SSE stream. 3.4.3: every write below is checked. Under the
+    # send deadline (src/conn.cyr) a client that stopped reading fails a
+    # write, and carrying on would make each later write wait out the full
+    # deadline again, so the first failure ends the stream.
+    var sse_r = sandhi_server_send_chunked_start(cfd, HTTP_OK, "text/event-stream", 0);
+    if (sse_r < 0) { bote_conn_log_send_drop("streamable", sse_r); return 0; }
 
     # Primer — an SSE COMMENT (leading ':'), NOT an event. It confirms the
     # stream is up + flushes headers without carrying an `id:`, so per the SSE
@@ -513,7 +517,8 @@ fn _strm_handle_get(cfd, buf, n, config) {
     # would be fatal to resumption: it is in no buffer, so the client's next
     # events_after would miss and silently resume nothing.
     var primer = ": bote stream open\n\n";
-    sandhi_server_send_chunk(cfd, primer, strlen(primer));
+    sse_r = sandhi_server_send_chunk(cfd, primer, strlen(primer));
+    if (sse_r < 0) { bote_conn_log_send_drop("streamable", sse_r); return 0; }
 
     # Drain buffered notifications (unconditional when there is no cursor).
     var last_id = sandhi_server_find_header(buf, n, "Last-Event-ID");
@@ -523,7 +528,8 @@ fn _strm_handle_get(cfd, buf, n, config) {
     while (di < dn) {
         var ev = vec_get(drain, di);
         var wire = stream_event_to_wire(ev);
-        sandhi_server_send_chunk(cfd, wire, strlen(wire));
+        sse_r = sandhi_server_send_chunk(cfd, wire, strlen(wire));
+        if (sse_r < 0) { bote_conn_log_send_drop("streamable", sse_r); return 0; }
         di = di + 1;
     }
 
@@ -539,6 +545,9 @@ fn _strm_handle_get(cfd, buf, n, config) {
 # ================================================================
 
 fn _strm_handle(config, cfd, buf, n) {
+    # 3.4.3: bound every write to this client, the SSE stream included
+    # (src/conn.cyr).
+    bote_conn_send_deadline(cfd);
     var method = sandhi_server_get_method(buf, n);
     var path   = sandhi_server_get_path(buf, n);
 

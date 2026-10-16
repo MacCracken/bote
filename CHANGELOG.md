@@ -18,6 +18,85 @@ have per release.
 
 _(empty)_
 
+## [3.4.3] — 2026-10-15 · a client that stops reading no longer wedges the server: send deadlines on every transport
+
+The roadmap's 3.4.3 pair: the Unix transport's accept-loop deadline and send-side timeouts.
+Both turned out to be the same defect. Every bote transport serves one connection at a time,
+and nothing bounded a write, so a client that stopped reading could stop the server for
+everyone.
+
+### Fixed — a client that stops reading no longer wedges the server
+
+- **Reproduced on 3.4.2 first.** A probe script runs one bad client and then a healthy client
+  that sends one `ping` and waits up to 4 s:
+
+  | Bad client | 3.4.2 | 3.4.3, `BOTE_SEND_TIMEOUT_MS=500 BOTE_UNIX_IDLE_MS=500` |
+  |---|---|---|
+  | Unix: floods `tools/list`, never reads | healthy client unanswered (wedged) | answered |
+  | WebSocket: floods frames, never reads | healthy client unanswered (wedged) | answered |
+  | Unix: connects and sends nothing | healthy client unanswered | answered in 0.20 s |
+
+  The two flood cases were permanent: the server sat in write(2) with no deadline. With the
+  defaults (send 30 s, Unix idle off), a Unix flood released the healthy client 28.6 s after it
+  started waiting, about 30 s after the stall. The log said
+  `client dropped: a write to it failed (stopped reading?) transport=unix errno=11 send_timeout_ms=30000`.
+- **A send deadline on every connection, on by default.** The new `src/conn.cyr`
+  (`bote_conn_send_deadline`) applies `BOTE_SEND_TIMEOUT_MS`, default 30000, as `SO_SNDTIMEO`:
+  - the Unix transport applies it to each accepted client;
+  - HTTP, bridge, Streamable HTTP and WebSocket apply it at the top of their handlers, since
+    sandhi's server sets only read deadlines on the connections it accepts.
+
+  A write parks only when the peer has stopped reading entirely, so the deadline only ever drops
+  a peer that is already broken.
+- **A failed write now drops the client.** Before, every write result was ignored:
+  - the Unix transport writes each reply line through `_unix_reply` (`sock_send_all`, which also
+    stops a partial write from leaving half a line on the wire) and drops the client on failure;
+  - the WebSocket loop checks `ws_server_send_text` and drops the connection, whose stream is
+    desynchronised mid-frame;
+  - the Streamable HTTP SSE drain stops at its first failed chunk, where carrying on would make
+    each later chunk wait out the full deadline again.
+
+  Each drop is one WARN line with the transport and errno.
+- **The Unix receive deadline is opt-in** (`BOTE_UNIX_IDLE_MS`, default 0). The Unix transport is
+  persistent: an MCP client may keep its connection open and quiet between requests, as a
+  WebSocket client may. A default receive deadline would drop those healthy clients, which is the
+  defect 3.3.7 fixed for WebSocket by making `ws_config_with_idle_ms` default to off. So a quiet
+  client still holds the single-threaded Unix server unless an operator opts in, and the probe's
+  "sends nothing" row stays wedged at the defaults by design. A read that ends on the idle
+  deadline is a DEBUG line.
+- **The binaries read both from the environment.** `bote_main_conn_from_env` parses
+  `BOTE_SEND_TIMEOUT_MS` / `BOTE_UNIX_IDLE_MS` strictly (digits only; `0` disables), keeps the
+  default with a WARN on anything else, and logs the values at INFO when either differs from its
+  default. An embedder assigns the two globals before starting a transport.
+- Tests (+26 assertions):
+  - `tests/bote_transport_unix.tcyr` +19, over a `socketpair` with a shrunk `SO_SNDBUF`. AF_UNIX
+    charges in-flight bytes to the sender, so a small send buffer on the server end is what backs
+    its replies up. Covered: the send deadline gives `EAGAIN` within 150 ms – 5 s; 0 disables it;
+    the idle deadline is off by default and gives `EAGAIN` when set; and `_unix_handle_client`,
+    fed 2,000 pings by a peer that reads nothing, returns, logs the WARN, and wrote replies before
+    the drop.
+  - `tests/bote_ws.tcyr` +7: the real `_bote_ws_handler`, driven through the handshake and fed
+    1,500 masked `tools/list` frames by a peer that never reads, returns and logs the drop.
+  - Mutations, each run under `cyrius test --timeout 20`: removing the WebSocket send deadline,
+    ignoring the WebSocket write failure, and ignoring the Unix write failure each make the unit
+    hang until it is killed and reported FAIL. A regression therefore fails CI at the runner's
+    default 300 s per-unit timeout instead of passing.
+  - All four affected units pass under `qemu-aarch64`.
+
+### Changed
+
+- New module `src/conn.cyr`, in `[lib]` (33 modules) ahead of the transports. Not in `[lib.core]`,
+  which carries no transport. `src/main.cyr` and the four test units that include a transport
+  include it.
+- Binaries: `bote` 2,821,576 → 2,825,968 B; aarch64 3,325,376 B; agnos 2,790,312 B with 0
+  undefined.
+- Benchmarks: `tests/bote.bcyr` links neither the transports nor `conn.cyr`, and none of its modules
+  changed. The logged 3.4.3 row matches 3.4.2 (`dispatch_tools_call` 1.802 µs against 1.770 µs,
+  `codec_process_message` 3.770 µs against 3.682 µs, at load 1.9).
+- CLAUDE.md, README (a connection-deadlines note beside logging), `DEPS-PATTERN.md`,
+  `docs/architecture/overview.md`, SECURITY.md and the roadmap updated. The roadmap's next patch is
+  3.4.4, DNS-aware SSRF.
+
 ## [3.4.2] — 2026-10-15 · one bote binary again: every transport by argv, the old names as aliases
 
 The roadmap's 3.4.2 item. The three per-transport binaries are one `bote` again, with the transport
