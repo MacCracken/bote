@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ws-idle-probe.py — runtime proof for the 3.3.7 WebSocket idle-drop fix.
 #
-#   ./build/bote-ws 8399 &
+#   ./build/bote ws 8399 &
 #   python3 scripts/ws-idle-probe.py 8399 3    # control: expect ALIVE  (exit 0)
 #   python3 scripts/ws-idle-probe.py 8399 33   # expect ALIVE after the fix (exit 0)
 #                                              # expected DROPPED before it (exit 1)

@@ -18,6 +18,73 @@ have per release.
 
 _(empty)_
 
+## [3.4.2] — 2026-10-15 · one bote binary again: every transport by argv, the old names as aliases
+
+The roadmap's 3.4.2 item. The three per-transport binaries are one `bote` again, with the transport
+chosen by argv. The split dated from 2.7.2, a workaround for the cyrius 5.10.x 2 MB
+compile-source cap, which 6.1.24 raised. bote carried it for twenty-odd releases after the reason
+was gone.
+
+### Changed — one binary, every transport by argv
+
+- **`src/main.cyr` serves all six transports.** `src/main_streamable.cyr` and `src/main_ws.cyr` are
+  deleted:
+
+  | Command | Transport | Default |
+  |---|---|---|
+  | `bote` / `bote stdio` | stdio | — |
+  | `bote http [port]` | HTTP | 8390 |
+  | `bote unix <path>` | Unix socket | — |
+  | `bote bridge [port]` | TS bridge with CORS | 8391 |
+  | `bote streamable [port]` | Streamable HTTP / SSE | 8392 |
+  | `bote ws [port]` | WebSocket | 8393 |
+
+  `bote stdio` is new as an explicit spelling of the default. An unrecognised mode still serves
+  stdio, as it always has, and its warning now lists the valid modes.
+- **The old binary names still work.** `bote_main_mode` matches argv[0]'s basename, so
+  `bote-streamable [port]` and `bote-ws [port]` select their transports when invoked through a
+  symlink. `scripts/build-all.sh` builds `build/bote` and links `build/bote-streamable` and
+  `build/bote-ws` to it, which also replaces a stale pre-3.4.2 binary of either name in `build/`.
+- **Each transport keeps the tool set it had.** As separate binaries, streamable and ws registered
+  only the echo / greeting / info references, while `bote` also registered the libro, filesystem
+  and web tools. Building one dispatcher before choosing the mode would have exposed `fs_write` and
+  `web_fetch` over two more network transports, and a consolidation should not decide that. So
+  streamable and ws build their own echo-only dispatcher, exactly as before. Whether they should
+  expose the full set is an open roadmap decision. The session store and the notification event
+  sink are still wired for streamable alone, so every other mode keeps 3.4.1's syscall-free
+  `tools/call`.
+- **Nothing that was released changes.** `release.yml` has only ever built and shipped `build/bote`,
+  zugot's recipe installs only `bote`, and the agnos repo's MCP smoke builds `src/main.cyr`. The one
+  released binary simply gains two modes. The agnos binary does too.
+- Binaries: one `bote` of 2,821,576 B (+25,080 B over 3.4.1's) replaces three totalling
+  8,313,872 B. On aarch64 it is 3,325,080 B and on agnos 2,785,920 B, with 0 undefined.
+  Capacity for `src/main.cyr`: `fn_table` 6,222 → 6,313 / 131,072 (4.8%), `identifiers` 198,201 →
+  200,628 / 8,388,608 (2.4%). The compile-source cap that forced the split has not been approached.
+- CI:
+  - The three places that listed three entries now list one: the manifest gate's `ENTRIES` and the
+    aarch64 and agnos cross-build loops.
+  - **New "Transport smoke" step**, `scripts/transport-smoke.sh`, which developers can run too. It
+    starts http, bridge, streamable, ws and unix from the built binary and checks:
+    - each answers `initialize` (ws: the upgrade answers 101);
+    - both argv[0] aliases select their transports;
+    - http lists `fs_write` and streamable does not.
+
+    Run verbatim it passes. With `fs_tools_register` planted on the streamable dispatcher it fails
+    and names the parity break.
+- Checked beyond CI:
+  - `scripts/ws-idle-probe.py` against `bote ws` held a framed connection through a 3 s idle (two
+    `tools/list` round trips, each with its DEBUG line). Its usage line now reads
+    `./build/bote ws 8399`.
+  - The aarch64 binary under `qemu-aarch64` answered `initialize` over stdio and over streamable on
+    a port.
+- `src/session.cyr`'s comment on why the outbound slot stays type-agnostic no longer refers to "the
+  bote-streamable binary".
+- Benchmarks: `tests/bote.bcyr` links no entry code and none of its modules changed. The logged
+  3.4.2 row matches 3.4.1 (`dispatch_tools_call` 1.770 µs against 1.794 µs, load 3.6).
+- CLAUDE.md (Binaries, entries, commands, the compile-source rule), README (build, run, try-it,
+  modules), `docs/architecture/overview.md` and the roadmap now describe one binary. The roadmap's
+  next patch is 3.4.3, and it gains the tool-set question as an open decision.
+
 ## [3.4.1] — 2026-10-15 · resources/templates/list; the "+58%" was the host's syscalls, and tools/call stops paying them
 
 The two items that sat under "next patch": `resources/templates/list`, the last ❌ in

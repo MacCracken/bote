@@ -42,17 +42,20 @@ Regenerate with `cyrius distlib` (default) and `cyrius distlib core`; `cyrius di
 
 ## Binaries
 
-Three per-transport binaries — a cyrius 5.10.x compile-source-cap workaround that the 6.1.24 cap raise made unnecessary; reconsolidation into one `bote` is a 3.4.x roadmap item:
+One binary since 3.4.2, `build/bote` from `src/main.cyr`, the transport chosen by argv:
 
-| Binary | Entry | Transports | Default port |
-|--------|-------|------------|--------------|
-| `build/bote` | `src/main.cyr` | stdio + http + unix + bridge | — / 8390 / — / 8391 |
-| `build/bote-streamable` | `src/main_streamable.cyr` | Streamable HTTP / SSE | 8392 |
-| `build/bote-ws` | `src/main_ws.cyr` | WebSocket | 8393 |
+| Command | Transport | Default port | Tool set |
+|---------|-----------|--------------|----------|
+| `bote` / `bote stdio` | stdio | — | full |
+| `bote http [port]` | HTTP | 8390 | full |
+| `bote unix <path>` | Unix socket | — | full |
+| `bote bridge [port]` | TS bridge with CORS | 8391 | full |
+| `bote streamable [port]` | Streamable HTTP / SSE (+ session store, notification drain) | 8392 | echo references only |
+| `bote ws [port]` | WebSocket | 8393 | echo references only |
 
-Build all three: `./scripts/build-all.sh`.
+"Full" is the echo / greeting / info references plus the libro, fs and web tools. streamable and ws keep the smaller set they had as separate binaries (2.7.2–3.4.1, a cyrius 5.10.x compile-source-cap workaround); changing that is an open roadmap decision, not a side effect of a refactor, and `scripts/transport-smoke.sh` fails if streamable gains `fs_write`. `bote-streamable` / `bote-ws` still work as argv[0] aliases (`bote_main_mode` matches the basename). `./scripts/build-all.sh` builds `build/bote` and links those two names to it; `./scripts/transport-smoke.sh` then exercises every mode (CI's "Transport smoke" step).
 
-**Targets.** Native x86_64 Linux; **aarch64** Linux (`cyrius build --aarch64`, the full suite runs under `qemu-aarch64`); **agnos** (`cyrius build --agnos` — a static x86-64 `ET_EXEC` over the agnos syscall ABI; the Unix transport fail-closes there because agnos has no `AF_UNIX`, the other five carry traffic). CI cross-builds all three entries for both non-native targets and, since 3.3.12, also compiles every test / bench / fuzz unit for agnos with a zero-`undefined function` bar — cycc lowers an unreachable undefined fn to a `ud2` stub and still exits 0, so "OK" alone is not the bar. Runtime on agnos is proven on the kernel's QEMU image (`BOTE_SELFTEST` + `bote-mcp-smoke.sh` in the agnos repo), not in bote's CI.
+**Targets.** Native x86_64 Linux; **aarch64** Linux (`cyrius build --aarch64`, the full suite runs under `qemu-aarch64`); **agnos** (`cyrius build --agnos` — a static x86-64 `ET_EXEC` over the agnos syscall ABI; the Unix transport fail-closes there because agnos has no `AF_UNIX`, the other five carry traffic). CI cross-builds the entry for both non-native targets and, since 3.3.12, also compiles every test / bench / fuzz unit for agnos with a zero-`undefined function` bar — cycc lowers an unreachable undefined fn to a `ud2` stub and still exits 0, so "OK" alone is not the bar. Runtime on agnos is proven on the kernel's QEMU image (`BOTE_SELFTEST` + `bote-mcp-smoke.sh` in the agnos repo), not in bote's CI.
 
 ## Consumers
 
@@ -102,7 +105,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `pkce.cyr` | RFC 7636 PKCE — `pkce_code_verifier` (getrandom) + `pkce_code_challenge_s256`. **In the bundle since 3.2.0** |
 | `sandbox.cyr` | Pluggable sandbox runner — kavach-shaped fn-pointer + ctx adapter, noop default, error envelope on a null runner. **In the bundle since 3.3.13**; it had been in `src/` and in no profile since 2.1.0, so no consumer could reach a `sandbox_*` symbol across thirteen minor lines — the same orphan shape `jwt.cyr` / `pkce.cyr` had until 3.2.0. Deliberately NOT in `[lib.core]`: eight repos vendor the core bundle and none references a `sandbox_*` symbol (rationale recorded in `cyrius.cyml`). ⭐ CI now fails on any `src/` module that is in no `[lib*]` profile and is not a declared entry point — the gate that would have caught this and the 3.2.0 pair |
 
-**Binary entries** — `src/main.cyr` + `src/main_streamable.cyr` + `src/main_ws.cyr` + `src/main_common.cyr` (shared helpers).
+**Binary entry** — `src/main.cyr` + `src/main_common.cyr` (entry-side helpers: reference dispatcher, mode selection, the binary's log lines). Neither is in a `[lib]` profile.
 
 ## Development Process
 
@@ -157,7 +160,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 - **Cyrius is single-pass.** Include order matters. New stdlib transitive deps go BEFORE the modules that reference them in `cyrius.cyml [deps] stdlib` (see the `ct` / `keccak` / `random` → `sigil` ordering for the worked example, and `thread` → `thread_local` → `sigil` for the 3.7.14 TLS-storage SIGILL guard added at 2.7.6).
 - **Namespace fn names too, not just constants.** The flat "last definition wins" namespace covers **functions** as well as enum constants, and the winner is decided by include order — which a consumer controls, not bote. Worked example: `src/stream.cyr`'s `cancel_token_new()` collided with `lib/async.cyr:1058`'s from 3.3.0 until **3.3.5**, when the family was renamed `bote_cancel_token_*`. bote's own binaries were fine (`src/` is included after `lib/`, so bote's won) — but a consumer vendoring `dist/bote.cyr` and including `async.cyr` after it silently got async's body, with no diagnostic on their side. ⭐ The rename moved `fn_table` +1: under last-definition-wins the shadowed definition occupied no slot, so the collision was literally hiding a function. **`src/` is warning-clean as of 3.3.5 — keep it that way**, so a new `duplicate fn` warning is signal instead of noise in a known-warning baseline. (Two deps can still collide with each other and bote cannot fix that from here. `_sub_new` — libro vs majra — was one until majra 2.7.1 renamed it; libro's thin sigil selection vs the fold's `lib/sigil.cyr` was one, 232 names, until cyrius 6.6.11 stopped vendoring the thin copy; see the libro row in the stack table.)
 - **Namespace global constants.** Enum constants share one flat global namespace with "last definition wins" — a bare tag silently takes a dep's value if both define it. `BoteErrTag` tags are prefixed `BOTE_ERR_*` (namespaced at 3.1.3) after bare `ERR_IO` / `ERR_JSON` collided with libro's own `ERR_IO=3` / `ERR_JSON=4` in any libro-linked binary. Prefix every new enum/const with `BOTE_` (or a module tag like `SCH_`) so it can't alias a stdlib/dep symbol. **The rule cuts the other way too:** a bare stdlib name bote *reads* can be supplied by a dep on a target where the stdlib doesn't define it. Worked example (3.3.12): `transport_unix.cyr` used bare `EINTR` / `EAGAIN` / `EINVAL` / `EMFILE`; the agnos syscall peer defines no errno names, and the four resolved anyway — from `lib/sigil.cyr:44`'s own bare errno enum in the injected prelude, correct only because sigil spells Linux's numbers. `ENFILE`, absent from sigil's enum, is what finally failed the build. The module now spells all twelve `BOTE_ERRNO_*` it classifies. When a bare stdlib constant compiles on a target whose peer you know lacks it, find out who is really defining it.
-- **Compile-source budget.** Watch `cyrius build` for `expanded source exceeds`. It has not fired since the 6.1.24 cap raise, but three response paths are on record if it does: an upstream cap raise, a per-transport binary split (the shape bote still carries from the 5.10.x era), and an opt-in module split for consumers (`dist/bote-core.cyr`).
+- **Compile-source budget.** Watch `cyrius build` for `expanded source exceeds`. It has not fired since the 6.1.24 cap raise, but three response paths are on record if it does: an upstream cap raise, a per-transport binary split (the shape bote carried from 2.7.2 to 3.4.1 for the 5.10.x cap, folded back at 3.4.2), and an opt-in module split for consumers (`dist/bote-core.cyr`).
 - **Function-table cap.** CI gates fn_table + identifier-buffer utilisation at < 95% (`CYRIUS_STATS=1`), parsing the cap out of the `cyrius stats:` block rather than hardcoding it. At 3.4.0 (cyrius 6.7.9) `src/main.cyr` sits at `fn_table 6222/131072`, `identifiers 198201/8388608`, `var_table 2825/1048576` — **4.7% / 2.4% / 0.3%**. Two rules: compare percentages only within a toolchain line (6.4.75 / 6.4.76 and the 6.6.x line each raised the ceilings, so older percentages are not comparable), and ⚠ **re-measure both sides on freshly-resolved trees before quoting a delta** — a figure taken against a stale `lib/` is not a baseline. Growth between releases is usually a dep's unreachable set (bayan's, at 3.3.4), not bote.
 - **A pin move resolves from scratch: `rm -rf lib cyrius.lock && cyrius lib sync --full && cyrius deps`, in that order.** `lib sync` goes before any `deps` / `build`: from cyrius 6.6.17 a `deps` or `build` run first stamps the new pin over the lock rows of files `deps` does not vendor, and `lib sync` then refuses (it names `--relock`). The lock is deleted because from 6.6.20 it keeps a commit pin once recorded: re-resolving over the old lock at 3.3.17 left the previous libro / majra / sigil / patra rows beside the new ones. Then check `cyrius deps --verify` and the four `commit` rows.
 - **A toolchain codegen A/B IS obtainable — run it on risky bumps.** Per-version toolchains live at `~/.cyrius/versions/<V>/` and **the `cyrius` wrapper re-execs the pinned one** (since 6.6.4: `cyrius which` inside the repo resolves to `~/.cyrius/versions/<pin>/bin/cycc`, not `~/.cyrius/bin/cycc`), so editing the `cyrius =` pin selects both the compiler and the stdlib snapshot. Recipe: build once at the old pin (`git show HEAD:cyrius.cyml > cyrius.cyml`, then `rm -rf lib && cyrius lib sync --full && cyrius deps`), keep that binary, restore the new pin and `lib/`, rebuild, run the two interleaved. ⚠ `path =` siblings vendor their WORKING TREE on both sides, so this is a toolchain control, not a previous-release reproduction, unless the siblings are checked out at the old tags. Done at 3.3.10 for 6.6.3 → 6.6.6 (14 benches, a wash: dispatch −3…−7%, schema +1…+3%), and — by stdin-prelude reconstruction, which the pre-6.6.4 wrapper needed because it ignored the pin for the compiler — at 3.3.4 for the 6.5.35 regalloc rewrite: 867/867 assertions agreed compiler-for-compiler.
@@ -192,7 +195,8 @@ Criterion benchmarks: **14** in `tests/bote.bcyr` (dispatch × 3, jsonx × 2, co
 
 ```bash
 cyrius deps                            # Resolve [deps.*] → lib/ (gitignored)
-./scripts/build-all.sh                 # Build bote / bote-streamable / bote-ws
+./scripts/build-all.sh                 # Build build/bote (+ bote-streamable / bote-ws alias links)
+./scripts/transport-smoke.sh           # Every mode of the built binary answers (needs curl, python3)
 cyrius test tests/bote.tcyr            # Run a single test file
 for f in tests/*.tcyr; do cyrius test "$f"; done  # All tests
 cyrius bench tests/bote.bcyr           # Run benchmarks

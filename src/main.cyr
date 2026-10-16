@@ -74,14 +74,12 @@ include "src/transport_stdio.cyr"
 include "src/transport_http.cyr"
 include "src/transport_unix.cyr"
 include "src/bridge.cyr"
-# transport_streamable.cyr and transport_ws.cyr are NOT in this entry.
-# 2.7.2 (cyrius 5.10.x): the 2MB compile-source cap forces a
-# per-transport binary split — streamable HTTP and WebSocket live in
-# their own entries (src/main_streamable.cyr / src/main_ws.cyr,
-# producing build/bote-streamable / build/bote-ws). When bote migrates
-# to cyrius 5.11.x (cap raised to 4 MB per the companion proposal),
-# fold these back into src/main.cyr and retire the per-transport
-# entries.
+# 3.4.2: streamable HTTP and WebSocket are back in this entry. From 2.7.2
+# they lived in their own binaries (src/main_streamable.cyr /
+# src/main_ws.cyr), a workaround for the cyrius 5.10.x 2 MB compile-source
+# cap that the 6.1.24 cap raise made unnecessary. Same order as [lib].
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
 # libro_tools.cyr — five built-in MCP audit tools (libro_query /
 # verify / export / proof / retention) over a live libro chain.
 # Folded back into the default binary at 2.7.5: the fn_table-headroom
@@ -104,13 +102,73 @@ fn main() {
     # stdout, which is the JSON-RPC wire on the stdio transport.
     bote_main_log_init();
 
+    # Mode selection (src/main_common.cyr bote_main_mode):
+    #   bote                       stdio (default)
+    #   bote stdio                 stdio
+    #   bote http [port]           HTTP (default 8390)
+    #   bote unix <path>           Unix socket
+    #   bote bridge [port]         TS bridge with CORS (default 8391)
+    #   bote streamable [port]     Streamable HTTP / SSE (default 8392)
+    #   bote ws [port]             WebSocket (default 8393)
+    # `bote-streamable [port]` and `bote-ws [port]`, the two binaries folded
+    # in here at 3.4.2, still work as argv[0] aliases (build-all.sh links them).
+    var mode_slot[8]; var arg_slot[8];
+    bote_main_mode(&mode_slot, &arg_slot);
+    var mode = load64(&mode_slot);
+    var arg = load64(&arg_slot);
+
+    # Bearer-token auth wiring (opt-in via env var).
+    # Set BOTE_BEARER_TOKENS=tok-a,tok-b,tok-c to require any of those
+    # tokens on every HTTP-family transport (http / bridge / streamable
+    # / ws). Stdio + unix sockets are local-only and don't get the check.
+    var auth_fp_slot[8]; var auth_ctx_slot[8];
+    store64(&auth_fp_slot, 0); store64(&auth_ctx_slot, 0);
+    _bote_bearer_from_env(&auth_fp_slot, &auth_ctx_slot);
+    var bearer_fp = load64(&auth_fp_slot);
+    var bearer_ctx = load64(&auth_ctx_slot);
+
+    # streamable and ws keep the tool set they had as separate binaries:
+    # the echo / greeting / info references only. The libro, fs and web
+    # tools below are registered for stdio / http / unix / bridge, as they
+    # always were. (Whether the two should expose those tools as well is an
+    # open roadmap decision, not something a consolidation changes.)
+    if (streq(mode, "streamable") == 1) {
+        var sdisp = bote_dispatcher_with_echo();
+        # Server→client notification wiring. A SessionStore gives each
+        # client a per-session outbound buffer; the client-notification
+        # EventSink pushes notifications/tools/list_changed into those
+        # buffers on a tool-set change, drained on the session's next SSE
+        # GET. Enabling the store also activates MCP session lifecycle:
+        # `initialize` mints an MCP-Session-Id and subsequent requests
+        # (incl. the GET stream) must present it.
+        var session_store = session_store_default();
+        dispatcher_set_events(sdisp, strm_notify_sink(session_store));
+        # This transport has a drain path, so it may honestly advertise
+        # tools/prompts listChanged (no other mode sets this).
+        dispatcher_set_notifications(sdisp, 1);
+        var sport = 8392;
+        if (arg != 0) { sport = bote_main_port(arg, 8392); }
+        var scfg = streamable_config_new("/mcp", INADDR_LOOPBACK(), sport);
+        streamable_config_with_session_store(scfg, session_store);
+        if (bearer_fp != 0) { streamable_config_with_bearer_validator(scfg, bearer_fp, bearer_ctx); }
+        bote_main_log_start("streamable", sport, 0, bearer_fp != 0);
+        return bote_main_log_exit("streamable", transport_streamable_run(sdisp, scfg));
+    }
+    if (streq(mode, "ws") == 1) {
+        var wdisp = bote_dispatcher_with_echo();
+        var wport = 8393;
+        if (arg != 0) { wport = bote_main_port(arg, 8393); }
+        var wcfg = ws_config_new("/mcp", INADDR_LOOPBACK(), wport);
+        if (bearer_fp != 0) { ws_config_with_bearer_validator(wcfg, bearer_fp, bearer_ctx); }
+        bote_main_log_start("ws", wport, 0, bearer_fp != 0);
+        return bote_main_log_exit("ws", transport_ws_run(wdisp, wcfg));
+    }
+
     var dispatcher = bote_dispatcher_with_echo();
 
     # libro audit tools (2.7.5): stand up an in-memory libro chain and
     # register libro_query / verify / export / proof / retention on the
-    # dispatcher. Held out of the default build from 1.9.4 for fn_table
-    # headroom; folded back in once the 6.1.x cap raise made the headroom
-    # argument moot (see the include comment above).
+    # dispatcher.
     var libro_chain = chain_new();
     libro_tools_init(libro_chain);
     libro_tools_register(dispatcher);
@@ -123,60 +181,39 @@ fn main() {
     # web_search targets the SearXNG instance at BOTE_SEARXNG_URL (unset -> reported, not faked).
     web_tools_register(dispatcher);
 
-    # Bearer-token auth wiring (opt-in via env var).
-    # Set BOTE_BEARER_TOKENS=tok-a,tok-b,tok-c to require any of those
-    # tokens on every HTTP-family transport (http / bridge / streamable
-    # / ws). Stdio + unix sockets are local-only and don't get the check.
-    var auth_fp_slot[8]; var auth_ctx_slot[8];
-    store64(&auth_fp_slot, 0); store64(&auth_ctx_slot, 0);
-    _bote_bearer_from_env(&auth_fp_slot, &auth_ctx_slot);
-    var bearer_fp = load64(&auth_fp_slot);
-    var bearer_ctx = load64(&auth_ctx_slot);
-
-    # Mode selection:
-    #   bote                     — stdio transport (default)
-    #   bote http [port]         — HTTP transport (default 8390)
-    #   bote unix <path>         — Unix socket transport
-    #   bote bridge [port]       — TS bridge with CORS (default 8391)
-    # Streamable HTTP / WebSocket transports moved to separate
-    # binaries in 2.7.2 (cyrius 5.10.x cap workaround):
-    #   bote-streamable [port]   — Streamable HTTP / SSE (default 8392)
-    #   bote-ws [port]           — WebSocket MCP transport (default 8393)
-    # Consolidates back into this binary on cyrius 5.11.x migration.
-    if (argc() >= 2) {
-        if (streq(argv(1), "http") == 1) {
-            var port = 8390;
-            if (argc() >= 3) { port = bote_main_port(argv(2), 8390); }
-            var cfg = http_config_new("/mcp", INADDR_LOOPBACK(), port);
-            if (bearer_fp != 0) { http_config_with_bearer_validator(cfg, bearer_fp, bearer_ctx); }
-            bote_main_log_start("http", port, 0, bearer_fp != 0);
-            return bote_main_log_exit("http", transport_http_run(dispatcher, cfg));
+    if (streq(mode, "http") == 1) {
+        var port = 8390;
+        if (arg != 0) { port = bote_main_port(arg, 8390); }
+        var cfg = http_config_new("/mcp", INADDR_LOOPBACK(), port);
+        if (bearer_fp != 0) { http_config_with_bearer_validator(cfg, bearer_fp, bearer_ctx); }
+        bote_main_log_start("http", port, 0, bearer_fp != 0);
+        return bote_main_log_exit("http", transport_http_run(dispatcher, cfg));
+    }
+    if (streq(mode, "unix") == 1) {
+        if (arg == 0) {
+            bote_log_error("usage: bote unix <socket-path>");
+            return 2;
         }
-        if (streq(argv(1), "unix") == 1) {
-            if (argc() < 3) {
-                bote_log_error("usage: bote unix <socket-path>");
-                return 2;
-            }
-            bote_main_log_start("unix", 0, argv(2), 0);
-            return bote_main_log_exit("unix", transport_unix_run(dispatcher, argv(2)));
-        }
-        if (streq(argv(1), "bridge") == 1) {
-            var bport = 8391;
-            if (argc() >= 3) { bport = bote_main_port(argv(2), 8391); }
-            var bcfg = bridge_config_new(INADDR_LOOPBACK(), bport);
-            var origins = vec_new();
-            vec_push(origins, "*");
-            bridge_config_with_origins(bcfg, origins);
-            if (bearer_fp != 0) { bridge_config_with_bearer_validator(bcfg, bearer_fp, bearer_ctx); }
-            bote_main_log_start("bridge", bport, 0, bearer_fp != 0);
-            return bote_main_log_exit("bridge", transport_bridge_run(dispatcher, bcfg));
-        }
-        # streamable + ws moved to bote-streamable / bote-ws binaries
-        # (see comment above; reconsolidates on cyrius 5.11.x).
-        # Any other mode used to fall through to stdio without a word.
+        bote_main_log_start("unix", 0, arg, 0);
+        return bote_main_log_exit("unix", transport_unix_run(dispatcher, arg));
+    }
+    if (streq(mode, "bridge") == 1) {
+        var bport = 8391;
+        if (arg != 0) { bport = bote_main_port(arg, 8391); }
+        var bcfg = bridge_config_new(INADDR_LOOPBACK(), bport);
+        var origins = vec_new();
+        vec_push(origins, "*");
+        bridge_config_with_origins(bcfg, origins);
+        if (bearer_fp != 0) { bridge_config_with_bearer_validator(bcfg, bearer_fp, bearer_ctx); }
+        bote_main_log_start("bridge", bport, 0, bearer_fp != 0);
+        return bote_main_log_exit("bridge", transport_bridge_run(dispatcher, bcfg));
+    }
+    if (streq(mode, "stdio") == 0) {
+        # An unrecognised mode serves stdio, as it always has, and says so.
         var un[BOTE_LOG_LINE_BYTES];
         bote_log_line(&un, SK_WARN, "unknown mode; serving stdio");
-        bote_log_str(&un, "mode", argv(1));
+        bote_log_str(&un, "mode", mode);
+        bote_log_str(&un, "modes", "stdio http unix bridge streamable ws");
         bote_log_emit(&un);
     }
     bote_main_log_start("stdio", 0, 0, 0);

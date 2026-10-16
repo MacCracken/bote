@@ -19,7 +19,7 @@ protocol surface is `initialize`, `tools/*`, `prompts/*`, `resources/list` + `re
 (buffered per session, drained on the client's next Streamable HTTP `GET` or piggybacked on
 a `POST`). Four MCP protocol revisions are accepted, from one list.
 Operational logging goes through sakshi (`src/log.cyr`, `BOTE_LOG`) — distinct from the MCP
-`logging` capability, which still waits on 3.5.x. Two consumer bundles (`dist/bote.cyr`, `dist/bote-core.cyr`), three per-transport binaries,
+`logging` capability, which still waits on 3.5.x. Two consumer bundles (`dist/bote.cyr`, `dist/bote-core.cyr`), one binary with every transport selected by argv,
 x86_64 + aarch64 + agnos targets, all CI-gated.
 
 What is **not** there, and where each item sits below: DNS-aware SSRF, whose upstream seam
@@ -29,11 +29,12 @@ subprotocol / compression negotiation (→ 3.6.x, needs an upstream seam).
 
 ---
 
-## Next patch — 3.4.2
+## Next patch — 3.4.3
 
 | Item | Notes | Effort |
 |---|---|---|
-| **Reconsolidate the per-transport binaries** — fold `bote-streamable` + `bote-ws` back into one `bote`, transport selected by argv. | The split was a cyrius 5.10.x compile-source cap workaround; the cap was raised at 6.1.24 (bote 2.7.3) and the trio has been carried since. `build-all.sh`, `release.yml`, CI's cross-build loops, the README run table and the six-transport round trip all simplify. The `[lib]` bundle is unaffected. | Small |
+| **`transport_unix` accept-loop deadline.** | The one accept loop bote owns; its listen fd is never made non-blocking and carries no `SO_RCVTIMEO` (the file's own comment says so). Low severity — `AF_UNIX`, local-only, mode 0600. | Small |
+| **Send-side timeouts.** | `sandhi_server_run_opts` applies only `SO_RCVTIMEO` (plus, since sandhi 1.10.7, a whole-request budget on the *read* side); sandhi's server options carry no send timeout, and bote never calls `sock_set_send_timeout`, so a stalled *send* is unguarded. bote-side: each HTTP-family handler owns its `cfd` and can set `SO_SNDTIMEO` before it writes. Low severity. | Small |
 
 ## 3.4.x — the rest of the minor, one bite per patch
 
@@ -42,8 +43,6 @@ intended order, not a promise.
 
 | Patch | Item | Notes | Effort |
 |---|---|---|---|
-| 3.4.3 | **`transport_unix` accept-loop deadline.** | The one accept loop bote owns; its listen fd is never made non-blocking and carries no `SO_RCVTIMEO` (the file's own comment says so). Low severity — `AF_UNIX`, local-only, mode 0600. | Small |
-| 3.4.3 | **Send-side timeouts.** | `sandhi_server_run_opts` applies only `SO_RCVTIMEO` (plus, since sandhi 1.10.7, a whole-request budget on the *read* side); sandhi's server options carry no send timeout, and bote never calls `sock_set_send_timeout`, so a stalled *send* is unguarded. bote-side: each HTTP-family handler owns its `cfd` and can set `SO_SNDTIMEO` before it writes. Low severity. | Small |
 | 3.4.4 | **DNS-aware SSRF for `web_fetch`.** | The guard (applied since 3.4.0) classifies IP literals and a hostname blocklist only, so `127.0.0.1.nip.io` or any name resolving to a private address gets through. The upstream seam is **already shipped**: bote filed it at 3.3.7 (sandhi `docs/development/issues/archive/2026-08-23-bote-ssrf-needs-preresolved-client-connect.md`) and sandhi 1.9.14 added `sandhi_client_set_resolver(lookup_fn, ctx)` — the client asks the hook for the address it will connect to, including on redirect hops, so classifying there leaves no rebinding window. bote-side: install a hook that resolves (sandhi's own resolver), classifies the address with the existing IPv4 / IPv6 classifiers, and refuses. | Medium |
 | 3.4.5 | **Port the conformance suite.** | The Rust archive (tag `0.92.0`) carried 44 protocol-level scenarios; none was ported. 3.3.13 is the argument: `ping` had answered `-32601` since the port with 887 assertions passing, because the suite tests the methods bote implements rather than the ones the spec requires. Do it before the 3.5.x work adds surface. Lands as `tests/conformance.tcyr`, driven through `codec_process_message` so it needs no live transport. | Medium |
 
@@ -79,6 +78,14 @@ Both need a seam upstream that bote should **file, not wait for** — not yet fi
 | **WS per-message deflate** (RFC 7692) | The same handshake / response-header seam. The codec is not a blocker: **sankoch** (`lib/sankoch.cyr`) ships a native DEFLATE with `deflate_compress` / `deflate_decompress`. | Negotiate `permessage-deflate`, wrap frames. |
 
 ## Open decisions (no version)
+
+- **The tool set streamable and ws expose.** In the one binary, stdio / http / unix / bridge
+  register the echo references plus the libro, fs and web tools, while streamable and ws register
+  the echo references only, the set they had as separate binaries through 3.4.1. 3.4.2 kept that
+  deliberately: a consolidation should not widen what two network transports expose
+  (`fs_write`, `web_fetch`). Unifying it is a product call: either every mode gets the full set,
+  or the network modes all get the smaller one and the fs / web tools become stdio-and-unix-only.
+  `scripts/transport-smoke.sh` pins the current shape and needs changing with it.
 
 - **JWT RS256 / ES256.** Not a dependency: sigil exposes `rsa_pubkey_from_der` +
   `rsa_pkcs1v15_verify_sha256` (verified end to end at 3.2.0 from a real SPKI PEM and an

@@ -108,12 +108,13 @@
 
 ```
 src/
-├── main.cyr                — CLI entry (stdio/http/unix/bridge): argv
-│                             selects transport; registers echo + libro
-│                             + fs + web tools
-├── main_streamable.cyr     — entry for build/bote-streamable
-├── main_ws.cyr             — entry for build/bote-ws
-├── main_common.cyr         — shared entry helpers (dispatcher setup,
+├── main.cyr                — the one CLI entry (3.4.2): argv selects
+│                             stdio / http / unix / bridge (echo + libro
+│                             + fs + web tools) or streamable / ws (echo
+│                             references only, as their pre-3.4.2 binaries)
+├── main_common.cyr         — entry helpers (dispatcher setup, mode
+│                             selection + bote-streamable / bote-ws argv[0]
+│                             aliases,
 │                             BOTE_BEARER_TOKENS env-wires auth allowlist,
 │                             BOTE_LOG init + starting / stopped / failed lines)
 ├── log.cyr                 — operational logging through sakshi (3.4.0):

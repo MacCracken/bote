@@ -1,13 +1,13 @@
-# Shared helpers for the bote binary family (bote / bote-streamable /
-# bote-ws). Each binary has its own src/main_*.cyr entry; they all
-# include this file for the common dispatcher setup + env-driven
-# bearer-token wiring.
+# Entry-side helpers for the bote binary (src/main.cyr): the reference
+# dispatcher, env-driven bearer-token wiring, mode selection and the
+# binary's log lines. Entry-only: in no [lib] profile, because a CLI's
+# helpers do not belong in a consumer's bundle.
 #
-# Split rationale (2.7.2): the cyrius 5.10.x 2 MB compile-source cap
-# forces a per-transport binary split. transport_streamable and
-# transport_ws each get their own entry. When bote migrates to
-# cyrius 5.11.x (4 MB cap), the per-transport entries fold back into
-# src/main.cyr and this common file goes with them.
+# Through 3.4.1 three binaries (bote / bote-streamable / bote-ws) shared
+# this file, a split forced by the cyrius 5.10.x 2 MB compile-source cap.
+# The cap was raised at 6.1.24, and 3.4.2 folded the two transport entries
+# back into src/main.cyr; bote_main_mode keeps their names working as
+# argv[0] aliases.
 
 # Echo the arguments back as an MCP-conformant tool result. Prior to 3.0.1 this
 # returned the raw `args` JSON verbatim (a bare object), which is NOT a valid MCP
@@ -111,6 +111,48 @@ fn _bote_bearer_from_env(out_fp, out_ctx) {
     store64(out_fp, &auth_validator_allowlist);
     store64(out_ctx, allowed);
     return 1;
+}
+
+# ================================================================
+# Mode selection (3.4.2)
+# ================================================================
+
+# The last path component of `p` (the program name without its directory).
+fn _bote_basename(p) {
+    if (p == 0) { return ""; }
+    var last = p;
+    var i = 0;
+    while (load8(p + i) != 0) {
+        if (load8(p + i) == 47) { last = p + i + 1; }
+        i = i + 1;
+    }
+    return last;
+}
+
+# Resolve the transport mode and its argument (a port, or the Unix socket
+# path) into *out_mode / *out_arg:
+#
+#   bote                       stdio
+#   bote <mode> [arg]          mode = stdio | http | unix | bridge | streamable | ws
+#   bote-streamable [port]     streamable  (argv[0] alias for the pre-3.4.2 binary)
+#   bote-ws [port]             ws          (argv[0] alias for the pre-3.4.2 binary)
+#
+# The aliases are matched on argv[0]'s basename, so a symlink named
+# bote-streamable or bote-ws pointing at bote behaves like the old binary.
+# An unrecognised mode is returned as given; main reports it and serves stdio.
+fn bote_main_mode(out_mode, out_arg) {
+    store64(out_arg, 0);
+    var me = _bote_basename(argv(0));
+    if (streq(me, "bote-streamable") == 1 || streq(me, "bote-ws") == 1) {
+        if (streq(me, "bote-ws") == 1) { store64(out_mode, "ws"); }
+        else { store64(out_mode, "streamable"); }
+        if (argc() >= 2) { store64(out_arg, argv(1)); }
+        return 0;
+    }
+    if (argc() < 2) { store64(out_mode, "stdio"); return 0; }
+    store64(out_mode, argv(1));
+    if (argc() >= 3) { store64(out_arg, argv(2)); }
+    return 0;
 }
 
 # ================================================================

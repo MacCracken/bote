@@ -166,8 +166,6 @@ jobs:
           ENTRIES=$(printf '%s\n' \
             "src/main.cyr" \
             "src/main_common.cyr" \
-            "src/main_streamable.cyr" \
-            "src/main_ws.cyr" \
             | sort -u)
           ONDISK=$(ls src/*.cyr | sort -u)
           PROFILED=$(awk '/^\[lib(\.[a-z]+)?\]/{f=1;next} /^\[/{f=0} f' cyrius.cyml \
@@ -399,6 +397,14 @@ jobs:
           [ $fail -eq 0 ] || exit 1
           echo "logging smoke: stdout clean at every level; stderr as each level promises"
 
+      - name: Transport smoke (every mode of the one binary answers)
+        # 3.4.2. One binary since 3.4.2 (bote-streamable / bote-ws folded into
+        # src/main.cyr, kept as argv[0] aliases). The tests drive the transports'
+        # handlers in-process; this runs the built binary in every network mode
+        # and over a Unix socket, checks both aliases, and checks that streamable
+        # kept its pre-3.4.2 tool set. See the script's header.
+        run: ./scripts/transport-smoke.sh
+
       - name: Fuzz
         # Added 3.3.8. There was NO fuzz step: fuzz/*.fcyr was never run by CI, and
         # all four harnesses had silently stopped compiling at cyrius 6.1.25
@@ -443,7 +449,7 @@ jobs:
         #      are stripped first: the fix commit deliberately NAMES these
         #      constants in explanatory comments.
         #
-        #   2. Cross-build all three entries. The denylist cannot catch a
+        #   2. Cross-build the entry (one since 3.4.2). The denylist cannot catch a
         #      new x86-only symbol that upstream adds later, so the actual
         #      compile is the backstop.
         #
@@ -500,7 +506,7 @@ jobs:
           fi
           echo "  clean — no raw syscall(...) in src/, tests/, or fuzz/"
           echo "--- cross-build ---"
-          for e in main:bote main_streamable:bote-streamable main_ws:bote-ws; do
+          for e in main:bote; do
             src="${e%%:*}"; out="${e##*:}"
             cyrius build --aarch64 "src/$src.cyr" "build/$out-aarch64"
             # ELF e_machine at offset 0x12 must be 0xB7 (EM_AARCH64), little-endian.
@@ -517,7 +523,7 @@ jobs:
         # toolchain's own scripts/agnos-crossbuild-gate.sh validates
         # behaviour on the agnos QEMU image, not here:
         #
-        #   1. All three entries cross-build to a valid agnos ring-3 binary
+        #   1. The entry (one since 3.4.2) cross-builds to a valid agnos ring-3 binary
         #      (static x86-64 ET_EXEC ELF: magic 7f454c46, e_type 0x0002,
         #      e_machine 0x003e) with ZERO `undefined function` lines,
         #      reachable or not. cycc lowers an unreachable undefined fn to a
@@ -531,7 +537,7 @@ jobs:
           set -o pipefail
           fail=0
           echo "--- entries ---"
-          for e in main:bote main_streamable:bote-streamable main_ws:bote-ws; do
+          for e in main:bote; do
             src="${e%%:*}"; out="${e##*:}"; log="build/$out-agnos.log"
             if ! cyrius build --agnos "src/$src.cyr" "build/$out-agnos" > "$log" 2>&1; then
               echo "::error::$out does not build for --agnos"; tail -5 "$log"; fail=1; continue
@@ -564,7 +570,7 @@ jobs:
             echo "  OK  $f"
           done
           [ $fail -eq 0 ] || exit 1
-          echo "agnos: all three entries + every unit build clean for CYRIUS_TARGET_AGNOS"
+          echo "agnos: the entry + every unit build clean for CYRIUS_TARGET_AGNOS"
 
       - name: Build benchmarks (non-fatal)
         run: |

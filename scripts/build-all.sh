@@ -1,20 +1,22 @@
 #!/bin/sh
-# build-all.sh — build the bote binary family.
+# build-all.sh — build the bote binary.
 #
-# Per-transport binary split — originally (2.7.2) a workaround for the
-# cyrius 5.10.x 2 MB compile-source cap, which 6.1.24 raised; folding the
-# three back into one `bote` is a 3.4.x roadmap item. Builds three
-# binaries from three entries:
+# One binary since 3.4.2, every transport selected by argv:
 #
-#   build/bote              src/main.cyr            stdio + http + unix + bridge
-#   build/bote-streamable   src/main_streamable.cyr Streamable HTTP / SSE
-#   build/bote-ws           src/main_ws.cyr         WebSocket MCP
+#   build/bote              src/main.cyr    stdio | http | unix | bridge | streamable | ws
 #
+# From 2.7.2 to 3.4.1 streamable HTTP and WebSocket were separate binaries
+# (bote-streamable, bote-ws), a workaround for the cyrius 5.10.x 2 MB
+# compile-source cap that 6.1.24 raised. bote still answers to those two
+# names as argv[0] aliases, so the symlinks below keep an old invocation
+# (`build/bote-streamable 8392`) working. `ln -sf` also replaces a stale
+# pre-3.4.2 binary of the same name left in build/.
 set -e
 
-cyrius build src/main.cyr            build/bote
-cyrius build src/main_streamable.cyr build/bote-streamable
-cyrius build src/main_ws.cyr         build/bote-ws
+cyrius build src/main.cyr build/bote
+
+ln -sf bote build/bote-streamable
+ln -sf bote build/bote-ws
 
 echo
 echo "Built:"

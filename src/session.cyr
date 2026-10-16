@@ -132,9 +132,11 @@ fn _gen_session_id() {
 #                         notification bundle. session.cyr treats it as an
 #                         opaque i64 and never dereferences or frees it: the
 #                         buffer types (ResumptionBuffer / EventIdGenerator)
-#                         live in transport_streamable.cyr, which is only in
-#                         the bote-streamable binary — session.cyr is in all
-#                         three, so it must stay type-agnostic. The streamable
+#                         live in transport_streamable.cyr, which comes
+#                         after session.cyr in every include order (cyrius
+#                         is single-pass) and which the HTTP transport,
+#                         also a session user, does not need — so it must
+#                         stay type-agnostic. The streamable
 #                         transport lazily allocs the bundle (see
 #                         _strm_session_outbound); it drops with the session.
 # ================================================================

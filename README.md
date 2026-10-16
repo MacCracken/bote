@@ -61,24 +61,29 @@ apps don't each reimplement the same protocol.
 
 ```sh
 cyrius deps            # resolve [deps.*] → lib/ (gitignored)
-./scripts/build-all.sh # build/bote, build/bote-streamable, build/bote-ws
+./scripts/build-all.sh # build/bote (one binary; bote-streamable / bote-ws link to it)
 ```
 
-Static ELF binaries, no libc dependency.
+Static ELF binary, no libc dependency.
 
 ### Run
 
 ```sh
-./build/bote                    # stdio transport (default)
+./build/bote                    # stdio transport (default; also `bote stdio`)
 ./build/bote http [port]        # HTTP on 127.0.0.1:port (default 8390)
 ./build/bote unix <path>        # Unix domain socket
 ./build/bote bridge [port]      # TS bridge with CORS (default 8391)
-./build/bote-streamable [port]  # Streamable HTTP / SSE (default 8392)
-./build/bote-ws [port]          # WebSocket (default 8393)
+./build/bote streamable [port]  # Streamable HTTP / SSE (default 8392)
+./build/bote ws [port]          # WebSocket (default 8393)
 ```
 
-The default binary registers `bote_echo`, the five `libro_*` tools, the
-three `fs_*` tools, and the two `web_*` tools.
+One binary since 3.4.2. Through 3.4.1 streamable and WebSocket were separate
+binaries; `bote-streamable [port]` and `bote-ws [port]` still work through the
+links `build-all.sh` makes. stdio, http, unix and bridge register `bote_echo`,
+the five `libro_*` tools, the three `fs_*` tools and the two `web_*` tools;
+streamable and ws register the echo / greeting / info references only, as their
+separate binaries did. `./scripts/transport-smoke.sh` starts every mode and
+checks each one answers.
 
 ### Bearer auth
 
@@ -136,7 +141,7 @@ curl -X POST http://127.0.0.1:8390/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 
 # WebSocket (with wscat)
-./build/bote-ws 8393 &
+./build/bote ws 8393 &
 wscat -c ws://127.0.0.1:8393/mcp
 > {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
 ```
@@ -225,10 +230,8 @@ src/transport_unix.cyr     AF_UNIX line-oriented transport
 src/bridge.cyr             TS-client bridge with CORS
 src/transport_streamable.cyr  Streamable HTTP / SSE (MCP 2025-11-25)
 src/transport_ws.cyr       WebSocket (RFC 6455)
-src/main.cyr               CLI entry: stdio / http / unix / bridge
-src/main_streamable.cyr    CLI entry: Streamable HTTP binary
-src/main_ws.cyr            CLI entry: WebSocket binary
-src/main_common.cyr        Shared binary setup (dispatcher + env bearer wiring)
+src/main.cyr               CLI entry: stdio / http / unix / bridge / streamable / ws
+src/main_common.cyr        Entry helpers (dispatcher, mode selection, env bearer wiring, log lines)
 ```
 
 Dependencies rehydrate into `lib/` (gitignored) via `cyrius deps`.
@@ -346,7 +349,7 @@ the same surface.
 **Current**: see [`VERSION`](VERSION) and the top of [CHANGELOG.md](CHANGELOG.md).
 SemVer. The 3.x line carries the full MCP capability suite (prompts / resources /
 completion + polled `list_changed` push), the fs / web / libro tool families, six
-transports across three binaries, and the bearer + JWT HS256 + PKCE auth substrate;
+transports in one binary, and the bearer + JWT HS256 + PKCE auth substrate;
 the 2.0 handler ABI is stable across the 2.x → 3.x line. Builds and tests clean on
 x86_64 and aarch64; compiles for agnos.
 
