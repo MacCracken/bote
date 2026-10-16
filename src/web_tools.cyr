@@ -476,15 +476,26 @@ fn _web_json_field(item, key) {
 # Register web_fetch / web_search on an existing dispatcher. Call after bote_dispatcher_with_echo().
 fn web_tools_register(dispatcher) {
     var reg = dispatcher_registry(dispatcher);
-
-    registry_register(reg, tool_def_new(
-        "web_fetch", "fetch a web page and return its readable text; args {url} (http/https only)",
-        schema_new("object", 0, vec_new())));
+    # Real input schemas and annotations since 3.4.10 (both registered
+    # {"type":"object"} with no properties before). Both reach the outside
+    # world and change nothing, so they are read-only and open-world.
+    var fprops = vec_new();
+    vec_push(fprops, schema_prop_new("url", "{\"type\":\"string\",\"description\":\"An http:// or https:// URL. Loopback, private, link-local, shared and reserved addresses are refused, whether written literally or resolved from a name.\"}"));
+    var freq = vec_new();
+    vec_push(freq, "url");
+    registry_register(reg, tool_def_with_annotations(tool_def_new(
+          "web_fetch", "Fetch a web page and return its readable text, size-capped.",
+          schema_new("object", fprops, freq)), ann_set_open_world(ann_read_only(), HINT_TRUE)));
     dispatcher_handle(dispatcher, "web_fetch", &web_fetch_handler);
 
-    registry_register(reg, tool_def_new(
-        "web_search", "search the web via SearXNG and return the top results; args {query, count?}",
-        schema_new("object", 0, vec_new())));
+    var sprops = vec_new();
+    vec_push(sprops, schema_prop_new("query", "{\"type\":\"string\",\"description\":\"Search terms.\"}"));
+    vec_push(sprops, schema_prop_new("count", "{\"type\":\"integer\",\"description\":\"How many results to return, 1 to 10 (default 5). A value outside that range is clamped into it.\"}"));
+    var sreq = vec_new();
+    vec_push(sreq, "query");
+    registry_register(reg, tool_def_with_annotations(tool_def_new(
+          "web_search", "Search the web through the configured SearXNG instance and return the top results (title, URL, snippet).",
+          schema_new("object", sprops, sreq)), ann_set_open_world(ann_read_only(), HINT_TRUE)));
     dispatcher_handle(dispatcher, "web_search", &web_search_handler);
 
     return 0;

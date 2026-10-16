@@ -235,6 +235,33 @@ fn main() {
     assert_eq(sandhi_client_resolver_installed(), 0, "a stale guard hook is not treated as an embedder's (no self-recursion)");
     sandhi_client_clear_resolver();
 
+    # ================================================================
+    # 3.4.10 — real input schemas and annotations
+    # ================================================================
+    var wreg = tool_registry_new();
+    var wdisp = dispatcher_new(wreg);
+    web_tools_register(wdisp);
+    assert(registry_validate_params(wreg, "web_fetch", "{}") != 0, "schema: web_fetch requires url");
+    assert(registry_validate_params(wreg, "web_fetch", "{\"url\":7}") != 0, "schema: web_fetch url must be a string");
+    assert(registry_validate_params(wreg, "web_search", "{\"count\":3}") != 0, "schema: web_search requires query");
+    assert(registry_validate_params(wreg, "web_search", "{\"query\":\"x\",\"count\":\"3\"}") != 0, "schema: web_search count must be an integer");
+    assert_eq(registry_validate_params(wreg, "web_search", "{\"query\":\"x\",\"count\":30}"), 0, "schema: an out-of-range count passes (the handler clamps it)");
+    var wl = dispatcher_dispatch(wdisp, req_new("1", "tools/list"), 0);
+    var wlr = resp_result(wl);
+    if (wlr == 0) { wlr = ""; }
+    assert(_lc_has(wlr, "\"required\":[\"url\"]") == 1 && _lc_has(wlr, "\"required\":[\"query\"]") == 1,
+      "tools/list: web_fetch and web_search publish their required arguments");
+    # Counted, not just found: both tools must carry the hints.
+    var wh = "\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":true";
+    var whn = 0;
+    var whi = 0;
+    var whl = strlen(wh);
+    while (load8(wlr + whi) != 0) {
+        if (memeq(wlr + whi, wh, whl) == 1) { whn = whn + 1; }
+        whi = whi + 1;
+    }
+    assert_eq(whn, 2, "tools/list: both web tools are read-only and open-world");
+
     return assert_summary();
 }
 

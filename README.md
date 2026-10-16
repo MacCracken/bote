@@ -260,25 +260,25 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 1333 total across fifteen files (+ a core-only drift smoke)
+### Tests — 1374 total across fifteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1333 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1374 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 536 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/conformance.tcyr        # 127 — JSON-RPC 2.0 + MCP 2025-11-25 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 45 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
-cyrius test tests/bote_fs_tools.tcyr      # 34 — fs_write / fs_read / fs_mkdir
+cyrius test tests/bote_fs_tools.tcyr      # 42 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 197 — host registry + SSRF guard (IPv4 + IPv6)
 cyrius test tests/bote_jwt.tcyr           # 53 — JWT HS256 verify + exact alg + exp enforcement
-cyrius test tests/bote_libro_tools.tcyr   # 38 — libro_tools wrappers
+cyrius test tests/bote_libro_tools.tcyr   # 64 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals
 cyrius test tests/bote_transport_unix.tcyr # 68 — Unix transport: sockaddr, accept-error policy, backoff, deadlines, closed-peer write
-cyrius test tests/bote_web_tools.tcyr     # 56 — web_fetch / web_search + the SSRF guard (URL and resolved address)
+cyrius test tests/bote_web_tools.tcyr     # 63 — web_fetch / web_search + the SSRF guard (URL and resolved address)
 cyrius test tests/bote_ws.tcyr            # 21 — WebSocket config + wire-up + the send-deadline drop
 cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dist/bote-core.cyr
 ```

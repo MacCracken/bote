@@ -18,6 +18,107 @@ have per release.
 
 _(empty)_
 
+## [3.4.10] — 2026-10-15 · bote's own tools: real schemas, real tool results, and two defects they hid
+
+The roadmap's 3.4.10 item, audit B9: bote's own tools (libro, fs, web) get real input schemas,
+annotations and real tool results. Making them found two defects: `libro_retention` could empty
+the audit chain on a missing argument, and every libro entry's timestamp went out as a heap
+address.
+
+### Security
+
+- **`libro_retention` no longer empties the chain when `value` is missing.** `keep_count`,
+  `keep_duration` and `keep_after` read `value` as 0 when it was absent. `{"policy":"keep_count"}`
+  therefore kept zero entries and archived the whole audit chain. A missing or negative `value`
+  for those three policies is now an `isError` result, and the chain is left alone (tested on a
+  populated chain). The schema now says `value` is a non-negative integer. The 2026-10-15 consumer
+  audit found daimon exposing this tool on an unauthenticated endpoint.
+- **libro entries no longer leak heap addresses.** libro stores an entry's timestamp as RFC 3339
+  text (a Str), and `_lt_emit_entry` printed it with `str_builder_add_int`. Every `libro_query` and
+  `libro_export` entry carried the Str's address as `"timestamp":140185473909144`. It is now the
+  string, `"timestamp":"2026-10-16T05:46:12Z"`. This is the struct-layout drift CLAUDE.md warns
+  about: here a field whose type changed, not one that moved.
+
+### Changed — bote's own tools, on the wire
+
+| Tool | 3.4.9 | 3.4.10 |
+|---|---|---|
+| all five libro tools | bare JSON (`{"ok":true}`), which the dispatcher wrapped as text since 3.4.8; a failure was not flagged | a CallToolResult: the JSON as text, the same object as `structuredContent`, and `isError: true` when `ok` is false |
+| `libro_query` / `libro_export` | `"timestamp"` a heap address | `"timestamp"` the RFC 3339 string |
+| `libro_retention` without `value` for a keep_* policy | ran with 0 | `isError` |
+| `fs_write` without `content` | wrote an empty file | `isError` (schema violation); pass `""` to write an empty file |
+| libro, fs and web arguments of the wrong type or range | reached the handler | `isError` from the dispatcher's validation (since 3.4.8, now that the schemas say something) |
+
+**Who this reaches:**
+
+- **daimon** calls `libro_tool_*` directly and passes a result that already has `content`
+  through, so its clients see the same text plus `structuredContent`. Its own wrapper also derived
+  `isError` from `ok`, so the failure flag is unchanged. `libro_query` / `libro_export` timestamps
+  become strings; they were addresses before.
+- **No other consumer** calls these handlers. itihas only mirrors the registration pattern.
+
+### Added
+
+- **Input schemas** where there were none:
+  - `libro_query`: nine typed filters, severity 0–5, `offset` and `limit` ≥ 0;
+  - `libro_proof`: `index` required, ≥ 0;
+  - `libro_retention`: `policy` required, an enum of the six policies; `value` ≥ 0, with what it
+    means for each policy;
+  - `fs_write`: `path` and `content` required;
+  - `fs_read` / `fs_mkdir`: `path` required;
+  - `web_fetch`: `url` required, the SSRF refusals described;
+  - `web_search`: `query` required, `count` described as clamped to 1–10, which is what the handler
+    does.
+
+  Each property has a description, so a client no longer learns the arguments from the tool's
+  description text.
+- **Annotations** on all ten:
+  - the four libro readers, `fs_read`, `web_fetch` and `web_search` are read-only;
+  - the web tools are open-world;
+  - `fs_write` is destructive and idempotent;
+  - `fs_mkdir` is idempotent;
+  - `libro_retention` is destructive, not idempotent (`keep_duration` depends on the clock) and not
+    open-world. The `ann_destructive()` preset says open-world, so that hint is overridden.
+- Tests:
+  - `tests/bote_libro_tools.tcyr` +26, and its old assertions read fields through
+    `structuredContent`:
+    - each result's shape, and `isError` on each failure path;
+    - the retention guard, with the chain proven untouched;
+    - RFC 3339 timestamps from export and query;
+    - schema enforcement, and the published properties and annotations.
+  - `tests/bote_fs_tools.tcyr` +8 and `tests/bote_web_tools.tcyr` +7: required and typed arguments,
+    and the annotations in `tools/list`.
+
+  1,333 → 1,374 in all.
+- **Mutation-proven.** Seven mutants, each killed:
+  - the retention guard removed;
+  - failures without `isError`;
+  - the timestamp printed as a number;
+  - `libro_proof`'s `index` not required;
+  - retention back to the open-world preset;
+  - `fs_write`'s `content` not required;
+  - `web_fetch` not open-world.
+
+  The last one first survived, because the assertion found the hint on `web_search`. It now counts
+  the hint once per tool.
+
+### Changed
+
+- Roadmap: nothing is queued for 3.4.x. Its planned work is done. The next work is either an item
+  from the consumer adoption track, taken when a named consumer is ready, or the 3.5.x
+  threaded-dispatch minor.
+- Binaries: `bote` 2,857,944 B (3.4.9: 2,851,512); aarch64 3,328,680 B; agnos 2,822,288 B with 0
+  undefined. Capacity: `fn_table` 6368 / 131072. Every test file is also green under
+  `qemu-aarch64`, and both `.deps` sidecars are unchanged.
+- The minimum cyrius stays 6.7.2. This patch uses no newer construct, and
+  `scripts/bundle-min-cyrius.sh 6.7.2` still builds, passes the core smoke test and answers a ping.
+
+### Performance
+
+- `tests/bote.bcyr` links none of the changed modules. The logged row (pinned, load 2.5) is within
+  noise of 3.4.9's: `dispatch_tools_call` 2.782 µs against 2.743, `dispatch_tools_list` 1.698 µs
+  against 1.617.
+
 ## [3.4.9] — 2026-10-15 · the bundles state their minimum cyrius (6.7.2, measured) and what a copied core bundle needs
 
 The roadmap's 3.4.9 item, findings B6 and B7 of the 2026-10-15 consumer audit. The bundles now say

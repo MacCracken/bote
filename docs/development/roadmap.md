@@ -29,16 +29,17 @@ subprotocol / compression negotiation (→ 3.6.x, needs an upstream seam).
 
 ---
 
-## Next patch — 3.4.10
+## Next patch
 
-| Item | Notes | Effort |
-|---|---|---|
-| **bote's own tools: real schemas and real tool results** (audit B9). | The libro tools return bare JSON (`{"ok":true}`, `{"ok":false,"error":…}`), so since 3.4.8 they reach the client as text blocks, and a failure is not flagged `isError`. Return CallToolResults, with `ok:false` as `isError`. daimon calls `libro_tool_*` directly and passes a result that already has `content` through, so it is unaffected (checked in the 2026-10-15 audit). The libro, fs and web tools also register `{"type":"object"}` with no properties, so clients learn their arguments from description text and 3.4.8's compiled validation has nothing to check. Give each its properties and `required`. `tests/bote_libro_tools.tcyr` reads result fields directly and changes with the shapes. | Small–medium |
+Nothing is queued. The 3.4.x minor's planned work is done: the conformance suite, the audit's
+bote-side fixes (B1–B9), and the SSRF classifier gaps. The next work is one of:
 
-## 3.4.x — the rest of the minor
+- **an item from the consumer adoption track below**, taken when a named consumer is ready to move
+  onto bote (each is its own patch); or
+- **the 3.5.x threaded-dispatch minor**, the one architectural item.
 
-Nothing further is queued for 3.4.x after 3.4.10. A finding that belongs in the minor (a
-conformance gap, a transport defect) lands here as its own patch, one bite per release.
+A finding that belongs in 3.4.x (a conformance gap, a transport defect) still lands as its own
+patch first.
 
 ## Consumer adoption track
 

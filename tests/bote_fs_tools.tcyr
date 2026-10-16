@@ -166,6 +166,22 @@ fn main() {
     assert(_lc_has(cb, "red:\\u001b[31mX\\u001b[0m bell:\\u0007 us:\\u001f tab:\\t end") == 1,
       "ESC, BEL and 0x1f are \\u00XX escapes; TAB keeps \\t");
 
+    # ================================================================
+    # 3.4.10 — real input schemas and annotations
+    # ================================================================
+    assert(registry_validate_params(reg, "fs_write", "{}") != 0, "schema: fs_write requires path");
+    assert(registry_validate_params(reg, "fs_write", "{\"path\":\"a.txt\"}") != 0, "schema: fs_write requires content (an empty file is written only on purpose)");
+    assert_eq(registry_validate_params(reg, "fs_write", "{\"path\":\"a.txt\",\"content\":\"\"}"), 0, "schema: path + empty content passes");
+    assert(registry_validate_params(reg, "fs_read", "{\"path\":5}") != 0, "schema: fs_read path must be a string");
+    assert(registry_validate_params(reg, "fs_mkdir", "{}") != 0, "schema: fs_mkdir requires path");
+    var fl = dispatcher_dispatch(disp, req_new("1", "tools/list"), 0);
+    var flr = resp_result(fl);
+    if (flr == 0) { flr = ""; }
+    assert(_lc_has(flr, "\"required\":[\"path\",\"content\"]") == 1, "tools/list: fs_write publishes path and content as required");
+    assert(_lc_has(flr, "\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":true,\"openWorldHint\":false") == 1,
+      "tools/list: fs_write is destructive, idempotent and not open-world");
+    assert(_lc_has(flr, "\"readOnlyHint\":true") == 1, "tools/list: fs_read is read-only");
+
     return assert_summary();
 }
 

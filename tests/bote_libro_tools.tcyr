@@ -47,6 +47,49 @@ include "src/codec.cyr"
 include "src/schema.cyr"
 include "src/libro_tools.cyr"
 
+# 1 when cstr `hay` contains cstr `needle`.
+fn _lc_has(hay, needle) {
+    if (hay == 0 || needle == 0) { return 0; }
+    var i = 0;
+    while (load8(hay + i) != 0) {
+        var j = 0;
+        while (load8(needle + j) != 0 && load8(hay + i + j) == load8(needle + j)) { j = j + 1; }
+        if (load8(needle + j) == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The structuredContent object of a libro tool's CallToolResult (3.4.10),
+# or "" so that a regression reports instead of dereferencing 0.
+fn _sc(r) {
+    if (r == 0) { return ""; }
+    var sc = jsonx_get_raw(r, "structuredContent");
+    if (sc == 0) { return ""; }
+    return sc;
+}
+# The raw value of `key` in r's structuredContent, or "".
+fn _scf(r, key) {
+    var v = jsonx_get_raw(_sc(r), key);
+    if (v == 0) { return ""; }
+    return v;
+}
+# 1 when r is a CallToolResult (content array + structuredContent) whose
+# isError is `want_err` (1: true, 0: absent).
+fn _lt_shape_ok(r, want_err) {
+    if (r == 0) { return 0; }
+    var c = jsonx_get_raw(r, "content");
+    if (c == 0 || load8(c) != 91) { return 0; }
+    if (jsonx_get_raw(r, "structuredContent") == 0) { return 0; }
+    var ie = jsonx_get_raw(r, "isError");
+    if (want_err == 1) {
+        if (ie == 0 || streq(ie, "true") == 0) { return 0; }
+    } else {
+        if (ie != 0) { return 0; }
+    }
+    return 1;
+}
+
 fn main() {
     alloc_init();
 
@@ -135,15 +178,16 @@ fn main() {
     chain_append(tchain, SEV_INFO, str_from("bote"), str_from("tool.completed"), str_from("{}"));
     chain_append(tchain, SEV_INFO, str_from("bote"), str_from("tool.failed"), str_from("{}"));
     libro_tools_init(tchain);
-    assert_streq(libro_tool_verify("{}", 0), "{\"ok\":true}", "verify clean chain reports ok");
+    var vclean = libro_tool_verify("{}", 0);
+    assert(_lt_shape_ok(vclean, 0) == 1 && streq(_sc(vclean), "{\"ok\":true}") == 1, "verify clean chain reports ok (a CallToolResult, no isError)");
 
     var e0 = vec_get(load64(tchain), 0);      # struct chain +0 = entries vec
     store64(e0 + 32, str_from("tampered"));   # struct entry +32 = source
     var vres = libro_tool_verify("{}", 0);
     assert(vres != 0, "verify tampered chain returns a result (no SIGSEGV)");
-    assert(jsonx_get_raw(vres, "ok") != 0, "tampered verify emits an ok field");
-    assert_streq(jsonx_get_raw(vres, "ok"), "false", "tampered chain reports ok:false");
-    assert_streq(jsonx_get_str(vres, "message"), "integrity violation",
+    assert(_lt_shape_ok(vres, 1) == 1, "tampered verify is a CallToolResult with isError (3.4.10)");
+    assert_streq(_scf(vres, "ok"), "false", "tampered chain reports ok:false");
+    assert_streq(_scf(vres, "message"), "\"integrity violation\"",
       "tampered chain decodes libro's message, not a garbage pointer");
 
     # ---------------- libro_proof on a POPULATED chain (3.3.4) ----------------
@@ -165,16 +209,68 @@ fn main() {
 
     var pres = libro_tool_proof("{\"index\":1}", 0);
     assert(pres != 0, "proof on populated chain returns a result");
-    assert_streq(jsonx_get_raw(pres, "ok"), "true", "proof on populated chain reports ok:true");
-    assert_streq(jsonx_get_raw(pres, "leaf_count"), "3", "proof reports the leaf count");
-    var proot = jsonx_get_str(pres, "root");
+    assert_streq(_scf(pres, "ok"), "true", "proof on populated chain reports ok:true");
+    assert_streq(_scf(pres, "leaf_count"), "3", "proof reports the leaf count");
+    var proot = jsonx_get_str(_sc(pres), "root");
     assert(proot != 0, "proof emits a root");
-    assert_eq(str_len(str_from(proot)), 64, "proof root is a 64-char sha256 hex digest");
+    if (proot == 0) { proot = ""; }
+    assert_eq(strlen(proot), 64, "proof root is a 64-char sha256 hex digest");
 
     # An odd leaf count is the case libro's promote-vs-duplicate change
     # touches; index 2 is that trailing node.
     var pres2 = libro_tool_proof("{\"index\":2}", 0);
-    assert_streq(jsonx_get_raw(pres2, "ok"), "true", "proof for the odd trailing leaf succeeds");
+    assert_streq(_scf(pres2, "ok"), "true", "proof for the odd trailing leaf succeeds");
+
+    # ---------------- 3.4.10: entries carry their real timestamp ----------------
+    # libro's entry timestamp is RFC 3339 text. Through 3.4.9 it was printed
+    # with str_builder_add_int, so the wire carried the Str's heap address.
+    var xr = libro_tool_export("{}", 0);
+    var xts = jsonx_get_raw(_sc(xr), "entries");
+    if (xts == 0) { xts = ""; }
+    assert(_lc_has(xts, "\"timestamp\":\"20") == 1 && _lc_has(xts, "Z\",\"severity\"") == 1,
+      "export: each entry's timestamp is its RFC 3339 string, not a number");
+    var qts = _scf(libro_tool_query("{\"limit\":1}", 0), "entries");
+    assert(_lc_has(qts, "\"timestamp\":\"20") == 1, "query: the same for libro_query");
+
+    # ---------------- 3.4.10: results are CallToolResults; ok:false is isError ----------------
+    assert(_lt_shape_ok(libro_tool_query("{}", 0), 0) == 1, "query: a CallToolResult with structuredContent");
+    assert(_lt_shape_ok(libro_tool_export("{}", 0), 0) == 1, "export: a CallToolResult with structuredContent");
+    assert(_lt_shape_ok(libro_tool_proof("{\"index\":0}", 0), 0) == 1, "proof: a CallToolResult with structuredContent");
+    assert(_lt_shape_ok(libro_tool_proof("{}", 0), 1) == 1, "proof without index: isError");
+    assert(_lt_shape_ok(libro_tool_proof("{\"index\":99}", 0), 1) == 1, "proof out of range: isError");
+    assert(_lt_shape_ok(libro_tool_retention("{\"policy\":\"not_a_policy\"}", 0), 1) == 1, "retention with an unknown policy: isError");
+
+    # ---------------- 3.4.10: retention never runs a keep_* policy without its value ----------------
+    # Through 3.4.9 a missing value read as 0: keep_count kept zero entries.
+    var before_n = vec_len(load64(pchain));
+    var rkc = libro_tool_retention("{\"policy\":\"keep_count\"}", 0);
+    assert(_lt_shape_ok(rkc, 1) == 1 && _lc_has(rkc, "missing 'value'") == 1, "retention keep_count without value: refused (isError)");
+    assert_eq(vec_len(load64(pchain)), before_n, "...and the chain is untouched (it used to be emptied)");
+    assert(_lt_shape_ok(libro_tool_retention("{\"policy\":\"keep_duration\"}", 0), 1) == 1, "retention keep_duration without value: refused");
+    assert(_lt_shape_ok(libro_tool_retention("{\"policy\":\"keep_after\"}", 0), 1) == 1, "retention keep_after without value: refused");
+    assert(_lt_shape_ok(libro_tool_retention("{\"policy\":\"keep_count\",\"value\":-1}", 0), 1) == 1, "retention with a negative value: refused");
+    assert_eq(vec_len(load64(pchain)), before_n, "...and still untouched");
+    var rk2 = libro_tool_retention("{\"policy\":\"keep_count\",\"value\":2}", 0);
+    assert(_lt_shape_ok(rk2, 0) == 1 && streq(_scf(rk2, "retained"), "2") == 1, "retention keep_count 2 keeps two entries");
+
+    # ---------------- 3.4.10: real input schemas, enforced by the dispatcher ----------------
+    assert(registry_validate_params(reg, "libro_proof", "{}") != 0, "schema: libro_proof requires index");
+    assert(registry_validate_params(reg, "libro_proof", "{\"index\":-1}") != 0, "schema: libro_proof index has minimum 0");
+    assert_eq(registry_validate_params(reg, "libro_proof", "{\"index\":2}"), 0, "schema: libro_proof index 2 passes");
+    assert(registry_validate_params(reg, "libro_retention", "{}") != 0, "schema: libro_retention requires policy");
+    assert(registry_validate_params(reg, "libro_retention", "{\"policy\":\"keep_some\"}") != 0, "schema: libro_retention policy is an enum");
+    assert(registry_validate_params(reg, "libro_query", "{\"severity\":9}") != 0, "schema: libro_query severity is at most 5");
+    assert(registry_validate_params(reg, "libro_query", "{\"limit\":\"5\"}") != 0, "schema: libro_query limit is an integer");
+    assert_eq(registry_validate_params(reg, "libro_query", "{\"source\":\"bote\",\"limit\":5}"), 0, "schema: a well-typed query passes");
+    var lst = dispatcher_dispatch(d, req_new("1", "tools/list"), 0);
+    var lsr = resp_result(lst);
+    if (lsr == 0) { lsr = ""; }
+    assert(_lc_has(lsr, "\"required\":[\"index\"]") == 1 && _lc_has(lsr, "\"enum\":[\"keep_count\"") == 1,
+      "tools/list publishes the properties and required fields");
+    assert(_lc_has(lsr, "\"name\":\"libro_query\",\"description\"") == 1 && _lc_has(lsr, "\"readOnlyHint\":true") == 1,
+      "tools/list marks the readers read-only");
+    assert(_lc_has(lsr, "\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false") == 1,
+      "libro_retention is destructive and not open-world");
 
     # Restore the shared chain the earlier assertions installed.
     libro_tools_init(chain_new());

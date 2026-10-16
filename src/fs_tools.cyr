@@ -236,22 +236,48 @@ fn fs_mkdir_handler(args, claims) {
 
 # Register fs_write / fs_read / fs_mkdir on an existing dispatcher.
 # Call after bote_dispatcher_with_echo() (see src/main.cyr).
+# A one-property-or-two input schema: `path`, plus `content` when `with_content`.
+# Both are required (3.4.10).
+fn _fs_schema(with_content) {
+    var props = vec_new();
+    vec_push(props, schema_prop_new("path", "{\"type\":\"string\",\"description\":\"Path relative to the server root (BOTE_FS_ROOT). Absolute paths and '..' are refused.\"}"));
+    var req = vec_new();
+    vec_push(req, "path");
+    if (with_content == 1) {
+        vec_push(props, schema_prop_new("content", "{\"type\":\"string\",\"description\":\"UTF-8 text to write. It replaces the file.\"}"));
+        vec_push(req, "content");
+    }
+    return schema_new("object", props, req);
+}
+
 fn fs_tools_register(dispatcher) {
     var reg = dispatcher_registry(dispatcher);
-
-    registry_register(reg, tool_def_new(
-        "fs_write", "write a UTF-8 text file (parents created) under the server root; args {path, content}",
-        schema_new("object", 0, vec_new())));
+    # Real input schemas and annotations since 3.4.10. Through 3.4.9 these
+    # registered {"type":"object"} with no properties, and fs_write wrote an
+    # empty file when `content` was missing.
+    var wann = ann_new();
+    ann_set_read_only(wann, HINT_FALSE);
+    ann_set_destructive(wann, HINT_TRUE);
+    ann_set_idempotent(wann, HINT_TRUE);
+    ann_set_open_world(wann, HINT_FALSE);
+    registry_register(reg, tool_def_with_annotations(tool_def_new(
+          "fs_write", "Write a UTF-8 text file under the server root, creating parent directories. Replaces an existing file.",
+          _fs_schema(1)), wann));
     dispatcher_handle(dispatcher, "fs_write", &fs_write_handler);
 
-    registry_register(reg, tool_def_new(
-        "fs_read", "read a text file under the server root; args {path}",
-        schema_new("object", 0, vec_new())));
+    registry_register(reg, tool_def_with_annotations(tool_def_new(
+          "fs_read", "Read a text file under the server root.",
+          _fs_schema(0)), ann_read_only()));
     dispatcher_handle(dispatcher, "fs_read", &fs_read_handler);
 
-    registry_register(reg, tool_def_new(
-        "fs_mkdir", "create a directory (and parents) under the server root; args {path}",
-        schema_new("object", 0, vec_new())));
+    var mann = ann_new();
+    ann_set_read_only(mann, HINT_FALSE);
+    ann_set_destructive(mann, HINT_FALSE);
+    ann_set_idempotent(mann, HINT_TRUE);
+    ann_set_open_world(mann, HINT_FALSE);
+    registry_register(reg, tool_def_with_annotations(tool_def_new(
+          "fs_mkdir", "Create a directory under the server root, with any missing parents.",
+          _fs_schema(0)), mann));
     dispatcher_handle(dispatcher, "fs_mkdir", &fs_mkdir_handler);
 
     return 0;
