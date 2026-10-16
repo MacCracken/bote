@@ -219,7 +219,7 @@ registered by default in the binaries.
 | Hostname blocklist (`localhost`, `metadata.google.internal`, `metadata`) — case-insensitive | `host::_ssrf_classify_hostname` | ✅ |
 | `user:pass@` userinfo stripping before classification | `host::_ssrf_extract_host` | ✅ |
 | Scheme gate — only `http://` / `https://` | same | ✅ |
-| DNS resolution (catch `127.0.0.1.nip.io` style bypasses) — the address a name resolves to is classified where sandhi connects | `web_tools::_web_ssrf_resolve` via `sandhi_client_set_resolver` | ✅ (3.4.4) — `web_fetch` only; `web_search` keeps stock resolution for the operator's own `BOTE_SEARXNG_URL`. Classifier gaps (CGNAT, broadcast, 240/4; non-canonical IPv6 spellings) → roadmap 3.4.6 |
+| DNS resolution (catch `127.0.0.1.nip.io` style bypasses) — the address a name resolves to is classified where sandhi connects | `web_tools::_web_ssrf_resolve` via `sandhi_client_set_resolver` | ✅ (3.4.4) — `web_fetch` only; `web_search` keeps stock resolution for the operator's own `BOTE_SEARXNG_URL`. Classifier gaps (CGNAT, broadcast, 240/4; non-canonical IPv6 spellings) → roadmap 3.4.7 |
 
 ---
 

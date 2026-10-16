@@ -16,7 +16,34 @@ have per release.
 
 ## [Unreleased]
 
-_(empty)_
+### Added
+
+- `docs/audit/2026-10-15-consumers.md`: a read-only audit of every AGNOS repo that consumes bote or
+  runs its own MCP server or client (agnosai, daimon, hoosh, itihas, phylax, stiva, szal, thoth,
+  t-ron, varna; jalwa, mneme, sandhi, agnostik). Every high-severity claim was re-read at its
+  `file:line`.
+  - No consumer depends on any behaviour 3.4.5 changed. Every bump is gated by the toolchain
+    instead: the 3.4.x core bundle does not compile on the cyrius 6.6.x pins most consumers carry.
+  - It found two bote defects, both now on the roadmap. The JSON escaper passes most control bytes
+    raw (measured: the 3.4.5 binary's `fs_read` of an ANSI-coloured file returns invalid JSON). No
+    input schema is ever compiled outside the tests, so the type / enum / bounds validator never
+    runs in production.
+  - It also found security defects in consumers, independent of bote: path traversal and an open
+    bind in mneme, heap overflows in t-ron, an SSRF bypass and curl file exfiltration in szal, and
+    unauthenticated MCP endpoints in daimon, agnosai and hoosh.
+
+### Changed
+
+- Roadmap re-planned from the audit:
+  - **3.4.6:** the escaper fix (control bytes as `\u00XX`, `serverInfo` escaped, a public name).
+  - **3.4.7:** the SSRF classifier gaps, moved back from 3.4.6.
+  - **3.4.8:** schemas compiled at registration and handler results checked.
+  - **3.4.9:** the bundles state the toolchain they need.
+  - A consumer adoption track holds envelope-free entry points, a pre-dispatch guard hook, a
+    handler context pointer, decoding getters and namespaced public names.
+  - Core-reachable HTTP guards and the SSRF classifier are an open profile decision.
+  - A vendoring-friendly pin is an upstream filing still to be made.
+  - `docs/spec-compliance.md` points the classifier gaps at 3.4.7.
 
 ## [3.4.5] — 2026-10-15 · the conformance suite, by spec clause, and the nine violations it found
 

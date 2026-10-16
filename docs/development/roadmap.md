@@ -33,13 +33,44 @@ subprotocol / compression negotiation (→ 3.6.x, needs an upstream seam).
 
 | Item | Notes | Effort |
 |---|---|---|
-| **SSRF classifier gaps.** | Found while wiring the 3.4.4 resolved-address guard. IPv4 (`_ssrf_classify_v4_ab`): no rule for CGNAT 100.64.0.0/10 (Tailscale and carrier-internal ranges — the 3.3.7 sandhi filing described it as covered, it is not), 255.255.255.255 broadcast, 240.0.0.0/4 reserved, 192.0.0.0/24, 198.18.0.0/15 benchmarking. IPv6 string matcher (`_ssrf_classify_ipv6`): textual, so `0:0:0:0:0:0:0:1`, `0::1` and `fe9f::1` are not recognised — the byte classifier (`ssrf_classify_ipv6_bytes`) already decides correctly, so the fix is to parse the literal to bytes and reuse it. Both are judgement calls about what "internal" means; add each with a test naming the range. | Small |
+| **A complete JSON escaper** (audit B1 + B5, G1). | Found by the [2026-10-15 consumer audit](../audit/2026-10-15-consumers.md). `_json_emit_escaped` (`src/dispatch.cyr:261`) escapes `"` `\` LF CR TAB and copies every other byte below 0x20 through raw, and every serializer in bote uses it: error messages, schemas, `content_text*`, `_dsp_tool_error_result`, `fs_tools` and `libro_tools` results. Measured on the 3.4.5 binary: `fs_read` of a file holding an ANSI colour code and a BEL returns a reply `json.loads` rejects. `serverInfo` name and version are emitted with no escaping at all (`_build_initialize_result`, B5). Fix: `\u00XX` for the remaining C0 bytes, escape `serverInfo`, and give the escaper a public name (hoosh calls the private one in six places; itihas, varna, mneme, jalwa and daimon each re-implement it). Tests: a conformance scenario whose tool result carries control bytes, checked by the suite's existing valid-JSON-response assertion; the `fs_read` case over stdio on the built binary; an `initialize` with a quote in the server name. | Small |
 
-## 3.4.x — the rest of the minor
+## 3.4.x — the rest of the minor, one bite per patch
 
-Nothing further is queued for 3.4.x after 3.4.6. A finding that belongs in the minor (a
-conformance gap `tests/conformance.tcyr` does not yet cover, a transport defect) lands here as
-its own patch, one bite per release.
+Each item lands as its own patch, verified before the next starts. The patch numbers are the
+intended order, not a promise.
+
+| Patch | Item | Notes | Effort |
+|---|---|---|---|
+| 3.4.7 | **SSRF classifier gaps.** | Found while wiring the 3.4.4 resolved-address guard. IPv4 (`_ssrf_classify_v4_ab`): no rule for CGNAT 100.64.0.0/10 (Tailscale and carrier-internal ranges — the 3.3.7 sandhi filing described it as covered, it is not), 255.255.255.255 broadcast, 240.0.0.0/4 reserved, 192.0.0.0/24, 198.18.0.0/15 benchmarking. IPv6 string matcher (`_ssrf_classify_ipv6`): textual, so `0:0:0:0:0:0:0:1`, `0::1` and `fe9f::1` are not recognised — the byte classifier (`ssrf_classify_ipv6_bytes`) already decides correctly, so the fix is to parse the literal to bytes and reuse it. Both are judgement calls about what "internal" means; add each with a test naming the range. | Small |
+| 3.4.8 | **Schemas compiled at registration; handler results checked** (audit B2–B4, G2 + G3). | Nothing compiles an input schema outside the tests: `registry_register` and `dispatcher_register_tool` never call `compiled_compile`, and neither does any `src/` module or consumer. Every tool in production takes `registry_validate_params`' fallback, which checks only that `required` keys are present, so the type / enum / bounds validator and 3.4.5's SEP-1303 path never run. Compile on registration (keeping `tool_def_with_compiled` as the explicit override), and refuse a schema whose `type` is not `"object"` or whose property value fails `jsonx_valid` — that check would have caught t-ron's and phylax's `Str`-for-cstr registrations. Also check what a handler returns: valid JSON and an object with `content`, else wrap it as a text block or answer an `isError` result (itihas returns bare records today; phylax returns a `Str` header). Audit and publish a result carrying `isError: true` as a failure, not `TOPIC_TOOL_COMPLETED`. ⚠ Wire-visible for consumers whose tools have typed schemas and loose callers: a wrongly typed argument that passes today becomes an `isError` result. Give it a migration note and say which consumers it reaches. | Medium |
+| 3.4.9 | **The bundles state the toolchain they need** (audit B6 + B7, G13). | The 3.4.x core bundle fails to compile on cyrius 6.6.6 at `const BOTE_LOG_LINE_BYTES` (measured during the audit), the pin hoosh, szal, thoth and t-ron carry. The minimum (≥ 6.7.2) is written only in the 3.4.0 CHANGELOG and DEPS-PATTERN, not in the file a vendoring repo actually opens. The bundle header is written by `cyrius distlib`, so either a comment at the top of `src/log.cyr` (the first module in both profiles) or an upstream request for a `# Requires cyrius:` header line taken from the pin. In the same place, say that a repo that *vendors* the core bundle must declare `sakshi` itself, because the sidecar does not list it and the libro → patra path that supplies it to pinned consumers does not exist for a copied file. | Small |
+
+## Consumer adoption track
+
+From the [2026-10-15 consumer audit](../audit/2026-10-15-consumers.md), section 4. Additive API
+that would let the MCP servers built without bote (jalwa, mneme), the consumers with
+non-JSON-RPC front doors (daimon, itihas, stiva) and t-ron's security gate move onto it. None
+changes the 2.0 handler ABI. Each is its own patch after the 3.4.x queue. Take them in the order a
+consumer is ready to adopt them, not as listed, and name that consumer in the patch.
+
+| Item | What | For |
+|---|---|---|
+| **Envelope-free entry points** (G4) | `dispatcher_call_tool(d, name, args, claims)` returning a CallToolResult (admission, validation, audit and events as `tools/call` does them), and a public tools-list builder (`_build_tools_list_result` is private). | daimon's builtins (matched by hand today), itihas (misusing `HostRegistry` to publish descriptions), stiva |
+| **A pre-dispatch guard hook** (G5) | e.g. `dispatcher_set_call_guard(d, fp, ctx)`, run inside dispatch for every `tools/call`, so a gate sees batches and notifications and sits behind 3.4.5's admission checks instead of in front of them. | t-ron (and thoth through it), whose gate wraps `dispatcher_dispatch` from outside |
+| **A handler context pointer** (G8) | An additive registration variant carrying a `ctx` the handler receives, beside the 2-arg ABI, which stays as it is. | jalwa (`plib`, `engine`), mneme (`manager`, `engines`), which would otherwise need globals |
+| **Decoding and typed argument getters** (G9) | `jsonx_get_str` returns a string's raw escapes, and there is no int / bool / string-array getter. `_fs_unescape` exists but is private and full-bundle only. | jalwa (`max`), mneme (`limit`, `tags`), every handler that reads arguments |
+| **Namespaced public names** (G12) | `content_*`, `ann_*`, `prop_*`, `validate_tool_name`, `parse_property` are bare. `content_text` / `content_audio` collide silently with agnostik and `content_image` by arity; `ann_new` already collided with sit's (thoth renames sit's copy with sed). Add prefixed names and keep the old ones as aliases for one minor. | any repo that vendors bote beside agnostik or sit |
+
+Two larger items need a minor of their own and a design pass first:
+
+- **An MCP client layer** (G10): initialize / initialized, session-id capture, the
+  `MCP-Protocol-Version` header, and reading both error shapes. sandhi's ADR 0001 leaves
+  protocol semantics to bote, but bote has no client side, so daimon hand-rolls a forwarder that
+  cannot reach `bote streamable`. The transport defects stay sandhi's (dual `Accept`,
+  notifications, response headers, depth-aware error detection).
+- **Dynamic resources and prompts** (G11): a provider hook or real RFC 6570 templates in place of
+  the exact-key registries, for a consumer whose set is a live map (agnosai).
 
 ## 3.5.x — Threaded dispatch (real-time push)
 
@@ -89,6 +120,14 @@ Both need a seam upstream that bote should **file, not wait for** — not yet fi
   it needs `iss` / `aud` claim validation bote has no concept of, so routing through bote
   would be indirection over no shared code. Re-decide on a second consumer, not on a
   premise. Precondition already met: `_jwt_str_field_eq` reads `alg` as an exact field.
+- **HTTP guards and the SSRF classifier for core consumers** (audit G6 + G7).
+  `validate_origin`, `validate_protocol_version`, the bearer / allowlist validators
+  (`session.cyr`, `auth.cyr`) and the SSRF classifier (`host.cyr`) are full-bundle only.
+  agnosai, mneme and hoosh run their own sandhi servers, and none checks Origin. szal, stiva and
+  agnosai make outbound requests with hand-rolled or literal-only guards. Options: a third
+  profile (`[lib.guards]`: core plus those three modules, no transports), or moving the pure
+  helpers into core. Weigh it the way `content.cyr` and `sandbox.cyr` were weighed below: on
+  which consumers would include it, not on fit.
 - **`[lib.core]` membership.** The profile exists to bound a transport-free consumer's
   compile set (t-ron's SecurityGate). `content.cyr` joined at 3.3.6 on evidence — core
   consumers were hand-rolling content envelopes and re-implementing JSON escaping.
@@ -164,7 +203,13 @@ None planned. Any one of these would:
 
 ## Upstream
 
-No open blockers. Two open filings, neither blocking:
+No open blockers. Two open filings, neither blocking, and one to file:
+
+- **To file with cyrius — a vendoring-friendly pin** (audit G14). A `[deps.bote]` limited to
+  `modules = ["dist/bote-core.cyr"]` still pulls bote's own `deps.libro` / `deps.majra` into the
+  consumer (t-ron shows it), which is the reason hoosh, szal and thoth vendor the bundle by hand
+  instead, and why all three sit 13 releases behind. A resolver that honours the selected
+  module's `.deps` sidecar, or deps scoped to a profile, would remove the reason.
 
 - **cyrius** — `docs/development/issues/2026-10-15-bote-distlib-kept-fold-over-thin-profile-records-named-deps-need.md`.
   `distlib` records libro's sigil needs (`sigil`, `ct`) on `dist/bote-core.deps` because the
