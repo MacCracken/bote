@@ -104,6 +104,8 @@ fn test_audit_log(ctx, event) {
     return 0;
 }
 fn _audit_reset() { _audit_events = vec_new(); return 0; }
+# A tool handler that returns nothing (3.4.5: a failed call).
+fn h_none_t(args, claims) { return 0; }
 
 # ---- sakshi capture (3.4.0 logging assertions) -----------------------------
 var _lc_buf = 0;
@@ -149,7 +151,7 @@ fn main() {
     # ---------------- error: rpc_code mapping ----------------
     assert_eq(bote_err_rpc_code(BOTE_ERR_PARSE), 0 - 32700, "rpc_code parse");
     assert_eq(bote_err_rpc_code(BOTE_ERR_PROTOCOL), 0 - 32600, "rpc_code protocol");
-    assert_eq(bote_err_rpc_code(BOTE_ERR_TOOL_NOT_FOUND), 0 - 32601, "rpc_code tool_not_found");
+    assert_eq(bote_err_rpc_code(BOTE_ERR_TOOL_NOT_FOUND), 0 - 32602, "rpc_code tool_not_found (-32602 since 3.4.5, the MCP tools spec)");
     assert_eq(bote_err_rpc_code(BOTE_ERR_INVALID_PARAMS), 0 - 32602, "rpc_code invalid_params");
     assert_eq(bote_err_rpc_code(BOTE_ERR_SCHEMA_VIOLATION), 0 - 32602, "rpc_code schema_violation");
     assert_eq(bote_err_rpc_code(BOTE_ERR_EXEC_FAILED), 0 - 32000, "rpc_code exec_failed");
@@ -735,12 +737,15 @@ fn main() {
     if (rs_tl_r == 0) { rs_tl_r = ""; }
     assert(streq(rs_tl_r, "{\"resourceTemplates\":[]}") == 1,
     "resources/templates/list → {\"resourceTemplates\":[]}");
+    # 3.4.5: bote issues no cursors, so a cursor is invalid: -32602, per the
+    # pagination spec (it was ignored through 3.4.4).
     var rs_tlc = dispatcher_dispatch(rs_d,
     req_with_params(req_new("5", "resources/templates/list"), "{\"cursor\":\"abc\"}"), 0);
-    var rs_tlc_r = resp_result(rs_tlc);
-    if (rs_tlc_r == 0) { rs_tlc_r = ""; }
-    assert(streq(rs_tlc_r, "{\"resourceTemplates\":[]}") == 1,
-    "resources/templates/list ignores a pagination cursor (there is never a next page)");
+    # Guarded: a regression to a success must report, not dereference 0.
+    var rs_tlc_code = 0;
+    if (resp_error_obj(rs_tlc) != 0) { rs_tlc_code = rpc_err_code(resp_error_obj(rs_tlc)); }
+    assert_eq(rs_tlc_code, 0 - 32602,
+    "resources/templates/list refuses a cursor it never issued (-32602)");
     var rs_tlw = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"resources/templates/list\"}", rs_d, 0);
     assert(streq(rs_tlw, "{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"resourceTemplates\":[]}}") == 1,
     "resources/templates/list on the wire");
@@ -832,7 +837,7 @@ fn main() {
     "{\"name\":\"nope_x\",\"arguments\":{}}"), 0);
     var uc_err = resp_error_obj(unk_call);
     assert(uc_err != 0, "unknown tool -> err");
-    assert_eq(rpc_err_code(uc_err), 0 - 32601, "unknown tool -32601");
+    assert_eq(rpc_err_code(uc_err), 0 - 32602, "unknown tool -32602");
 
     # ---------------- dispatch: unknown method ----------------
     var um_resp = dispatcher_dispatch(d, req_new("7", "garbage/method"), 0);
@@ -863,7 +868,7 @@ fn main() {
     "{\"name\":\"dyn_tool\",\"arguments\":{}}"), 0);
     var da_err = resp_error_obj(dyn_after);
     assert(da_err != 0, "after dereg unknown tool");
-    assert_eq(rpc_err_code(da_err), 0 - 32601, "after dereg -32601");
+    assert_eq(rpc_err_code(da_err), 0 - 32602, "after dereg -32602");
 
     # Deregister missing
     var dereg_miss = dispatcher_deregister_tool(d, "never_existed");
@@ -1370,6 +1375,29 @@ fn main() {
     assert_eq(bridge_process_message("{\"jsonrpc\":\"2.0\",\"method\":\"notify\"}", bd, 0), 0,
     "bridge notif -> 0");
 
+    # 3.4.5: the bridge runs the codec's own checks (_cdc_admit + jsonx_valid),
+    # so what the codec refuses, the bridge refuses the same way.
+    var bp_bad = bridge_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",}", bd, 0);
+    assert(_lc_has(bp_bad, "\"code\":-32700") == 1, "bridge: invalid JSON is -32700, as in the codec");
+    var bp_bid = bridge_process_message("{\"jsonrpc\":\"2.0\",\"id\":{},\"method\":\"ping\"}", bd, 0);
+    assert(_lc_has(bp_bid, "\"code\":-32600") == 1, "bridge: an object id is -32600, as in the codec");
+    # A schema violation is already a tool result with isError (SEP-1303); the
+    # bridge passes it through once rather than wrapping it a second time.
+    var bsp = vec_new();
+    vec_push(bsp, schema_prop_new("path", "{\"type\":\"string\"}"));
+    var bsr = vec_new();
+    vec_push(bsr, "path");
+    var bss = schema_new("object", bsp, bsr);
+    registry_register(bdreg, tool_def_with_compiled(tool_def_new("svc_strict", "strict", bss), compiled_compile(bss)));
+    dispatcher_handle(bd, "svc_strict", &h_echo);
+    var bp_sv = bridge_process_message(
+    "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"svc_strict\",\"arguments\":{}}}",
+    bd, 0);
+    assert(_lc_has(bp_sv, "\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"schema violation for tool 'svc_strict'") == 1,
+      "bridge: a schema violation arrives as the dispatcher's own isError result");
+    assert(_lc_has(bp_sv, "\"isError\":true}}") == 1 && _lc_has(bp_sv, "\\\"isError") == 0,
+      "bridge: ...not wrapped a second time");
+
     # ---------------- bridge: cors origin selection ----------------
     var cors_a = vec_new();
     vec_push(cors_a, "*");
@@ -1502,6 +1530,22 @@ fn main() {
     assert(resp_error_obj(w_miss) != 0, "missing tool returns error");
     assert_eq(vec_len(_audit_events), 0, "validate-stage err: no audit");
     assert_eq(vec_len(_ev_topics), 0, "validate-stage err: no event");
+
+    # 3.4.5: a handler that returns nothing is a failed call. It answers a
+    # result with isError (not "result":null), and is audited and published
+    # as a failure, not a success.
+    _ev_reset();
+    _audit_reset();
+    registry_register(wreg, tool_def_new("svc_none", "returns nothing", schema_new("object", 0, vec_new())));
+    dispatcher_handle(wd, "svc_none", &h_none_t);
+    var w_none = dispatcher_dispatch(wd, req_with_params(req_new("2c", "tools/call"),
+    "{\"name\":\"svc_none\",\"arguments\":{}}"), 0);
+    var w_none_r = resp_result(w_none);
+    if (w_none_r == 0) { w_none_r = ""; }
+    assert(_lc_has(w_none_r, "\"isError\":true") == 1, "a handler returning 0 answers isError, not null");
+    assert_eq(vec_len(_audit_events), 1, "...audited once");
+    assert_eq(tool_call_event_success(vec_get(_audit_events, 0)), 0, "...as a failure");
+    assert(_lc_has(vec_get(_ev_topics, 0), "bote/tool/failed") == 1, "...published on bote/tool/failed");
 
     # initialize + tools/list do NOT emit tool-call events
     _ev_reset();
@@ -1640,7 +1684,7 @@ fn main() {
     assert_eq(resp_error_obj(s0_r), 0, "no sinks: call succeeds");
     assert(resp_result(s0_r) != 0, "no sinks: result present");
     var s0_u = dispatcher_dispatch(sd_0, s_unh, 0);
-    assert_eq(rpc_err_code(resp_error_obj(s0_u)), 0 - 32601, "no sinks: unhandled tool → tool-not-found code");
+    assert_eq(rpc_err_code(resp_error_obj(s0_u)), 0 - 32602, "no sinks: unhandled tool → tool-not-found code");
 
     # ================================================================
     # 3.4.0 — one DEBUG line per request, from codec_process_message
@@ -1664,9 +1708,9 @@ fn main() {
     # arrives as backslash + 'n' and logs as \\n (the backslash escaped).
     codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"x\\n[0] [ERROR] forged\"}", ld, 0);
     assert(_lc_has(_lc_buf, "method=\"x\\\\n[0] [ERROR] forged\"") == 1, "a JSON-escaped newline logs with its backslash escaped");
-    # The real vector: bote's parser accepts a RAW LF inside a string, so the
-    # byte reaches the logger. It must come out as the two characters \n,
-    # leaving the event one line.
+    # The raw vector: a RAW LF inside a string. Through 3.4.4 bote's parser
+    # accepted it and the byte reached the logger. Since 3.4.5 the message
+    # is syntax-checked first, so it is a parse error and never dispatched.
     var rawreq = alloc(96);
     var rq1 = "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"y";
     var rq1n = strlen(rq1);
@@ -1675,7 +1719,18 @@ fn main() {
     var rq2 = "[0] [ERROR] forged\"}";
     memcpy(rawreq + rq1n + 1, rq2, strlen(rq2));
     store8(rawreq + rq1n + 1 + strlen(rq2), 0);
-    codec_process_message(rawreq, ld, 0);
+    store8(_lc_buf, 0);
+    var rawresp = codec_process_message(rawreq, ld, 0);
+    assert(_lc_has(rawresp, "\"code\":-32700") == 1, "a raw LF inside a JSON string is a parse error (3.4.5)");
+    assert_eq(_lc_has(_lc_buf, "forged"), 0, "...and logs no request line");
+    # The logger's own escaping still holds for a method that carries the
+    # byte: it must come out as the two characters \n, leaving one line.
+    var rawm = alloc(32);
+    store8(rawm, 121);
+    store8(rawm + 1, 10);
+    memcpy(rawm + 2, "[0] [ERROR] forged", 18);
+    store8(rawm + 20, 0);
+    _cdc_log_request(req_new("11", rawm), 0, clock_now_ns());
     assert(_lc_has(_lc_buf, "method=\"y\\n[0] [ERROR] forged\"") == 1, "a raw LF in a method name is logged as \\n");
     var lfs = 0;
     var li = 0;

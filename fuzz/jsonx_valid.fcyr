@@ -1,0 +1,167 @@
+# Fuzz: jsonx_valid (3.4.5) decides RFC 8259 syntax without crashing.
+#
+# The codec trusts it: every byte the extractors and the dispatcher read has
+# passed it first. So an accept it should not give is a hole, and a crash is
+# a remote crash. Three properties, each with its own exit code:
+#
+#   10+  the known-valid corpus is accepted and the known-invalid one refused;
+#   20   every proper prefix of a valid object or array text is refused (the
+#        closing bracket is the text's last byte, so no prefix can be one
+#        whole value), and the text itself is accepted;
+#   30   every single-byte substitution at every offset of the seeds returns
+#        0 or 1 and nothing else; any it accepts, the extractors walk cleanly.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+
+alloc_init();
+
+fn _v(s) { return jsonx_valid(s, strlen(s)); }
+
+var good = vec_new();
+vec_push(good, "{}");
+vec_push(good, "[]");
+vec_push(good, " { } ");
+vec_push(good, "0");
+vec_push(good, "-0");
+vec_push(good, "-12.5e+3");
+vec_push(good, "1E9");
+vec_push(good, "\"\"");
+vec_push(good, "\"a\\\"b\\\\c\\/d\\b\\f\\n\\r\\t\\u00e9\"");
+vec_push(good, "true");
+vec_push(good, "false");
+vec_push(good, "null");
+vec_push(good, "{\"a\":[1,2,{\"b\":null}],\"c\":\"d\"}");
+vec_push(good, "[[[[[[[[[[1]]]]]]]]]]");
+vec_push(good, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"x_y\",\"arguments\":{\"k\":[true,false]}}}");
+
+var bad = vec_new();
+vec_push(bad, "");
+vec_push(bad, "   ");
+vec_push(bad, "{");
+vec_push(bad, "}");
+vec_push(bad, "[1,]");
+vec_push(bad, "{\"a\":1,}");
+vec_push(bad, "{\"a\" 1}");
+vec_push(bad, "{a:1}");
+vec_push(bad, "{\"a\":1}}");
+vec_push(bad, "01");
+vec_push(bad, "-");
+vec_push(bad, "1.");
+vec_push(bad, ".5");
+vec_push(bad, "1e");
+vec_push(bad, "1e+");
+vec_push(bad, "+1");
+vec_push(bad, "tru");
+vec_push(bad, "nulll");
+vec_push(bad, "\"abc");
+vec_push(bad, "\"\\x\"");
+vec_push(bad, "\"\\u12\"");
+vec_push(bad, "\"\\u12G4\"");
+vec_push(bad, "\"tab\there\"");
+vec_push(bad, "[1 2]");
+vec_push(bad, "1 2");
+vec_push(bad, "{\"a\":1} x");
+
+var i = 0;
+while (i < vec_len(good)) {
+    if (_v(vec_get(good, i)) != 1) { sys_exit(10 + i); }
+    i = i + 1;
+}
+if (jsonx_valid(0, 0) != 0) { sys_exit(9); }
+i = 0;
+while (i < vec_len(bad)) {
+    if (_v(vec_get(bad, i)) != 0) { sys_exit(40 + i); }
+    i = i + 1;
+}
+
+# A container nested JSONX_MAX_DEPTH deep is accepted; one deeper is not,
+# matching the cap the extractors walk under.
+var deep = alloc(2 * JSONX_MAX_DEPTH + 8);
+var di = 0;
+while (di < JSONX_MAX_DEPTH) { store8(deep + di, 91); di = di + 1; }
+di = 0;
+while (di < JSONX_MAX_DEPTH) { store8(deep + JSONX_MAX_DEPTH + di, 93); di = di + 1; }
+store8(deep + 2 * JSONX_MAX_DEPTH, 0);
+if (_v(deep) != 1) { sys_exit(7); }
+var deeper = alloc(2 * JSONX_MAX_DEPTH + 8);
+store8(deeper, 91);
+memcpy(deeper + 1, deep, 2 * JSONX_MAX_DEPTH);
+store8(deeper + 2 * JSONX_MAX_DEPTH + 1, 93);
+store8(deeper + 2 * JSONX_MAX_DEPTH + 2, 0);
+if (_v(deeper) != 0) { sys_exit(8); }
+
+# Property 20: proper prefixes of an object- or array-rooted text.
+var seeds = vec_new();
+vec_push(seeds, "{\"a\":[1,2,{\"b\":null}],\"c\":\"d\\\"e\"}");
+vec_push(seeds, "[{\"x\":-1.5e3},\"s\",true,false,null,[]]");
+vec_push(seeds, "{\"jsonrpc\":\"2.0\",\"id\":\"q\",\"method\":\"tools/call\",\"params\":{\"name\":\"x_y\",\"arguments\":{\"k\":[0,1]}}}");
+var si = 0;
+while (si < vec_len(seeds)) {
+    var s = vec_get(seeds, si);
+    var n = strlen(s);
+    if (jsonx_valid(s, n) != 1) { sys_exit(20); }
+    var k = 1;
+    while (k < n) {
+        if (jsonx_valid(s, k) != 0) { sys_exit(21); }
+        k = k + 1;
+    }
+    si = si + 1;
+}
+
+# Property 30: every single-byte substitution at every offset.
+var subs = vec_new();
+vec_push(subs, 0);
+vec_push(subs, 9);
+vec_push(subs, 34);
+vec_push(subs, 44);
+vec_push(subs, 48);
+vec_push(subs, 58);
+vec_push(subs, 91);
+vec_push(subs, 92);
+vec_push(subs, 93);
+vec_push(subs, 123);
+vec_push(subs, 125);
+vec_push(subs, 255);
+si = 0;
+while (si < vec_len(seeds)) {
+    var src = vec_get(seeds, si);
+    var sn = strlen(src);
+    var buf = alloc(sn + 1);
+    var off = 0;
+    while (off < sn) {
+        var bi = 0;
+        while (bi < vec_len(subs)) {
+            memcpy(buf, src, sn);
+            store8(buf + sn, 0);
+            store8(buf + off, vec_get(subs, bi));
+            # A NUL substitution shortens the cstr; the explicit length keeps
+            # the validator reading the NUL as a byte, as a transport would.
+            var r = jsonx_valid(buf, sn);
+            if (r != 0 && r != 1) { sys_exit(30); }
+            if (r == 1 && vec_get(subs, bi) != 0) {
+                jsonx_get_raw(buf, "a");
+                jsonx_get_str(buf, "method");
+                jsonx_has(buf, "params");
+            }
+            bi = bi + 1;
+        }
+        off = off + 1;
+    }
+    si = si + 1;
+}
+
+sys_exit(0);

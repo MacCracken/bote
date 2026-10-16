@@ -114,6 +114,12 @@ fn main() {
     assert(streq(tr, "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}") == 1,
     "content_text_response matches content_single(content_text(...))");
 
+    # 3.4.5: the failed-execution twin, which the dispatcher uses for input
+    # validation failures (SEP-1303).
+    var tre = content_text_error_response("bad \"x\"");
+    assert(streq(tre, "{\"content\":[{\"type\":\"text\",\"text\":\"bad \\\"x\\\"\"}],\"isError\":true}") == 1,
+    "content_text_error_response: one escaped text block and isError:true");
+
     # ---------------- Binary resource (blob) variant — 1.9.1 ----------------
     var crb = content_resource_blob("file:///bin", "application/octet-stream", "AAA=");
     assert(streq(crb,

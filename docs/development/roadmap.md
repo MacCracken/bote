@@ -17,7 +17,8 @@ stable across the 2.x → 3.x line; patch releases add capabilities, not shape c
 protocol surface is `initialize`, `tools/*`, `prompts/*`, `resources/list` + `read`,
 `completion/complete`, `ping`, and a polled push of `tools` / `prompts` `list_changed`
 (buffered per session, drained on the client's next Streamable HTTP `GET` or piggybacked on
-a `POST`). Four MCP protocol revisions are accepted, from one list.
+a `POST`). Four MCP protocol revisions are accepted, from one list. Since 3.4.5 every one of
+those paths, error paths included, is asserted by spec clause in `tests/conformance.tcyr`.
 Operational logging goes through sakshi (`src/log.cyr`, `BOTE_LOG`) — distinct from the MCP
 `logging` capability, which still waits on 3.5.x. Two consumer bundles (`dist/bote.cyr`, `dist/bote-core.cyr`), one binary with every transport selected by argv,
 x86_64 + aarch64 + agnos targets, all CI-gated.
@@ -28,20 +29,17 @@ subprotocol / compression negotiation (→ 3.6.x, needs an upstream seam).
 
 ---
 
-## Next patch — 3.4.5
+## Next patch — 3.4.6
 
 | Item | Notes | Effort |
 |---|---|---|
-| **Port the conformance suite.** | The Rust archive (tag `0.92.0`) carried 44 protocol-level scenarios; none was ported. 3.3.13 is the argument: `ping` had answered `-32601` since the port with 887 assertions passing, because the suite tests the methods bote implements rather than the ones the spec requires. Do it before the 3.5.x work adds surface. Lands as `tests/conformance.tcyr`, driven through `codec_process_message` so it needs no live transport. | Medium |
+| **SSRF classifier gaps.** | Found while wiring the 3.4.4 resolved-address guard. IPv4 (`_ssrf_classify_v4_ab`): no rule for CGNAT 100.64.0.0/10 (Tailscale and carrier-internal ranges — the 3.3.7 sandhi filing described it as covered, it is not), 255.255.255.255 broadcast, 240.0.0.0/4 reserved, 192.0.0.0/24, 198.18.0.0/15 benchmarking. IPv6 string matcher (`_ssrf_classify_ipv6`): textual, so `0:0:0:0:0:0:0:1`, `0::1` and `fe9f::1` are not recognised — the byte classifier (`ssrf_classify_ipv6_bytes`) already decides correctly, so the fix is to parse the literal to bytes and reuse it. Both are judgement calls about what "internal" means; add each with a test naming the range. | Small |
 
-## 3.4.x — the rest of the minor, one bite per patch
+## 3.4.x — the rest of the minor
 
-Each item lands as its own patch, verified before the next starts. The patch numbers are the
-intended order, not a promise.
-
-| Patch | Item | Notes | Effort |
-|---|---|---|---|
-| 3.4.6 | **SSRF classifier gaps.** | Found while wiring the 3.4.4 resolved-address guard. IPv4 (`_ssrf_classify_v4_ab`): no rule for CGNAT 100.64.0.0/10 (Tailscale and carrier-internal ranges — the 3.3.7 sandhi filing described it as covered, it is not), 255.255.255.255 broadcast, 240.0.0.0/4 reserved, 192.0.0.0/24, 198.18.0.0/15 benchmarking. IPv6 string matcher (`_ssrf_classify_ipv6`): textual, so `0:0:0:0:0:0:0:1`, `0::1` and `fe9f::1` are not recognised — the byte classifier (`ssrf_classify_ipv6_bytes`) already decides correctly, so the fix is to parse the literal to bytes and reuse it. Both are judgement calls about what "internal" means; add each with a test naming the range. | Small |
+Nothing further is queued for 3.4.x after 3.4.6. A finding that belongs in the minor (a
+conformance gap `tests/conformance.tcyr` does not yet cover, a transport defect) lands here as
+its own patch, one bite per release.
 
 ## 3.5.x — Threaded dispatch (real-time push)
 

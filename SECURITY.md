@@ -11,7 +11,11 @@ The primary security-relevant surface areas are:
 
 - **JSON-RPC parsing** — `codec` / `jsonx` parsing of untrusted client input.
   Malformed or oversized payloads could cause excessive memory allocation;
-  batch length is capped to bound per-request allocation.
+  batch length is capped to bound per-request allocation. Since 3.4.5 every
+  message is syntax-checked (`jsonx_valid`, RFC 8259, nesting capped at 64)
+  before any extractor reads it. Before that the scanning extractors read
+  whatever they were given, and a truncated object containing a "method"
+  was dispatched.
 - **Transport layer** — HTTP, Streamable HTTP/SSE, WebSocket, Unix socket, and
   bridge transports accept network connections. Opt-in auth validators (bearer,
   allowlist, JWT HS256, PKCE) are built in; TLS is expected to be handled by
@@ -73,9 +77,13 @@ responsibly:
 
 - No panic/abort in library code — errors return as 0 / -1 / error tags; the
   consumer decides.
-- jsonrpc version validated on every request.
+- Every message is checked to be one valid JSON text before it is read
+  (`-32700` otherwise), and the jsonrpc version, the id type and the params
+  type are validated on every request (`-32600`).
 - Empty/missing tool names rejected before dispatch.
 - Tool arguments validated against the registered JSON Schema before dispatch.
+  A violation never reaches the handler; it is answered as a result with
+  `isError: true` (MCP 2025-11-25, SEP-1303).
 - JSON-RPC batch length capped to bound per-request allocation.
 - Profile-split distribution (`dist/bote-core.cyr`) — core has minimal attack
   surface.

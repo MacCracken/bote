@@ -196,11 +196,12 @@ Supported MCP protocol versions: `2024-11-05`, `2025-03-26`, `2025-06-18`,
 
 | Code | Meaning |
 |---|---|
-| -32700 | Parse error |
-| -32600 | Invalid request |
-| -32601 | Method not found |
-| -32602 | Invalid params |
-| -32000 | Tool execution / sandbox error |
+| -32700 | Parse error (the message is not valid JSON) |
+| -32600 | Invalid request (valid JSON, but not a JSON-RPC request) |
+| -32601 | Method not found (including a method behind an un-advertised capability) |
+| -32602 | Invalid params — including an unknown tool, a malformed `tools/call`, an invalid pagination cursor, a missing required prompt argument |
+| -32002 | Resource not found (`resources/read`; the URI is in `error.data`) |
+| -32000 | Tool execution / sandbox error — in `bote_err_rpc_code` for an embedder's own use; bote's dispatcher reports a failed tool as a result with `isError: true` instead |
 | -32003 | Transport closed / bind failed |
 | -32603 | Internal error |
 | -32800 | Request cancelled |
@@ -213,7 +214,7 @@ Supported MCP protocol versions: `2024-11-05`, `2025-03-26`, `2025-06-18`,
 src/log.cyr                Operational logging through sakshi (BOTE_LOG, BOTE_LOG_FILE)
 src/error.cyr              BoteErrTag enum, rpc_code mapping, format
 src/protocol.cyr           JsonRpcRequest / Response / Error
-src/jsonx.cyr              Nested-aware JSON value extractor
+src/jsonx.cyr              Nested-aware JSON value extractor + RFC 8259 syntax check
 src/registry.cyr           ToolDef / ToolSchema / ToolRegistry / annotations
 src/prompts.cyr            PromptRegistry (prompts/list + prompts/get)
 src/resources.cyr          ResourceRegistry (resources/list + resources/read)
@@ -256,14 +257,15 @@ transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ## Verification
 
-### Tests — 1094 total across fourteen files (+ a core-only drift smoke)
+### Tests — 1222 total across fifteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1094 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1222 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 473 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/bote.tcyr               # 483 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/conformance.tcyr        # 117 — JSON-RPC 2.0 + MCP 2025-11-25 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 45 — bearer + allowlist + JWT + PKCE validators
-cyrius test tests/bote_content.tcyr       # 24 — typed content blocks
+cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 31 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 152 — host registry + SSRF guard (IPv4 + IPv6)
 cyrius test tests/bote_jwt.tcyr           # 53 — JWT HS256 verify + exact alg + exp enforcement
@@ -284,7 +286,7 @@ cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dis
 cyrius bench tests/bote.bcyr
 ```
 
-Latest logged row — bote 3.4.1 on cyrius 6.7.9, single run (1-minute load 2.1), `AMD Ryzen 7 5800H`. The full history, with the host conditions
+A logged row — bote 3.4.1 on cyrius 6.7.9, single run (1-minute load 2.1, a quieter host than any row since), `AMD Ryzen 7 5800H`. 3.4.5 added a 15th bench, `jsonx_valid_request`, the syntax pass every message now gets (577 ns in its own row). The full history, with the host conditions
 each block was taken under, is [`benches/history.log`](benches/history.log).
 
 | Hot path | Avg |
@@ -322,8 +324,9 @@ each block was taken under, is [`benches/history.log`](benches/history.log).
 cyrius fuzz fuzz/codec_parse.fcyr
 cyrius fuzz fuzz/codec_process.fcyr
 cyrius fuzz fuzz/jsonx_extract.fcyr
+cyrius fuzz fuzz/jsonx_valid.fcyr
 cyrius fuzz fuzz/schema_validate.fcyr
-# 4 passed, 0 failed each
+# 1 passed, 0 failed each
 ```
 
 ---

@@ -8,6 +8,7 @@
 # This module exposes:
 #   jsonx_get_raw(obj_cstr, key) → cstr (raw JSON value) or 0
 #   jsonx_get_str(obj_cstr, key) → cstr (decoded string value, no quotes) or 0
+#   jsonx_valid(buf, len)        → 1 if buf is one RFC 8259 JSON text, else 0
 #
 # Limitations: no escape decoding inside strings (only \" is honored for
 # detecting closing quote). No whitespace tolerance inside structured values.
@@ -169,5 +170,172 @@ fn jsonx_is_object(obj_cstr) {
     var i = _jx_skip_ws(obj_cstr, len, 0);
     if (i >= len) { return 0; }
     if (load8(obj_cstr + i) != 123) { return 0; }
+    return 1;
+}
+
+# ================================================================
+# Syntax validation (3.4.5)
+# ================================================================
+#
+# The extractors above trust their input: they find a key by scanning and
+# never check that the text around it is JSON. JSON-RPC 2.0 §5.1 needs the
+# distinction, though. Invalid JSON is a parse error (-32700), and a valid
+# JSON text that is not a request is an invalid request (-32600). Through
+# 3.4.4 the codec could not tell them apart. `not json` answered -32600,
+# and a truncated object that happened to contain a "method" was
+# dispatched.
+#
+# jsonx_valid checks RFC 8259 syntax in one pass and allocates nothing.
+# It rejects:
+#   - unescaped control bytes inside strings, and malformed escapes;
+#   - leading zeros, a bare `-`, a `.` without digits, an `e` without digits;
+#   - trailing commas;
+#   - anything after the value but whitespace.
+# It does not check UTF-8. Bytes >= 0x80 pass through as they always have.
+#
+# Nesting is capped at JSONX_MAX_DEPTH. That is the same cap _jx_skip_struct
+# bails at, so every text this accepts can also be walked by the
+# extractors. Recursion depth is bounded by the same cap.
+
+fn _jx_is_digit(c) {
+    if (c >= 48 && c <= 57) { return 1; }
+    return 0;
+}
+
+fn _jx_is_hex(c) {
+    if (c >= 48 && c <= 57) { return 1; }
+    if (c >= 65 && c <= 70) { return 1; }
+    if (c >= 97 && c <= 102) { return 1; }
+    return 0;
+}
+
+# Index after the string at buf[i] (a `"`), or -1.
+fn _jx_valid_string(buf, len, i) {
+    i = i + 1;
+    while (i < len) {
+        var c = load8(buf + i);
+        if (c == 34) { return i + 1; }
+        if (c < 32) { return 0 - 1; }
+        if (c == 92) {
+            if (i + 1 >= len) { return 0 - 1; }
+            var e = load8(buf + i + 1);
+            if (e == 117) {
+                if (i + 6 > len) { return 0 - 1; }
+                var h = 2;
+                while (h < 6) {
+                    if (_jx_is_hex(load8(buf + i + h)) == 0) { return 0 - 1; }
+                    h = h + 1;
+                }
+                i = i + 6;
+            } elif (e == 34 || e == 92 || e == 47 || e == 98 || e == 102 || e == 110 || e == 114 || e == 116) {
+                i = i + 2;
+            } else {
+                return 0 - 1;
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+    return 0 - 1;
+}
+
+# Index after the number at buf[i], or -1. RFC 8259 §6:
+# -? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?
+fn _jx_valid_number(buf, len, i) {
+    if (i < len && load8(buf + i) == 45) { i = i + 1; }
+    if (i >= len) { return 0 - 1; }
+    var c = load8(buf + i);
+    if (c == 48) {
+        i = i + 1;
+    } elif (c >= 49 && c <= 57) {
+        while (i < len && _jx_is_digit(load8(buf + i)) == 1) { i = i + 1; }
+    } else {
+        return 0 - 1;
+    }
+    if (i < len && load8(buf + i) == 46) {
+        i = i + 1;
+        if (i >= len || _jx_is_digit(load8(buf + i)) == 0) { return 0 - 1; }
+        while (i < len && _jx_is_digit(load8(buf + i)) == 1) { i = i + 1; }
+    }
+    if (i < len && (load8(buf + i) == 101 || load8(buf + i) == 69)) {
+        i = i + 1;
+        if (i < len && (load8(buf + i) == 43 || load8(buf + i) == 45)) { i = i + 1; }
+        if (i >= len || _jx_is_digit(load8(buf + i)) == 0) { return 0 - 1; }
+        while (i < len && _jx_is_digit(load8(buf + i)) == 1) { i = i + 1; }
+    }
+    return i;
+}
+
+# Index after the literal `lit` (n bytes) at buf[i], or -1.
+fn _jx_valid_literal(buf, len, i, lit, n) {
+    if (i + n > len) { return 0 - 1; }
+    if (memeq(buf + i, lit, n) == 0) { return 0 - 1; }
+    return i + n;
+}
+
+# Index after the object at buf[i] (a `{`), or -1. `depth` counts this one.
+fn _jx_valid_object(buf, len, i, depth) {
+    i = _jx_skip_ws(buf, len, i + 1);
+    if (i < len && load8(buf + i) == 125) { return i + 1; }
+    while (i < len) {
+        if (load8(buf + i) != 34) { return 0 - 1; }
+        i = _jx_valid_string(buf, len, i);
+        if (i < 0) { return 0 - 1; }
+        i = _jx_skip_ws(buf, len, i);
+        if (i >= len || load8(buf + i) != 58) { return 0 - 1; }
+        i = _jx_valid_value(buf, len, i + 1, depth);
+        if (i < 0) { return 0 - 1; }
+        i = _jx_skip_ws(buf, len, i);
+        if (i >= len) { return 0 - 1; }
+        var c = load8(buf + i);
+        if (c == 125) { return i + 1; }
+        if (c != 44) { return 0 - 1; }
+        i = _jx_skip_ws(buf, len, i + 1);
+    }
+    return 0 - 1;
+}
+
+# Index after the array at buf[i] (a `[`), or -1. `depth` counts this one.
+fn _jx_valid_array(buf, len, i, depth) {
+    i = _jx_skip_ws(buf, len, i + 1);
+    if (i < len && load8(buf + i) == 93) { return i + 1; }
+    while (i < len) {
+        i = _jx_valid_value(buf, len, i, depth);
+        if (i < 0) { return 0 - 1; }
+        i = _jx_skip_ws(buf, len, i);
+        if (i >= len) { return 0 - 1; }
+        var c = load8(buf + i);
+        if (c == 93) { return i + 1; }
+        if (c != 44) { return 0 - 1; }
+        i = _jx_skip_ws(buf, len, i + 1);
+    }
+    return 0 - 1;
+}
+
+# Index after the value at buf[i] (leading whitespace skipped), or -1.
+# `depth` is the number of containers already open around it.
+fn _jx_valid_value(buf, len, i, depth) {
+    i = _jx_skip_ws(buf, len, i);
+    if (i >= len) { return 0 - 1; }
+    var c = load8(buf + i);
+    if (c == 34) { return _jx_valid_string(buf, len, i); }
+    if (c == 123 || c == 91) {
+        if (depth >= JSONX_MAX_DEPTH) { return 0 - 1; }
+        if (c == 123) { return _jx_valid_object(buf, len, i, depth + 1); }
+        return _jx_valid_array(buf, len, i, depth + 1);
+    }
+    if (c == 116) { return _jx_valid_literal(buf, len, i, "true", 4); }
+    if (c == 102) { return _jx_valid_literal(buf, len, i, "false", 5); }
+    if (c == 110) { return _jx_valid_literal(buf, len, i, "null", 4); }
+    return _jx_valid_number(buf, len, i);
+}
+
+# 1 when buf[0..len) is exactly one JSON text, surrounding whitespace
+# allowed; 0 otherwise, or when buf is 0.
+fn jsonx_valid(buf, len) {
+    if (buf == 0) { return 0; }
+    var end = _jx_valid_value(buf, len, 0, 0);
+    if (end < 0) { return 0; }
+    if (_jx_skip_ws(buf, len, end) != len) { return 0; }
     return 1;
 }

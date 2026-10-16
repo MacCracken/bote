@@ -85,6 +85,16 @@ fn resp_error(id, code, message) {
     return r;
 }
 
+# resp_error with a `data` member: a raw JSON literal, or 0 to omit it.
+fn resp_error_data(id, code, message, data) {
+    var r = alloc(32);
+    store64(r, "2.0");
+    store64(r + 8, id);
+    store64(r + 16, 0);
+    store64(r + 24, rpc_err_new(code, message, data));
+    return r;
+}
+
 fn resp_jsonrpc(r) { return load64(r); }
 fn resp_id(r) { return load64(r + 8); }
 fn resp_result(r) { return load64(r + 16); }

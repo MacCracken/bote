@@ -18,6 +18,171 @@ have per release.
 
 _(empty)_
 
+## [3.4.5] — 2026-10-15 · the conformance suite, by spec clause, and the nine violations it found
+
+The roadmap's 3.4.5 item: port the conformance suite. The Rust archive's 44 protocol scenarios
+are now `tests/conformance.tcyr`, organised by spec clause and driven through
+`codec_process_message`, with the JSON-RPC 2.0 and MCP 2025-11-25 requirements the Rust suite never
+had. Run against the 3.4.4 sources, it fails 29 of its 117 assertions. Each failure is a spec
+violation, and each is fixed here.
+
+### Breaking — wire behaviour changed to match the spec
+
+Each of these changes what a client sees on the wire, so each gets a migration note. They ship in
+a patch because each was a spec violation on the released binary, the same footing as 3.3.13's
+`ping` fix. `dispatcher_dispatch`'s signature and the 2.0 handler ABI are unchanged.
+
+| Request | 3.4.4 | 3.4.5 | Spec |
+|---|---|---|---|
+| `tools/call` naming an unknown tool | error `-32601` | error `-32602` | MCP tools spec, "Error Handling": the example is `{"code":-32602,"message":"Unknown tool: …"}` (also in 2025-06-18) |
+| `tools/call` whose arguments fail the tool's `inputSchema` | error `-32602` | **result** `{"content":[{"type":"text","text":"schema violation for tool '…': …"}],"isError":true}` | MCP 2025-11-25, SEP-1303: input validation errors are tool execution errors, "to enable model self-correction" |
+| `tools/call` whose handler returns nothing | `"result":null` | result with `isError:true`, text `tool execution failed: <name> - the handler returned no result` | a CallToolResult must carry `content`; `null` is not one |
+| `resources/read` of a URI nothing serves | error `-32602`, "invalid params for tool '<uri>': resource not found" | error `-32002`, "resource not found: <uri>", `"data":{"uri":"<uri>"}` | MCP resources spec, "Error Handling" |
+| `prompts/get` missing a required argument | the handler was called | error `-32602` | MCP prompts spec: missing required arguments are `-32602` |
+| Invalid JSON (`not valid json`, a truncated object, a trailing comma, `"id":01`) | `-32600`, or dispatched, or silently dropped | error `-32700`, id null | JSON-RPC 2.0 §5.1 |
+| An id that is an object, array or boolean | echoed back | error `-32600`, id null | JSON-RPC 2.0 §4: an id is a string, a number or null |
+| `params` that is a string or a number | ignored | error `-32600` with the request's id | JSON-RPC 2.0 §4.2: params is structured, if present |
+| A `cursor` on `tools/list`, `prompts/list`, `resources/list` or `resources/templates/list` | ignored, first page sent again | error `-32602` (a null cursor is still read as absent) | MCP pagination: "Invalid cursors SHOULD result in an error with code -32602". bote issues no cursors, so every cursor is invalid |
+
+Migration:
+
+- **A client matching `-32601` for an unknown tool** should match `-32602`. `-32601` now means only
+  what JSON-RPC says it means: the *method* does not exist.
+- **A client that treated a `-32602` from `tools/call` as "bad arguments"** now gets a result with
+  `isError: true`, whose text names the offending argument. A missing or empty tool name,
+  `arguments` that are not an object, and an unknown tool `version` are still `-32602`: those break
+  the CallToolRequest itself.
+- **An embedder that re-wraps `dispatcher_dispatch` results** should pass a result that already has
+  a top-level `content` array through unchanged, as bote's own bridge does (`wrap_tool_result`).
+  Otherwise a validation failure is wrapped twice.
+- **An embedder that read `bote_err_rpc_code(BOTE_ERR_TOOL_NOT_FOUND)`** gets `-32602`.
+- **A prompt that declares an argument `required` but tolerated its absence** must either receive it
+  or stop declaring it required.
+- **A client that sends a `cursor` bote never gave it** should stop: bote returns every item in one
+  page and never sets `nextCursor`, so a conforming client never has a cursor to send.
+
+### Fixed — the nine violations, in the code
+
+- **`jsonx_valid` (new, `src/jsonx.cyr`)** checks RFC 8259 syntax in one pass, allocating nothing,
+  with nesting capped at `JSONX_MAX_DEPTH`, the cap the extractors already walk under. The
+  extractors never checked syntax: they find a key by scanning. `codec_process_message` now
+  validates the whole message first. 3.4.4 had answered `not valid json` with `-32600`. The
+  spec's own truncated-object example (`{"jsonrpc":"2.0","method":"foo","params":"bar","baz]`) has
+  no id, so 3.4.4 dispatched it as a notification and answered nothing. `{"id":01,…}` went back as
+  `"id":01`, which is not JSON. The spec's invalid-JSON batch example got a two-element array where
+  one `-32700` belongs.
+- **Request admission is one function.** `_cdc_admit` (`src/codec.cyr`) checks the jsonrpc
+  version, the id type and the params type. `bridge.cyr`'s single-message path calls it, and the
+  bridge runs `jsonx_valid` too. The bridge used to carry its own copy of the version check, and
+  that copy would have missed every check added here. An explicit `"params":null` is read as absent: clients send
+  it, and it carries nothing a method could misread.
+- **`tools/call`** (`src/dispatch.cyr`):
+  - an unknown tool, or a listed tool with no handler, is `-32602`;
+  - non-object `arguments` is `-32602`, checked before validation;
+  - a schema violation is a result built by `_dsp_tool_error_result`;
+  - a handler that returns 0 is a failed call, audited and published as `TOPIC_TOOL_FAILED` where
+    3.4.4 recorded a success.
+- **`resources/read`** answers an unserved URI with `-32002` (`BOTE_RPC_RESOURCE_NOT_FOUND`) and
+  the URI in `error.data`, through the new `resp_error_data` in `src/protocol.cyr`.
+- **The list methods** (`tools/list`, `prompts/list`, `resources/list`,
+  `resources/templates/list`) answer a non-null `cursor` with `-32602`, through
+  `_dsp_cursor_given` / `_dsp_cursor_refusal`. 3.4.1 had documented ignoring a cursor as the honest
+  reply, but the pagination spec says otherwise, and a first page sent again reads to a client
+  joining pages as duplicates.
+- **`prompts/get`** refuses non-object `arguments` and the first missing required argument with
+  `-32602`, before the handler runs. An unknown prompt's message is now "prompt not found: <name>".
+  It used to say "invalid params for tool '<name>'".
+
+### Added
+
+- **`tests/conformance.tcyr`**, 117 assertions in fifteen sections:
+  - JSON-RPC 2.0 §4 request, §5 response, §4.1 notifications, §5.1 error codes and §6 batch,
+    including the spec's own examples (`[1,2,3]`, the truncated object, the invalid batch);
+  - MCP initialize and version negotiation for all four revisions;
+  - ping and cancellation;
+  - capability gating and pagination cursors;
+  - tools/list, tools/call, prompts, resources and completion;
+  - the registry's compiled-schema cleanup, and the whole initialize → initialized → list → call
+    flow.
+
+  Every response is also checked on its own: it must be valid JSON and a JSON-RPC 2.0 Response
+  object (an id that is a string, number or null; exactly one of result and error; an error with an
+  integer code and a string message). One assertion requires the nonconforming count to be zero;
+  against 3.4.4 it was 4. The Rust suite's 44 scenarios are all here except the bridge's error
+  envelope, which stays in `tests/bote.tcyr` because the bridge links the HTTP stack. Where the
+  Rust suite and the spec disagree (unknown tool, schema violation), the scenario says which it
+  follows: the spec.
+- **`fuzz/jsonx_valid.fcyr`**, the fifth fuzz harness:
+  - a valid and an invalid corpus;
+  - depth at and past the cap;
+  - every proper prefix of an object or array text is refused;
+  - every single-byte substitution at every offset of three seeds returns 0 or 1, and anything
+    accepted is walked by the extractors.
+- `fuzz/codec_process.fcyr` now requires every reply to pass `jsonx_valid`. It used to check only
+  the first byte, "we can't validate JSON here without a parser", which is how `"id":01` went
+  unnoticed. Ten corpus entries cover the new paths.
+- `content_text_error_response(text)`, the failed-execution twin of `content_text_response`.
+- `resp_error_data(id, code, message, data)`.
+- The per-request DEBUG line says `status=tool_error` for a `tools/call` result carrying
+  `isError: true`. Validation failures are results now, so they would otherwise log as `ok`.
+- Tests: conformance +117; `tests/bote.tcyr` +10 (the bridge's new parse, id and pass-through
+  checks; a handler returning nothing, audited and published as a failure; the raw-LF log case
+  split in two, since the codec now refuses that byte before the logger sees it; the
+  templates-list cursor assertion now expects `-32602`); `tests/bote_content.tcyr` +1. 1,094 →
+  1,222 in all, every file also green under `qemu-aarch64`.
+- **Mutation-proven.** Fifteen mutants, each killed:
+  - skipping the parse check;
+  - letting control bytes, trailing bytes, trailing commas or bad escapes through the validator;
+  - an off-by-one depth cap;
+  - unchecked id or params types;
+  - schema violations back to `-32602`;
+  - a handler's 0 back to `null`, and that empty result audited as a success;
+  - dropping the prompt check;
+  - `-32002` back to `-32602`;
+  - a cursor check that never fires, and one that fires on a null cursor.
+
+  Three (control bytes, depth, escapes) are caught only by the fuzz harness, which CI runs.
+
+### Changed
+
+- `docs/spec-compliance.md` is re-audited against the suite. It gains rows for the parse check,
+  request admission, pagination and the tools/call error split, and its coverage table moves from
+  3.3.12's counts to today's. Its DNS-resolution row still said "⏳ roadmap 3.6.x" although 3.4.4
+  shipped the guard; it now says what shipped. CLAUDE.md, README, SECURITY.md and
+  `docs/architecture/overview.md` carry the new counts and the corrected error-code tables. The
+  old tables said `-32601` meant "tool not found" and `-32602` "schema violation".
+- CI's "Run tests" step runs `tests/conformance.tcyr`. The "Fuzz" step picks up
+  `fuzz/jsonx_valid.fcyr` through its glob, and so do the aarch64 and agnos compile gates.
+- The roadmap's next patch is 3.4.6, the SSRF classifier gaps. Nothing else is queued for 3.4.x.
+- Binaries: `bote` 2,842,816 B (3.4.4: 2,830,176); aarch64 3,325,840 B; agnos 2,807,160 B with 0
+  undefined. Capacity: `fn_table` 6349 / 131072 (4%).
+
+### Performance
+
+- **The syntax pass is the one new cost on the request path**, measured in an interleaved A/B
+  against a 3.4.4 build. Both trees were pinned to one core (`taskset`), three rounds each,
+  because another session was compiling on the host (load 7–14):
+
+  | Bench | 3.4.4 avgs (ns) | 3.4.5 avgs (ns) | Δ median |
+  |---|---|---|---|
+  | `codec_process_message` | 4541, 4798, 4614 | 5326, 5332, 5360 | +0.72 µs (+15.6%) |
+  | `jsonx_valid_request` (new) | — | 665, 665, 675 | — |
+  | `dispatch_tools_call` | 2253, 2277, 2339 | 2421, 2442, 2489 | +7.2% |
+  | `codec_parse_request` | 1685, 1685, 1729 | 1640, 1659, 1692 | −1.5% |
+  | `validate_compiled_nested` | 2652, 2679, 2593 | 2609, 2611, 2567 | −1.6% |
+
+  The `codec_process_message` delta is the new pass (`jsonx_valid_request`, a new benchmark, 15
+  now, on the same 106-byte `tools/call` line) plus the admission checks. The `dispatch_tools_call`
+  delta is mostly drift. In a direct with/without A/B of its only new work, the `arguments`
+  object check, the difference was at most about 50 ns, and the untouched
+  `dispatch_tools_list` moved as much between runs. Benches sharing no changed code stay within
+  ±6%.
+- The logged row (`benches/history.log`, pinned, load 6.2) has `codec_process_message` 4.633 µs
+  and `jsonx_valid_request` 577 ns. Its untouched rows sit about 10% above the 3.4.4 row
+  (`dispatch_initialize` 1.459 against 1.323 µs), which is the host, not bote.
+- Letting plain string bytes through `_jx_valid_string` on one compare gave no win
+  distinguishable from noise, and was not kept.
+
 ## [3.4.4] — 2026-10-15 · DNS-aware SSRF: web_fetch classifies the address a name resolves to
 
 The roadmap's 3.4.4 item: DNS-aware SSRF for `web_fetch`. The guard 3.4.0 applied judged the URL's

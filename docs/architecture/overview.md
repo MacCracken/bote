@@ -122,7 +122,7 @@ src/
 │                             first in both profiles
 ├── error.cyr               — BoteErrTag (12 variants), rpc_code, format
 ├── protocol.cyr            — JsonRpcRequest / Response / Error data types
-├── jsonx.cyr               — nested-aware JSON extractor
+├── jsonx.cyr               — nested-aware JSON extractor + jsonx_valid (RFC 8259 syntax check)
 ├── registry.cyr            — ToolDef (+profile tags), ToolSchema, ToolAnnotations, ToolRegistry
 ├── prompts.cyr             — PromptDef / PromptArgument / PromptRegistry (prompts/list + get)
 ├── resources.cyr           — ResourceDef / ResourceRegistry (resources/list + read;
@@ -176,9 +176,10 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
   authentication bypasses).
 
 tests/
-├── bote.tcyr                  — 473 core assertions
+├── bote.tcyr                  — 483 core assertions
+├── conformance.tcyr           — 117 (JSON-RPC 2.0 + MCP 2025-11-25, by spec clause, via codec_process_message)
 ├── bote_auth.tcyr             — 45 (bearer + allowlist + JWT + PKCE validators; 401 log lines)
-├── bote_content.tcyr          — 24 (content blocks + annotations)
+├── bote_content.tcyr          — 25 (content blocks + annotations)
 ├── bote_fs_tools.tcyr         — 31 (fs_tools; refused-path log lines)
 ├── bote_host.tcyr             — 152 (host registry + SSRF + resolved-address classifiers)
 ├── bote_jwt.tcyr              — 53 (JWT HS256 verify)
@@ -192,12 +193,13 @@ tests/
 ├── bote_web_tools.tcyr        — 56 (web_tools; URL + resolved-address SSRF guard)
 ├── bote_ws.tcyr               — 21 (WebSocket; send-deadline drop)
 ├── bote_core_only_smoke.tcyr  — drift guard (includes only dist/bote-core.cyr)
-└── bote.bcyr                  — 14 hot-path benchmarks
+└── bote.bcyr                  — 15 hot-path benchmarks
 
 fuzz/
 ├── codec_parse.fcyr
 ├── codec_process.fcyr
 ├── jsonx_extract.fcyr
+├── jsonx_valid.fcyr          — RFC 8259 syntax check: corpus, prefixes, byte substitutions
 └── schema_validate.fcyr
 
 docs/
@@ -211,8 +213,9 @@ docs/
 └── audit/                     — dated audit reports
 ```
 
-The per-module test-file split (twelve per-module `tests/bote_*.tcyr`
-files plus the core-only drift smoke) is a
+The per-module test-file split (thirteen per-module `tests/bote_*.tcyr`
+files, the by-spec-clause `tests/conformance.tcyr`, plus the core-only
+drift smoke) is a
 deliberate organization choice — it mirrors `src/` layout and makes
 per-module compile times tight. (It originated as a workaround for the
 cyrius 4.5.1 parser identifier-buffer cap; that cap has since been
@@ -240,7 +243,9 @@ JSON-RPC `id`, `params`, `result`, and error `data` are stored as **raw
 JSON-literal cstrs** (e.g. `"1"`, `"\"abc\""`, `"null"`, `"{...}"`)
 since cyrius has no nested JSON value type. The `jsonx` module extracts
 subtrees by slicing the source bytes (respecting nested braces,
-brackets, and quoted strings).
+brackets, and quoted strings). The extractors trust their input, so
+`codec_process_message` first runs `jsonx_valid` over the whole message
+(3.4.5): invalid JSON is `-32700` and never reaches them.
 
 ### Adapter pattern (for sinks + auth)
 
@@ -266,16 +271,22 @@ dispatch.
 
 | Code | Meaning |
 |---|---|
-| -32700 | Parse error |
-| -32600 | Invalid request (bad jsonrpc version, empty batch, non-object element) |
-| -32601 | Method not found / tool not found |
-| -32602 | Invalid params (missing required, schema violation, empty tool name) |
-| -32000 | Tool execution error / sandbox error |
+| -32700 | Parse error (not valid JSON — `jsonx_valid`, run on every message first) |
+| -32600 | Invalid request (bad jsonrpc version, id or params type; empty batch; non-object element; valid JSON that is not a request) |
+| -32601 | Method not found (incl. a method behind an un-advertised capability) |
+| -32602 | Invalid params (unknown tool or tool version, missing / empty / non-string tool name, non-object `arguments`, invalid pagination cursor, unknown prompt or missing required prompt argument, missing `uri`) |
+| -32002 | Resource not found (`resources/read`, URI in `error.data`) |
+| -32000 | Tool execution / sandbox error — in `bote_err_rpc_code` for an embedder's own use; bote's dispatcher reports a failed tool as a result with `isError: true` instead |
+
+A `tools/call` whose arguments fail the tool's `inputSchema` is **not** an error code: it is a
+result with `isError: true`, so the model can read what it got wrong (MCP 2025-11-25, SEP-1303).
+So is a handler that returns nothing.
 | -32003 | Transport closed / bind failed |
 | -32603 | Internal error |
 | -32800 | Request cancelled |
 
-Maintained in `src/error.cyr::bote_err_rpc_code`.
+Maintained in `src/error.cyr::bote_err_rpc_code`; `-32002` and the cursor refusal are set in
+`src/dispatch.cyr`.
 
 ---
 
@@ -393,11 +404,12 @@ standing rules are in CLAUDE.md under Key Principles.
 
 | Artifact | Count | Where |
 |---|---|---|
-| Core unit tests | 473 | `tests/bote.tcyr` |
-| Module tests | 621 | `tests/bote_auth.tcyr` (45) + `bote_content.tcyr` (24) + `bote_fs_tools.tcyr` (31) + `bote_host.tcyr` (152) + `bote_jwt.tcyr` (53) + `bote_libro_tools.tcyr` (38) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (68) + `bote_web_tools.tcyr` (56) + `bote_ws.tcyr` (21) |
-| **Total assertions** | **1094** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
-| Benchmarks | 14 | `tests/bote.bcyr` |
-| Fuzz harnesses | 4 | `fuzz/*.fcyr` |
+| Core unit tests | 483 | `tests/bote.tcyr` |
+| Protocol conformance | 117 | `tests/conformance.tcyr` — by spec clause, through `codec_process_message` (3.4.5) |
+| Module tests | 622 | `tests/bote_auth.tcyr` (45) + `bote_content.tcyr` (25) + `bote_fs_tools.tcyr` (31) + `bote_host.tcyr` (152) + `bote_jwt.tcyr` (53) + `bote_libro_tools.tcyr` (38) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (68) + `bote_web_tools.tcyr` (56) + `bote_ws.tcyr` (21) |
+| **Total assertions** | **1222** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
+| Benchmarks | 15 | `tests/bote.bcyr` |
+| Fuzz harnesses | 5 | `fuzz/*.fcyr` |
 
 All hot paths sub-10 µs on x86_64 (`AMD Ryzen 7 5800H`). Side-by-side
 with the Rust v0.92.0 baseline in

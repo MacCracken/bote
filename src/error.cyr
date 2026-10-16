@@ -47,10 +47,17 @@ fn bote_err_reason(e) { return load64(e + 16); }
 fn bote_err_violations(e) { return load64(e + 24); }
 
 # Map a BoteErrTag to its JSON-RPC error code (negative).
+#
+# TOOL_NOT_FOUND is -32602 (invalid params), not -32601 (method not found).
+# The method, tools/call, exists; only the `name` it was given names nothing.
+# That is the MCP tools spec's own example since 2025-06-18:
+# {"code":-32602,"message":"Unknown tool: invalid_tool_name"}. bote answered
+# -32601 through 3.4.4. A client could read that as "this server does not
+# implement tools/call".
 fn bote_err_rpc_code(tag) {
     if (tag == BOTE_ERR_PARSE) { return 0 - 32700; }
     if (tag == BOTE_ERR_PROTOCOL) { return 0 - 32600; }
-    if (tag == BOTE_ERR_TOOL_NOT_FOUND) { return 0 - 32601; }
+    if (tag == BOTE_ERR_TOOL_NOT_FOUND) { return 0 - 32602; }
     if (tag == BOTE_ERR_INVALID_PARAMS) { return 0 - 32602; }
     if (tag == BOTE_ERR_SCHEMA_VIOLATION) { return 0 - 32602; }
     if (tag == BOTE_ERR_EXEC_FAILED) { return 0 - 32000; }

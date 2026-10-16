@@ -103,6 +103,13 @@ fn b_codec_process_message() {
     return codec_process_message(_b_call_line, _b_dispatcher, 0);
 }
 
+# 3.4.5: the syntax check codec_process_message now runs first, on the same
+# tools/call line, so its share of the codec_process_message figure is
+# visible on its own.
+fn b_jsonx_valid_request() {
+    return jsonx_valid(_b_call_line, strlen(_b_call_line));
+}
+
 fn b_validate_compiled_simple() {
     return vec_len(compiled_validate(_b_compiled_simple, _b_compiled_simple_params));
 }
@@ -245,6 +252,10 @@ fn main() {
     var b14 = bench_new("auth_bearer_check_set");
     bench_run(b14, &b_auth_bearer_check_set, 100000);
     vec_push(benches, b14);
+
+    var b15 = bench_new("jsonx_valid_request");
+    bench_run(b15, &b_jsonx_valid_request, 100000);
+    vec_push(benches, b15);
 
     bench_report_all(benches);
     return 0;

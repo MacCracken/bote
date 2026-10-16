@@ -161,6 +161,14 @@ fn content_text_response(text) {
     return str_data(str_builder_build(sb));
 }
 
+# The failed-execution twin of content_text_response:
+# {"content":[{"type":"text","text":"..."}],"isError":true}. The dispatcher
+# answers input-validation failures with it (MCP 2025-11-25, SEP-1303), and
+# a handler may return it for its own failures.
+fn content_text_error_response(text) {
+    return _dsp_tool_error_result(text);
+}
+
 # ================================================================
 # Binary resource (blob) variant of content_resource. The MCP spec
 # distinguishes text resources (carry a `text` field) from binary

@@ -66,18 +66,31 @@ vec_push(corpus, "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}]");
 vec_push(corpus, "[{\"jsonrpc\":\"2.0\",\"method\":\"a\"},{\"jsonrpc\":\"2.0\",\"method\":\"b\"}]");
 vec_push(corpus, "[{},{},{}]");
 vec_push(corpus, "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"},42,{\"jsonrpc\":\"2.0\",\"method\":\"x\"}]");
+# 3.4.5: the parse check and the request-shape checks.
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"method\":\"foo\",\"params\":\"bar\",\"baz]");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":01,\"method\":\"ping\"}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":{\"a\":1},\"method\":\"ping\"}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":[1],\"method\":\"ping\"}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":5}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",}");
+vec_push(corpus, "[1,2,3]");
+vec_push(corpus, "[{\"jsonrpc\":\"2.0\",\"method\":\"sum\",\"params\":[1,2,4],\"id\":\"1\"},{\"jsonrpc\":\"2.0\",\"method\"]");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"svc_echo\",\"arguments\":5}}");
+vec_push(corpus, "{\"jsonrpc\":\"2.0\",\"id\":\"q\\\"r\",\"method\":\"no/such\"}");
 
 var i = 0;
 while (i < vec_len(corpus)) {
     var out = codec_process_message(vec_get(corpus, i), d, 0);
     # Output is either 0 (valid: no response needed) OR a non-empty cstr that
-    # parses as JSON. We can't validate JSON here without a parser, so just
-    # check it's a non-empty cstr.
+    # is valid JSON. Since 3.4.5 the second half is checked outright with
+    # jsonx_valid; until then the harness had no parser and checked only the
+    # first byte, which let 3.4.4 echo an id of `01` back unnoticed.
     if (out != 0) {
         if (strlen(out) == 0) { sys_exit(20); }
         # Must start with `{` or `[`
         var c = load8(out);
         if (c != 123) { if (c != 91) { sys_exit(21); } }
+        if (jsonx_valid(out, strlen(out)) == 0) { sys_exit(22); }
     }
     i = i + 1;
 }

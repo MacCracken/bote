@@ -121,21 +121,11 @@ fn wrap_error_result(message) {
 # Other methods (initialize, tools/list, batch elements) pass through unchanged.
 
 fn _bridge_process_single(line, dispatcher, claims) {
-    var req = codec_parse_request(line);
-    if (req == 0) {
-        var sb = str_builder_new();
-        str_builder_add_cstr(sb, "invalid request: malformed object");
-        return codec_serialize_response(resp_error("null", 0 - 32600, str_data(str_builder_build(sb))));
-    }
-    if (streq(req_jsonrpc(req), "2.0") == 0) {
-        var sb2 = str_builder_new();
-        str_builder_add_cstr(sb2, "unsupported jsonrpc version '");
-        str_builder_add_cstr(sb2, req_jsonrpc(req));
-        str_builder_add_cstr(sb2, "'");
-        var id_v = req_id(req);
-        if (id_v == 0) { id_v = "null"; }
-        return codec_serialize_response(resp_error(id_v, 0 - 32600, str_data(str_builder_build(sb2))));
-    }
+    # The codec's own admission checks, so a request the codec refuses is
+    # refused here the same way (3.4.5; this was a second copy before).
+    var err_slot[8];
+    var req = _cdc_admit(line, &err_slot);
+    if (req == 0) { return load64(&err_slot); }
     var resp = dispatcher_dispatch(dispatcher, req, claims);
     if (resp == 0) { return 0; }
 
@@ -160,6 +150,7 @@ fn bridge_process_message(input, dispatcher, claims) {
     var len = strlen(input);
     var i = _cdc_skip_ws(input, len, 0);
     if (i >= len) { return _cdc_parse_error("empty input"); }
+    if (jsonx_valid(input, len) == 0) { return _cdc_parse_error("invalid JSON"); }
     var first = load8(input + i);
 
     # Batch arrays defer to the codec (no per-element wrapping; the bridge

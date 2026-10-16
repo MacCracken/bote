@@ -1,11 +1,14 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.4.4 (cyrius 6.7.9) | **Last Audited**: 2026-09-22 (at 3.3.13)
+> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.4.5 (cyrius 6.7.9) | **Last Audited**: 2026-10-15 (at 3.4.5, with `tests/conformance.tcyr`)
 
 This file lists what the shipped Cyrius implementation **covers today**, including the
 gaps — a ❌ row is a defect on the released binary, a ⏳ row is planned work. Both are
 scheduled in [`docs/development/roadmap.md`](development/roadmap.md). Re-audited at the
 3.3.12 documentation sweep by probing the built binary, not by reading the previous table.
+Since 3.4.5 the protocol rows below are also asserted, by spec clause, in
+`tests/conformance.tcyr`, which CI runs. On the 3.4.4 sources that suite failed 29 of its 117
+assertions, which is how the rows marked (3.4.5) were found.
 
 ---
 
@@ -38,15 +41,20 @@ legitimately batch).
 | Spec Requirement | Module | Status |
 |---|---|---|
 | JSON-RPC 2.0 — request, response, notification, batch | `protocol` + `codec` | ✅ |
-| Spec error codes (-32700, -32600, -32601, -32602, -32000, -32003, -32603, -32800) | `error` | ✅ |
+| Invalid JSON is `-32700`; valid JSON that is not a request is `-32600` (§5.1) | `jsonx_valid` + `codec` | ✅ (3.4.5) — the whole message is syntax-checked (RFC 8259, nesting ≤ 64) before anything reads it. Through 3.4.4 `not valid json` was `-32600`, the spec's truncated-object example was dispatched as a notification, and `"id":01` was echoed back as invalid JSON |
+| `id` is a string, a number or null; `params`, if present, is an object or an array (§4) | `codec::_cdc_admit` | ✅ (3.4.5) — otherwise `-32600`. An explicit `"params":null` is read as absent. A null id is answered, though MCP forbids a client to send one |
+| Spec error codes (-32700, -32600, -32601, -32602, -32002, -32000, -32003, -32603, -32800) | `error` + `dispatch` | ✅ (`-32002` since 3.4.5) |
 | `initialize` handshake (serverInfo + capabilities + version negotiation; `serverInfo` configurable via `dispatcher_set_server_info`) | `dispatch` | ✅ |
 | `ping` → empty `{}` result (spec: the receiver *MUST* respond promptly) | `dispatch` | ✅ (3.3.13) — answered ahead of every capability gate, so a bare dispatcher replies; emits no audit or event record (liveness, not activity). bote answers pings, it does not originate them |
 | `notifications/initialized` / `notifications/cancelled` — accepted, never answered | `codec` (no response to any notification) | ✅ (`cancelled` is ignored: there is no in-flight work to cancel until threaded dispatch, 3.5.x) |
 | `tools/list` with full `inputSchema` | `dispatch` + `registry` | ✅ |
+| Pagination: `nextCursor` omitted when there is no next page; an invalid `cursor` is `-32602` | `dispatch` | ✅ (3.4.5) — bote returns every item in one page and never issues a cursor, so any `cursor` a client sends is invalid and gets `-32602`, the spec's code for one, on `tools/list`, `prompts/list`, `resources/list` and `resources/templates/list`. A null `cursor` is read as absent. Through 3.4.4 a cursor was ignored and the first page sent again, which a client concatenating pages would take as duplicates |
 | `tools/call` with arguments + version selection | `dispatch` + `schema` | ✅ |
-| `prompts/list` + `prompts/get` (capability advertised iff a `PromptRegistry` is present) | `dispatch` + `prompts` | ✅ |
-| `resources/list` + `resources/read` (capability advertised iff a `ResourceRegistry` is present) | `dispatch` + `resources` | ✅ |
-| `resources/templates/list` (optional in the spec) | `dispatch` | ✅ (3.4.1) — answers `{"resourceTemplates":[]}` whenever resources are advertised (gated like `resources/list`; no registry → `-32601`). It answered `-32601` until 3.4.1, which some clients read as a failure rather than "no templates". bote has no URI-template registry (RFC 6570); the empty list is the honest reply, and a `cursor` is ignored because there is never a next page |
+| `tools/call` error split: an unknown tool or a malformed CallToolRequest (missing / empty / non-string `name`, non-object `arguments`) is a protocol error `-32602`; arguments failing the tool's `inputSchema` are a tool execution error, a result with `isError: true` | `dispatch` | ✅ (3.4.5) — per the tools spec's "Error Handling" and SEP-1303. Through 3.4.4 an unknown tool was `-32601` and a schema violation `-32602`. The dispatcher has no per-session negotiated version, so this split applies to every revision. 2025-06-18 already listed "invalid input data" as a tool execution error |
+| `tools/call` result is always a CallToolResult | `dispatch` | ✅ (3.4.5) — a handler that returns nothing is a failed call (`isError: true`), not `"result":null` |
+| `prompts/list` + `prompts/get` (capability advertised iff a `PromptRegistry` is present) | `dispatch` + `prompts` | ✅ — an unknown name, a missing required argument and non-object `arguments` are `-32602` (the last two since 3.4.5) |
+| `resources/list` + `resources/read` (capability advertised iff a `ResourceRegistry` is present) | `dispatch` + `resources` | ✅ — an unserved URI is `-32002` with `data.uri`, as in the resources spec's example (3.4.5; was `-32602`) |
+| `resources/templates/list` (optional in the spec) | `dispatch` | ✅ (3.4.1) — answers `{"resourceTemplates":[]}` whenever resources are advertised (gated like `resources/list`; no registry → `-32601`). It answered `-32601` until 3.4.1, which some clients read as a failure rather than "no templates". bote has no URI-template registry (RFC 6570); the empty list is the honest reply. A `cursor` is `-32602` since 3.4.5, as on the other list methods |
 | `resources/subscribe` / `unsubscribe` + `notifications/resources/updated`; `resources` `listChanged` | — | ⏳ not implemented and not advertised — wait on real-time push (roadmap 3.5.x) |
 | `completion/complete` (capability advertised iff a completion handler is set) | `dispatch` (`dispatcher_set_completion`) | ✅ |
 | `notifications/tools/list_changed` + `notifications/prompts/list_changed` (buffered per session, drained on the client's next streamable `GET`; `listChanged` advertised only by a transport with a drain path) | `dispatch` (`dispatcher_set_notifications`) + `transport_streamable` (`strm_notify_sink`) | ✅ streamable (polled) |
@@ -211,37 +219,39 @@ registered by default in the binaries.
 | Hostname blocklist (`localhost`, `metadata.google.internal`, `metadata`) — case-insensitive | `host::_ssrf_classify_hostname` | ✅ |
 | `user:pass@` userinfo stripping before classification | `host::_ssrf_extract_host` | ✅ |
 | Scheme gate — only `http://` / `https://` | same | ✅ |
-| DNS resolution (catch `127.0.0.1.nip.io` style bypasses) | — | ⏳ needs a resolve hook on the sandhi HTTP *client* so the classified address is the connected one (roadmap 3.6.x); `sandhi_resolve_ipv4` itself exists |
+| DNS resolution (catch `127.0.0.1.nip.io` style bypasses) — the address a name resolves to is classified where sandhi connects | `web_tools::_web_ssrf_resolve` via `sandhi_client_set_resolver` | ✅ (3.4.4) — `web_fetch` only; `web_search` keeps stock resolution for the operator's own `BOTE_SEARXNG_URL`. Classifier gaps (CGNAT, broadcast, 240/4; non-canonical IPv6 spellings) → roadmap 3.4.6 |
 
 ---
 
-## Test Coverage (bote 3.3.12)
+## Test Coverage (bote 3.4.5)
 
 | Scope | Count | Source |
 |---|---|---|
-| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch (incl. `ping` + version negotiation) / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit | **439** | `tests/bote.tcyr` |
-| Bearer + allowlist + JWT + PKCE validators | **38** | `tests/bote_auth.tcyr` |
-| Content blocks + annotations | **24** | `tests/bote_content.tcyr` |
-| `fs_tools` path safety + root confinement | **26** | `tests/bote_fs_tools.tcyr` |
-| HostRegistry + IPv4 / IPv6 SSRF + hot-reload | **113** | `tests/bote_host.tcyr` |
+| **Protocol conformance by spec clause** — JSON-RPC 2.0 §4 / §5 / §4.1 / §5.1 / §6 (incl. the spec's own examples), MCP initialize + all four revisions, ping, cancellation, capability gating, pagination cursors, tools/list, the tools/call protocol-vs-execution error split, prompts, resources, completion; every response checked to be valid JSON and a §5 Response object | **117** | `tests/conformance.tcyr` (3.4.5) |
+| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / the per-request DEBUG line | **483** | `tests/bote.tcyr` |
+| Bearer + allowlist + JWT + PKCE validators | **45** | `tests/bote_auth.tcyr` |
+| Content blocks + annotations | **25** | `tests/bote_content.tcyr` |
+| `fs_tools` path safety + root confinement | **31** | `tests/bote_fs_tools.tcyr` |
+| HostRegistry + IPv4 / IPv6 SSRF (URL and resolved address) + hot-reload | **152** | `tests/bote_host.tcyr` |
 | JWT HS256 — signature, exact `alg`, `exp` (mutation-proven) | **53** | `tests/bote_jwt.tcyr` |
 | `libro_tools` incl. tampered-chain decode + populated-chain proof | **38** | `tests/bote_libro_tools.tcyr` |
+| Operational logging over sakshi | **50** | `tests/bote_log.tcyr` |
 | RFC 7636 PKCE-S256 | **17** | `tests/bote_pkce.tcyr` |
 | Sandbox runner adapter | **13** | `tests/bote_sandbox.tcyr` |
 | Streamable HTTP — event ids, resumption, per-session outbound, drain selection | **53** | `tests/bote_streamable.tcyr` |
-| Unix transport — sockaddr, accept-error policy, backoff | **47** | `tests/bote_transport_unix.tcyr` |
-| `web_tools` — scheme guard, HTML stripper, entities | **27** | `tests/bote_web_tools.tcyr` |
-| WebSocket config + wire-up | **14** | `tests/bote_ws.tcyr` |
-| **Total assertions** | **902** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all 902 also run under `qemu-aarch64` |
-| Hot-path benchmarks | **14** | `tests/bote.bcyr` |
-| Fuzz harnesses | **4** | `fuzz/*.fcyr` (in CI since 3.3.8) |
-| End-to-end transport round trips | 6 (stdio, HTTP, Unix, bridge, streamable, WS) | one `tools/call` per transport on the built binaries, run per release |
+| Unix transport — sockaddr, accept-error policy, backoff, deadlines, closed-peer write | **68** | `tests/bote_transport_unix.tcyr` |
+| `web_tools` — scheme guard, SSRF guard (URL and resolved address), HTML stripper, entities | **56** | `tests/bote_web_tools.tcyr` |
+| WebSocket config + wire-up + the send-deadline drop | **21** | `tests/bote_ws.tcyr` |
+| **Total assertions** | **1222** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
+| Hot-path benchmarks | **15** | `tests/bote.bcyr` |
+| Fuzz harnesses | **5** | `fuzz/*.fcyr` (in CI since 3.3.8; `jsonx_valid.fcyr` since 3.4.5) |
+| End-to-end transport round trips | 6 (stdio, HTTP, Unix, bridge, streamable, WS) | CI's "Transport smoke" step plus a per-release stdio probe on the built binary |
 
-The conformance test suite — 44 protocol-level scenarios in the Rust archive's
-`tests/conformance.rs` (tag `0.92.0`) — is **still not ported**. It would land as
-`tests/conformance.tcyr`. The argument for it is 3.3.13: `ping` had been answering
-`-32601` since the port and no assertion covered it, because the suite tests the
-methods bote implements rather than the methods the spec requires. Roadmap 3.4.x.
+The Rust archive's conformance suite (`tests/conformance.rs`, tag `0.92.0`, 44 scenarios) is
+ported as `tests/conformance.tcyr` (3.4.5). Its scenarios are there, with the JSON-RPC and MCP
+requirements it never covered, and where the Rust suite and the spec disagree (an unknown tool's
+code, a schema violation's shape) the spec wins. The bridge's error-envelope scenario lives in
+`tests/bote.tcyr`, which links the bridge.
 
 ---
 

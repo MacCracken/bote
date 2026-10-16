@@ -307,6 +307,7 @@ jobs:
         run: |
           fail=0
           for tcyr in tests/bote.tcyr \
+                      tests/conformance.tcyr \
                       tests/bote_auth.tcyr \
                       tests/bote_content.tcyr \
                       tests/bote_fs_tools.tcyr \

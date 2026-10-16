@@ -1,0 +1,636 @@
+# conformance.tcyr — protocol conformance, driven through codec_process_message.
+#
+# New at 3.4.5. The Rust archive (tag 0.92.0, tests/conformance.rs) carried 44
+# protocol-level scenarios and none was ported. 3.3.13 showed what that cost:
+# `ping` had answered -32601 since the port, with 887 assertions passing,
+# because the other suites test the methods bote implements, not the ones the
+# spec requires. This file is organised by spec clause instead. Every scenario
+# goes in as wire bytes and comes out as wire bytes, through the same entry
+# point every transport calls, so no live transport is needed.
+#
+# Sources:
+#   JSON-RPC 2.0               https://www.jsonrpc.org/specification
+#   MCP 2025-11-25             https://modelcontextprotocol.io/specification/2025-11-25
+#     basic/lifecycle, basic/utilities/ping, server/tools, server/prompts,
+#     server/resources, server/utilities/completion, changelog (SEP-1303)
+#
+# The Rust suite's 44 scenarios are all here except two, which live where
+# their module is linked: the bridge's error envelope is in tests/bote.tcyr
+# (the bridge pulls the HTTP stack), and the compiled-schema cleanup on
+# deregister is §N below. Where the spec and the Rust suite disagree, the
+# spec wins, and the scenario says so:
+#   - unknown tool: Rust -32601, MCP tools spec -32602;
+#   - a schema violation: Rust a -32602 error, MCP 2025-11-25 a tool result
+#     with isError (SEP-1303).
+#
+# Every response is also checked, on its own, to be valid JSON (jsonx_valid)
+# and a JSON-RPC 2.0 Response object (§5: "jsonrpc":"2.0", an id that is a
+# string, number or null, exactly one of result / error, and an error with an
+# integer code and a string message). A response that is not is printed and
+# counted, and one assertion at the end requires the count to be zero.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/freelist.cyr"
+include "lib/atomic.cyr"
+include "lib/sakshi.cyr"
+include "lib/assert.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/content.cyr"
+
+# ---- handlers ---------------------------------------------------------------
+
+fn h_echo(args, claims) { return content_text_response(args); }
+fn h_ok(args, claims) { return content_text_response("ok"); }
+fn h_none(args, claims) { return 0; }
+fn h_prompt(args, claims) {
+    return "{\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"hi\"}}]}";
+}
+fn h_resource(uri, claims) {
+    return "{\"contents\":[{\"uri\":\"mem://a\",\"mimeType\":\"text/plain\",\"text\":\"A\"}]}";
+}
+fn h_complete(params, claims) { return "{\"completion\":{\"values\":[\"x\"]}}"; }
+
+# ---- response checks --------------------------------------------------------
+
+var _seen = 0;
+var _nonconforming = 0;
+var _last = 0;
+
+fn _show(s) {
+    eprint("    got: ", 9);
+    if (s == 0) { eprint("(no response)", 13); }
+    else { eprint(s, strlen(s)); }
+    eprint("\n", 1);
+    return 0;
+}
+
+fn _parse(s) {
+    if (s == 0) { return 0; }
+    return bayan_json_v_parse_buf(s, strlen(s));
+}
+
+fn _get(v, key) { return bayan_json_v_obj_get_by_cstr(v, key); }
+
+fn _str_is(v, lit) {
+    var sv = bayan_json_v_str(v);
+    if (sv == 0) { return 0; }
+    return str_eq_cstr(sv, lit);
+}
+
+# 1 when `v` is a JSON-RPC 2.0 Response object (§5).
+fn _is_response(v) {
+    if (bayan_json_v_is_obj(v) == 0) { return 0; }
+    if (_str_is(_get(v, "jsonrpc"), "2.0") == 0) { return 0; }
+    var id = _get(v, "id");
+    if (id == 0) { return 0; }
+    if (bayan_json_v_is_str(id) == 0 && bayan_json_v_is_int(id) == 0 && bayan_json_v_is_null(id) == 0) {
+        return 0;
+    }
+    var r = _get(v, "result");
+    var e = _get(v, "error");
+    if (r != 0 && e != 0) { return 0; }
+    if (r == 0 && e == 0) { return 0; }
+    if (e != 0) {
+        if (bayan_json_v_is_obj(e) == 0) { return 0; }
+        if (bayan_json_v_is_int(_get(e, "code")) == 0) { return 0; }
+        if (bayan_json_v_is_str(_get(e, "message")) == 0) { return 0; }
+    }
+    return 1;
+}
+
+# Count `s` as seen, and as nonconforming unless it is valid JSON whose
+# parsed form satisfies `_is_response` (each element, for a batch).
+fn _conform(s) {
+    _seen = _seen + 1;
+    var ok = 0;
+    if (jsonx_valid(s, strlen(s)) == 1) {
+        var v = _parse(s);
+        if (bayan_json_v_is_arr(v) == 1) {
+            ok = 1;
+            var n = bayan_json_v_arr_len(v);
+            if (n == 0) { ok = 0; }
+            var i = 0;
+            while (i < n) {
+                if (_is_response(bayan_json_v_arr_get(v, i)) == 0) { ok = 0; }
+                i = i + 1;
+            }
+        } else {
+            ok = _is_response(v);
+        }
+    }
+    if (ok == 0) {
+        _nonconforming = _nonconforming + 1;
+        eprint("  NONCONFORMING response\n", 25);
+        _show(s);
+    }
+    return ok;
+}
+
+# Send `msg`; return the parsed response, or 0 when there was none.
+fn _send(d, msg) {
+    var s = codec_process_message(msg, d, 0);
+    _last = s;
+    if (s == 0) { return 0; }
+    _conform(s);
+    return _parse(s);
+}
+
+fn _code(v) {
+    var e = _get(v, "error");
+    if (e == 0) { return 0; }
+    return bayan_json_v_int(_get(e, "code"));
+}
+
+fn _result(v) { return _get(v, "result"); }
+
+# 1 when `v`'s result is a CallToolResult carrying isError true, with a
+# leading text block.
+fn _is_tool_error(v) {
+    var r = _result(v);
+    if (r == 0) { return 0; }
+    if (bayan_json_v_bool(_get(r, "isError")) != 1) { return 0; }
+    var c = _get(r, "content");
+    if (bayan_json_v_arr_len(c) < 1) { return 0; }
+    var b = bayan_json_v_arr_get(c, 0);
+    if (_str_is(_get(b, "type"), "text") == 0) { return 0; }
+    if (bayan_json_v_is_str(_get(b, "text")) == 0) { return 0; }
+    return 1;
+}
+
+# 1 when `v`'s result is a successful CallToolResult: a content array and
+# no isError true.
+fn _is_tool_ok(v) {
+    var r = _result(v);
+    if (r == 0) { return 0; }
+    if (bayan_json_v_is_arr(_get(r, "content")) == 0) { return 0; }
+    if (bayan_json_v_bool(_get(r, "isError")) == 1) { return 0; }
+    return 1;
+}
+
+# Send `msg` and assert the response is an error with `code`.
+fn _expect_code(d, msg, code, name) {
+    var v = _send(d, msg);
+    var c = _code(v);
+    if (c != code) { _show(_last); }
+    assert_eq(c, code, name);
+    return v;
+}
+
+# Send `msg` and assert there is no response at all.
+fn _expect_none(d, msg, name) {
+    var s = codec_process_message(msg, d, 0);
+    if (s != 0) { _show(s); }
+    assert(s == 0, name);
+    return 0;
+}
+
+# Send `msg` and assert the response carries a result.
+fn _expect_result(d, msg, name) {
+    var v = _send(d, msg);
+    var r = _result(v);
+    if (r == 0) { _show(_last); }
+    assert(r != 0, name);
+    return v;
+}
+
+fn _expect(cond, name) {
+    if (cond != 1) { _show(_last); }
+    assert(cond == 1, name);
+    return 0;
+}
+
+# ---- fixtures ---------------------------------------------------------------
+
+# The Rust suite's make_dispatcher: test_echo (empty schema) and test_strict
+# (`path`, a required string). Rust compiled every schema on register; here
+# the compiled schema is attached explicitly, as a consumer does. Two more:
+# test_none, whose handler returns nothing, and test_unhandled, registered
+# with no handler at all.
+fn _strict_def(name) {
+    var props = vec_new();
+    vec_push(props, schema_prop_new("path", "{\"type\":\"string\"}"));
+    var req = vec_new();
+    vec_push(req, "path");
+    var sch = schema_new("object", props, req);
+    return tool_def_with_compiled(tool_def_new(name, "Strict", sch), compiled_compile(sch));
+}
+
+fn _mk() {
+    var reg = tool_registry_new();
+    registry_register(reg, tool_def_new("test_echo", "Echo", schema_new("object", 0, vec_new())));
+    registry_register(reg, _strict_def("test_strict"));
+    registry_register(reg, tool_def_new("test_none", "Returns nothing", schema_new("object", 0, vec_new())));
+    registry_register(reg, tool_def_new("test_unhandled", "No handler", schema_new("object", 0, vec_new())));
+    var d = dispatcher_new(reg);
+    dispatcher_handle(d, "test_echo", &h_echo);
+    dispatcher_handle(d, "test_strict", &h_ok);
+    dispatcher_handle(d, "test_none", &h_none);
+    return d;
+}
+
+# A dispatcher with every optional capability wired.
+fn _mk_full() {
+    var d = _mk();
+    var pargs = vec_new();
+    vec_push(pargs, prompt_arg_new("code", "The code to review", 1));
+    vec_push(pargs, prompt_arg_new("style", "Optional style", 0));
+    dispatcher_register_prompt(d, prompt_def_new("code_review", "Review code", pargs), &h_prompt);
+    dispatcher_register_resource(d, resource_def_new("mem://a", "a", "Resource A", "text/plain"), &h_resource);
+    dispatcher_set_completion(d, &h_complete);
+    return d;
+}
+
+fn main() {
+    alloc_init();
+    fl_init();
+    var d = _mk();
+    var bare = dispatcher_new(tool_registry_new());
+    var v = 0;
+    var r = 0;
+
+    # =========================================================================
+    # §A  JSON-RPC 2.0 §4 — the Request object
+    # =========================================================================
+
+    v = _expect_code(d, "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"initialize\"}", 0 - 32600,
+      "A1 §4 jsonrpc MUST be exactly \"2.0\": \"1.0\" is -32600");
+    _expect(bayan_json_v_int(_get(v, "id")) == 1, "A1 ...and the readable id is echoed");
+    _expect_code(d, "{\"id\":1,\"method\":\"initialize\"}", 0 - 32600,
+      "A2 §4 a request without jsonrpc is -32600");
+    _expect_code(d, "{\"jsonrpc\":2.0,\"id\":1,\"method\":\"ping\"}", 0 - 32600,
+      "A3 §4 jsonrpc as a number, not the string \"2.0\", is -32600");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1}", 0 - 32600,
+      "A4 §4 a request without method is -32600");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"method\":1,\"params\":\"bar\"}", 0 - 32600,
+      "A5 §4 method MUST be a string: the spec's own example is -32600");
+    _expect_result(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}",
+      "A6 §4 params MAY be omitted");
+    _expect_result(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}",
+      "A7 §4.2 params by name (an object) is accepted");
+    _expect_result(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":null}",
+      "A8 an explicit null params is read as absent (bote accepts; clients send it)");
+    v = _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":\"bar\"}", 0 - 32600,
+      "A9 §4.2 params MUST be structured: a string is -32600");
+    _expect(bayan_json_v_int(_get(v, "id")) == 7, "A9 ...with the request's id");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":5}", 0 - 32600,
+      "A10 §4.2 a number params is -32600");
+    v = _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":{\"a\":1},\"method\":\"ping\"}", 0 - 32600,
+      "A11 §4 id MUST be a string, number or null: an object is -32600");
+    _expect(bayan_json_v_is_null(_get(v, "id")) == 1, "A11 ...answered with id null");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":[1],\"method\":\"ping\"}", 0 - 32600,
+      "A12 §4 an array id is -32600");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":true,\"method\":\"ping\"}", 0 - 32600,
+      "A13 §4 a boolean id is -32600");
+
+    # =========================================================================
+    # §B  JSON-RPC 2.0 §5 — the Response object
+    # =========================================================================
+
+    v = _expect_result(d, "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"ping\"}", "B1 ping answers");
+    _expect(bayan_json_v_int(_get(v, "id")) == 42, "B1 §5 an integer id is echoed unchanged");
+    v = _expect_result(d, "{\"jsonrpc\":\"2.0\",\"id\":\"req-abc\",\"method\":\"ping\"}", "B2 ping answers");
+    _expect(_str_is(_get(v, "id"), "req-abc"), "B2 §5 a string id is echoed unchanged");
+    # MCP forbids a client to send a null id; JSON-RPC allows it. bote
+    # answers rather than refuse (the Rust suite asserted the same).
+    v = _expect_result(d, "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"ping\"}", "B3 a null-id request is answered");
+    _expect(bayan_json_v_is_null(_get(v, "id")) == 1, "B3 §5 ...with id null");
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}");
+    _expect(_result(v) != 0 && _get(v, "error") == 0, "B4 §5 success: result present, error absent");
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"no/such\"}");
+    _expect(_result(v) == 0 && _get(v, "error") != 0, "B5 §5 failure: error present, result absent");
+
+    # =========================================================================
+    # §C  JSON-RPC 2.0 §4.1 — notifications are never answered
+    # =========================================================================
+
+    _expect_none(d, "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}", "C1 §4.1 a notification for a known method gets no response");
+    _expect_none(d, "{\"jsonrpc\":\"2.0\",\"method\":\"no/such\"}", "C2 §4.1 a notification for an unknown method gets no response either");
+    _expect_none(d, "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"nope_x\"}}",
+      "C3 §4.1 a notification that would fail gets no response");
+
+    # =========================================================================
+    # §D  JSON-RPC 2.0 §5.1 — error codes
+    # =========================================================================
+
+    v = _expect_code(d, "not valid json", 0 - 32700, "D1 §5.1 invalid JSON is -32700 (Rust: error_parse_error_code)");
+    _expect(bayan_json_v_is_null(_get(v, "id")) == 1, "D1 ...with id null");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"method\":\"foo\",\"params\":\"bar\",\"baz]", 0 - 32700,
+      "D2 §7 the spec's truncated-object example is -32700, not dispatched");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",}", 0 - 32700,
+      "D3 a trailing comma is invalid JSON: -32700");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"} x", 0 - 32700,
+      "D4 bytes after the value are invalid JSON: -32700");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":01,\"method\":\"ping\"}", 0 - 32700,
+      "D5 a leading zero is invalid JSON: -32700");
+    _expect_code(d, "   ", 0 - 32700, "D6 whitespace only is -32700");
+    _expect_code(d, "42", 0 - 32600, "D7 §5.1 valid JSON that is not a request (a number) is -32600");
+    _expect_code(d, "\"hello\"", 0 - 32600, "D8 ...a string is -32600");
+    _expect_code(d, "true", 0 - 32600, "D9 ...a boolean is -32600");
+    _expect_code(d, "null", 0 - 32600, "D10 ...null is -32600");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"bogus/method\"}", 0 - 32601,
+      "D11 §5.1 an unknown method is -32601");
+
+    # =========================================================================
+    # §E  JSON-RPC 2.0 §6 — batch
+    # =========================================================================
+
+    var bs = codec_process_message("[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"},{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}]", d, 0);
+    _last = bs;
+    _conform(bs);
+    v = _parse(bs);
+    _expect(bayan_json_v_arr_len(v) == 2, "E1 §6 a batch is answered with an array, one response per request");
+    _expect_code(d, "[]", 0 - 32600, "E2 §6 an empty batch is a single -32600, not an array");
+    bs = codec_process_message("[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"},{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"},{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}]", d, 0);
+    _last = bs;
+    _conform(bs);
+    v = _parse(bs);
+    _expect(bayan_json_v_arr_len(v) == 2
+      && bayan_json_v_int(_get(bayan_json_v_arr_get(v, 0), "id")) == 1
+      && bayan_json_v_int(_get(bayan_json_v_arr_get(v, 1), "id")) == 3,
+      "E3 §6 notifications in a batch get no element: ids 1 and 3 only");
+    _expect_none(d, "[{\"jsonrpc\":\"2.0\",\"method\":\"ping\"},{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}]",
+      "E4 §6 an all-notification batch gets no response at all");
+    bs = codec_process_message("[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"},42,{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}]", d, 0);
+    _last = bs;
+    _conform(bs);
+    v = _parse(bs);
+    _expect(bayan_json_v_arr_len(v) == 3
+      && _result(bayan_json_v_arr_get(v, 0)) != 0
+      && _code(bayan_json_v_arr_get(v, 1)) == 0 - 32600
+      && _result(bayan_json_v_arr_get(v, 2)) != 0,
+      "E5 §6 an invalid element is -32600 in its own slot; the rest are answered");
+    bs = codec_process_message("[1,2,3]", d, 0);
+    _last = bs;
+    _conform(bs);
+    v = _parse(bs);
+    _expect(bayan_json_v_arr_len(v) == 3
+      && _code(bayan_json_v_arr_get(v, 0)) == 0 - 32600
+      && _code(bayan_json_v_arr_get(v, 2)) == 0 - 32600,
+      "E6 §7 the spec's [1,2,3] example: three -32600 responses");
+    _expect_code(d, "[{\"jsonrpc\":\"2.0\",\"method\":\"sum\",\"params\":[1,2,4],\"id\":\"1\"},{\"jsonrpc\":\"2.0\",\"method\"]",
+      0 - 32700, "E7 §7 the spec's invalid-JSON batch example is one -32700");
+
+    # =========================================================================
+    # §F  MCP lifecycle — initialize
+    # =========================================================================
+
+    v = _expect_result(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}",
+      "F1 initialize answers");
+    r = _result(v);
+    _expect(bayan_json_v_is_str(_get(r, "protocolVersion")) == 1, "F1 lifecycle: protocolVersion is a string");
+    _expect(bayan_json_v_is_obj(_get(_get(r, "capabilities"), "tools")) == 1, "F2 lifecycle: capabilities.tools is an object");
+    _expect(_str_is(_get(_get(r, "serverInfo"), "name"), "bote")
+      && bayan_json_v_is_str(_get(_get(r, "serverInfo"), "version")) == 1,
+      "F3 lifecycle: serverInfo carries name \"bote\" and a version string");
+    _expect(_get(_get(r, "capabilities"), "prompts") == 0
+      && _get(_get(r, "capabilities"), "resources") == 0
+      && _get(_get(r, "capabilities"), "completions") == 0
+      && _get(_get(r, "capabilities"), "logging") == 0,
+      "F4 lifecycle: nothing is advertised that is not wired (no prompts / resources / completions / logging)");
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\"}}");
+    _expect(_str_is(_get(_result(v), "protocolVersion"), "2024-11-05"), "F5 a supported version is echoed: 2024-11-05");
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\"}}");
+    _expect(_str_is(_get(_result(v), "protocolVersion"), "2025-03-26"), "F6 ...2025-03-26");
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}");
+    _expect(_str_is(_get(_result(v), "protocolVersion"), "2025-06-18"), "F7 ...2025-06-18");
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\"}}");
+    _expect(_str_is(_get(_result(v), "protocolVersion"), "2025-11-25"), "F8 ...2025-11-25");
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2099-01-01\"}}");
+    _expect(_str_is(_get(_result(v), "protocolVersion"), "2025-11-25"),
+      "F9 lifecycle: an unsupported version gets the server's latest, not an error");
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}");
+    _expect(_str_is(_get(_result(v), "protocolVersion"), "2025-11-25"), "F10 a missing version gets the latest");
+    _expect_none(d, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
+      "F11 lifecycle: notifications/initialized is not answered");
+
+    # =========================================================================
+    # §G  MCP utilities — ping, cancellation
+    # =========================================================================
+
+    v = _expect_result(bare, "{\"jsonrpc\":\"2.0\",\"id\":\"p\",\"method\":\"ping\"}",
+      "G1 ping: the receiver MUST respond, even on a bare dispatcher");
+    _expect(bayan_json_v_is_obj(_result(v)) == 1 && bayan_json_v_obj_len(_result(v)) == 0,
+      "G1 ...with an empty object result");
+    _expect_none(d, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":1}}",
+      "G2 notifications/cancelled is not answered");
+
+    # =========================================================================
+    # §H  Capability negotiation — a method behind an un-advertised capability
+    # =========================================================================
+
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/list\"}", 0 - 32601, "H1 prompts/list without prompts is -32601");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/get\",\"params\":{\"name\":\"x\"}}", 0 - 32601, "H2 prompts/get without prompts is -32601");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/list\"}", 0 - 32601, "H3 resources/list without resources is -32601");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"mem://a\"}}", 0 - 32601, "H4 resources/read without resources is -32601");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/templates/list\"}", 0 - 32601, "H5 resources/templates/list without resources is -32601");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"completion/complete\",\"params\":{}}", 0 - 32601, "H6 completion/complete without completions is -32601");
+
+    # =========================================================================
+    # §I  tools/list
+    # =========================================================================
+
+    v = _expect_result(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", "I1 tools/list answers");
+    var tools = _get(_result(v), "tools");
+    _expect(bayan_json_v_arr_len(tools) == 4
+      && _str_is(_get(bayan_json_v_arr_get(tools, 0), "name"), "test_echo")
+      && _str_is(_get(bayan_json_v_arr_get(tools, 1), "name"), "test_strict"),
+      "I1 tools: every registered tool, in registration order");
+    var ti = 0;
+    var tools_ok = 1;
+    while (ti < bayan_json_v_arr_len(tools)) {
+        var t = bayan_json_v_arr_get(tools, ti);
+        if (bayan_json_v_is_str(_get(t, "name")) == 0) { tools_ok = 0; }
+        if (bayan_json_v_is_str(_get(t, "description")) == 0) { tools_ok = 0; }
+        if (_str_is(_get(_get(t, "inputSchema"), "type"), "object") == 0) { tools_ok = 0; }
+        ti = ti + 1;
+    }
+    _expect(tools_ok, "I2 tools: each Tool has a name, a description and an inputSchema of type \"object\"");
+    _expect(_get(_result(v), "nextCursor") == 0, "I3 pagination: no nextCursor when there is no next page");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"cursor\":\"abc\"}}", 0 - 32602,
+      "I4 pagination: an invalid cursor SHOULD be -32602, and bote issues none, so every cursor is invalid");
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"cursor\":null}}");
+    _expect(bayan_json_v_arr_len(_get(_result(v), "tools")) == 4, "I4 ...while a null cursor is read as absent");
+    var vreg = tool_registry_new();
+    registry_register(vreg, tool_def_with_deprecated(tool_def_with_version(
+          tool_def_new("old_tool", "Old", schema_new("object", 0, vec_new())), "1.0.0"), "use new_tool"));
+    v = _send(dispatcher_new(vreg), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
+    var vt = bayan_json_v_arr_get(_get(_result(v), "tools"), 0);
+    _expect(_str_is(_get(vt, "version"), "1.0.0"), "I5 tools: version is listed when set (bote extension)");
+    _expect(_str_is(_get(vt, "deprecated"), "use new_tool"), "I6 tools: deprecated is listed when set (bote extension)");
+
+    # =========================================================================
+    # §J  tools/call — protocol errors vs tool execution errors
+    # =========================================================================
+
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"test_echo\",\"arguments\":{\"k\":\"v\"}}}");
+    _expect(_is_tool_ok(v), "J1 tools/call: success is a result with a content array");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"arguments\":{}}}", 0 - 32602,
+      "J2 tools: a missing name is a malformed CallToolRequest, -32602");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"\",\"arguments\":{}}}", 0 - 32602,
+      "J3 tools: an empty name is -32602");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":5}}", 0 - 32602,
+      "J4 tools: a name that is not a string is -32602");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}", 0 - 32602,
+      "J5 tools: tools/call without params is -32602");
+    v = _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"nope_x\",\"arguments\":{}}}", 0 - 32602,
+      "J6 tools: an unknown tool is a protocol error, -32602 as in the spec's example (Rust: -32601)");
+    _expect(_get(v, "result") == 0, "J6 ...not a tool result");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"test_unhandled\",\"arguments\":{}}}", 0 - 32602,
+      "J7 a listed tool with no handler is answered as unknown, -32602");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"test_echo\",\"arguments\":5}}", 0 - 32602,
+      "J8 tools: arguments that are not an object break CallToolRequest, -32602");
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"test_strict\",\"arguments\":{}}}");
+    _expect(_is_tool_error(v), "J9 SEP-1303: a missing required argument is a tool execution error, a result with isError (Rust: -32602)");
+    _expect(_get(v, "error") == 0, "J9 ...not a protocol error");
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"test_strict\",\"arguments\":{\"path\":42}}}");
+    _expect(_is_tool_error(v), "J10 SEP-1303: a wrongly typed argument is a result with isError");
+    var jt = bayan_json_v_str(_get(bayan_json_v_arr_get(_get(_result(v), "content"), 0), "text"));
+    _expect(jt != 0 && _lc_contains(str_cstr(jt), "path") == 1,
+      "J10 ...whose text names the offending argument, so the model can correct it");
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"test_strict\",\"arguments\":{\"path\":\"/tmp\"}}}");
+    _expect(_is_tool_ok(v), "J11 valid arguments succeed");
+    _expect_code(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"test_echo\",\"version\":\"9.9.9\",\"arguments\":{}}}", 0 - 32602,
+      "J12 an unknown tool version is -32602 (bote extension; answered like an unknown tool)");
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"test_echo\"}}");
+    _expect(_is_tool_ok(v), "J13 tools: arguments is optional; a missing one is {}");
+    v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"test_none\",\"arguments\":{}}}");
+    _expect(_is_tool_error(v),
+      "J14 a handler that returns nothing is a failed call (isError), never \"result\":null");
+
+    # =========================================================================
+    # §K  prompts
+    # =========================================================================
+
+    var f = _mk_full();
+    v = _expect_result(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}", "K0 initialize on a full dispatcher");
+    r = _get(_result(v), "capabilities");
+    _expect(_get(r, "prompts") != 0 && _get(r, "resources") != 0 && _get(r, "completions") != 0,
+      "K0 lifecycle: wired capabilities are advertised");
+    v = _send(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/list\"}");
+    var pl = bayan_json_v_arr_get(_get(_result(v), "prompts"), 0);
+    _expect(_str_is(_get(pl, "name"), "code_review")
+      && bayan_json_v_bool(_get(bayan_json_v_arr_get(_get(pl, "arguments"), 0), "required")) == 1,
+      "K1 prompts/list: the prompt, with its required argument marked");
+    v = _send(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/get\",\"params\":{\"name\":\"code_review\",\"arguments\":{\"code\":\"x\"}}}");
+    _expect(bayan_json_v_is_arr(_get(_result(v), "messages")) == 1, "K2 prompts/get: a messages array");
+    _expect_code(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/list\",\"params\":{\"cursor\":\"p2\"}}", 0 - 32602,
+      "K2b pagination: prompts/list refuses a cursor it never issued");
+    _expect_code(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/get\",\"params\":{\"name\":\"nope\"}}", 0 - 32602,
+      "K3 prompts: an invalid prompt name is -32602");
+    _expect_code(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/get\",\"params\":{}}", 0 - 32602,
+      "K4 prompts: a missing name is -32602");
+    _expect_code(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/get\",\"params\":{\"name\":\"code_review\",\"arguments\":{\"style\":\"terse\"}}}", 0 - 32602,
+      "K5 prompts: a missing required argument is -32602");
+    _expect_code(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/get\",\"params\":{\"name\":\"code_review\"}}", 0 - 32602,
+      "K6 prompts: no arguments at all, with one required, is -32602");
+    _expect_code(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/get\",\"params\":{\"name\":\"code_review\",\"arguments\":[\"x\"]}}", 0 - 32602,
+      "K7 prompts: arguments that are not an object is -32602");
+
+    # =========================================================================
+    # §L  resources
+    # =========================================================================
+
+    v = _send(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/list\"}");
+    _expect(_str_is(_get(bayan_json_v_arr_get(_get(_result(v), "resources"), 0), "uri"), "mem://a"),
+      "L1 resources/list: the resource and its uri");
+    v = _send(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"mem://a\"}}");
+    _expect(bayan_json_v_is_arr(_get(_result(v), "contents")) == 1, "L2 resources/read: a contents array");
+    v = _expect_code(f, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"resources/read\",\"params\":{\"uri\":\"mem://none\"}}", 0 - 32002,
+      "L3 resources: resource not found is -32002");
+    _expect(_str_is(_get(_get(_get(v, "error"), "data"), "uri"), "mem://none"),
+      "L3 ...with the uri in error.data, as the spec's example has it");
+    _expect_code(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{}}", 0 - 32602,
+      "L4 resources/read without a uri is -32602");
+    v = _send(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/templates/list\"}");
+    _expect(bayan_json_v_is_arr(_get(_result(v), "resourceTemplates")) == 1,
+      "L5 resources/templates/list: a resourceTemplates array when resources are advertised");
+    _expect_code(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/list\",\"params\":{\"cursor\":\"r2\"}}", 0 - 32602,
+      "L6 pagination: resources/list refuses a cursor it never issued");
+    _expect_code(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/templates/list\",\"params\":{\"cursor\":\"t2\"}}", 0 - 32602,
+      "L7 pagination: so does resources/templates/list");
+
+    # =========================================================================
+    # §M  completion
+    # =========================================================================
+
+    v = _send(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"completion/complete\",\"params\":{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"code_review\"},\"argument\":{\"name\":\"code\",\"value\":\"x\"}}}");
+    _expect(bayan_json_v_is_arr(_get(_get(_result(v), "completion"), "values")) == 1,
+      "M1 completion/complete: completion.values is an array");
+
+    # =========================================================================
+    # §N  Registry — deregister drops the compiled schema with the tool
+    # =========================================================================
+
+    var nreg = tool_registry_new();
+    registry_register(nreg, _strict_def("typed_tool"));
+    _expect(registry_validate_params(nreg, "typed_tool", "{\"path\":42}") != 0,
+      "N1 a compiled schema rejects a wrongly typed argument");
+    _expect(registry_validate_params(nreg, "typed_tool", "{\"path\":\"/tmp\"}") == 0,
+      "N2 ...and accepts a correct one");
+    registry_deregister(nreg, "typed_tool");
+    var nerr = registry_validate_params(nreg, "typed_tool", "{\"path\":\"/tmp\"}");
+    _expect(nerr != 0 && bote_err_tag(nerr) == BOTE_ERR_TOOL_NOT_FOUND && registry_contains(nreg, "typed_tool") == 0,
+      "N3 after deregister the tool is gone: validation reports it unknown");
+
+    # =========================================================================
+    # §O  The whole flow: initialize, initialized, tools/list, tools/call
+    # =========================================================================
+
+    var o = _mk();
+    v = _send(o, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}");
+    var o_ok = 0;
+    if (_result(v) != 0) { o_ok = 1; }
+    if (codec_process_message("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}", o, 0) != 0) { o_ok = 0; }
+    v = _send(o, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
+    if (bayan_json_v_arr_len(_get(_result(v), "tools")) == 0) { o_ok = 0; }
+    v = _send(o, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"test_echo\",\"arguments\":{}}}");
+    if (_is_tool_ok(v) == 0) { o_ok = 0; }
+    _expect(o_ok, "O1 initialize, initialized, tools/list, tools/call: each step answers as the spec says");
+
+    # =========================================================================
+    # Every response above, checked on its own
+    # =========================================================================
+
+    assert(_seen > 70, "every scenario's response reached the shape check");
+    assert_eq(_nonconforming, 0, "every response is valid JSON and a JSON-RPC 2.0 Response object");
+
+    return assert_summary();
+}
+
+# 1 when cstr `hay` contains cstr `needle`.
+fn _lc_contains(hay, needle) {
+    if (hay == 0 || needle == 0) { return 0; }
+    var i = 0;
+    while (load8(hay + i) != 0) {
+        var j = 0;
+        while (load8(needle + j) != 0 && load8(hay + i + j) == load8(needle + j)) { j = j + 1; }
+        if (load8(needle + j) == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+var rc = main();
+sys_exit(rc);

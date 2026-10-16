@@ -124,12 +124,82 @@ fn _cdc_log_request(req, resp, t0) {
     } elif (resp_error_obj(resp) != 0) {
         bote_log_str(&ln, "status", "error");
         bote_log_int(&ln, "code", rpc_err_code(resp_error_obj(resp)));
+    } elif (_cdc_is_tool_error(resp_result(resp)) == 1) {
+        # A failed tool call is a result, not an error, since 3.4.5 covers
+        # input validation too: without this it would log as "ok".
+        bote_log_str(&ln, "status", "tool_error");
     } else {
         bote_log_str(&ln, "status", "ok");
     }
     bote_log_int(&ln, "us", (clock_now_ns() - t0) / 1000);
     bote_log_emit(&ln);
     return 0;
+}
+
+# 1 when `result` (a raw JSON literal) is a tool result carrying
+# "isError":true.
+fn _cdc_is_tool_error(result) {
+    if (result == 0) { return 0; }
+    var flag = jsonx_get_raw(result, "isError");
+    if (flag == 0) { return 0; }
+    return streq(flag, "true");
+}
+
+# 1 when `raw`, a value jsonx_get_raw took from a validated message, may be
+# a request id: a string, a number or null (JSON-RPC 2.0 §4). An object, an
+# array or a boolean may not.
+fn _cdc_id_ok(raw) {
+    var c = load8(raw);
+    if (c == 34 || c == 45 || c == 110) { return 1; }
+    if (c >= 48 && c <= 57) { return 1; }
+    return 0;
+}
+
+# 1 when `raw` may be a request's params. JSON-RPC 2.0 §4.2 allows only a
+# structured value (an object or an array). An explicit null is taken as
+# absent, as codec_parse_request already does for a missing member: some
+# clients send it, and it carries nothing a method could misread.
+fn _cdc_params_ok(raw) {
+    var c = load8(raw);
+    if (c == 123 || c == 91 || c == 110) { return 1; }
+    return 0;
+}
+
+# Parse one request object (`line`, already known to be valid JSON) into a
+# request the dispatcher may be handed. Returns the request, or 0 with
+# *err_out set to the serialized -32600 response. bridge.cyr's
+# single-message path calls this too, so the two cannot drift apart.
+#
+# The id is echoed in the error when it could be read; a missing or
+# unusable id is answered with null (JSON-RPC 2.0 §5).
+fn _cdc_admit(line, err_out) {
+    store64(err_out, 0);
+    var req = codec_parse_request(line);
+    if (req == 0) {
+        bote_log_debug("request rejected: malformed JSON-RPC object");
+        store64(err_out, _cdc_invalid_request("malformed object"));
+        return 0;
+    }
+    var id = req_id(req);
+    if (id != 0 && _cdc_id_ok(id) == 0) {
+        store64(err_out, _cdc_invalid_request("id must be a string, a number or null"));
+        return 0;
+    }
+    if (id == 0) { id = "null"; }
+    if (streq(req_jsonrpc(req), "2.0") == 0) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "unsupported jsonrpc version '");
+        str_builder_add_cstr(sb, req_jsonrpc(req));
+        str_builder_add_cstr(sb, "'");
+        store64(err_out, codec_serialize_response(resp_error(id, 0 - 32600, str_data(str_builder_build(sb)))));
+        return 0;
+    }
+    if (_cdc_params_ok(req_params(req)) == 0) {
+        store64(err_out, codec_serialize_response(resp_error(id, 0 - 32600,
+              "invalid request: params must be an object or an array")));
+        return 0;
+    }
+    return req;
 }
 
 # Process a single request body. Returns serialized response cstr or 0 (notif).
@@ -139,20 +209,9 @@ fn _cdc_process_single(line, dispatcher, claims) {
     var dbg = bote_log_enabled(SK_DEBUG);
     var t0 = 0;
     if (dbg == 1) { t0 = clock_now_ns(); }
-    var req = codec_parse_request(line);
-    if (req == 0) {
-        bote_log_debug("request rejected: malformed JSON-RPC object");
-        return _cdc_invalid_request("malformed object");
-    }
-    if (streq(req_jsonrpc(req), "2.0") == 0) {
-        var sb = str_builder_new();
-        str_builder_add_cstr(sb, "unsupported jsonrpc version '");
-        str_builder_add_cstr(sb, req_jsonrpc(req));
-        str_builder_add_cstr(sb, "'");
-        var id = req_id(req);
-        if (id == 0) { id = "null"; }
-        return codec_serialize_response(resp_error(id, 0 - 32600, str_data(str_builder_build(sb))));
-    }
+    var err_slot[8];
+    var req = _cdc_admit(line, &err_slot);
+    if (req == 0) { return load64(&err_slot); }
     var resp = dispatcher_dispatch(dispatcher, req, claims);
     if (dbg == 1) { _cdc_log_request(req, resp, t0); }
     if (resp == 0) { return 0; }
@@ -183,11 +242,17 @@ fn _cdc_split_array(buf) {
 }
 
 # Process a raw JSON-RPC message. Returns serialized response cstr or 0.
+#
+# The whole message is syntax-checked first (jsonx_valid), so that invalid
+# JSON is a parse error (-32700) and every later step reads valid JSON.
+# Only then does the shape decide: an object is one request, an array is a
+# batch, and any other JSON value is an invalid request (-32600).
 fn codec_process_message(input, dispatcher, claims) {
     if (input == 0) { return _cdc_parse_error("empty input"); }
     var len = strlen(input);
     var i = _cdc_skip_ws(input, len, 0);
     if (i >= len) { return _cdc_parse_error("empty input"); }
+    if (jsonx_valid(input, len) == 0) { return _cdc_parse_error("invalid JSON"); }
     var first = load8(input + i);
 
     if (first == 91) {
