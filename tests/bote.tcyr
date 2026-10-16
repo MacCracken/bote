@@ -106,6 +106,9 @@ fn test_audit_log(ctx, event) {
 fn _audit_reset() { _audit_events = vec_new(); return 0; }
 # A tool handler that returns nothing (3.4.5: a failed call).
 fn h_none_t(args, claims) { return 0; }
+# 3.4.8: a handler reporting its own failure, and one returning broken JSON.
+fn h_iserr_t(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"no\"}],\"isError\":true}"; }
+fn h_badjson_t(args, claims) { return "{oops"; }
 
 # ---- sakshi capture (3.4.0 logging assertions) -----------------------------
 var _lc_buf = 0;
@@ -289,7 +292,60 @@ fn main() {
     # ---------------- registry: validate_params missing field ----------------
     var miss_err = registry_validate_params(reg2, "scan", "{}");
     assert(miss_err != 0, "validate err on missing");
-    assert_eq(bote_err_tag(miss_err), BOTE_ERR_INVALID_PARAMS, "missing -> INVALID_PARAMS");
+    # 3.4.8: registration compiles the schema, so a missing required field is
+    # the compiled validator's SCHEMA_VIOLATION (it was the required-only
+    # fallback's INVALID_PARAMS).
+    assert_eq(bote_err_tag(miss_err), BOTE_ERR_SCHEMA_VIOLATION, "missing -> SCHEMA_VIOLATION (compiled at registration)");
+
+    # ---------------- registry: registration checks and compile (3.4.8) ----------------
+    var rreg = tool_registry_new();
+    var good = tool_def_new("svc.tools-list_v2", "ok", schema_new("object", 0, vec_new()));
+    assert_eq(registry_check_tool_def(good), 0, "check: a SEP-986 name using . - _ passes");
+    assert_eq(registry_register(rreg, good), 0, "register: accepted");
+    assert(tool_def_compiled(good) != 0, "register: the input schema is compiled at registration");
+    var preset = tool_def_new("svc_preset", "ok", schema_new("object", 0, vec_new()));
+    var pcomp = compiled_new();
+    tool_def_with_compiled(preset, pcomp);
+    registry_register(rreg, preset);
+    assert_eq(tool_def_compiled(preset), pcomp, "register: a compiled schema the caller attached is kept");
+    _lc_begin();
+    var rsp = registry_register(rreg, tool_def_new("has space", "x", schema_new("object", 0, vec_new())));
+    assert(rsp != 0 && registry_contains(rreg, "has space") == 0, "refused: a name with a space, and nothing registered");
+    assert_eq(_lc_level, SK_ERROR, "refused: ...logged at ERROR");
+    assert(_lc_has(_lc_buf, "tool registration refused") == 1 && _lc_has(_lc_buf, "reason=") == 1, "refused: ...with the reason");
+    var n128 = alloc(130);
+    memset(n128, 97, 128);
+    store8(n128 + 128, 0);
+    assert_eq(registry_register(rreg, tool_def_new(n128, "x", schema_new("object", 0, vec_new()))), 0, "accepted: a 128-character name");
+    var n129 = alloc(131);
+    memset(n129, 98, 129);
+    store8(n129 + 129, 0);
+    assert(registry_register(rreg, tool_def_new(n129, "x", schema_new("object", 0, vec_new()))) != 0, "refused: a 129-character name");
+    assert(registry_register(rreg, tool_def_new("", "x", schema_new("object", 0, vec_new()))) != 0, "refused: an empty name");
+    assert(registry_register(rreg, 0) != 0, "refused: no definition at all");
+    assert(registry_register(rreg, tool_def_new("svc_noschema", "x", 0)) != 0, "refused: no inputSchema");
+    assert(registry_register(rreg, tool_def_new("svc_str", "x", schema_new("string", 0, vec_new()))) != 0, "refused: an inputSchema of type string");
+    assert(registry_register(rreg, tool_def_new("svc_tron", "x", schema_new(str_from("object"), vec_new(), vec_new()))) != 0,
+      "refused: a Str where the schema type belongs (t-ron's shape)");
+    assert(registry_register(rreg, tool_def_new(str_from("phylax_scan"), "x", schema_new("object", 0, vec_new()))) != 0,
+      "refused: a Str where the name belongs (phylax's shape)");
+    var pbad = vec_new();
+    vec_push(pbad, schema_prop_new("p", "string"));
+    assert(registry_register(rreg, tool_def_new("svc_pbad", "x", schema_new("object", pbad, vec_new()))) != 0, "refused: a property schema that is not JSON");
+    var pstr = vec_new();
+    vec_push(pstr, schema_prop_new("p", "\"string\""));
+    assert(registry_register(rreg, tool_def_new("svc_pstr", "x", schema_new("object", pstr, vec_new()))) != 0, "refused: a property schema that is JSON but not a schema");
+    var ptrue = vec_new();
+    vec_push(ptrue, schema_prop_new("p", "true"));
+    assert_eq(registry_register(rreg, tool_def_new("svc_ptrue", "x", schema_new("object", ptrue, vec_new()))), 0, "accepted: a boolean subschema (2020-12)");
+    var rq_empty = vec_new();
+    vec_push(rq_empty, "");
+    assert(registry_register(rreg, tool_def_new("svc_rq", "x", schema_new("object", 0, rq_empty))) != 0, "refused: an empty required entry");
+    var drr = dispatcher_new(tool_registry_new());
+    var drr_err = dispatcher_register_tool(drr, tool_def_new("svc_badschema", "x", schema_new("string", 0, vec_new())), &h_echo);
+    assert(drr_err != 0 && map_has(dispatcher_handlers(drr), "svc_badschema") == 0,
+      "dispatcher_register_tool: a refused definition returns the error and gets no handler");
+    _lc_end();
 
     # ---------------- registry: required fields around a nested object ----------------
     # The fallback reads the top-level keys of bayan's flat `json_parse`. Before bayan 1.5.10 a
@@ -863,7 +919,9 @@ fn main() {
     var call_resp = dispatcher_dispatch(d, call_req, 0);
     var call_result = resp_result(call_resp);
     assert(call_result != 0, "call has result");
-    assert(streq(call_result, "{\"msg\":\"hi\"}") == 1, "echo handler returned args");
+    # 3.4.8: a bare JSON result goes out as a text block holding the JSON,
+    # so the reply is a CallToolResult (it went out verbatim through 3.4.7).
+    assert(streq(call_result, "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"msg\\\":\\\"hi\\\"}\"}]}") == 1, "echo handler's bare args arrive as a text block");
     assert_eq(resp_error_obj(call_resp), 0, "call success no error");
 
     # ---------------- dispatch: tools/call with const handler ----------------
@@ -871,7 +929,7 @@ fn main() {
     dispatcher_handle(d, "svc_const", &h_const);
     var cc = dispatcher_dispatch(d, req_with_params(req_new("4", "tools/call"),
     "{\"name\":\"svc_const\",\"arguments\":{}}"), 0);
-    assert(streq(resp_result(cc), "{\"answer\":42}") == 1, "const handler returned constant");
+    assert(streq(resp_result(cc), "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"answer\\\":42}\"}]}") == 1, "const handler's bare object arrives as a text block");
 
     # ---------------- dispatch: tools/call missing name ----------------
     var bad_call = dispatcher_dispatch(d, req_with_params(req_new("5", "tools/call"), "{}"), 0);
@@ -906,7 +964,7 @@ fn main() {
     assert_eq(ok_reg, 0, "valid register succeeds");
     var dyn_call = dispatcher_dispatch(d, req_with_params(req_new("8", "tools/call"),
     "{\"name\":\"dyn_tool\",\"arguments\":{\"q\":1}}"), 0);
-    assert(streq(resp_result(dyn_call), "{\"q\":1}") == 1, "dyn handler dispatched");
+    assert(_lc_has(resp_result(dyn_call), "{\\\"q\\\":1}") == 1, "dyn handler dispatched (its args, as text)");
 
     # ---------------- dispatch: deregister ----------------
     var dereg_ok = dispatcher_deregister_tool(d, "dyn_tool");
@@ -1082,6 +1140,31 @@ fn main() {
     assert_eq(vec_len(compiled_validate(c_ib, "{\"retries\":3}")), 0, "int in bounds");
     assert_eq(vec_len(compiled_validate(c_ib, "{\"retries\":-1}")), 1, "int below");
     assert_eq(vec_len(compiled_validate(c_ib, "{\"retries\":10}")), 1, "int above");
+
+    # ---------------- schema: numbers as JSON Schema 2020-12 reads them (3.4.8) ----------------
+    # Exponents and fractions are read; an integer is any number whose
+    # fractional part is zero. Through 3.4.7 `5e2` was read as 5 and `3.0`
+    # was not an integer.
+    assert_eq(vec_len(compiled_validate(c_ib, "{\"retries\":3.0}")), 0, "integer: 3.0 is an integer (2020-12)");
+    assert_eq(vec_len(compiled_validate(c_ib, "{\"retries\":3.5}")), 1, "integer: 3.5 is not");
+    assert_eq(vec_len(compiled_validate(c_ib, "{\"retries\":4e0}")), 0, "integer: 4e0 is an integer, in bounds");
+    assert_eq(vec_len(compiled_validate(c_ib, "{\"retries\":5e1}")), 1, "integer: 5e1 is 50, above 5 (3.4.7 read it as 5)");
+    var ps_ne = vec_new();
+    vec_push(ps_ne, schema_prop_new("n", "{\"type\":\"number\",\"minimum\":100,\"maximum\":1e3}"));
+    var c_ne = compiled_compile(schema_new("object", ps_ne, vec_new()));
+    assert_eq(vec_len(compiled_validate(c_ne, "{\"n\":5e2}")), 0, "number: 5e2 is 500, inside [100, 1e3] (3.4.7 refused it as 5)");
+    assert_eq(vec_len(compiled_validate(c_ne, "{\"n\":1.5e2}")), 0, "number: 1.5e2 is 150");
+    assert_eq(vec_len(compiled_validate(c_ne, "{\"n\":2e3}")), 1, "number: 2e3 is above a maximum written 1e3");
+    assert_eq(vec_len(compiled_validate(c_ne, "{\"n\":1e999}")), 1, "number: a huge exponent saturates and stays above the maximum");
+    assert_eq(vec_len(compiled_validate(c_ne, "{\"n\":99.9}")), 1, "number: 99.9 is below 100");
+    var nv[8];
+    assert_eq(_sch_num_parse("-0", &nv), 2, "parse: -0 is integral");
+    assert_eq(_sch_num_parse("1e-1", &nv), 1, "parse: 1e-1 has a fractional part");
+    assert_eq(load64(&nv), 0, "parse: ...and truncates to 0");
+    assert_eq(_sch_num_parse("-12.75", &nv), 1, "parse: -12.75 has a fractional part");
+    assert_eq(load64(&nv), 0 - 12, "parse: ...and truncates toward zero, to -12");
+    assert_eq(_sch_num_parse("abc", &nv), 0, "parse: a word is not a number");
+    assert_eq(_sch_num_parse("1.", &nv), 0, "parse: a trailing dot is not a number");
 
     # ---------------- schema: required ----------------
     var ps_r = vec_new();
@@ -1593,6 +1676,26 @@ fn main() {
     assert_eq(vec_len(_audit_events), 1, "...audited once");
     assert_eq(tool_call_event_success(vec_get(_audit_events, 0)), 0, "...as a failure");
     assert(_lc_has(vec_get(_ev_topics, 0), "bote/tool/failed") == 1, "...published on bote/tool/failed");
+
+    # 3.4.8: a result carrying isError, and a result that is not JSON, are
+    # failed calls for the audit and the event too.
+    _ev_reset();
+    _audit_reset();
+    registry_register(wreg, tool_def_new("svc_iserr", "reports failure", schema_new("object", 0, vec_new())));
+    dispatcher_handle(wd, "svc_iserr", &h_iserr_t);
+    dispatcher_dispatch(wd, req_with_params(req_new("2d", "tools/call"), "{\"name\":\"svc_iserr\",\"arguments\":{}}"), 0);
+    assert_eq(tool_call_event_success(vec_get(_audit_events, 0)), 0, "an isError result is audited as a failure");
+    assert(_lc_has(vec_get(_ev_topics, 0), "bote/tool/failed") == 1, "...and published on bote/tool/failed");
+    _ev_reset();
+    _audit_reset();
+    registry_register(wreg, tool_def_new("svc_badjson", "broken output", schema_new("object", 0, vec_new())));
+    dispatcher_handle(wd, "svc_badjson", &h_badjson_t);
+    var w_bj = dispatcher_dispatch(wd, req_with_params(req_new("2e", "tools/call"), "{\"name\":\"svc_badjson\",\"arguments\":{}}"), 0);
+    var w_bj_r = resp_result(w_bj);
+    if (w_bj_r == 0) { w_bj_r = ""; }
+    assert(_lc_has(w_bj_r, "not valid JSON") == 1 && _lc_has(w_bj_r, "\"isError\":true") == 1 && _lc_has(w_bj_r, "oops") == 0,
+      "a result that is not JSON becomes an isError result, and its bytes are not sent");
+    assert_eq(tool_call_event_success(vec_get(_audit_events, 0)), 0, "...audited as a failure");
 
     # initialize + tools/list do NOT emit tool-call events
     _ev_reset();

@@ -176,8 +176,8 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
   authentication bypasses).
 
 tests/
-├── bote.tcyr                  — 496 core assertions
-├── conformance.tcyr           — 119 (JSON-RPC 2.0 + MCP 2025-11-25, by spec clause, via codec_process_message)
+├── bote.tcyr                  — 536 core assertions
+├── conformance.tcyr           — 127 (JSON-RPC 2.0 + MCP 2025-11-25, by spec clause, via codec_process_message)
 ├── bote_auth.tcyr             — 45 (bearer + allowlist + JWT + PKCE validators; 401 log lines)
 ├── bote_content.tcyr          — 25 (content blocks + annotations)
 ├── bote_fs_tools.tcyr         — 34 (fs_tools; refused-path log lines; control bytes read back as valid JSON)
@@ -193,7 +193,7 @@ tests/
 ├── bote_web_tools.tcyr        — 56 (web_tools; URL + resolved-address SSRF guard)
 ├── bote_ws.tcyr               — 21 (WebSocket; send-deadline drop)
 ├── bote_core_only_smoke.tcyr  — drift guard (includes only dist/bote-core.cyr)
-└── bote.bcyr                  — 15 hot-path benchmarks
+└── bote.bcyr                  — 16 hot-path benchmarks
 
 fuzz/
 ├── codec_parse.fcyr
@@ -405,11 +405,11 @@ standing rules are in CLAUDE.md under Key Principles.
 
 | Artifact | Count | Where |
 |---|---|---|
-| Core unit tests | 496 | `tests/bote.tcyr` |
-| Protocol conformance | 119 | `tests/conformance.tcyr` — by spec clause, through `codec_process_message` (3.4.5) |
+| Core unit tests | 536 | `tests/bote.tcyr` |
+| Protocol conformance | 127 | `tests/conformance.tcyr` — by spec clause, through `codec_process_message` (3.4.5) |
 | Module tests | 670 | `tests/bote_auth.tcyr` (45) + `bote_content.tcyr` (25) + `bote_fs_tools.tcyr` (34) + `bote_host.tcyr` (197) + `bote_jwt.tcyr` (53) + `bote_libro_tools.tcyr` (38) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (68) + `bote_web_tools.tcyr` (56) + `bote_ws.tcyr` (21) |
-| **Total assertions** | **1285** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
-| Benchmarks | 15 | `tests/bote.bcyr` |
+| **Total assertions** | **1333** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
+| Benchmarks | 16 | `tests/bote.bcyr` |
 | Fuzz harnesses | 6 | `fuzz/*.fcyr` |
 
 All hot paths sub-10 µs on x86_64 (`AMD Ryzen 7 5800H`). Side-by-side

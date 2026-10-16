@@ -88,9 +88,14 @@ responsibly:
   (`-32700` otherwise), and the jsonrpc version, the id type and the params
   type are validated on every request (`-32600`).
 - Empty/missing tool names rejected before dispatch.
-- Tool arguments validated against the registered JSON Schema before dispatch.
-  A violation never reaches the handler; it is answered as a result with
-  `isError: true` (MCP 2025-11-25, SEP-1303).
+- Tool arguments validated against the registered JSON Schema before dispatch:
+  types, enums, bounds, nested objects and required fields. The schema is
+  compiled at registration since 3.4.8; until then only `required` was checked
+  in production. A violation never reaches the handler; it is answered as a
+  result with `isError: true` (MCP 2025-11-25, SEP-1303).
+- Tool definitions are checked at registration (name, an object inputSchema,
+  valid property schemas), and whatever a handler returns reaches the client as
+  a CallToolResult that is valid JSON (3.4.8).
 - JSON-RPC batch length capped to bound per-request allocation.
 - Profile-split distribution (`dist/bote-core.cyr`) — core has minimal attack
   surface.

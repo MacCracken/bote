@@ -1,10 +1,11 @@
 # bote::registry — Tool registration, discovery, and parameter validation
 # Mirrors rust-old/src/registry.rs
 #
-# CompiledSchema integration is deferred until src/schema.cyr lands.
-# For now, validate_params performs:
-#   1. "params is JSON object" check (leading non-ws byte == '{')
-#   2. Required-field-present check via lib/bayan.cyr's json_parse (flat)
+# Registration checks a tool definition and compiles its input schema
+# (3.4.8), so every registered tool is validated by src/schema.cyr's
+# compiled_validate: types, enums, bounds, nested objects and required
+# fields. registry_validate_params keeps a required-fields-only fallback for
+# a definition that somehow carries no compiled schema.
 
 include "lib/hashmap.cyr"
 include "lib/bayan.cyr"
@@ -181,7 +182,114 @@ fn registry_entries(r) { return load64(r); }
 fn registry_versions_map(r) { return load64(r + 8); }
 fn registry_names(r) { return load64(r + 16); }
 
+# 1 when `name` follows the MCP tools spec's naming guidance (2025-11-25,
+# "Tool Names"): 1-128 characters, each an ASCII letter, a digit, `_`, `-`
+# or `.`.
+fn _reg_name_ok(name) {
+    if (name == 0) { return 0; }
+    var n = 0;
+    while (load8(name + n) != 0) {
+        var c = load8(name + n);
+        var ok = 0;
+        if (c >= 48 && c <= 57) { ok = 1; }
+        if (c >= 65 && c <= 90) { ok = 1; }
+        if (c >= 97 && c <= 122) { ok = 1; }
+        if (c == 95 || c == 45 || c == 46) { ok = 1; }
+        if (ok == 0) { return 0; }
+        n = n + 1;
+        if (n > 128) { return 0; }
+    }
+    if (n == 0) { return 0; }
+    return 1;
+}
+
+# 1 when `raw` is a JSON Schema in its own right: valid JSON that is an
+# object, `true` or `false` (2020-12).
+fn _reg_subschema_ok(raw) {
+    if (raw == 0) { return 0; }
+    if (jsonx_valid(raw, strlen(raw)) == 0) { return 0; }
+    if (jsonx_is_object(raw) == 1) { return 1; }
+    if (streq(raw, "true") == 1 || streq(raw, "false") == 1) { return 1; }
+    return 0;
+}
+
+# Why `tool_def` cannot be registered, as a message, or 0 when it can (3.4.8).
+#
+# - The name follows the MCP tools spec's guidance. Every consumer's names
+#   already do, and a `Str` passed where bote takes a cstr fails it: phylax
+#   passed one for every name and its tools/list crashed.
+# - inputSchema exists and is an object schema. The spec says it "MUST be a
+#   valid JSON Schema object (not null)". t-ron passed `str_from("object")`
+#   as the type, and tools/list emitted the Str header as garbage bytes.
+# - Each property schema is valid JSON (an object or a boolean), and each
+#   property and each required entry has a name.
+#
+# Public, so a consumer can check a definition before it registers one.
+fn registry_check_tool_def(tool_def) {
+    if (tool_def == 0) { return "no tool definition"; }
+    if (_reg_name_ok(tool_def_name(tool_def)) == 0) {
+        return "the tool name must be 1-128 characters from A-Z a-z 0-9 _ - .";
+    }
+    var schema = tool_def_input_schema(tool_def);
+    if (schema == 0) { return "inputSchema is missing"; }
+    var st = schema_type(schema);
+    if (st == 0 || streq(st, "object") == 0) { return "inputSchema type must be \"object\""; }
+    var props = schema_properties(schema);
+    if (props != 0) {
+        var np = vec_len(props);
+        var i = 0;
+        while (i < np) {
+            var pair = vec_get(props, i);
+            var key = schema_prop_key(pair);
+            if (key == 0 || strlen(key) == 0) { return "an inputSchema property has no name"; }
+            if (_reg_subschema_ok(schema_prop_value(pair)) == 0) {
+                return "an inputSchema property's schema is not a valid JSON Schema (an object or a boolean)";
+            }
+            i = i + 1;
+        }
+    }
+    var req = schema_required(schema);
+    if (req != 0) {
+        var nr = vec_len(req);
+        var j = 0;
+        while (j < nr) {
+            var rq = vec_get(req, j);
+            if (rq == 0 || strlen(rq) == 0) { return "an inputSchema required entry is empty"; }
+            j = j + 1;
+        }
+    }
+    return 0;
+}
+
+# One ERROR line for a refused registration. The name is logged only when
+# it passed the name check; otherwise it may be the bytes of a Str header.
+fn _reg_log_refused(tool_def, why) {
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_ERROR, "tool registration refused");
+    if (tool_def != 0 && _reg_name_ok(tool_def_name(tool_def)) == 1) {
+        bote_log_str(&ln, "tool", tool_def_name(tool_def));
+    }
+    bote_log_str(&ln, "reason", why);
+    bote_log_emit(&ln);
+    return 0;
+}
+
+# Register `tool_def`. Returns 0, or a BoteError when registry_check_tool_def
+# refuses it, in which case nothing is registered and an ERROR line says why.
+# The input schema is compiled here unless tool_def_with_compiled already
+# attached one (3.4.8). Through 3.4.7 nothing compiled it, so every tool was
+# checked only for its required fields.
 fn registry_register(r, tool_def) {
+    var why = registry_check_tool_def(tool_def);
+    if (why != 0) {
+        _reg_log_refused(tool_def, why);
+        var tn = "";
+        if (tool_def != 0 && _reg_name_ok(tool_def_name(tool_def)) == 1) { tn = tool_def_name(tool_def); }
+        return bote_err_new(BOTE_ERR_INVALID_PARAMS, tn, why);
+    }
+    if (tool_def_compiled(tool_def) == 0) {
+        tool_def_with_compiled(tool_def, compiled_compile(tool_def_input_schema(tool_def)));
+    }
     var name = tool_def_name(tool_def);
     var entries = registry_entries(r);
     var names = registry_names(r);
@@ -328,6 +436,8 @@ fn registry_validate_params(r, name, params_cstr) {
     }
 
     # 3. Fallback: required-field-present check via lib/bayan.cyr's json_parse.
+    # Unreachable for a definition registry_register accepted (it compiles
+    # one); kept for a ToolDef placed in the registry by other means.
     var schema = tool_def_input_schema(t);
     var required = schema_required(schema);
     if (required == 0) { return 0; }

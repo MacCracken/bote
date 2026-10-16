@@ -18,6 +18,152 @@ have per release.
 
 _(empty)_
 
+## [3.4.8] — 2026-10-15 · schemas compiled at registration, every tool result a CallToolResult
+
+The roadmap's 3.4.8 item, findings B2–B4 of the 2026-10-15 consumer audit. bote's schema validator
+had never run in production, because nothing compiled a schema. Whatever a tool handler returned
+went out as it was. And a handler that reported its own failure was audited as a success.
+
+### Breaking — what a client and an embedder see
+
+| Situation | 3.4.7 | 3.4.8 |
+|---|---|---|
+| `tools/call` with an argument of the wrong type, outside its bounds or its enum | reached the handler (only `required` was checked) | a result with `isError: true` naming the argument (SEP-1303) |
+| a handler returns bare JSON (`{"ok":true}`, an array, a number) | sent as the `result`, which no client can read as a CallToolResult | a text block holding that JSON |
+| a handler returns one content block (`{"type":"image",…}`) | sent bare | lifted into a one-element `content` array |
+| a handler returns bytes that are not JSON | sent, breaking the reply | a failed call (`isError`); the bytes are not sent |
+| a handler returns a result with `isError: true` | audited and published as a success | audited as a failure, on `bote/tool/failed` |
+| `registry_register` / `dispatcher_register_tool` given a malformed definition | registered; `tools/list` then emitted garbage or crashed | refused with a BoteError and an ERROR log line; nothing registered |
+
+**Who this reaches**, checked against each consumer's source:
+
+- **t-ron**: its four tools pass `str_from("object")` as the schema type, so they are now refused
+  at registration. They used to be listed with garbage bytes in `tools/list`, and every call to
+  them failed validation on a garbage `required` key. Fix: pass cstrs.
+- **phylax**: its five tools pass `Str` names. They are now refused. On 3.3.8–3.4.7 `tools/list`
+  crashed (measured). Fix: cstrs, `jsonx_get_str`, CallToolResult returns.
+- **szal**: its 73 literal property schemas are all valid, so registration accepts every tool.
+  Types, enums and bounds are now enforced on calls where only `required` was before. A client
+  sending a string for an integer gets an `isError` result naming the argument.
+- **itihas**: its integer `year` arguments are now type-checked, and its bare-record results arrive
+  as text blocks.
+- **bote's own binary**: `libro_query` / `_verify` / `_export` / `_proof` / `_retention` returned
+  bare JSON (`{"ok":true}`) and now arrive as text blocks. On the built 3.4.7 binary, `libro_verify`
+  over stdio answered `"result":{"ok":true}`.
+- **hoosh, stiva, daimon, thoth, agnosai**: unaffected. They return CallToolResults already, or do
+  not register tools through bote.
+
+Migration:
+
+- **Call `registry_check_tool_def(def)`** to see why a definition would be refused. It returns the
+  reason, or 0. Refusals are also logged at ERROR, with the reason.
+- **Return a CallToolResult** (`content_text_response`, `content_text_error_response`, the
+  `content_*` builders) if the text-block wrapping of a bare result is not what a client should
+  see. Report a tool-level failure with `isError: true`, and the audit will record it as a failure.
+- **A schema with a fractional bound** (`"minimum": 4.5`) is compared on its integer part, so a
+  value slightly outside it can pass. Integral bounds are exact.
+
+### Fixed
+
+- **Schemas are compiled at registration** (`registry_register`, and so `dispatcher_register_tool`).
+  Through 3.4.7 nothing in `src/` or in any consumer called `compiled_compile`. Every tool took
+  `registry_validate_params`' fallback, which checks only that `required` keys are present, so
+  `compiled_validate` and 3.4.5's SEP-1303 path never ran in production. A compiled schema the
+  caller attached with `tool_def_with_compiled` is kept.
+- **Registration checks the definition** (`registry_check_tool_def`, new and public):
+  - the name follows the MCP tools spec's guidance: 1–128 characters from `A-Z a-z 0-9 _ - .`.
+    Every consumer's names already do, and a `Str` passed as a name fails;
+  - inputSchema exists and has type `"object"` (the spec: "MUST be a valid JSON Schema object (not
+    `null`)");
+  - each property schema is valid JSON that is an object or a boolean;
+  - property names and `required` entries are non-empty.
+- **Numbers are read as JSON Schema 2020-12 reads them** (`_sch_num_parse`). Compiling every schema
+  made two old validator bugs reachable:
+  - **Exponents were ignored:** a number was read up to its first non-digit, so `5e2` (500) failed a
+    minimum of 100 as 5.
+  - **`integer` rejected any `.`:** 2020-12, MCP's default dialect, counts `5.0` and `1e2` as
+    integers.
+
+  Bounds written with exponents (`"maximum": 1e3`) are read too. A value is truncated toward zero
+  for its bounds. Truncation is monotonic, so a valid value can never fail a bound; only a
+  fractional bound can let a value slightly outside it through.
+- **Every tool result is a CallToolResult** (`_dsp_coerce_result`; table above).
+  - Only the five MCP content types lift as a block. A domain object with a `type` member
+    (`{"type":"person"}`) stays data, in a text block.
+  - Invalid JSON is checked with `jsonx_valid`, so a handler can no longer break the reply that
+    carries its result.
+- **A result carrying `isError: true` is a failure for the audit and the event**
+  (`TOPIC_TOOL_FAILED`, `success` 0), like a handler that returns nothing or invalid JSON.
+
+### Added
+
+- `registry_check_tool_def(tool_def)`: the reason a definition would be refused, or 0.
+- Tests:
+  - `tests/bote.tcyr` +40:
+    - numbers per 2020-12: `3.0`, `4e0`, `5e1`, `5e2`, `1.5e2`, `1e999`, `-12.75` and malformed
+      forms;
+    - registration accepted, compiled, and a caller's compiled schema kept;
+    - each refusal (space in a name, 129 characters, empty, no definition, no schema, type string,
+      t-ron's and phylax's `Str` shapes, a non-JSON and a non-schema property, an empty required
+      entry) and the ERROR line;
+    - 128 characters and a boolean subschema accepted;
+    - `dispatcher_register_tool` returning the refusal with no handler added;
+    - `isError` and invalid-JSON results audited as failures.
+  - `tests/conformance.tcyr` +8:
+    - J16–J20, each result shape on the wire (bare JSON, one block, invalid JSON, a domain object
+      with `type`, the handler's own `isError` result);
+    - J21–J23, typed arguments on a schema compiled at registration (`5.0` and `5e2` accepted, a
+      fraction for an integer refused, a value below its minimum refused).
+- **Mutation-proven.** Eleven mutants, each killed by at least one suite:
+  - no compile;
+  - the name check, the type check or the subschema check skipped;
+  - the refusal ignored by `dispatcher_register_tool`;
+  - no coercion, any `type` lifted, or invalid JSON passed through;
+  - `isError` audited as success;
+  - the integer rule reverted, or exponents ignored.
+
+### Changed
+
+- `registry_register` returns a BoteError on refusal (it always returned 0). Callers that ignore the
+  return keep compiling, and a refused tool is simply absent.
+- The registry header no longer says CompiledSchema integration is deferred.
+- Roadmap: the next patch is 3.4.9. bote's own tools (libro's bare-JSON results, `ok:false` as
+  `isError`, and the empty schemas, audit B9) are recorded as a follow-up.
+- Binaries: `bote` 2,851,512 B (3.4.7: 2,842,848); aarch64 3,326,344 B; agnos 2,815,848 B with 0
+  undefined. Capacity: `fn_table` 6365 / 131072. Every test file is also green under
+  `qemu-aarch64`, and both `.deps` sidecars are unchanged.
+
+### Performance
+
+- **Interleaved A/B against 3.4.7**, both trees pinned to one core, three rounds each, on a quiet
+  host (load 1.9–2.4):
+
+  | Bench | 3.4.7 avgs (ns) | 3.4.8 avgs (ns) | Δ median |
+  |---|---|---|---|
+  | `dispatch_tools_call` (handler returns bare JSON) | 2066, 2068, 2011 | 2780, 2874, 2842 | +0.78 µs (+37.6%) |
+  | `dispatch_tools_call_result` (new; returns a CallToolResult) | — | 2596, 2670, 2647 | — |
+  | `codec_process_message` | 4567, 4578, 4483 | 5487, 5656, 5608 | +22.8% |
+  | `validate_compiled_simple` | 498, 519, 484 | 521, 528, 521 | +4.6% |
+  | `dispatch_tools_list` | 1709, 1710, 1700 | 1647, 1708, 1690 | −1.1% |
+
+  - **The cost is checking the result.** With coercion turned off, `dispatch_tools_call` went back
+    to 2.10 µs. With compile-at-registration turned off, it stayed at 3.10 µs, so compiling costs
+    nothing measurable here (the bench schema has no properties).
+  - **A CallToolResult**, what real handlers return, costs about 0.58 µs more than 3.4.7's
+    unchecked passthrough: a syntax pass over the result, and one walk over its top-level members.
+  - **A bare result** also gets wrapped in a text block: +0.78 µs on the bench's 12-byte one.
+  - **A first version did worse:** two key lookups plus an allocation to read `type`, +1.0 µs.
+    The single, allocation-free walk (`_dsp_result_shape`) replaced it.
+  - **Numbers were briefly parsed twice:** `validate_compiled_simple` was +14% until the number
+    branch parsed each value once.
+  - **`jsonx_get_str_flat` reads +12%** (145 → 160 ns) on code this patch did not touch. That is a
+    layout shift.
+- The logged row (`benches/history.log`, pinned, load 2.5) agrees: `dispatch_tools_call` 2.817 µs,
+  `dispatch_tools_call_result` 2.625 µs, `dispatch_tools_list` 1.677 µs.
+- `dispatch_tools_call_result` is the sixteenth benchmark. It runs on its own dispatcher, so
+  `dispatch_tools_list` still lists one tool and stays comparable with earlier rows (a first
+  attempt that shared the registry read +86% on `tools/list`).
+
 ## [3.4.7] — 2026-10-15 · SSRF classifier gaps: shared, reserved and IETF space refused, IPv6 literals parsed to bytes
 
 The roadmap's 3.4.7 item: the SSRF classifier gaps found while wiring the 3.4.4 resolved-address

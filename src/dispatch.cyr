@@ -32,7 +32,7 @@ fn _mcp_is_supported(v) {
 
 fn _mcp_latest_version() { return "2025-11-25"; }
 
-fn _bote_server_version() { return "3.4.7"; }
+fn _bote_server_version() { return "3.4.8"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -195,7 +195,8 @@ fn dispatcher_register_tool(d, tool_def, handler_fp) {
     var name = tool_def_name(tool_def);
     var verr = validate_tool_name(name);
     if (verr != 0) { return verr; }
-    registry_register(dispatcher_registry(d), tool_def);
+    var rerr = registry_register(dispatcher_registry(d), tool_def);
+    if (rerr != 0) { return rerr; }
     map_set(dispatcher_handlers(d), name, handler_fp);
     event_sink_publish(dispatcher_event_sink(d), TOPIC_TOOL_REGISTERED(),
       _emit_tool_name_payload(name));
@@ -570,6 +571,111 @@ fn _dsp_tool_error_result(text) {
     return str_data(str_builder_build(sb));
 }
 
+# A successful tool call's result carrying `text` as one text block (3.4.8).
+fn _dsp_tool_text_result(text) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
+    if (text != 0) { _json_emit_escaped(sb, text); }
+    str_builder_add_cstr(sb, "\"}]}");
+    return str_data(str_builder_build(sb));
+}
+
+# 1 when the n bytes at p equal cstr lit.
+fn _dsp_bytes_eq(p, n, lit) {
+    if (n != strlen(lit)) { return 0; }
+    return memeq(p, lit, n);
+}
+
+# 1 when the n bytes at p name an MCP content block type (tools spec, "Tool
+# Result").
+fn _dsp_is_content_type(p, n) {
+    if (_dsp_bytes_eq(p, n, "text") == 1 || _dsp_bytes_eq(p, n, "image") == 1) { return 1; }
+    if (_dsp_bytes_eq(p, n, "audio") == 1 || _dsp_bytes_eq(p, n, "resource") == 1) { return 1; }
+    if (_dsp_bytes_eq(p, n, "resource_link") == 1) { return 1; }
+    return 0;
+}
+
+# What a handler's result (valid JSON) is, from one pass over its top-level
+# members, with nothing allocated: bit 1 when `content` is an array, bit 2
+# when `isError` is true, bit 4 when `type` is an MCP content type. 0 for a
+# result that is not an object.
+var DSP_SHAPE_CONTENT = 1;
+var DSP_SHAPE_ISERROR = 2;
+var DSP_SHAPE_BLOCK = 4;
+fn _dsp_result_shape(buf) {
+    var len = strlen(buf);
+    var i = _jx_skip_ws(buf, len, 0);
+    if (i >= len || load8(buf + i) != 123) { return 0; }
+    var flags = 0;
+    i = _jx_skip_ws(buf, len, i + 1);
+    while (i < len && load8(buf + i) == 34) {
+        var ks = i + 1;
+        var ke = _jx_skip_string(buf, len, i);
+        var klen = ke - ks - 1;
+        i = _jx_skip_ws(buf, len, ke);
+        if (i >= len || load8(buf + i) != 58) { return flags; }
+        var vs = _jx_skip_ws(buf, len, i + 1);
+        var ve = _jx_skip_value(buf, len, vs);
+        if (vs < len) {
+            var vc = load8(buf + vs);
+            if (vc == 91 && _dsp_bytes_eq(buf + ks, klen, "content") == 1) {
+                flags = flags | DSP_SHAPE_CONTENT;
+            } elif (vc == 116 && _dsp_bytes_eq(buf + ks, klen, "isError") == 1 && _dsp_bytes_eq(buf + vs, ve - vs, "true") == 1) {
+                flags = flags | DSP_SHAPE_ISERROR;
+            } elif (vc == 34 && _dsp_bytes_eq(buf + ks, klen, "type") == 1 && _dsp_is_content_type(buf + vs + 1, ve - vs - 2) == 1) {
+                flags = flags | DSP_SHAPE_BLOCK;
+            }
+        }
+        i = _jx_skip_ws(buf, len, ve);
+        if (i < len && load8(buf + i) == 44) { i = _jx_skip_ws(buf, len, i + 1); }
+    }
+    return flags;
+}
+
+# The CallToolResult the client gets for what tool `name`'s handler
+# returned, and through *fail_out the failure message for the audit and the
+# event (0 when the call succeeded). 3.4.8; through 3.4.7 a handler's return
+# went out verbatim.
+#   - nothing (0): a failed call, as since 3.4.5;
+#   - not valid JSON: a failed call. The bytes are not sent, because they
+#     would break the reply;
+#   - an object whose `content` is an array: a CallToolResult already, sent
+#     as it is. `"isError": true` in it makes the call a failure for the audit;
+#   - one content block (an object whose `type` is an MCP content type):
+#     lifted into a one-element `content` array;
+#   - anything else (a bare record, an array, a number, a string): sent as a
+#     text block holding the JSON text, so the model still sees the data.
+# A domain object that happens to carry a `type` member ({"type":"person"})
+# is not mistaken for a block: only the five content types lift.
+fn _dsp_coerce_result(name, result, fail_out) {
+    store64(fail_out, 0);
+    if (result == 0) {
+        var m0 = str_data(bote_err_format(bote_err_new(BOTE_ERR_EXEC_FAILED, name, "the handler returned no result")));
+        store64(fail_out, m0);
+        return _dsp_tool_error_result(m0);
+    }
+    if (jsonx_valid(result, strlen(result)) == 0) {
+        var m1 = str_data(bote_err_format(bote_err_new(BOTE_ERR_EXEC_FAILED, name, "the handler returned a result that is not valid JSON")));
+        store64(fail_out, m1);
+        return _dsp_tool_error_result(m1);
+    }
+    var shape = _dsp_result_shape(result);
+    if ((shape & DSP_SHAPE_CONTENT) != 0) {
+        if ((shape & DSP_SHAPE_ISERROR) != 0) {
+            store64(fail_out, "the tool reported an error (isError)");
+        }
+        return result;
+    }
+    if ((shape & DSP_SHAPE_BLOCK) != 0) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "{\"content\":[");
+        str_builder_add_cstr(sb, result);
+        str_builder_add_cstr(sb, "]}");
+        return str_data(str_builder_build(sb));
+    }
+    return _dsp_tool_text_result(result);
+}
+
 # 1 when a list request's params carry a non-null `cursor`. bote returns
 # every item in one page and never issues a cursor, so any cursor a client
 # sends is one it was never given. The pagination spec says an invalid
@@ -867,15 +973,13 @@ fn dispatcher_dispatch(d, request, claims) {
         }
         var fp = map_get(handlers, name);
         # 2.0 ABI: fncall2 with claims (always 0 in 2.0; populated in 2.x)
-        var result = fncall2(fp, args, claims);
-        # A handler that returns nothing has failed. Through 3.4.4 that went
-        # out as "result":null, which no client can read: a CallToolResult
-        # must carry `content`. It is now a failed call, and audited as one.
-        var no_result = 0;
-        if (result == 0) {
-            no_result = str_data(bote_err_format(bote_err_new(BOTE_ERR_EXEC_FAILED, name, "the handler returned no result")));
-            result = _dsp_tool_error_result(no_result);
-        }
+        # Whatever the handler returned, the client gets a CallToolResult
+        # (_dsp_coerce_result, 3.4.8). A failed call — no result, invalid
+        # JSON, or a result carrying isError — is audited and published as
+        # a failure.
+        var fail_slot[8];
+        var result = _dsp_coerce_result(name, fncall2(fp, args, claims), &fail_slot);
+        var no_result = load64(&fail_slot);
         if (audit_on == 1 || events_on == 1) {
             var dur_ms = (clock_now_ns() - t_start) / 1000000;
             if (no_result == 0) {

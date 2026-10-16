@@ -257,13 +257,13 @@ transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ## Verification
 
-### Tests — 1285 total across fifteen files (+ a core-only drift smoke)
+### Tests — 1333 total across fifteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1285 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1333 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 496 — core protocol/dispatch/codec/schema/session/transports
-cyrius test tests/conformance.tcyr        # 119 — JSON-RPC 2.0 + MCP 2025-11-25 conformance, by spec clause
+cyrius test tests/bote.tcyr               # 536 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/conformance.tcyr        # 127 — JSON-RPC 2.0 + MCP 2025-11-25 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 45 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 34 — fs_write / fs_read / fs_mkdir

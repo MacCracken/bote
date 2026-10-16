@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.4.7 (cyrius 6.7.9) | **Last Audited**: 2026-10-15 (at 3.4.5, with `tests/conformance.tcyr`)
+> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.4.8 (cyrius 6.7.9) | **Last Audited**: 2026-10-15 (at 3.4.5, with `tests/conformance.tcyr`)
 
 This file lists what the shipped Cyrius implementation **covers today**, including the
 gaps — a ❌ row is a defect on the released binary, a ⏳ row is planned work. Both are
@@ -52,7 +52,7 @@ legitimately batch).
 | Pagination: `nextCursor` omitted when there is no next page; an invalid `cursor` is `-32602` | `dispatch` | ✅ (3.4.5) — bote returns every item in one page and never issues a cursor, so any `cursor` a client sends is invalid and gets `-32602`, the spec's code for one, on `tools/list`, `prompts/list`, `resources/list` and `resources/templates/list`. A null `cursor` is read as absent. Through 3.4.4 a cursor was ignored and the first page sent again, which a client concatenating pages would take as duplicates |
 | `tools/call` with arguments + version selection | `dispatch` + `schema` | ✅ |
 | `tools/call` error split: an unknown tool or a malformed CallToolRequest (missing / empty / non-string `name`, non-object `arguments`) is a protocol error `-32602`; arguments failing the tool's `inputSchema` are a tool execution error, a result with `isError: true` | `dispatch` | ✅ (3.4.5) — per the tools spec's "Error Handling" and SEP-1303. Through 3.4.4 an unknown tool was `-32601` and a schema violation `-32602`. The dispatcher has no per-session negotiated version, so this split applies to every revision. 2025-06-18 already listed "invalid input data" as a tool execution error |
-| `tools/call` result is always a CallToolResult | `dispatch` | ✅ (3.4.5) — a handler that returns nothing is a failed call (`isError: true`), not `"result":null` |
+| `tools/call` result is always a CallToolResult | `dispatch::_dsp_coerce_result` | ✅ (3.4.5; 3.4.8) — a handler that returns nothing or invalid JSON is a failed call (`isError: true`); bare JSON arrives as a text block, one content block is lifted into `content`, and a CallToolResult passes through. A result carrying `isError` is audited and published as a failure. Through 3.4.7 bare JSON went out as the result, so bote's own libro tools answered `{"ok":true}` |
 | `prompts/list` + `prompts/get` (capability advertised iff a `PromptRegistry` is present) | `dispatch` + `prompts` | ✅ — an unknown name, a missing required argument and non-object `arguments` are `-32602` (the last two since 3.4.5) |
 | `resources/list` + `resources/read` (capability advertised iff a `ResourceRegistry` is present) | `dispatch` + `resources` | ✅ — an unserved URI is `-32002` with `data.uri`, as in the resources spec's example (3.4.5; was `-32602`) |
 | `resources/templates/list` (optional in the spec) | `dispatch` | ✅ (3.4.1) — answers `{"resourceTemplates":[]}` whenever resources are advertised (gated like `resources/list`; no registry → `-32601`). It answered `-32601` until 3.4.1, which some clients read as a failure rather than "no templates". bote has no URI-template registry (RFC 6570); the empty list is the honest reply. A `cursor` is `-32602` since 3.4.5, as on the other list methods |
@@ -73,14 +73,17 @@ legitimately batch).
 | Tool annotations: `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` — serialized in `tools/list` | `ToolAnnotations` (+ `ann_read_only` / `ann_destructive` presets); `_emit_annotations` | ✅ |
 | Tool profile tags + optional `{"profile":"<tag>"}` filter on `tools/list` (bote extension) | `tool_def_with_profiles` + `_build_tools_list_result` | ✅ |
 | `project_tool` naming convention enforced on dynamic register | `validate_tool_name` | ✅ |
+| Tool names follow the spec's guidance (1–128 characters from `A-Z a-z 0-9 _ - .`) and inputSchema is an object schema ("MUST be a valid JSON Schema object") | `registry::registry_check_tool_def` | ✅ (3.4.8) — checked at every registration; a refused definition is not registered, an ERROR line says why, and the call returns a BoteError. It refuses the `Str`-for-cstr registrations the consumer audit found in t-ron and phylax |
 
 ## Schema Validation
 
 | Spec Requirement | Module | Status |
 |---|---|---|
+| Input schemas compiled at registration, so every tool's arguments are validated | `registry::registry_register` → `compiled_compile` | ✅ (3.4.8) — through 3.4.7 nothing compiled a schema, so only `required` was ever checked in production |
 | JSON Schema subset — string, number, integer, boolean, array, object, ANY | `schema::SchemaTypeTag` | ✅ |
 | String enum constraint | `prop_enum_values` | ✅ |
-| Numeric bounds (`minimum`, `maximum`) for number + integer | `prop_min` / `prop_max` | ✅ |
+| Numeric bounds (`minimum`, `maximum`) for number + integer | `prop_min` / `prop_max` | ✅ — exponents read (3.4.8); a value is truncated toward zero, so a fractional bound can admit a value just outside it |
+| `integer` per JSON Schema 2020-12 (a zero fractional part counts: `5.0`, `1e2`) | `schema::_sch_num_parse` | ✅ (3.4.8; any `.` was refused before) |
 | Required field check | `compiled_required` | ✅ |
 | Recursive nested object validation | `_validate_against` | ✅ |
 | Array `items` typing | `prop_items` | ✅ |
@@ -228,8 +231,8 @@ registered by default in the binaries.
 
 | Scope | Count | Source |
 |---|---|---|
-| **Protocol conformance by spec clause** — JSON-RPC 2.0 §4 / §5 / §4.1 / §5.1 / §6 (incl. the spec's own examples), MCP initialize + all four revisions, ping, cancellation, capability gating, pagination cursors, tools/list, the tools/call protocol-vs-execution error split, prompts, resources, completion, control bytes in a tool result; every response checked to be valid JSON and a §5 Response object | **119** | `tests/conformance.tcyr` (3.4.5) |
-| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / the per-request DEBUG line, the string escaper | **496** | `tests/bote.tcyr` |
+| **Protocol conformance by spec clause** — JSON-RPC 2.0 §4 / §5 / §4.1 / §5.1 / §6 (incl. the spec's own examples), MCP initialize + all four revisions, ping, cancellation, capability gating, pagination cursors, tools/list, the tools/call protocol-vs-execution error split, prompts, resources, completion, control bytes in a tool result, every handler-result shape, typed arguments; every response checked to be valid JSON and a §5 Response object | **127** | `tests/conformance.tcyr` (3.4.5) |
+| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / the per-request DEBUG line, the string escaper, registration checks, numbers per 2020-12 | **536** | `tests/bote.tcyr` |
 | Bearer + allowlist + JWT + PKCE validators | **45** | `tests/bote_auth.tcyr` |
 | Content blocks + annotations | **25** | `tests/bote_content.tcyr` |
 | `fs_tools` path safety + root confinement + control bytes as valid JSON | **34** | `tests/bote_fs_tools.tcyr` |
@@ -243,8 +246,8 @@ registered by default in the binaries.
 | Unix transport — sockaddr, accept-error policy, backoff, deadlines, closed-peer write | **68** | `tests/bote_transport_unix.tcyr` |
 | `web_tools` — scheme guard, SSRF guard (URL and resolved address), HTML stripper, entities | **56** | `tests/bote_web_tools.tcyr` |
 | WebSocket config + wire-up + the send-deadline drop | **21** | `tests/bote_ws.tcyr` |
-| **Total assertions** | **1285** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
-| Hot-path benchmarks | **15** | `tests/bote.bcyr` |
+| **Total assertions** | **1333** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
+| Hot-path benchmarks | **16** | `tests/bote.bcyr` |
 | Fuzz harnesses | **6** | `fuzz/*.fcyr` (in CI since 3.3.8; `jsonx_valid.fcyr` since 3.4.5, `ssrf_ipv6.fcyr` since 3.4.7) |
 | End-to-end transport round trips | 6 (stdio, HTTP, Unix, bridge, streamable, WS) | CI's "Transport smoke" step plus a per-release stdio probe on the built binary |
 

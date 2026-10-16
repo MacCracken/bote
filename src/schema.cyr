@@ -2,7 +2,9 @@
 # Mirrors rust-old/src/schema.rs
 #
 # Cyrius limitations vs Rust:
-#   - No floats. Number and Integer both validated as i64 (Number bounds use ints).
+#   - No floats. A number is read exactly for its type (integral or not,
+#     exponents included) and truncated toward zero for its bounds; see
+#     _sch_num_parse.
 #   - apply_defaults is not yet implemented (would need JSON object mutation).
 
 # ================================================================
@@ -121,23 +123,101 @@ fn _sch_is_boolean(v) {
 }
 fn _sch_is_null(v) { if (_sch_first_nonws(v) == 110) { return 1; } return 0; }
 
-# Number: starts with '-' or digit. Integer: no '.' anywhere in token.
-fn _sch_is_number(v) {
-    var c = _sch_first_nonws(v);
-    if (c == 45) { return 1; }
+# Magnitude a parsed number saturates at: 2^62.
+var SCH_NUM_SAT = 4611686018427387904;
+
+fn _sch_is_digit(c) {
     if (c >= 48 && c <= 57) { return 1; }
     return 0;
 }
 
-fn _sch_is_integer(v) {
-    if (_sch_is_number(v) == 0) { return 0; }
+# Parse the JSON number at the start of v (RFC 8259 §6; leading whitespace
+# allowed, parsing stops where the number ends). Writes the value truncated
+# toward zero to *val_out, its magnitude saturating at SCH_NUM_SAT. Returns 2
+# when the value is integral, 1 when it has a non-zero fractional part, and 0
+# when v does not begin with a JSON number.
+#
+# Integral is JSON Schema 2020-12's rule, the dialect MCP 2025-11-25 defaults
+# to: a number with a zero fractional part is an integer, so `5.0` and `1e2`
+# are integers. Through 3.4.7 the validator rejected any `.` for `integer`,
+# and it read numbers up to the first non-digit, so `5e2` counted as 5. That
+# only became reachable in production once schemas were compiled at
+# registration (3.4.8).
+#
+# Truncating toward zero never makes a valid value fail a bound, because the
+# rounding is monotonic. A fractional bound can therefore only let a value
+# slightly outside it through: `minimum` 4.5 admits 4.1. Exact decimal
+# comparison is not implemented.
+fn _sch_num_parse(v, val_out) {
+    store64(val_out, 0);
+    if (v == 0) { return 0; }
     var i = 0;
-    while (load8(v + i) != 0) {
-        if (load8(v + i) == 46) { return 0; }
+    while (load8(v + i) == 32 || load8(v + i) == 9 || load8(v + i) == 10 || load8(v + i) == 13) { i = i + 1; }
+    var neg = 0;
+    if (load8(v + i) == 45) { neg = 1; i = i + 1; }
+    if (_sch_is_digit(load8(v + i)) == 0) { return 0; }
+    var istart = i;
+    if (load8(v + i) == 48) { i = i + 1; }
+    else { while (_sch_is_digit(load8(v + i)) == 1) { i = i + 1; } }
+    var ilen = i - istart;
+    var fstart = i;
+    var flen = 0;
+    if (load8(v + i) == 46) {
         i = i + 1;
+        if (_sch_is_digit(load8(v + i)) == 0) { return 0; }
+        fstart = i;
+        while (_sch_is_digit(load8(v + i)) == 1) { i = i + 1; }
+        flen = i - fstart;
     }
-    return 1;
+    var e = 0;
+    if (load8(v + i) == 101 || load8(v + i) == 69) {
+        i = i + 1;
+        var eneg = 0;
+        if (load8(v + i) == 43) { i = i + 1; }
+        elif (load8(v + i) == 45) { eneg = 1; i = i + 1; }
+        if (_sch_is_digit(load8(v + i)) == 0) { return 0; }
+        while (_sch_is_digit(load8(v + i)) == 1) {
+            if (e < 100000) { e = e * 10 + (load8(v + i) - 48); }
+            i = i + 1;
+        }
+        if (eneg == 1) { e = 0 - e; }
+    }
+    # The digits, integer part then fraction, scaled by 10^(e - flen). The
+    # first `keep` of them are the integer part of the value.
+    var dlen = ilen + flen;
+    var scale = e - flen;
+    var keep = dlen;
+    if (scale < 0) {
+        keep = dlen + scale;
+        if (keep < 0) { keep = 0; }
+    }
+    var integral = 2;
+    var n = 0;
+    var k = 0;
+    while (k < dlen) {
+        var ch = 0;
+        if (k < ilen) { ch = load8(v + istart + k); }
+        else { ch = load8(v + fstart + k - ilen); }
+        if (k < keep) {
+            if (n < SCH_NUM_SAT / 10) { n = n * 10 + (ch - 48); }
+            else { n = SCH_NUM_SAT; }
+        } elif (ch != 48) {
+            integral = 1;
+        }
+        k = k + 1;
+    }
+    var m = 0;
+    while (m < scale && n != 0) {
+        if (n < SCH_NUM_SAT / 10) { n = n * 10; }
+        else { n = SCH_NUM_SAT; m = scale; }
+        m = m + 1;
+    }
+    if (n > SCH_NUM_SAT) { n = SCH_NUM_SAT; }
+    if (neg == 1) { n = 0 - n; }
+    store64(val_out, n);
+    return integral;
 }
+
 
 # Strip surrounding quotes from a JSON-string cstr ("hello" → hello).
 # Caller guarantees v is a string literal. Returns alloc'd cstr.
@@ -151,25 +231,13 @@ fn _sch_unquote(v) {
     return out;
 }
 
-# Parse a JSON integer cstr to i64 (handles leading '-').
-# Stops at the first non-digit. Caller is expected to pass a JSON-number
-# literal extracted by jsonx_get_raw, so non-digits beyond the prefix are not
-# diagnosed (silent truncation of suffixes by design).
+# The value of the JSON number v, truncated toward zero (0 when v is not a
+# number). It reads fractions and exponents through _sch_num_parse, so a
+# bound or an argument written `5e2` is 500, not 5 (3.4.8).
 fn _sch_parse_int(v) {
-    if (v == 0) { return 0; }
-    var i = 0;
-    var neg = 0;
-    if (load8(v) == 45) { neg = 1; i = 1; }
-    var n = 0;
-    while (load8(v + i) != 0) {
-        var c = load8(v + i);
-        if (c < 48) { break; }
-        if (c > 57) { break; }
-        n = n * 10 + (c - 48);
-        i = i + 1;
-    }
-    if (neg == 1) { return 0 - n; }
-    return n;
+    var t[8];
+    _sch_num_parse(v, &t);
+    return load64(&t);
 }
 
 # Walk a top-level JSON array (cstr starting with `[`); push each raw element
@@ -398,11 +466,12 @@ fn _validate_value(path, value, prop, violations) {
     }
 
     if (tag == SCH_NUMBER) {
-        if (_sch_is_number(value) == 0) {
+        var nslot[8];
+        if (_sch_num_parse(value, &nslot) == 0) {
             _violation(violations, path, "expected number");
             return 0;
         }
-        var nv = _sch_parse_int(value);
+        var nv = load64(&nslot);
         if (prop_has_min(prop) == 1) {
             if (nv < prop_min(prop)) { _violation(violations, path, "less than minimum"); }
         }
@@ -413,11 +482,12 @@ fn _validate_value(path, value, prop, violations) {
     }
 
     if (tag == SCH_INTEGER) {
-        if (_sch_is_integer(value) == 0) {
+        var islot[8];
+        if (_sch_num_parse(value, &islot) != 2) {
             _violation(violations, path, "expected integer");
             return 0;
         }
-        var iv = _sch_parse_int(value);
+        var iv = load64(&islot);
         if (prop_has_min(prop) == 1) {
             if (iv < prop_min(prop)) { _violation(violations, path, "less than minimum"); }
         }

@@ -67,6 +67,13 @@ var _b_auth_allowed = 0;
 
 fn h_echo_b(args) { return args; }
 
+# 3.4.8: a handler returning a CallToolResult, the shape real tools return,
+# so the passthrough path is measured beside the bare-result one
+# (dispatch_tools_call, whose handler returns its args as bare JSON).
+fn h_result_b(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}"; }
+var _b_call_result_req = 0;
+var _b_result_dispatcher = 0;
+
 # ================================================================
 # Benchmark callbacks (no-arg functions, called by bench_run)
 # ================================================================
@@ -81,6 +88,10 @@ fn b_dispatch_tools_list() {
 
 fn b_dispatch_tools_call() {
     return dispatcher_dispatch(_b_dispatcher, _b_call_req, 0);
+}
+
+fn b_dispatch_tools_call_result() {
+    return dispatcher_dispatch(_b_result_dispatcher, _b_call_result_req, 0);
 }
 
 fn b_jsonx_get_str_flat() {
@@ -150,6 +161,13 @@ fn _bench_setup() {
     registry_register(reg, tool_def_new("svc_echo", "echo", s));
     _b_dispatcher = dispatcher_new(reg);
     dispatcher_handle(_b_dispatcher, "svc_echo", &h_echo_b);
+    # Its own registry and dispatcher, so dispatch_tools_list still lists one
+    # tool and stays comparable with earlier rows.
+    var rreg = tool_registry_new();
+    registry_register(rreg, tool_def_new("svc_result", "returns a CallToolResult", schema_new("object", 0, vec_new())));
+    _b_result_dispatcher = dispatcher_new(rreg);
+    dispatcher_handle(_b_result_dispatcher, "svc_result", &h_result_b);
+    _b_call_result_req = req_with_params(req_new("3", "tools/call"), "{\"name\":\"svc_result\",\"arguments\":{\"msg\":\"hi\"}}");
 
     _b_init_req = req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}");
     _b_list_req = req_new("2", "tools/list");
@@ -256,6 +274,10 @@ fn main() {
     var b15 = bench_new("jsonx_valid_request");
     bench_run(b15, &b_jsonx_valid_request, 100000);
     vec_push(benches, b15);
+
+    var b16 = bench_new("dispatch_tools_call_result");
+    bench_run(b16, &b_dispatch_tools_call_result, 10000);
+    vec_push(benches, b16);
 
     bench_report_all(benches);
     return 0;
