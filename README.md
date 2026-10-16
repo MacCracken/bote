@@ -189,7 +189,7 @@ Supported MCP protocol versions: `2024-11-05`, `2025-03-26`, `2025-06-18`,
 | `libro_proof` | Merkle inclusion proof for an entry by index |
 | `libro_retention` | Apply a policy (`keep_count` / `keep_duration` / `keep_after` / `pci_dss` / `hipaa` / `sox`) |
 | `fs_write` / `fs_read` / `fs_mkdir` | Filesystem ops confined to `BOTE_FS_ROOT` (default `.`) |
-| `web_fetch` | GET a URL (http/https only; loopback / private / link-local / metadata refused by the SSRF guard), strip HTML to readable text, size-capped |
+| `web_fetch` | GET a URL (http/https only; loopback / private / link-local / metadata refused by the SSRF guard — on the URL and, since 3.4.4, on the address the name resolves to), strip HTML to readable text, size-capped |
 | `web_search` | Query a SearXNG JSON endpoint (`BOTE_SEARXNG_URL`) |
 
 ### Error codes
@@ -256,16 +256,16 @@ transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ## Verification
 
-### Tests — 1045 total across fourteen files (+ a core-only drift smoke)
+### Tests — 1094 total across fourteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1045 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1094 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 473 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/bote_auth.tcyr          # 45 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 24 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 31 — fs_write / fs_read / fs_mkdir
-cyrius test tests/bote_host.tcyr          # 122 — host registry + SSRF guard (IPv4 + IPv6)
+cyrius test tests/bote_host.tcyr          # 152 — host registry + SSRF guard (IPv4 + IPv6)
 cyrius test tests/bote_jwt.tcyr           # 53 — JWT HS256 verify + exact alg + exp enforcement
 cyrius test tests/bote_libro_tools.tcyr   # 38 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
@@ -273,7 +273,7 @@ cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals
 cyrius test tests/bote_transport_unix.tcyr # 68 — Unix transport: sockaddr, accept-error policy, backoff, deadlines, closed-peer write
-cyrius test tests/bote_web_tools.tcyr     # 37 — web_fetch / web_search + the SSRF guard
+cyrius test tests/bote_web_tools.tcyr     # 56 — web_fetch / web_search + the SSRF guard (URL and resolved address)
 cyrius test tests/bote_ws.tcyr            # 21 — WebSocket config + wire-up + the send-deadline drop
 cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dist/bote-core.cyr
 ```

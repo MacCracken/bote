@@ -57,6 +57,24 @@ fn _lc_has(hay, needle) {
     return 0;
 }
 
+# 16 IPv6 bytes from 8 big-endian 16-bit groups (3.4.4 tests).
+fn _v6(g0, g1, g2, g3, g4, g5, g6, g7) {
+    var p = alloc(16);
+    var gs = alloc(64);
+    store64(gs, g0); store64(gs + 8, g1); store64(gs + 16, g2); store64(gs + 24, g3);
+    store64(gs + 32, g4); store64(gs + 40, g5); store64(gs + 48, g6); store64(gs + 56, g7);
+    var i = 0;
+    while (i < 8) {
+        var g = load64(gs + i * 8);
+        store8(p + i * 2, (g >> 8) & 0xFF);
+        store8(p + i * 2 + 1, g & 0xFF);
+        i = i + 1;
+    }
+    return p;
+}
+# Packed IPv4 (first octet lowest), as sandhi carries it.
+fn _v4(a, b, c, d) { return a | (b << 8) | (c << 16) | (d << 24); }
+
 fn main() {
     alloc_init();
 
@@ -308,6 +326,45 @@ fn main() {
     assert_streq(ssrf_host("https://user:pw@10.0.0.5:8443/a"), "10.0.0.5", "ssrf_host drops userinfo and port");
     assert_streq(ssrf_host("http://[::1]:80/"), "::1", "ssrf_host drops IPv6 brackets");
     assert_eq(ssrf_host("not a url"), 0, "ssrf_host of an unparseable URL is 0");
+
+
+    # ================================================================
+    # 3.4.4 — resolved-address classifiers (what web_fetch's hook judges)
+    # ================================================================
+    assert_eq(ssrf_classify_ipv4_addr(0x0100007F), SSRF_LOOPBACK, "packed 127.0.0.1 (0x0100007F) → loopback");
+    assert_eq(ssrf_classify_ipv4_addr(_v4(10, 1, 2, 3)), SSRF_PRIVATE, "packed 10.1.2.3 → private");
+    assert_eq(ssrf_classify_ipv4_addr(_v4(172, 16, 0, 1)), SSRF_PRIVATE, "packed 172.16.0.1 → private");
+    assert_eq(ssrf_classify_ipv4_addr(_v4(172, 32, 0, 1)), SSRF_OK, "packed 172.32.0.1 → ok (outside /12)");
+    assert_eq(ssrf_classify_ipv4_addr(_v4(192, 168, 1, 1)), SSRF_PRIVATE, "packed 192.168.1.1 → private");
+    assert_eq(ssrf_classify_ipv4_addr(_v4(169, 254, 169, 254)), SSRF_METADATA, "packed 169.254.169.254 → metadata");
+    assert_eq(ssrf_classify_ipv4_addr(_v4(0, 0, 0, 0)), SSRF_UNSPEC, "packed 0.0.0.0 → unspecified");
+    assert_eq(ssrf_classify_ipv4_addr(_v4(224, 0, 0, 1)), SSRF_MULTICAST, "packed 224.0.0.1 → multicast");
+    assert_eq(ssrf_classify_ipv4_addr(_v4(8, 8, 8, 8)), SSRF_OK, "packed 8.8.8.8 → ok");
+    assert_eq(ssrf_classify_ipv4_addr(_v4(93, 184, 216, 34)), SSRF_OK, "packed 93.184.216.34 → ok");
+    # Parity: a literal URL and the same address resolved are judged alike,
+    # because both go through _ssrf_classify_v4_ab.
+    assert_eq(ssrf_check("http://10.9.8.7/"), ssrf_classify_ipv4_addr(_v4(10, 9, 8, 7)), "parity: 10.9.8.7");
+    assert_eq(ssrf_check("http://172.31.255.255/"), ssrf_classify_ipv4_addr(_v4(172, 31, 255, 255)), "parity: 172.31.255.255");
+    assert_eq(ssrf_check("http://127.8.8.8/"), ssrf_classify_ipv4_addr(_v4(127, 8, 8, 8)), "parity: 127.8.8.8");
+    assert_eq(ssrf_check("http://1.1.1.1/"), ssrf_classify_ipv4_addr(_v4(1, 1, 1, 1)), "parity: 1.1.1.1");
+
+    assert_eq(ssrf_classify_ipv6_bytes(_v6(0, 0, 0, 0, 0, 0, 0, 0)), SSRF_UNSPEC, "bytes :: → unspecified");
+    assert_eq(ssrf_classify_ipv6_bytes(_v6(0, 0, 0, 0, 0, 0, 0, 1)), SSRF_LOOPBACK, "bytes ::1 (any spelling) → loopback");
+    assert_eq(ssrf_classify_ipv6_bytes(_v6(0, 0, 0, 0, 0, 0xFFFF, 0x7F00, 1)), SSRF_PRIVATE, "bytes ::ffff:127.0.0.1 → private (mapped)");
+    assert_eq(ssrf_classify_ipv6_bytes(_v6(0, 0, 0, 0, 0, 0, 0x7F00, 1)), SSRF_PRIVATE, "bytes ::127.0.0.1 (compatible) → private");
+    assert_eq(ssrf_classify_ipv6_bytes(_v6(0x64, 0xFF9B, 0, 0, 0, 0, 0x0A00, 1)), SSRF_PRIVATE, "bytes 64:ff9b::10.0.0.1 → private (NAT64)");
+    assert_eq(ssrf_classify_ipv6_bytes(_v6(0xFE80, 0, 0, 0, 0, 0, 0, 1)), SSRF_LINK_LOCAL, "bytes fe80::1 → link-local");
+    assert_eq(ssrf_classify_ipv6_bytes(_v6(0xFEBF, 0, 0, 0, 0, 0, 0, 1)), SSRF_LINK_LOCAL, "bytes febf::1 → link-local (the whole /10, which the text matcher misses)");
+    assert_eq(ssrf_classify_ipv6_bytes(_v6(0xFD00, 0, 0, 0, 0, 0, 0, 1)), SSRF_PRIVATE, "bytes fd00::1 → private (ULA)");
+    assert_eq(ssrf_classify_ipv6_bytes(_v6(0xFC00, 0, 0, 0, 0, 0, 0, 1)), SSRF_PRIVATE, "bytes fc00::1 → private (ULA)");
+    assert_eq(ssrf_classify_ipv6_bytes(_v6(0xFF02, 0, 0, 0, 0, 0, 0, 1)), SSRF_MULTICAST, "bytes ff02::1 → multicast");
+    assert_eq(ssrf_classify_ipv6_bytes(_v6(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888)), SSRF_OK, "bytes 2001:4860:4860::8888 → ok");
+    assert_eq(ssrf_classify_ipv6_bytes(0), SSRF_PARSE, "bytes null → parse");
+
+    assert_streq(ssrf_ipv4_addr_str(0x0100007F), "127.0.0.1", "ssrf_ipv4_addr_str(0x0100007F)");
+    assert_streq(ssrf_ipv4_addr_str(_v4(169, 254, 169, 254)), "169.254.169.254", "ssrf_ipv4_addr_str(metadata)");
+    assert_streq(ssrf_ipv6_bytes_str(_v6(0xFE80, 0, 0, 0, 0, 0, 0, 1)), "fe80:0:0:0:0:0:0:1", "ssrf_ipv6_bytes_str(fe80::1)");
+    assert_streq(ssrf_ipv6_bytes_str(_v6(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0xABCD)), "2001:db8:0:0:0:0:0:abcd", "ssrf_ipv6_bytes_str(2001:db8::abcd)");
 
     return assert_summary();
 }

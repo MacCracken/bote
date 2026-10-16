@@ -355,9 +355,13 @@ fn _ssrf_classify_ipv4(s, start, end) {
     var rd = _ssrf_parse_octet(s, dot3 + 1, end, &d_slot);
     if (rd != end) { return SSRF_PARSE; }
 
-    var a = load64(&a_slot);
-    var b = load64(&b_slot);
+    return _ssrf_classify_v4_ab(load64(&a_slot), load64(&b_slot));
+}
 
+# The IPv4 decision, on the first two octets. Shared by the string
+# classifier above and ssrf_classify_ipv4_addr below, so a literal URL and a
+# resolved address can never be judged differently (3.4.4).
+fn _ssrf_classify_v4_ab(a, b) {
     # 0.0.0.0/8 — unspecified / "any interface"
     if (a == 0) { return SSRF_UNSPEC; }
     # 127.0.0.0/8 — loopback
@@ -594,6 +598,99 @@ fn ssrf_check(url) {
 fn ssrf_is_safe(url) {
     if (ssrf_check(url) == SSRF_OK) { return 1; }
     return 0;
+}
+
+# ================================================================
+# Resolved-address classifiers (3.4.4)
+# ================================================================
+#
+# ssrf_check judges a URL's host string. web_fetch's resolve hook
+# (src/web_tools.cyr) judges the address a name actually resolved to, which
+# closes the hostname case: `127.0.0.1.nip.io`, or any name whose A record
+# points inside, passes the string check and is refused here.
+
+# Classify a packed IPv4 address as sandhi and lib/net.cyr carry it: network
+# byte order in the low 32 bits, so the first octet is the lowest byte
+# (127.0.0.1 is 0x0100007F).
+fn ssrf_classify_ipv4_addr(addr) {
+    return _ssrf_classify_v4_ab(addr & 0xFF, (addr >> 8) & 0xFF);
+}
+
+# Classify 16 raw IPv6 address bytes at `p` (an AAAA answer). The string
+# classifier's categories, decided on bytes, so spellings its text matcher
+# misses (`0:0:0:0:0:0:0:1`, `fe9f::1`) cannot slip through.
+fn ssrf_classify_ipv6_bytes(p) {
+    if (p == 0) { return SSRF_PARSE; }
+    var zero10 = 1;
+    var i = 0;
+    while (i < 10) {
+        if (load8(p + i) != 0) { zero10 = 0; }
+        i = i + 1;
+    }
+    var b10 = load8(p + 10) & 0xFF;
+    var b11 = load8(p + 11) & 0xFF;
+    if (zero10 == 1 && b10 == 0 && b11 == 0) {
+        # ::/96: :: unspecified, ::1 loopback, and the deprecated
+        # IPv4-compatible ::a.b.c.d, rejected as the string classifier does.
+        var tail = (load8(p + 12) & 0xFF) | (load8(p + 13) & 0xFF) | (load8(p + 14) & 0xFF);
+        var last = load8(p + 15) & 0xFF;
+        if (tail == 0 && last == 0) { return SSRF_UNSPEC; }
+        if (tail == 0 && last == 1) { return SSRF_LOOPBACK; }
+        return SSRF_PRIVATE;
+    }
+    # ::ffff:0:0/96 IPv4-mapped: conservative, as the string classifier.
+    if (zero10 == 1 && b10 == 0xFF && b11 == 0xFF) { return SSRF_PRIVATE; }
+    var b0 = load8(p) & 0xFF;
+    var b1 = load8(p + 1) & 0xFF;
+    # 64:ff9b::/96 NAT64 well-known prefix (RFC 6052)
+    if (b0 == 0x00 && b1 == 0x64 && (load8(p + 2) & 0xFF) == 0xFF && (load8(p + 3) & 0xFF) == 0x9B) {
+        return SSRF_PRIVATE;
+    }
+    # fe80::/10 link-local
+    if (b0 == 0xFE && (b1 & 0xC0) == 0x80) { return SSRF_LINK_LOCAL; }
+    # fc00::/7 unique local
+    if ((b0 & 0xFE) == 0xFC) { return SSRF_PRIVATE; }
+    # ff00::/8 multicast
+    if (b0 == 0xFF) { return SSRF_MULTICAST; }
+    return SSRF_OK;
+}
+
+# Dotted-quad text of a packed IPv4 address, for a log line.
+fn ssrf_ipv4_addr_str(addr) {
+    var sb = str_builder_new();
+    var k = 0;
+    while (k < 4) {
+        if (k > 0) { str_builder_add_cstr(sb, "."); }
+        str_builder_add_int(sb, (addr >> (k * 8)) & 0xFF);
+        k = k + 1;
+    }
+    return str_data(str_builder_build(sb));
+}
+
+# Uncompressed hex text of 16 IPv6 bytes (`fe80:0:0:0:0:0:0:1`), for a log line.
+fn ssrf_ipv6_bytes_str(p) {
+    var out = alloc(40);
+    var hex = "0123456789abcdef";
+    var o = 0;
+    var g = 0;
+    while (g < 8) {
+        if (g > 0) { store8(out + o, 58); o = o + 1; }
+        var w = ((load8(p + g * 2) & 0xFF) << 8) | (load8(p + g * 2 + 1) & 0xFF);
+        var started = 0;
+        var sh = 12;
+        while (sh >= 0) {
+            var d = (w >> sh) & 15;
+            if (d != 0 || started == 1 || sh == 0) {
+                store8(out + o, load8(hex + d));
+                o = o + 1;
+                started = 1;
+            }
+            sh = sh - 4;
+        }
+        g = g + 1;
+    }
+    store8(out + o, 0);
+    return out;
 }
 
 # Lowercase name of an SSRF_* code, for a log line or an error message

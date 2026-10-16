@@ -85,6 +85,27 @@ fn _lc_has(hay, needle) {
     return 0;
 }
 
+# ---- 3.4.4: a fake embedder resolver (no network) ---------------------------
+# Answers as an attacker's DNS might. The guard resolves through it, as it
+# would through a real embedder's hook, and must classify what it returns.
+var _fk_v6_ula = 0;
+var _fk_v6_pub = 0;
+fn _fake_resolver(ctx, host, family) {
+    if (family == SANDHI_RESOLVE_V4) {
+        if (streq(host, "rebind.test") == 1) { return 0x0100007F; }               # 127.0.0.1
+        if (streq(host, "meta.test") == 1) { return 0xFEA9FEA9; }                 # 169.254.169.254
+        if (streq(host, "public.test") == 1) { return 0x22D8B85D; }               # 93.184.216.34
+        return 0 - 1;
+    }
+    if (streq(host, "v6only.test") == 1) { return _fk_v6_ula; }                  # fd00::1
+    if (streq(host, "v6pub.test") == 1) { return _fk_v6_pub; }                   # 2001:4860::8888
+    return 0;
+}
+fn _fake_none(ctx, host, family) {
+    if (family == SANDHI_RESOLVE_V4) { return 0 - 1; }
+    return 0;
+}
+
 fn main() {
     alloc_init();
     var dst = alloc(256);
@@ -153,6 +174,66 @@ fn main() {
     var v6 = web_fetch_handler("{\"url\":\"http://[::1]/\"}", 0);
     assert(_lc_has(v6, "SSRF guard: loopback") == 1, "web_fetch refuses IPv6 loopback");
     _lc_end();
+
+
+    # ================================================================
+    # 3.4.4 — the resolved address is classified, through sandhi's hook
+    # ================================================================
+    # Every name below passes the URL pre-check (not a literal, not on the
+    # blocklist) and is refused only once its answer is classified. Nothing
+    # here leaves the box: each refusal happens before connect.
+    _fk_v6_ula = alloc(16);
+    memset(_fk_v6_ula, 0, 16);
+    store8(_fk_v6_ula, 0xFD); store8(_fk_v6_ula + 15, 1);
+    _fk_v6_pub = alloc(16);
+    memset(_fk_v6_pub, 0, 16);
+    store8(_fk_v6_pub, 0x20); store8(_fk_v6_pub + 1, 0x01); store8(_fk_v6_pub + 2, 0x48);
+    store8(_fk_v6_pub + 3, 0x60); store8(_fk_v6_pub + 14, 0x88); store8(_fk_v6_pub + 15, 0x88);
+
+    assert_eq(ssrf_check("http://rebind.test/x"), SSRF_OK, "rebind.test passes the string check (why the hook is needed)");
+    sandhi_client_set_resolver(&_fake_resolver, 0);
+    _lc_begin();
+    var g_rb = web_fetch_handler("{\"url\":\"http://rebind.test/x\"}", 0);
+    assert(_lc_has(g_rb, "SSRF guard: loopback, resolved address") == 1, "a name resolving to 127.0.0.1 is refused");
+    assert(_lc_has(g_rb, "\"isError\":true") == 1, "the refusal is an isError result");
+    assert_eq(_lc_level, SK_WARN, "the resolved-address refusal is a WARN");
+    assert(_lc_has(_lc_buf, "host=rebind.test addr=127.0.0.1") == 1, "the line names the host and the address it resolved to");
+    assert_eq(_sandhi_client_resolver_fn, &_fake_resolver, "the embedder's hook is restored after the fetch");
+    var g_mt = web_fetch_handler("{\"url\":\"https://meta.test/latest/meta-data/\"}", 0);
+    assert(_lc_has(g_mt, "SSRF guard: metadata, resolved address") == 1, "a name resolving to 169.254.169.254 is refused");
+    var g_v6 = web_fetch_handler("{\"url\":\"http://v6only.test/\"}", 0);
+    assert(_lc_has(g_v6, "SSRF guard: private, resolved address") == 1, "a name whose only answer is fd00::1 is refused");
+    assert(_lc_has(_lc_buf, "addr=fd00:0:0:0:0:0:0:1") == 1, "the line names the IPv6 address");
+    _lc_end();
+
+    # The hook itself, called directly (no request, so no connect):
+    _web_prev_fn = &_fake_resolver;
+    _web_prev_ctx = 0;
+    _web_refused = 0;
+    assert_eq(_web_ssrf_resolve(0, "public.test", SANDHI_RESOLVE_V4), 0x22D8B85D, "a public IPv4 answer is passed through");
+    assert_eq(_web_refused, 0, "a public answer records no refusal");
+    assert_eq(_web_ssrf_resolve(0, "v6pub.test", SANDHI_RESOLVE_V6), _fk_v6_pub, "a public IPv6 answer is passed through");
+    assert_eq(_web_ssrf_resolve(0, "rebind.test", SANDHI_RESOLVE_V4), 0 - 1, "a loopback IPv4 answer is refused");
+    assert_eq(_web_ssrf_resolve(0, "v6pub.test", SANDHI_RESOLVE_V6), 0, "after an IPv4 refusal the name is refused on IPv6 too");
+    _web_refused = 0;
+    assert_eq(_web_ssrf_resolve(0, "unknown.test", SANDHI_RESOLVE_V4), 0 - 1, "no answer is no address (sandhi then asks IPv6)");
+    assert_eq(_web_refused, 0, "no answer is not a refusal");
+    _web_prev_fn = 0;
+
+    # With no hook installed before the fetch, none is left after it. An IPv6
+    # literal gives an answer on neither family without a DNS query, so this
+    # makes no network call either.
+    sandhi_client_clear_resolver();
+    _web_get_guarded("http://[2001:db8::1]/");
+    assert_eq(sandhi_client_resolver_installed(), 0, "with no hook before, none is installed after");
+    sandhi_client_set_resolver(&_fake_none, 0);
+    _web_get_guarded("http://nowhere.test/");
+    assert_eq(_sandhi_client_resolver_fn, &_fake_none, "an embedder's hook survives a fetch that resolved nothing");
+    # The guard never chains to itself, even if its hook was left installed.
+    sandhi_client_set_resolver(&_web_ssrf_resolve, 0);
+    _web_get_guarded("http://[2001:db8::2]/");
+    assert_eq(sandhi_client_resolver_installed(), 0, "a stale guard hook is not treated as an embedder's (no self-recursion)");
+    sandhi_client_clear_resolver();
 
     return assert_summary();
 }

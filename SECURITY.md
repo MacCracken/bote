@@ -28,10 +28,15 @@ The primary security-relevant surface areas are:
 - **Outbound requests** — the `host` module's SSRF guard rejects URLs targeting
   loopback / link-local / private / cloud-metadata endpoints (IPv4 and IPv6)
   before any network call. `web_fetch`, the built-in tool that fetches a
-  client-supplied URL, applies it since **3.4.0**; before that it checked only
-  the scheme, so this statement did not hold for it. The guard classifies IP
-  literals and a hostname blocklist and does not resolve DNS: a name that
-  resolves to a private address is not caught (roadmap: DNS-aware SSRF).
+  client-supplied URL, applies it in two layers: the URL's host string (IP
+  literals and a hostname blocklist) since **3.4.0**, and since **3.4.4** the
+  address a name actually resolves to, classified inside sandhi's client
+  resolve hook, so the address judged is the address dialled (no DNS-rebinding
+  window, and `127.0.0.1.nip.io`-style names are refused). Before 3.4.0 it
+  checked only the scheme. Known gaps, on the roadmap: the IPv4 classifier has
+  no CGNAT (100.64.0.0/10), broadcast or 240.0.0.0/4 rule, and `web_search`
+  is deliberately unguarded (its endpoint is the operator's
+  `BOTE_SEARXNG_URL`).
 - **Logging** — operational logs go through sakshi to stderr (or
   `BOTE_LOG_FILE`), never to stdout, which carries the stdio transport's
   JSON-RPC stream. No bearer token, JWT, request body, tool argument or full

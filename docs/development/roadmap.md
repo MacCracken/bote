@@ -22,18 +22,17 @@ Operational logging goes through sakshi (`src/log.cyr`, `BOTE_LOG`) — distinct
 `logging` capability, which still waits on 3.5.x. Two consumer bundles (`dist/bote.cyr`, `dist/bote-core.cyr`), one binary with every transport selected by argv,
 x86_64 + aarch64 + agnos targets, all CI-gated.
 
-What is **not** there, and where each item sits below: DNS-aware SSRF, whose upstream seam
-already exists (→ 3.4.4); real-time *held-open* streaming (→ 3.5.x),
+What is **not** there, and where each item sits below: real-time *held-open* streaming (→ 3.5.x),
 which is what `resources/subscribe`, `logging` and `$/cancelRequest` wait on; and WebSocket
 subprotocol / compression negotiation (→ 3.6.x, needs an upstream seam).
 
 ---
 
-## Next patch — 3.4.4
+## Next patch — 3.4.5
 
 | Item | Notes | Effort |
 |---|---|---|
-| **DNS-aware SSRF for `web_fetch`.** | The guard (applied since 3.4.0) classifies IP literals and a hostname blocklist only, so `127.0.0.1.nip.io` or any name resolving to a private address gets through. The upstream seam is **already shipped**: bote filed it at 3.3.7 (sandhi `docs/development/issues/archive/2026-08-23-bote-ssrf-needs-preresolved-client-connect.md`) and sandhi 1.9.14 added `sandhi_client_set_resolver(lookup_fn, ctx)` — the client asks the hook for the address it will connect to, including on redirect hops, so classifying there leaves no rebinding window. bote-side: install a hook that resolves (sandhi's own resolver), classifies the address with the existing IPv4 / IPv6 classifiers, and refuses. | Medium |
+| **Port the conformance suite.** | The Rust archive (tag `0.92.0`) carried 44 protocol-level scenarios; none was ported. 3.3.13 is the argument: `ping` had answered `-32601` since the port with 887 assertions passing, because the suite tests the methods bote implements rather than the ones the spec requires. Do it before the 3.5.x work adds surface. Lands as `tests/conformance.tcyr`, driven through `codec_process_message` so it needs no live transport. | Medium |
 
 ## 3.4.x — the rest of the minor, one bite per patch
 
@@ -42,7 +41,7 @@ intended order, not a promise.
 
 | Patch | Item | Notes | Effort |
 |---|---|---|---|
-| 3.4.5 | **Port the conformance suite.** | The Rust archive (tag `0.92.0`) carried 44 protocol-level scenarios; none was ported. 3.3.13 is the argument: `ping` had answered `-32601` since the port with 887 assertions passing, because the suite tests the methods bote implements rather than the ones the spec requires. Do it before the 3.5.x work adds surface. Lands as `tests/conformance.tcyr`, driven through `codec_process_message` so it needs no live transport. | Medium |
+| 3.4.6 | **SSRF classifier gaps.** | Found while wiring the 3.4.4 resolved-address guard. IPv4 (`_ssrf_classify_v4_ab`): no rule for CGNAT 100.64.0.0/10 (Tailscale and carrier-internal ranges — the 3.3.7 sandhi filing described it as covered, it is not), 255.255.255.255 broadcast, 240.0.0.0/4 reserved, 192.0.0.0/24, 198.18.0.0/15 benchmarking. IPv6 string matcher (`_ssrf_classify_ipv6`): textual, so `0:0:0:0:0:0:0:1`, `0::1` and `fe9f::1` are not recognised — the byte classifier (`ssrf_classify_ipv6_bytes`) already decides correctly, so the fix is to parse the literal to bytes and reuse it. Both are judgement calls about what "internal" means; add each with a test naming the range. | Small |
 
 ## 3.5.x — Threaded dispatch (real-time push)
 
@@ -172,7 +171,9 @@ No open blockers. Two open filings, neither blocking:
 - **cyrius** — `docs/development/issues/2026-10-15-bote-distlib-kept-fold-over-thin-profile-records-named-deps-need.md`.
   `distlib` records libro's sigil needs (`sigil`, `ct`) on `dist/bote-core.deps` because the
   resolver keeps the sigil fold over libro's thin profile and never credits the fold to libro.
-  Measured cost and consumer numbers are in the 3.3.17 CHANGELOG entry.
+  Measured cost and consumer numbers are in the 3.3.17 CHANGELOG entry. cyrius placed it in
+  its 6.7.13 tools lane (2026-10-15): at the pin move that reaches 6.7.13, check the watch-list
+  item on `dist/bote-core.deps`.
 - **sandhi** — `docs/development/issues/2026-10-15-bote-server-run-failures-return-bare-1.md`.
   The five serve entry points return a bare `1` for every failure (the bind's `EADDRINUSE` is
   in a local and discarded), so bote's `transport failed` line can only name socket, bind,

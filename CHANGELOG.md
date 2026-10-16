@@ -18,6 +18,92 @@ have per release.
 
 _(empty)_
 
+## [3.4.4] — 2026-10-15 · DNS-aware SSRF: web_fetch classifies the address a name resolves to
+
+The roadmap's 3.4.4 item: DNS-aware SSRF for `web_fetch`. The guard 3.4.0 applied judged the URL's
+host *string*, so a hostname that resolved inside the box sailed through it. Since cyrius 6.5.37
+sandhi has carried the seam bote filed at 3.3.7; this release uses it.
+
+### Security — a hostname resolving to an internal address is refused
+
+- **Reproduced first, through real DNS.** A local HTTP server on `127.0.0.1:18555` served a file,
+  and `web_fetch` was called over stdio:
+
+  | URL | 3.4.3 | 3.4.4 |
+  |---|---|---|
+  | `http://127.0.0.1:18555/secret.txt` | refused (SSRF guard: loopback) | refused (SSRF guard: loopback) |
+  | `http://127.0.0.1.nip.io:18555/secret.txt` | **returned the file's contents** | refused (SSRF guard: loopback, resolved address) |
+
+  `127.0.0.1.nip.io` is a public name whose A record is `127.0.0.1`. Any attacker-controlled zone
+  does the same, and it reaches the cloud metadata address just as easily.
+- **The address is classified where sandhi connects.** `web_fetch` installs a resolve hook
+  (`sandhi_client_set_resolver`, sandhi 1.9.14) for the duration of its request.
+  - sandhi asks that hook for the address it will connect to, so the address that gets classified
+    is the one that gets dialled. There is no second lookup to rebind between.
+  - IPv4 answers are judged by `ssrf_classify_ipv4_addr`, IPv6 answers by
+    `ssrf_classify_ipv6_bytes`.
+  - Once a name is refused on IPv4 it is refused on IPv6 too, so one bad answer cannot fall through
+    to the AAAA record.
+  - The hook also fires for IP literals, and would fire on every redirect hop. `web_fetch` does not
+    follow redirects (sandhi's default), so there is no redirect bypass today either.
+  - A refusal is an `isError` result naming the reason, plus a WARN line with the host and the
+    address it resolved to.
+
+  The URL pre-check (`ssrf_check`) still runs first and fails a literal or a blocklisted name
+  before any DNS query.
+- **Scoped to `web_fetch`, and composes with an embedder's hook.**
+  - The hook is installed around the request, and whatever was installed before is restored after
+    (or cleared, if nothing was).
+  - `web_search` keeps stock resolution. Its endpoint is the operator's `BOTE_SEARXNG_URL`, often on
+    localhost, and a live check against a SearXNG stand-in on `127.0.0.1` still answered.
+  - If an embedder had installed its own hook, the guard resolves through it and classifies what it
+    returns.
+  - The guard never chains to itself. A mutant that skipped the restore made the next fetch chain
+    to its own hook and die with SIGSEGV, so one line now prevents that.
+  - The embedder's hook is read from sandhi's private `_sandhi_client_resolver_fn` / `_ctx`; sandhi
+    exposes only an installed 0/1. A rename there fails bote's build, not the guard.
+  - The hook is process-wide while installed. That is right for today's single-threaded dispatch;
+    the 3.5.x worker threads will need it per thread, which the code says.
+- **One IPv4 decision for literals and answers.** The two-octet decision is extracted from
+  `_ssrf_classify_ipv4` into `_ssrf_classify_v4_ab`, which the literal and resolved paths share. A
+  test checks that `ssrf_check("http://a.b.c.d/")` and `ssrf_classify_ipv4_addr` agree.
+- **IPv6 is classified on bytes.** `ssrf_classify_ipv6_bytes` covers the string classifier's
+  categories (`::`, `::1`, IPv4-mapped and -compatible, NAT64, fe80::/10, fc00::/7, ff00::/8)
+  decided on the 16 address bytes. It therefore covers the whole fe80::/10, including `febf::1`,
+  which the text matcher misses. An IPv6 *literal* never resolves through the hook: sandhi's stock
+  resolver cannot dial one either, and the URL pre-check has already classified it.
+- New public helpers in `src/host.cyr`: `ssrf_classify_ipv4_addr`, `ssrf_classify_ipv6_bytes`,
+  `ssrf_ipv4_addr_str`, `ssrf_ipv6_bytes_str`.
+- Tests (+49 assertions):
+  - `tests/bote_host.tcyr` +30: the packed IPv4 classifier, literal-versus-resolved parity, the
+    byte IPv6 classifier, and both formatters.
+  - `tests/bote_web_tools.tcyr` +19, through a fake embedder resolver, so nothing leaves the box:
+    - a name resolving to 127.0.0.1, one resolving to 169.254.169.254, and one whose only answer is
+      fd00::1 are each refused, with the host and address in the WARN line;
+    - public IPv4 and IPv6 answers pass, IPv6 is refused after an IPv4 refusal, and a name with no
+      answer is not a refusal;
+    - the embedder's hook is restored, no hook is left behind when none was installed, and a stale
+      guard hook is not chained to.
+  - Mutations, each run under `--timeout 60`:
+    - with IPv4 classification removed, the refusal assertions fail, and the run then hangs trying
+      to connect to 169.254.169.254;
+    - with the restore removed, the restore assertion fails;
+    - with IPv6 asked after an IPv4 refusal, that assertion fails.
+  - Both units pass under `qemu-aarch64`.
+
+### Changed
+
+- The roadmap's next patch is 3.4.5, the conformance suite. The classifier gaps found along the way
+  are recorded as their own small item. The IPv4 side has no CGNAT (100.64.0.0/10), broadcast or
+  240.0.0.0/4 rule, although the 3.3.7 sandhi filing described CGNAT as covered. The IPv6 string
+  matcher misses spellings such as `0:0:0:0:0:0:0:1`.
+- SECURITY.md's outbound-request paragraph says what the guard now covers and what it still does
+  not. CLAUDE.md, README and `docs/architecture/overview.md` carry the new counts.
+- Binaries: `bote` 2,825,968 → 2,830,176 B; aarch64 3,325,488 B; agnos 2,794,512 B with 0 undefined.
+- Benchmarks: `tests/bote.bcyr` links neither `host.cyr` nor `web_tools.cyr`, and none of its
+  modules changed. The logged 3.4.4 row matches 3.4.3 (`dispatch_tools_call` 1.786 µs against
+  1.802 µs, load 1.75).
+
 ## [3.4.3] — 2026-10-15 · a client that stops reading no longer wedges the server: send deadlines on every transport
 
 The roadmap's 3.4.3 pair: the Unix transport's accept-loop deadline and send-side timeouts.
