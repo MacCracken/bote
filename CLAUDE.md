@@ -97,7 +97,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `bridge.cyr` | HTTP↔stdio TypeScript bridge with CORS |
 | `transport_streamable.cyr` | Streamable HTTP / SSE transport |
 | `transport_ws.cyr` | WebSocket transport (manually includes `lib/ws_server.cyr`) |
-| `host.cyr` | HostRegistry + IPv4/IPv6 SSRF guard + JSON config hot-reload |
+| `host.cyr` | HostRegistry + IPv4/IPv6 SSRF guard + JSON config hot-reload; (3.4.7) IPv6 literals parsed to bytes (`_ssrf_parse_ipv6`) and judged by the same classifier as resolved AAAA answers |
 | `libro_tools.cyr` | libro audit-tool dispatch (5 tools; in default binary + bundle since 2.7.5, not in core) |
 | `fs_tools.cyr` | Filesystem MCP tools (`fs_write` / `fs_read` / `fs_mkdir`) — root-confined (`BOTE_FS_ROOT`); since 2.8.0 |
 | `web_tools.cyr` | Web MCP tools (`web_fetch` / `web_search` via SearXNG, sandhi client); since 3.1.0; (3.4.4) `web_fetch` classifies the resolved address inside sandhi's client resolve hook, installed only around its request |
@@ -180,7 +180,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `tests/bote_auth.tcyr` | 45 | Bearer + allowlist + JWT HS256 + PKCE validators; (3.4.0) a 401 logs WARN with its reason and never the token |
 | `tests/bote_content.tcyr` | 25 | Typed MCP content blocks + annotations + (3.4.5) `content_text_error_response` |
 | `tests/bote_fs_tools.tcyr` | 34 | Filesystem tools — path safety (`..` / absolute refusal), JSON unescape, root confinement, (3.4.6) `fs_read` of `tests/fixtures/control-bytes.txt` comes back as valid JSON |
-| `tests/bote_host.tcyr` | 152 | HostRegistry + IPv4/IPv6 SSRF + JSON config hot-reload + (3.4.4) the resolved-address classifiers (packed IPv4, IPv6 bytes, literal-vs-resolved parity) + (3.4.0) `ssrf_reason` / `ssrf_host` |
+| `tests/bote_host.tcyr` | 197 | HostRegistry + IPv4/IPv6 SSRF + JSON config hot-reload + (3.4.4) the resolved-address classifiers (packed IPv4, IPv6 bytes, literal-vs-resolved parity) + (3.4.0) `ssrf_reason` / `ssrf_host` + (3.4.7) a test naming each new range (and the two left open on purpose), IPv6 spellings / zone ids / malformed literals, and `_ssrf_parse_ipv6` checked against cyrius's `_tn_parse_ipv6` on 37 inputs. Mutation-proven |
 | `tests/bote_jwt.tcyr` | 53 | JWT HS256 verify — b64u decode, signature, exact `alg` field read (incl. the algorithm-confusion header), `exp` enforcement + malformed-claim rejection. Both gates mutation-proven |
 | `tests/bote_libro_tools.tcyr` | 38 | libro audit-tool dispatch surface + (3.3.4) the `struct error` decode path on a TAMPERED chain and `libro_proof` on a POPULATED one — both were unreachable from any assertion before, which is why the 2.8.11 layout shift shipped a SIGSEGV. Mutation-proven |
 | `tests/bote_log.tcyr` | 50 | `src/log.cyr` (3.4.0) — level names, `bote_log_enabled`, exact line bytes, logfmt escaping (incl. the forged-line case), value / line truncation, dead lines that emit nothing; captured through sakshi's emit hook. Mutation-proven |
@@ -191,9 +191,9 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 | `tests/bote_web_tools.tcyr` | 56 | Web tools — (3.4.4) the resolved-address guard through a fake embedder resolver (rebind to 127.0.0.1 / metadata / ULA refused, hook restored, no self-chaining; mutation-proven), (3.4.0) the SSRF guard on `web_fetch` (loopback v4/v6, metadata, private; refused before any socket; userinfo never logged), scheme guard, HTML→text stripper (incl. control-byte/NUL drop), url-encode, entity decode |
 | `tests/bote_ws.tcyr` | 21 | WebSocket — WsConfig + handler wire-up + (3.4.3) the real `_bote_ws_handler` dropping a peer that floods frames and never reads (mutation-proven) |
 | `tests/bote_core_only_smoke.tcyr` | drift guard | Includes only `dist/bote-core.cyr` — catches core/transport entanglement |
-| **Total** | **1240** | + 1 drift smoke, + CI's "Logging smoke" step (the built binary at nine `BOTE_LOG` values: stdout must stay one JSON-RPC line). Green on **x86_64** and, since 3.3.11, **all of it under `qemu-aarch64` 11.1.1** (`cyrius test --aarch64 <file>`; the cross-build is gated in CI, the emulated sweep is local). Through 3.3.10 that sweep was PARTIAL — qemu 11.1.0 did not pass `getrandom` through, so `bote.tcyr`, `bote_pkce.tcyr` and `bote_streamable.tcyr` exited 90 on the fail-closed session-ID contract (373 of 883 executing). If it regresses to that shape, suspect the emulator or the toolchain's aarch64 `ESYSXLAT` rows before bote |
+| **Total** | **1285** | + 1 drift smoke, + CI's "Logging smoke" step (the built binary at nine `BOTE_LOG` values: stdout must stay one JSON-RPC line). Green on **x86_64** and, since 3.3.11, **all of it under `qemu-aarch64` 11.1.1** (`cyrius test --aarch64 <file>`; the cross-build is gated in CI, the emulated sweep is local). Through 3.3.10 that sweep was PARTIAL — qemu 11.1.0 did not pass `getrandom` through, so `bote.tcyr`, `bote_pkce.tcyr` and `bote_streamable.tcyr` exited 90 on the fail-closed session-ID contract (373 of 883 executing). If it regresses to that shape, suspect the emulator or the toolchain's aarch64 `ESYSXLAT` rows before bote |
 
-Criterion benchmarks: **15** in `tests/bote.bcyr` (dispatch × 3, jsonx × 3 — incl. `jsonx_valid_request`, the 3.4.5 syntax pass — codec × 3, schema × 4, auth_bearer × 2). Fuzz harnesses: **5** in `fuzz/` (CI step "Fuzz").
+Criterion benchmarks: **15** in `tests/bote.bcyr` (dispatch × 3, jsonx × 3 — incl. `jsonx_valid_request`, the 3.4.5 syntax pass — codec × 3, schema × 4, auth_bearer × 2). Fuzz harnesses: **6** in `fuzz/` (CI step "Fuzz").
 
 ```bash
 cyrius deps                            # Resolve [deps.*] → lib/ (gitignored)

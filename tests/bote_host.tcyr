@@ -20,6 +20,9 @@ include "lib/assert.cyr"
 include "src/log.cyr"
 include "src/jsonx.cyr"
 include "src/host.cyr"
+# 3.4.7: the cyrius TLS stack's IPv6 literal parser, used here only as an
+# oracle for host.cyr's own. It has no includes of its own.
+include "lib/tls_hostid.cyr"
 
 # ---- sakshi capture (3.4.0 logging assertions) -----------------------------
 var _lc_buf = 0;
@@ -74,6 +77,20 @@ fn _v6(g0, g1, g2, g3, g4, g5, g6, g7) {
 }
 # Packed IPv4 (first octet lowest), as sandhi carries it.
 fn _v4(a, b, c, d) { return a | (b << 8) | (c << 16) | (d << 24); }
+
+# 1 when host.cyr's IPv6 parser and the cyrius TLS stack's agree on `h`: both
+# refuse it, or both accept it with the same 16 bytes (3.4.7).
+fn _v6_agree(h) {
+    var a = alloc(16);
+    var b = alloc(16);
+    var n = strlen(h);
+    var ra = _ssrf_parse_ipv6(h, n, a);
+    var rb = 0;
+    if (_tn_parse_ipv6(h, n, b) == 16) { rb = 1; }
+    if (ra != rb) { return 0; }
+    if (ra == 1 && memeq(a, b, 16) == 0) { return 0; }
+    return 1;
+}
 
 fn main() {
     alloc_init();
@@ -342,7 +359,7 @@ fn main() {
     assert_eq(ssrf_classify_ipv4_addr(_v4(8, 8, 8, 8)), SSRF_OK, "packed 8.8.8.8 → ok");
     assert_eq(ssrf_classify_ipv4_addr(_v4(93, 184, 216, 34)), SSRF_OK, "packed 93.184.216.34 → ok");
     # Parity: a literal URL and the same address resolved are judged alike,
-    # because both go through _ssrf_classify_v4_ab.
+    # because both go through _ssrf_classify_v4.
     assert_eq(ssrf_check("http://10.9.8.7/"), ssrf_classify_ipv4_addr(_v4(10, 9, 8, 7)), "parity: 10.9.8.7");
     assert_eq(ssrf_check("http://172.31.255.255/"), ssrf_classify_ipv4_addr(_v4(172, 31, 255, 255)), "parity: 172.31.255.255");
     assert_eq(ssrf_check("http://127.8.8.8/"), ssrf_classify_ipv4_addr(_v4(127, 8, 8, 8)), "parity: 127.8.8.8");
@@ -360,6 +377,86 @@ fn main() {
     assert_eq(ssrf_classify_ipv6_bytes(_v6(0xFF02, 0, 0, 0, 0, 0, 0, 1)), SSRF_MULTICAST, "bytes ff02::1 → multicast");
     assert_eq(ssrf_classify_ipv6_bytes(_v6(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888)), SSRF_OK, "bytes 2001:4860:4860::8888 → ok");
     assert_eq(ssrf_classify_ipv6_bytes(0), SSRF_PARSE, "bytes null → parse");
+
+    # ================================================================
+    # 3.4.7 — classifier gaps: each range a test of its own
+    # ================================================================
+    # IPv4, through the URL classifier and the resolved-address one.
+    assert_eq(ssrf_check("http://100.64.0.1/"), SSRF_SHARED, "100.64.0.0/10 (RFC 6598 shared / CGNAT): first address refused");
+    assert_eq(ssrf_check("http://100.100.100.100/"), SSRF_SHARED, "100.64.0.0/10: a Tailscale-style tailnet address refused");
+    assert_eq(ssrf_check("http://100.127.255.255/"), SSRF_SHARED, "100.64.0.0/10: last address refused");
+    assert_eq(ssrf_check("http://100.63.255.255/"), SSRF_OK, "100.63.255.255, just below the /10, passes");
+    assert_eq(ssrf_check("http://100.128.0.1/"), SSRF_OK, "100.128.0.1, just above the /10, passes");
+    assert_eq(ssrf_check("http://192.0.0.1/"), SSRF_RESERVED, "192.0.0.0/24 (IETF protocol assignments) refused");
+    assert_eq(ssrf_check("http://192.0.0.170/"), SSRF_RESERVED, "192.0.0.0/24: the NAT64-discovery address refused");
+    assert_eq(ssrf_check("http://192.0.1.1/"), SSRF_OK, "192.0.1.1, outside the /24, passes");
+    assert_eq(ssrf_check("http://240.0.0.1/"), SSRF_RESERVED, "240.0.0.0/4 (reserved) refused");
+    assert_eq(ssrf_check("http://255.255.255.255/"), SSRF_RESERVED, "255.255.255.255 (limited broadcast, inside 240/4) refused");
+    assert_eq(ssrf_check("http://239.255.255.255/"), SSRF_MULTICAST, "239.255.255.255 is still multicast, not reserved");
+    assert_eq(ssrf_check("http://198.18.0.1/"), SSRF_OK, "198.18.0.0/15 (benchmarking) passes on purpose: fake-IP DNS proxies answer inside it");
+    assert_eq(ssrf_check("http://192.0.2.1/"), SSRF_OK, "192.0.2.0/24 (documentation) passes on purpose: nothing routes it");
+    assert_eq(ssrf_classify_ipv4_addr(_v4(100, 64, 1, 2)), SSRF_SHARED, "packed 100.64.1.2 → shared");
+    assert_eq(ssrf_classify_ipv4_addr(_v4(192, 0, 0, 8)), SSRF_RESERVED, "packed 192.0.0.8 → reserved (the third octet reaches the decision)");
+    assert_eq(ssrf_classify_ipv4_addr(_v4(192, 0, 1, 1)), SSRF_OK, "packed 192.0.1.1 → ok (outside the /24, so the third octet really is read)");
+    assert_eq(ssrf_classify_ipv4_addr(_v4(255, 255, 255, 255)), SSRF_RESERVED, "packed 255.255.255.255 → reserved");
+    assert_eq(ssrf_check("http://100.70.0.9/"), ssrf_classify_ipv4_addr(_v4(100, 70, 0, 9)), "parity: 100.70.0.9");
+    assert_eq(ssrf_check("http://192.0.0.9/"), ssrf_classify_ipv4_addr(_v4(192, 0, 0, 9)), "parity: 192.0.0.9");
+    assert_streq(ssrf_reason(SSRF_SHARED), "shared", "ssrf_reason(SHARED)");
+    assert_streq(ssrf_reason(SSRF_RESERVED), "reserved", "ssrf_reason(RESERVED)");
+
+    # IPv6 literals are parsed to bytes, so every spelling of an address is
+    # judged as the address. Through 3.4.6 these went through a text matcher.
+    assert_eq(ssrf_check("http://[0:0:0:0:0:0:0:1]/"), SSRF_LOOPBACK, "::1 spelled out in full is loopback");
+    assert_eq(ssrf_check("http://[0::1]/"), SSRF_LOOPBACK, "::1 spelled 0::1 is loopback");
+    assert_eq(ssrf_check("http://[0000:0000::0001]/"), SSRF_LOOPBACK, "::1 with zero-padded groups is loopback");
+    assert_eq(ssrf_check("http://[fe9f::1]/"), SSRF_LINK_LOCAL, "fe80::/10 reaches fe9f:: (the text matcher saw only fe80:)");
+    assert_eq(ssrf_check("http://[FEBF:0::1]/"), SSRF_LINK_LOCAL, "fe80::/10's last /16, upper-case, is link-local");
+    assert_eq(ssrf_check("http://[fe80::1%25eth0]/"), SSRF_LINK_LOCAL, "a zone id is set aside and the address classified");
+    assert_eq(ssrf_check("http://[fe80::1%]/"), SSRF_PARSE, "an empty zone id is refused");
+    assert_eq(ssrf_check("http://[fec0::1]/"), SSRF_PRIVATE, "fec0::/10 (deprecated site-local) refused");
+    assert_eq(ssrf_check("http://[2002:7f00:1::]/"), SSRF_LOOPBACK, "2002::/16 (6to4) carrying 127.0.0.1 is loopback");
+    assert_eq(ssrf_check("http://[2002:a9fe:a9fe::1]/"), SSRF_METADATA, "6to4 carrying 169.254.169.254 is metadata");
+    assert_eq(ssrf_check("http://[2002:808:808::1]/"), SSRF_OK, "6to4 carrying 8.8.8.8 passes");
+    assert_eq(ssrf_check("http://[64:ff9b:1::a00:1]/"), SSRF_PRIVATE, "64:ff9b:1::/48 (local-use NAT64) refused");
+    assert_eq(ssrf_check("http://[::ffff:8.8.8.8]/"), SSRF_PRIVATE, "IPv4-mapped stays refused outright, public tail or not");
+    assert_eq(ssrf_check("http://[2001:4860:4860::8888]/"), SSRF_OK, "a public IPv6 literal passes");
+    assert_eq(ssrf_check("http://[2001:db8:1:2:3:4:5:6]/"), SSRF_OK, "eight full groups parse and pass");
+    # Anything that does not parse is refused. Through 3.4.6 it was SSRF_OK.
+    assert_eq(ssrf_check("http://[zzz]/"), SSRF_PARSE, "a non-hex literal is refused (it used to pass)");
+    assert_eq(ssrf_check("http://[1:2:3:4:5:6:7:8:9]/"), SSRF_PARSE, "nine groups are refused");
+    assert_eq(ssrf_check("http://[1::2::3]/"), SSRF_PARSE, "two :: are refused");
+    assert_eq(ssrf_check("http://[12345::1]/"), SSRF_PARSE, "a five-digit group is refused");
+    assert_eq(ssrf_check("http://[::1.2.3]/"), SSRF_PARSE, "a three-octet dotted tail is refused");
+    assert_eq(ssrf_check("http://[::01.2.3.4]/"), SSRF_PARSE, "a non-canonical dotted tail is refused, as an IPv4 literal is");
+    assert_eq(ssrf_check("http://[1.2.3.4::]/"), SSRF_PARSE, "a dotted quad before :: is refused");
+    assert_eq(ssrf_check("http://[]/"), SSRF_PARSE, "empty brackets are refused");
+
+    # The parser against the cyrius TLS stack's (lib/tls_hostid.cyr,
+    # _tn_parse_ipv6): the same verdict, and the same bytes when both accept.
+    var v6c = vec_new();
+    vec_push(v6c, "::"); vec_push(v6c, "::1"); vec_push(v6c, "1::"); vec_push(v6c, "1::2");
+    vec_push(v6c, "0:0:0:0:0:0:0:1"); vec_push(v6c, "1:2:3:4:5:6:7:8"); vec_push(v6c, "1:2:3:4:5:6:7::");
+    vec_push(v6c, "::2:3:4:5:6:7:8"); vec_push(v6c, "1:2:3:4:5:6:7:8:9"); vec_push(v6c, "1:2:3:4:5:6:7");
+    vec_push(v6c, "fe80::1"); vec_push(v6c, "FE80::ABCD:ef01"); vec_push(v6c, "2001:db8::1:0:0:1");
+    vec_push(v6c, "::ffff:1.2.3.4"); vec_push(v6c, "::ffff:7f00:1"); vec_push(v6c, "64:ff9b::10.0.0.1");
+    vec_push(v6c, "1:2:3:4:5:6:1.2.3.4"); vec_push(v6c, "1:2:3:4:5:6:7:1.2.3.4"); vec_push(v6c, "::1.2.3");
+    vec_push(v6c, "::01.2.3.4"); vec_push(v6c, "::256.1.1.1"); vec_push(v6c, "1.2.3.4"); vec_push(v6c, "1.2.3.4::");
+    vec_push(v6c, ":::"); vec_push(v6c, "::::"); vec_push(v6c, "1:::2"); vec_push(v6c, "1::2::3");
+    vec_push(v6c, ":1:2:3:4:5:6:7"); vec_push(v6c, "1:2:3:4:5:6:7:"); vec_push(v6c, "12345::"); vec_push(v6c, "g::1");
+    vec_push(v6c, ""); vec_push(v6c, ":"); vec_push(v6c, "::ffff:1.2.3.4:5"); vec_push(v6c, "1::2:3:4:5:6:7");
+    vec_push(v6c, "1::2:3:4:5:6:7:8"); vec_push(v6c, "0000:0000:0000:0000:0000:0000:0000:0000");
+    var v6i = 0;
+    var v6bad = 0;
+    while (v6i < vec_len(v6c)) {
+        if (_v6_agree(vec_get(v6c, v6i)) == 0) {
+            v6bad = v6bad + 1;
+            eprint("  parser disagreement: ", 23);
+            eprint(vec_get(v6c, v6i), strlen(vec_get(v6c, v6i)));
+            eprint("\n", 1);
+        }
+        v6i = v6i + 1;
+    }
+    assert_eq(v6bad, 0, "host.cyr's IPv6 parser agrees with cyrius's on all 37 inputs");
 
     assert_streq(ssrf_ipv4_addr_str(0x0100007F), "127.0.0.1", "ssrf_ipv4_addr_str(0x0100007F)");
     assert_streq(ssrf_ipv4_addr_str(_v4(169, 254, 169, 254)), "169.254.169.254", "ssrf_ipv4_addr_str(metadata)");

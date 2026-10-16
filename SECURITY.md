@@ -37,9 +37,13 @@ The primary security-relevant surface areas are:
   address a name actually resolves to, classified inside sandhi's client
   resolve hook, so the address judged is the address dialled (no DNS-rebinding
   window, and `127.0.0.1.nip.io`-style names are refused). Before 3.4.0 it
-  checked only the scheme. Known gaps, on the roadmap: the IPv4 classifier has
-  no CGNAT (100.64.0.0/10), broadcast or 240.0.0.0/4 rule, and `web_search`
-  is deliberately unguarded (its endpoint is the operator's
+  checked only the scheme. Since **3.4.7** the IPv4 classifier also refuses
+  CGNAT / tailnet space (100.64.0.0/10), 192.0.0.0/24 and 240.0.0.0/4
+  (which holds the broadcast address). IPv6 literals are parsed to their 16
+  bytes and judged there, so any spelling of an internal address is refused,
+  and a literal that does not parse is refused too. 198.18.0.0/15 is
+  deliberately allowed: fake-IP DNS proxies answer every name inside it.
+  `web_search` is deliberately unguarded (its endpoint is the operator's
   `BOTE_SEARXNG_URL`).
 - **Logging** — operational logs go through sakshi to stderr (or
   `BOTE_LOG_FILE`), never to stdout, which carries the stdio transport's

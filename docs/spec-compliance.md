@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.4.6 (cyrius 6.7.9) | **Last Audited**: 2026-10-15 (at 3.4.5, with `tests/conformance.tcyr`)
+> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.4.7 (cyrius 6.7.9) | **Last Audited**: 2026-10-15 (at 3.4.5, with `tests/conformance.tcyr`)
 
 This file lists what the shipped Cyrius implementation **covers today**, including the
 gaps — a ❌ row is a defect on the released binary, a ⏳ row is planned work. Both are
@@ -215,12 +215,12 @@ registered by default in the binaries.
 |---|---|---|
 | `HostRegistry` — name → `{url, headers, capabilities}` map | `host::HostRegistry` | ✅ (1.8.0) |
 | Capability allowlist (`host_entry_allows`); fail-open when unset | same | ✅ |
-| `ssrf_check(url)` — IPv4 (loopback / private / link-local / metadata / unspec / multicast) | `host::_ssrf_classify_ipv4` | ✅ (1.8.0) |
-| IPv6 blocklist (bracket form, `::1`, `::`, `fe80::/10`, `fc00::/7`, `ff00::/8`) | `host::_ssrf_classify_ipv6` | ✅ (1.9.1) |
+| `ssrf_check(url)` — IPv4 (loopback / private / link-local / metadata / unspec / multicast; since 3.4.7 also 100.64.0.0/10 shared, 192.0.0.0/24 and 240.0.0.0/4 reserved) | `host::_ssrf_classify_v4` | ✅ (1.8.0; 3.4.7) — 198.18.0.0/15 and the documentation ranges are allowed on purpose (fake-IP DNS proxies answer inside 198.18/15; nothing routes the documentation ranges) |
+| IPv6 literals parsed to bytes (RFC 4291 §2.2, zone id set aside) and classified on them: `::`, `::1`, IPv4-mapped / -compatible, NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`), 6to4 carrying an internal IPv4, `fe80::/10`, `fec0::/10`, `fc00::/7`, `ff00::/8` | `host::_ssrf_parse_ipv6` + `ssrf_classify_ipv6_bytes` | ✅ (1.9.1; bytes since 3.4.7) — a literal that does not parse is refused. Through 3.4.6 a text matcher missed spellings such as `0:0:0:0:0:0:0:1` and `fe9f::1` and passed anything it did not recognise. The parser is checked against cyrius's own (`lib/tls_hostid.cyr`) in `tests/bote_host.tcyr` and `fuzz/ssrf_ipv6.fcyr` |
 | Hostname blocklist (`localhost`, `metadata.google.internal`, `metadata`) — case-insensitive | `host::_ssrf_classify_hostname` | ✅ |
 | `user:pass@` userinfo stripping before classification | `host::_ssrf_extract_host` | ✅ |
 | Scheme gate — only `http://` / `https://` | same | ✅ |
-| DNS resolution (catch `127.0.0.1.nip.io` style bypasses) — the address a name resolves to is classified where sandhi connects | `web_tools::_web_ssrf_resolve` via `sandhi_client_set_resolver` | ✅ (3.4.4) — `web_fetch` only; `web_search` keeps stock resolution for the operator's own `BOTE_SEARXNG_URL`. Classifier gaps (CGNAT, broadcast, 240/4; non-canonical IPv6 spellings) → roadmap 3.4.7 |
+| DNS resolution (catch `127.0.0.1.nip.io` style bypasses) — the address a name resolves to is classified where sandhi connects | `web_tools::_web_ssrf_resolve` via `sandhi_client_set_resolver` | ✅ (3.4.4) — `web_fetch` only; `web_search` keeps stock resolution for the operator's own `BOTE_SEARXNG_URL`. The hook uses the same classifiers as the URL check, so 3.4.7's ranges apply to resolved addresses too |
 
 ---
 
@@ -233,7 +233,7 @@ registered by default in the binaries.
 | Bearer + allowlist + JWT + PKCE validators | **45** | `tests/bote_auth.tcyr` |
 | Content blocks + annotations | **25** | `tests/bote_content.tcyr` |
 | `fs_tools` path safety + root confinement + control bytes as valid JSON | **34** | `tests/bote_fs_tools.tcyr` |
-| HostRegistry + IPv4 / IPv6 SSRF (URL and resolved address) + hot-reload | **152** | `tests/bote_host.tcyr` |
+| HostRegistry + IPv4 / IPv6 SSRF (URL and resolved address; each 3.4.7 range named) + the IPv6 parser against cyrius's + hot-reload | **197** | `tests/bote_host.tcyr` |
 | JWT HS256 — signature, exact `alg`, `exp` (mutation-proven) | **53** | `tests/bote_jwt.tcyr` |
 | `libro_tools` incl. tampered-chain decode + populated-chain proof | **38** | `tests/bote_libro_tools.tcyr` |
 | Operational logging over sakshi | **50** | `tests/bote_log.tcyr` |
@@ -243,9 +243,9 @@ registered by default in the binaries.
 | Unix transport — sockaddr, accept-error policy, backoff, deadlines, closed-peer write | **68** | `tests/bote_transport_unix.tcyr` |
 | `web_tools` — scheme guard, SSRF guard (URL and resolved address), HTML stripper, entities | **56** | `tests/bote_web_tools.tcyr` |
 | WebSocket config + wire-up + the send-deadline drop | **21** | `tests/bote_ws.tcyr` |
-| **Total assertions** | **1240** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
+| **Total assertions** | **1285** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
 | Hot-path benchmarks | **15** | `tests/bote.bcyr` |
-| Fuzz harnesses | **5** | `fuzz/*.fcyr` (in CI since 3.3.8; `jsonx_valid.fcyr` since 3.4.5) |
+| Fuzz harnesses | **6** | `fuzz/*.fcyr` (in CI since 3.3.8; `jsonx_valid.fcyr` since 3.4.5, `ssrf_ipv6.fcyr` since 3.4.7) |
 | End-to-end transport round trips | 6 (stdio, HTTP, Unix, bridge, streamable, WS) | CI's "Transport smoke" step plus a per-release stdio probe on the built binary |
 
 The Rust archive's conformance suite (`tests/conformance.rs`, tag `0.92.0`, 44 scenarios) is

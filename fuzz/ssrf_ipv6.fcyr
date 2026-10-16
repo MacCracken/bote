@@ -1,0 +1,110 @@
+# Fuzz: host.cyr's IPv6 literal parser (3.4.7) against the cyrius TLS
+# stack's own (lib/tls_hostid.cyr, _tn_parse_ipv6), plus ssrf_check on
+# mutated URLs.
+#
+# Since 3.4.7 ssrf_check parses a URL's IPv6 literal to bytes and judges
+# those, so a parser bug is a guard bug: an internal address that parses as
+# a public one gets fetched. Two properties, each with its own exit code:
+#
+#   10+  differential — for every seed, and every single-byte substitution
+#        at every offset of it, both parsers refuse, or both accept with the
+#        same 16 bytes;
+#   30   ssrf_check returns an SSRF_* code (0..10) for every bracketed URL
+#        built from those strings, and never crashes.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/fnptr.cyr"
+
+include "src/log.cyr"
+include "src/jsonx.cyr"
+include "src/host.cyr"
+include "lib/tls_hostid.cyr"
+
+alloc_init();
+
+var A = alloc(16);
+var B = alloc(16);
+
+# 1 when both parsers give the same verdict on buf[0..n), and the same bytes
+# when they accept.
+fn _agree(buf, n) {
+    var ra = _ssrf_parse_ipv6(buf, n, A);
+    var rb = 0;
+    if (_tn_parse_ipv6(buf, n, B) == 16) { rb = 1; }
+    if (ra != rb) { return 0; }
+    if (ra == 1 && memeq(A, B, 16) == 0) { return 0; }
+    return 1;
+}
+
+# ssrf_check of "http://[" + buf[0..n) + "]/", which must be an SSRF_* code.
+fn _check_ok(buf, n) {
+    var u = alloc(n + 16);
+    memcpy(u, "http://[", 8);
+    memcpy(u + 8, buf, n);
+    memcpy(u + 8 + n, "]/", 2);
+    store8(u + 10 + n, 0);
+    var c = ssrf_check(u);
+    if (c < 0 || c > 10) { return 0; }
+    return 1;
+}
+
+var seeds = vec_new();
+vec_push(seeds, "::1");
+vec_push(seeds, "fe80::1");
+vec_push(seeds, "2001:db8:1:2:3:4:5:6");
+vec_push(seeds, "::ffff:127.0.0.1");
+vec_push(seeds, "64:ff9b::10.0.0.1");
+vec_push(seeds, "2002:7f00:1::");
+vec_push(seeds, "1:2:3:4:5:6:1.2.3.4");
+vec_push(seeds, "fd12:3456:789a::abcd");
+
+var subs = vec_new();
+vec_push(subs, 46);    # .
+vec_push(subs, 48);    # 0
+vec_push(subs, 49);    # 1
+vec_push(subs, 58);    # :
+vec_push(subs, 57);    # 9
+vec_push(subs, 70);    # F
+vec_push(subs, 102);   # f
+vec_push(subs, 103);   # g
+vec_push(subs, 37);    # %
+vec_push(subs, 32);    # space
+vec_push(subs, 93);    # ]
+vec_push(subs, 255);
+
+var si = 0;
+while (si < vec_len(seeds)) {
+    var src = vec_get(seeds, si);
+    var n = strlen(src);
+    if (_agree(src, n) != 1) { sys_exit(10 + si); }
+    if (_check_ok(src, n) != 1) { sys_exit(30); }
+    var buf = alloc(n + 1);
+    var off = 0;
+    while (off < n) {
+        var bi = 0;
+        while (bi < vec_len(subs)) {
+            memcpy(buf, src, n);
+            store8(buf + n, 0);
+            store8(buf + off, vec_get(subs, bi));
+            if (_agree(buf, n) != 1) { sys_exit(20); }
+            if (_check_ok(buf, n) != 1) { sys_exit(30); }
+            bi = bi + 1;
+        }
+        # Every prefix and every deletion at this offset, too.
+        if (_agree(src, off) != 1) { sys_exit(21); }
+        memcpy(buf, src, off);
+        memcpy(buf + off, src + off + 1, n - off - 1);
+        if (_agree(buf, n - 1) != 1) { sys_exit(22); }
+        off = off + 1;
+    }
+    si = si + 1;
+}
+
+sys_exit(0);

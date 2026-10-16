@@ -18,6 +18,98 @@ have per release.
 
 _(empty)_
 
+## [3.4.7] — 2026-10-15 · SSRF classifier gaps: shared, reserved and IETF space refused, IPv6 literals parsed to bytes
+
+The roadmap's 3.4.7 item: the SSRF classifier gaps found while wiring the 3.4.4 resolved-address
+guard. A few URLs that reached the network on 3.4.6 are refused now, each with the range named.
+
+### Security — more internal address space is refused, and IPv6 literals are parsed
+
+- **Reproduced on 3.4.6 first.** `web_fetch` over stdio on the built binaries:
+
+  | URL | 3.4.6 | 3.4.7 |
+  |---|---|---|
+  | `http://[0:0:0:0:0:0:0:1]:18555/x` | passed the guard (transport error) | refused (loopback) |
+  | `http://[fe9f::1]/x` | passed the guard (transport error) | refused (link_local) |
+  | `http://[zzz]/x` | passed the guard (transport error) | refused (parse) |
+  | `http://100.100.100.100/x` | passed the guard; the connect hung past 40 s | refused (shared) |
+  | `http://255.255.255.255/x` | passed the guard; no reply within 40 s | refused (reserved) |
+
+  The IPv6 rows failed at the transport only because sandhi's stock client cannot dial a literal.
+  The guard itself had let them through.
+- **IPv4** (`_ssrf_classify_v4`, which now reads three octets):
+  - **100.64.0.0/10**, RFC 6598 shared address space (carrier-grade NAT, and the tailnet
+    addresses Tailscale hands out), is refused with the new code `SSRF_SHARED` ("shared").
+  - **192.0.0.0/24** (IETF protocol assignments) and **240.0.0.0/4** (reserved, which contains the
+    255.255.255.255 broadcast address) are refused with the new code `SSRF_RESERVED`
+    ("reserved").
+  - **Two ranges the roadmap considered stay open, on purpose.** 198.18.0.0/15 (benchmarking):
+    fake-IP DNS proxies (Clash, mihomo, sing-box) answer every name with an address there, so
+    refusing it would refuse every fetch on such a host, and nothing an attacker wants lives in
+    it. The documentation ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24): nothing routes
+    them. Both are pinned by tests that say why.
+- **IPv6 literals are parsed, not pattern-matched.**
+  - `_ssrf_parse_ipv6` turns a URL's literal into its 16 bytes per RFC 4291 §2.2: one `::`, groups
+    of 1–4 hex digits, an optional dotted-quad tail under the canonical-octet rule, and a zone id
+    set aside. `ssrf_classify_ipv6_bytes` then judges it, the same classifier web_fetch's resolve
+    hook uses for AAAA answers, so no spelling of an address is judged differently from the
+    address.
+  - The text matcher it replaces missed `0:0:0:0:0:0:0:1`, `0::1` and most of `fe80::/10`, and
+    returned OK for anything it did not recognise. A literal that does not parse is now
+    `SSRF_PARSE`, which refuses it.
+  - A bracketed host now always goes to the IPv6 classifier. It used to be chosen by "has a
+    colon", which sent `[zzz]` and `[]` down the hostname path, where they passed.
+- **IPv6 ranges added to the byte classifier:**
+  - `fec0::/10`: deprecated site-local, still internal wherever a stack routes it.
+  - `64:ff9b:1::/48`: local-use NAT64, as the well-known prefix already was.
+  - `2002::/16` (6to4): the IPv4 address in bytes 2–5 is judged as one, so `2002:7f00:1::` is
+    loopback and 6to4 of a public address passes.
+  - IPv4-mapped and NAT64 literals stay refused outright, public tail or not.
+
+### Added
+
+- `SSRF_SHARED` (9) and `SSRF_RESERVED` (10), named by `ssrf_reason`.
+- `fuzz/ssrf_ipv6.fcyr`, the sixth fuzz harness. It runs host.cyr's IPv6 parser against the cyrius
+  TLS stack's own (`lib/tls_hostid.cyr`, `_tn_parse_ipv6`) on eight seeds, every byte
+  substitution at every offset, every prefix and every deletion: both must refuse, or both must
+  accept with the same bytes. It also checks that `ssrf_check` returns a defined code for every
+  bracketed URL built from those inputs.
+- Tests: `tests/bote_host.tcyr` +45.
+  - A test per new range, at both edges where there is one: 100.63.255.255 and 100.128.0.1 pass,
+    100.64.0.1 and 100.127.255.255 are refused, and 239.255.255.255 is still multicast.
+  - The two ranges left open on purpose.
+  - Packed-address parity, including a 192.0.1.1 case proving the third octet is read.
+  - IPv6 spellings, zone ids, 6to4, site-local, local-use NAT64 and eight malformed literals.
+  - The two parsers agreeing on 37 inputs.
+- **Mutation-checked.** Ten mutants; nine are killed:
+  - each new IPv4 range removed, or widened;
+  - the packed classifier dropping the third octet;
+  - bracket routing removed;
+  - five-digit groups allowed (the fuzz harness catches this one too);
+  - the 6to4 rule, the fec0 rule, and the empty-zone check each removed.
+
+  The tenth, dropping the explicit second-`::` check, is equivalent: the side holding the earlier
+  `::` always contains an empty group and fails anyway. The check stays for clarity.
+
+### Changed
+
+- `_ssrf_classify_v4_ab(a, b)` is now `_ssrf_classify_v4(a, b, c)`, since 192.0.0.0/24 needs the
+  third octet. The dotted-quad parse is split out as `_ssrf_parse_dotted`, which the IPv4 classifier
+  and the IPv6 parser's dotted tail share. All of these are private.
+- Roadmap: the next patch is 3.4.8, schemas compiled at registration and handler results checked.
+- `docs/spec-compliance.md`'s SSRF rows describe the byte classifier and the ranges, and SECURITY.md
+  drops the gaps this patch closes.
+- Binaries: `bote` 2,842,848 B (3.4.6: 2,842,816); aarch64 3,325,872 B; agnos 2,807,192 B with 0
+  undefined. Capacity: `fn_table` 6356 / 131072, +4 for the parser's functions. Every test file is
+  also green under `qemu-aarch64`.
+
+### Performance
+
+- `tests/bote.bcyr` links neither `host.cyr` nor `web_tools.cyr`, and none of its modules changed.
+  The logged row (pinned, load 2.7) sits 3–6% above the 3.4.6 row on every bench alike:
+  `dispatch_tools_list` 1.708 µs against 1.613, `codec_serialize_response` 458 ns against 439.
+  A uniform shift across code that did not change is host state, not this patch.
+
 ## [3.4.6] — 2026-10-15 · every string bote writes into JSON is escaped: control bytes no longer break replies
 
 The roadmap's 3.4.6 item, the first finding of the 2026-10-15 consumer audit: bote's JSON escaper

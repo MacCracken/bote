@@ -257,9 +257,9 @@ transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
 
 ## Verification
 
-### Tests — 1240 total across fifteen files (+ a core-only drift smoke)
+### Tests — 1285 total across fifteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1240 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1285 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 496 — core protocol/dispatch/codec/schema/session/transports
@@ -267,7 +267,7 @@ cyrius test tests/conformance.tcyr        # 119 — JSON-RPC 2.0 + MCP 2025-11-2
 cyrius test tests/bote_auth.tcyr          # 45 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 34 — fs_write / fs_read / fs_mkdir
-cyrius test tests/bote_host.tcyr          # 152 — host registry + SSRF guard (IPv4 + IPv6)
+cyrius test tests/bote_host.tcyr          # 197 — host registry + SSRF guard (IPv4 + IPv6)
 cyrius test tests/bote_jwt.tcyr           # 53 — JWT HS256 verify + exact alg + exp enforcement
 cyrius test tests/bote_libro_tools.tcyr   # 38 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
@@ -326,6 +326,7 @@ cyrius fuzz fuzz/codec_process.fcyr
 cyrius fuzz fuzz/jsonx_extract.fcyr
 cyrius fuzz fuzz/jsonx_valid.fcyr
 cyrius fuzz fuzz/schema_validate.fcyr
+cyrius fuzz fuzz/ssrf_ipv6.fcyr
 # 1 passed, 0 failed each
 ```
 
