@@ -9,7 +9,10 @@
 #        closing bracket is the text's last byte, so no prefix can be one
 #        whole value), and the text itself is accepted;
 #   30   every single-byte substitution at every offset of the seeds returns
-#        0 or 1 and nothing else; any it accepts, the extractors walk cleanly.
+#        0 or 1 and nothing else; any it accepts, the extractors walk cleanly;
+#   50   (3.4.6) bote_json_escape's output, quoted, is always one valid JSON
+#        string: for every single byte 1..255, and for every substituted seed
+#        read as a cstr. jsonx_valid is the oracle.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -30,6 +33,16 @@ include "src/jsonx.cyr"
 alloc_init();
 
 fn _v(s) { return jsonx_valid(s, strlen(s)); }
+
+# 1 when `"` + bote_json_escape(s) + `"` is one valid JSON text.
+fn _q_valid(s) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\"");
+    bote_json_escape(sb, s);
+    str_builder_add_cstr(sb, "\"");
+    var q = str_data(str_builder_build(sb));
+    return jsonx_valid(q, strlen(q));
+}
 
 var good = vec_new();
 vec_push(good, "{}");
@@ -104,6 +117,16 @@ store8(deeper + 2 * JSONX_MAX_DEPTH + 1, 93);
 store8(deeper + 2 * JSONX_MAX_DEPTH + 2, 0);
 if (_v(deeper) != 0) { sys_exit(8); }
 
+# Property 50: every single byte, escaped and quoted, is a valid JSON string.
+var one = alloc(2);
+var ob = 1;
+while (ob < 256) {
+    store8(one, ob);
+    store8(one + 1, 0);
+    if (_q_valid(one) != 1) { sys_exit(50); }
+    ob = ob + 1;
+}
+
 # Property 20: proper prefixes of an object- or array-rooted text.
 var seeds = vec_new();
 vec_push(seeds, "{\"a\":[1,2,{\"b\":null}],\"c\":\"d\\\"e\"}");
@@ -152,6 +175,7 @@ while (si < vec_len(seeds)) {
             # the validator reading the NUL as a byte, as a transport would.
             var r = jsonx_valid(buf, sn);
             if (r != 0 && r != 1) { sys_exit(30); }
+            if (_q_valid(buf) != 1) { sys_exit(51); }
             if (r == 1 && vec_get(subs, bi) != 0) {
                 jsonx_get_raw(buf, "a");
                 jsonx_get_str(buf, "method");

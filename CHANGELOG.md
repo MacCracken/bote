@@ -16,7 +16,55 @@ have per release.
 
 ## [Unreleased]
 
+_(empty)_
+
+## [3.4.6] — 2026-10-15 · every string bote writes into JSON is escaped: control bytes no longer break replies
+
+The roadmap's 3.4.6 item, the first finding of the 2026-10-15 consumer audit: bote's JSON escaper
+left most control bytes raw, so a tool result containing one was not JSON.
+
+### Fixed — every string bote writes into JSON is escaped (RFC 8259 §7)
+
+- **Reproduced on 3.4.5 first.** `fs_read` of a file holding two ANSI colour sequences and a BEL,
+  over stdio on the built binary: Python's `json.loads` rejects the reply ("Invalid control
+  character"). Any client reading a coloured log, a terminal transcript or a file with a stray
+  0x01 got a broken stream.
+- **The escaper.** `_json_emit_escaped` escaped `"`, `\`, LF, CR and TAB, and copied every other
+  byte below 0x20 through raw. It is now `bote_json_escape` (`src/jsonx.cyr`). Control bytes
+  become `\b \f \n \r \t` or `\u00XX`, the same table as the stdlib's
+  `str_builder_add_json_str`, which bote cannot call directly because it takes a Str and writes the
+  quotes itself. Bytes from 0x20 up pass through, so UTF-8 is untouched. `_json_emit_escaped`
+  stays as an alias: every bote module calls it, and so do six call sites in hoosh.
+- **`serverInfo`** (`dispatcher_set_server_info`) went into the `initialize` reply with no escaping
+  at all, so a quote in an embedder's server name broke the reply. Both fields are escaped now.
+- **A sweep of every other place `src/` writes a string into JSON** found nothing else unescaped:
+  each is a literal, a value from a fixed set (`"2.0"`, a negotiated protocol version, a content
+  kind), or already went through the escaper.
+
 ### Added
+
+- `bote_json_escape(sb, cstr)`: the escaper, public, for a consumer's own JSON. The audit found it
+  re-implemented in itihas, varna, mneme, jalwa and daimon, two of them wrongly. `content.cyr`'s
+  builders already go through it.
+- Tests:
+  - `tests/bote.tcyr` +13: each escape form, plain runs on either side of an escape, UTF-8 and DEL
+    passing through, and every byte 1..255 in one string, which must come back as valid JSON that
+    bayan decodes to the same 255 bytes.
+  - `tests/conformance.tcyr` +2: J15, a tool result holding ESC, BEL, 0x1f, TAB and a quote; F12,
+    an embedder's `serverInfo` with a quote and a backslash. Both also pass through the suite's
+    standing valid-JSON check.
+  - `tests/bote_fs_tools.tcyr` +3: `fs_read` of `tests/fixtures/control-bytes.txt` (new) is valid
+    JSON, and the bytes come back as `\u001b` / `\u0007` / `\u001f` / `\t`.
+  - `fuzz/jsonx_valid.fcyr` property 50, with `jsonx_valid` as the oracle: every byte 1..255 and
+    every byte-substituted seed must come out of the escaper, quoted, as one valid JSON string.
+  - **Mutation-proven.** Four mutants, each killed:
+    - control bytes raw again: unit tests, the conformance standing check, the `fs_read` test and
+      the fuzz property all fail;
+    - `serverInfo` raw again: F12 fails;
+    - the trailing run dropped, or the run copy one byte short: unit and conformance tests fail.
+
+    The fuzz property misses the last two by design. It checks validity, not fidelity, and the
+    unit round-trip covers fidelity.
 
 - `docs/audit/2026-10-15-consumers.md`: a read-only audit of every AGNOS repo that consumes bote or
   runs its own MCP server or client (agnosai, daimon, hoosh, itihas, phylax, stiva, szal, thoth,
@@ -34,6 +82,14 @@ have per release.
 
 ### Changed
 
+- `_json_emit_escaped` moves from `dispatch.cyr` to `jsonx.cyr`, the JSON-helpers module that
+  precedes every caller in both profiles. Neither profile's module list or sidecar changes.
+- `jsonx.cyr`'s header no longer calls `jsonx_get_str`'s value "decoded". It returns the
+  string's raw JSON text, as the function's own comment says.
+- Roadmap: the next patch is 3.4.7, the SSRF classifier gaps.
+- Binaries: `bote` 2,842,816 B (unchanged from 3.4.5), aarch64 3,325,840 B, agnos 2,807,160 B with
+  0 undefined. Capacity: `fn_table` 6352 / 131072, +3 for the escaper's three functions. Every test
+  file is also green under `qemu-aarch64`.
 - Roadmap re-planned from the audit:
   - **3.4.6:** the escaper fix (control bytes as `\u00XX`, `serverInfo` escaped, a public name).
   - **3.4.7:** the SSRF classifier gaps, moved back from 3.4.6.
@@ -44,6 +100,30 @@ have per release.
   - Core-reachable HTTP guards and the SSRF classifier are an open profile decision.
   - A vendoring-friendly pin is an upstream filing still to be made.
   - `docs/spec-compliance.md` points the classifier gaps at 3.4.7.
+
+### Performance
+
+- **Interleaved A/B against 3.4.5,** both trees pinned to one core, three rounds each, on a quiet
+  host (load falling from 3.8 to 3.4):
+
+  | Bench | 3.4.5 avgs (ns) | 3.4.6 avgs (ns) | Δ median |
+  |---|---|---|---|
+  | `dispatch_tools_list` | 2066, 2070, 2043 | 1747, 1742, 1711 | **−15.7%** |
+  | `dispatch_initialize` | 1436, 1443, 1430 | 1505, 1514, 1483 | +4.8% (+69 ns) |
+  | `dispatch_tools_call` | 2084, 2079, 2053 | 2099, 2100, 2060 | +1.0% |
+  | `codec_process_message` | 4634, 4617, 4527 | 4813, 4588, 4560 | −0.6% |
+  | `codec_serialize_response` | 461, 461, 457 | 465, 457, 456 | −0.9% |
+
+  - **`tools/list` is faster** because the escaper now copies a run of plain bytes in one go. The
+    old one paid a `strlen`, a grow check and a `memcpy` for every byte, through a two-byte stack
+    buffer.
+  - **`initialize` is slower by about 70 ns**, every round, because `serverInfo` goes through the
+    escaper now: two short strings that used to be copied raw. That is the price of the B5 fix.
+  - **Everything else is within ±3%.**
+- The logged row (`benches/history.log`, pinned, load 2.9) has `dispatch_tools_list` at 1.613 µs.
+  The 3.4.5 row has 2.084 µs, but it was logged under load 6.2.
+- An earlier attempt at the A/B under load 25 (other sessions compiling on every core) was
+  discarded: untouched rows moved by up to 68%.
 
 ## [3.4.5] — 2026-10-15 · the conformance suite, by spec clause, and the nine violations it found
 

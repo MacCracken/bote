@@ -77,6 +77,9 @@ responsibly:
 
 - No panic/abort in library code — errors return as 0 / -1 / error tags; the
   consumer decides.
+- Every string bote writes into JSON is escaped per RFC 8259 §7, control
+  bytes included (`bote_json_escape`, complete since 3.4.6), so a tool
+  result cannot break the framing of the reply that carries it.
 - Every message is checked to be one valid JSON text before it is read
   (`-32700` otherwise), and the jsonrpc version, the id type and the params
   type are validated on every request (`-32600`).

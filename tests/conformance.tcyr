@@ -72,6 +72,23 @@ fn h_resource(uri, claims) {
 }
 fn h_complete(params, claims) { return "{\"completion\":{\"values\":[\"x\"]}}"; }
 
+# Text holding control bytes a real tool returns all the time: an ANSI colour
+# sequence (ESC), a BEL, a unit separator, a TAB and a quote (3.4.6).
+var _ctl_text = 0;
+fn _ctl_text_new() {
+    var t = alloc(64);
+    var parts = "red:_[31mX_[0m bell:_ us:_ tab:_ q:\"";
+    var n = strlen(parts);
+    memcpy(t, parts, n + 1);
+    store8(t + 4, 27);
+    store8(t + 10, 27);
+    store8(t + 20, 7);
+    store8(t + 25, 31);
+    store8(t + 31, 9);
+    return t;
+}
+fn h_ctl(args, claims) { return content_text_response(_ctl_text); }
+
 # ---- response checks --------------------------------------------------------
 
 var _seen = 0;
@@ -424,6 +441,13 @@ fn main() {
     _expect(_str_is(_get(_result(v), "protocolVersion"), "2025-11-25"), "F10 a missing version gets the latest");
     _expect_none(d, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
       "F11 lifecycle: notifications/initialized is not answered");
+    # 3.4.6: an embedder's serverInfo is escaped (it was emitted raw).
+    var sd = _mk();
+    dispatcher_set_server_info(sd, "my \"srv\"", "1.0\\beta");
+    v = _send(sd, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}");
+    _expect(_str_is(_get(_get(_result(v), "serverInfo"), "name"), "my \"srv\"")
+      && _str_is(_get(_get(_result(v), "serverInfo"), "version"), "1.0\\beta"),
+      "F12 serverInfo set by an embedder survives a quote and a backslash");
 
     # =========================================================================
     # §G  MCP utilities — ping, cancellation
@@ -518,6 +542,18 @@ fn main() {
     v = _send(d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"test_none\",\"arguments\":{}}}");
     _expect(_is_tool_error(v),
       "J14 a handler that returns nothing is a failed call (isError), never \"result\":null");
+
+    # 3.4.6: tool output with control bytes still makes a valid response.
+    # Through 3.4.5 the escaper copied ESC, BEL and 0x1f through raw.
+    _ctl_text = _ctl_text_new();
+    var creg = tool_registry_new();
+    registry_register(creg, tool_def_new("test_ctl", "Control bytes", schema_new("object", 0, vec_new())));
+    var cd = dispatcher_new(creg);
+    dispatcher_handle(cd, "test_ctl", &h_ctl);
+    v = _send(cd, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"test_ctl\",\"arguments\":{}}}");
+    var ctl_dec = bayan_json_v_str(_get(bayan_json_v_arr_get(_get(_result(v), "content"), 0), "text"));
+    _expect(_is_tool_ok(v) && ctl_dec != 0 && str_eq_cstr(ctl_dec, _ctl_text) == 1,
+      "J15 RFC 8259 §7: a result holding ESC / BEL / 0x1f is escaped, and decodes back to the same text");
 
     # =========================================================================
     # §K  prompts

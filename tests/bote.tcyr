@@ -130,6 +130,12 @@ fn _lc_begin() {
     return 0;
 }
 fn _lc_end() { sakshi_clear_emit_hook(); return 0; }
+# bote_json_escape of cstr `s`, as a new cstr (3.4.6).
+fn _esc(s) {
+    var sb = str_builder_new();
+    bote_json_escape(sb, s);
+    return str_data(str_builder_build(sb));
+}
 # 1 when cstr `hay` contains cstr `needle`.
 fn _lc_has(hay, needle) {
     if (hay == 0 || needle == 0) { return 0; }
@@ -385,6 +391,47 @@ fn main() {
     var jx_xs = jsonx_get_raw(arr, "xs");
     assert(jx_xs != 0, "jx xs found");
     assert(streq(jx_xs, "[1,{\"k\":\"v\"},3]") == 1, "jx array with nested obj");
+
+    # ---------------- jsonx: bote_json_escape (3.4.6) ----------------
+    # Every byte below 0x20 has an escape (RFC 8259 §7). Through 3.4.5 all
+    # but LF, CR and TAB went out raw, so the reply was not JSON.
+    assert(streq(_esc("a\"b\\c"), "a\\\"b\\\\c") == 1, "escape: quote and backslash");
+    assert(streq(_esc("l\nr\rt\t"), "l\\nr\\rt\\t") == 1, "escape: LF CR TAB keep their short forms");
+    var eb = alloc(8);
+    store8(eb, 8); store8(eb + 1, 12); store8(eb + 2, 0);
+    assert(streq(_esc(eb), "\\b\\f") == 1, "escape: BS and FF use \\b \\f");
+    store8(eb, 1); store8(eb + 1, 0);
+    assert(streq(_esc(eb), "\\u0001") == 1, "escape: 0x01 -> \\u0001");
+    store8(eb, 27); store8(eb + 1, 0);
+    assert(streq(_esc(eb), "\\u001b") == 1, "escape: ESC -> \\u001b (lower-case hex)");
+    store8(eb, 31); store8(eb + 1, 0);
+    assert(streq(_esc(eb), "\\u001f") == 1, "escape: 0x1f -> \\u001f");
+    store8(eb, 97); store8(eb + 1, 98); store8(eb + 2, 1); store8(eb + 3, 99); store8(eb + 4, 100); store8(eb + 5, 0);
+    assert(streq(_esc(eb), "ab\\u0001cd") == 1, "escape: plain runs on either side of an escape survive");
+    store8(eb, 195); store8(eb + 1, 169); store8(eb + 2, 127); store8(eb + 3, 0);
+    assert(memeq(_esc(eb), eb, 4) == 1, "escape: UTF-8 bytes and DEL pass through");
+    assert(streq(_esc(""), "") == 1, "escape: empty string appends nothing");
+    var esb0 = str_builder_new();
+    bote_json_escape(esb0, 0);
+    assert_eq(str_len(str_builder_build(esb0)), 0, "escape: a null cstr appends nothing");
+    # Every byte 1..255 in one string: quoted, the result is valid JSON, and
+    # bayan decodes it back to the same 255 bytes.
+    var all = alloc(257);
+    var ai = 0;
+    while (ai < 255) { store8(all + ai, ai + 1); ai = ai + 1; }
+    store8(all + 255, 0);
+    var aq = str_builder_new();
+    str_builder_add_cstr(aq, "\"");
+    bote_json_escape(aq, all);
+    str_builder_add_cstr(aq, "\"");
+    var aqs = str_data(str_builder_build(aq));
+    assert_eq(jsonx_valid(aqs, strlen(aqs)), 1, "escape: all 255 non-NUL bytes, quoted, are one valid JSON string");
+    var adec = bayan_json_v_str(bayan_json_v_parse_buf(aqs, strlen(aqs)));
+    assert(adec != 0 && str_len(adec) == 255 && memeq(str_data(adec), all, 255) == 1,
+      "escape: ...that decodes back to the same 255 bytes");
+    var esb = str_builder_new();
+    _json_emit_escaped(esb, eb);
+    assert(memeq(str_data(str_builder_build(esb)), eb, 3) == 1, "escape: the old private name is an alias");
 
     # ---------------- jsonx: truncated string regression (jsonx_get_str must clamp) ----------------
     # Input has opening quote but no closing — _jx_skip_string returns end == len,

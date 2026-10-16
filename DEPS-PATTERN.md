@@ -268,10 +268,14 @@ core-profile consumers (nein's `mcp` module, t-ron) hand-rolled
 `{"content":[…],"isError":…}` with a raw `str_builder` — which means
 each of them re-implemented JSON string escaping, the exact duplicated
 injection surface this profile exists to prevent. It adds **no** new
-stdlib leaves: its only external references are `_json_emit_escaped`
-(already in core via `dispatch.cyr`), `str_builder_*` / `str_data`,
-`vec_*` and `alloc`. It is listed **last** in `[lib.core]` because
-cyrius is single-pass and it calls `_json_emit_escaped`.
+stdlib leaves. Its only external references are `_json_emit_escaped` (in
+core through `jsonx.cyr`; since 3.4.6 an alias of the public
+`bote_json_escape`), `_dsp_tool_error_result` (`dispatch.cyr`),
+`str_builder_*` / `str_data`, `vec_*` and `alloc`. It is listed **last** in
+`[lib.core]` because cyrius is single-pass and it calls into both.
+`bote_json_escape(sb, cstr)` is the escaper a consumer's own JSON should use:
+it appends a cstr as a JSON string body, escaping every control byte as
+RFC 8259 §7 requires.
 
 Stdlib footprint of the 13 modules: `string`, `fmt`, `alloc`,
 `vec`, `str`, `tagged`, `assert`, `fnptr`, `hashmap`, `bayan`,

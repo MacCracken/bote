@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.4.5 (cyrius 6.7.9) | **Last Audited**: 2026-10-15 (at 3.4.5, with `tests/conformance.tcyr`)
+> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.4.6 (cyrius 6.7.9) | **Last Audited**: 2026-10-15 (at 3.4.5, with `tests/conformance.tcyr`)
 
 This file lists what the shipped Cyrius implementation **covers today**, including the
 gaps — a ❌ row is a defect on the released binary, a ⏳ row is planned work. Both are
@@ -44,6 +44,7 @@ legitimately batch).
 | Invalid JSON is `-32700`; valid JSON that is not a request is `-32600` (§5.1) | `jsonx_valid` + `codec` | ✅ (3.4.5) — the whole message is syntax-checked (RFC 8259, nesting ≤ 64) before anything reads it. Through 3.4.4 `not valid json` was `-32600`, the spec's truncated-object example was dispatched as a notification, and `"id":01` was echoed back as invalid JSON |
 | `id` is a string, a number or null; `params`, if present, is an object or an array (§4) | `codec::_cdc_admit` | ✅ (3.4.5) — otherwise `-32600`. An explicit `"params":null` is read as absent. A null id is answered, though MCP forbids a client to send one |
 | Spec error codes (-32700, -32600, -32601, -32602, -32002, -32000, -32003, -32603, -32800) | `error` + `dispatch` | ✅ (`-32002` since 3.4.5) |
+| Every response is valid JSON: strings escaped per RFC 8259 §7, control bytes included | `jsonx::bote_json_escape` | ✅ (3.4.6) — through 3.4.5 the escaper left control bytes other than LF / CR / TAB raw, so a tool result holding an ESC or a BEL (an ANSI-coloured log through `fs_read`) was not JSON, and an embedder's `serverInfo` was not escaped at all. Asserted by the conformance suite's standing valid-JSON check (J15, F12) and a fuzz property |
 | `initialize` handshake (serverInfo + capabilities + version negotiation; `serverInfo` configurable via `dispatcher_set_server_info`) | `dispatch` | ✅ |
 | `ping` → empty `{}` result (spec: the receiver *MUST* respond promptly) | `dispatch` | ✅ (3.3.13) — answered ahead of every capability gate, so a bare dispatcher replies; emits no audit or event record (liveness, not activity). bote answers pings, it does not originate them |
 | `notifications/initialized` / `notifications/cancelled` — accepted, never answered | `codec` (no response to any notification) | ✅ (`cancelled` is ignored: there is no in-flight work to cancel until threaded dispatch, 3.5.x) |
@@ -227,11 +228,11 @@ registered by default in the binaries.
 
 | Scope | Count | Source |
 |---|---|---|
-| **Protocol conformance by spec clause** — JSON-RPC 2.0 §4 / §5 / §4.1 / §5.1 / §6 (incl. the spec's own examples), MCP initialize + all four revisions, ping, cancellation, capability gating, pagination cursors, tools/list, the tools/call protocol-vs-execution error split, prompts, resources, completion; every response checked to be valid JSON and a §5 Response object | **117** | `tests/conformance.tcyr` (3.4.5) |
-| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / the per-request DEBUG line | **483** | `tests/bote.tcyr` |
+| **Protocol conformance by spec clause** — JSON-RPC 2.0 §4 / §5 / §4.1 / §5.1 / §6 (incl. the spec's own examples), MCP initialize + all four revisions, ping, cancellation, capability gating, pagination cursors, tools/list, the tools/call protocol-vs-execution error split, prompts, resources, completion, control bytes in a tool result; every response checked to be valid JSON and a §5 Response object | **119** | `tests/conformance.tcyr` (3.4.5) |
+| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / the per-request DEBUG line, the string escaper | **496** | `tests/bote.tcyr` |
 | Bearer + allowlist + JWT + PKCE validators | **45** | `tests/bote_auth.tcyr` |
 | Content blocks + annotations | **25** | `tests/bote_content.tcyr` |
-| `fs_tools` path safety + root confinement | **31** | `tests/bote_fs_tools.tcyr` |
+| `fs_tools` path safety + root confinement + control bytes as valid JSON | **34** | `tests/bote_fs_tools.tcyr` |
 | HostRegistry + IPv4 / IPv6 SSRF (URL and resolved address) + hot-reload | **152** | `tests/bote_host.tcyr` |
 | JWT HS256 — signature, exact `alg`, `exp` (mutation-proven) | **53** | `tests/bote_jwt.tcyr` |
 | `libro_tools` incl. tampered-chain decode + populated-chain proof | **38** | `tests/bote_libro_tools.tcyr` |
@@ -242,7 +243,7 @@ registered by default in the binaries.
 | Unix transport — sockaddr, accept-error policy, backoff, deadlines, closed-peer write | **68** | `tests/bote_transport_unix.tcyr` |
 | `web_tools` — scheme guard, SSRF guard (URL and resolved address), HTML stripper, entities | **56** | `tests/bote_web_tools.tcyr` |
 | WebSocket config + wire-up + the send-deadline drop | **21** | `tests/bote_ws.tcyr` |
-| **Total assertions** | **1222** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
+| **Total assertions** | **1240** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
 | Hot-path benchmarks | **15** | `tests/bote.bcyr` |
 | Fuzz harnesses | **5** | `fuzz/*.fcyr` (in CI since 3.3.8; `jsonx_valid.fcyr` since 3.4.5) |
 | End-to-end transport round trips | 6 (stdio, HTTP, Unix, bridge, streamable, WS) | CI's "Transport smoke" step plus a per-release stdio probe on the built binary |

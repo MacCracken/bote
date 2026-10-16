@@ -153,6 +153,19 @@ fn main() {
     assert(_lc_has(_lc_buf, "tool=fs_write") == 1, "fs_write refusal is logged");
     _lc_end();
 
+    # ================================================================
+    # 3.4.6 — fs_read of a file holding control bytes is valid JSON
+    # ================================================================
+    # tests/fixtures/control-bytes.txt holds two ANSI colour sequences (ESC),
+    # a BEL, a 0x1f and a TAB, read through the default root ("." = the repo
+    # root the runner starts in). Through 3.4.5 the ESC and BEL went out raw
+    # and the reply was not JSON: the audit's measured case.
+    var cb = fs_read_handler("{\"path\":\"tests/fixtures/control-bytes.txt\"}", 0);
+    assert(_lc_has(cb, "isError\":false") == 1, "fs_read reads the fixture");
+    assert_eq(jsonx_valid(cb, strlen(cb)), 1, "a file with control bytes reads back as valid JSON");
+    assert(_lc_has(cb, "red:\\u001b[31mX\\u001b[0m bell:\\u0007 us:\\u001f tab:\\t end") == 1,
+      "ESC, BEL and 0x1f are \\u00XX escapes; TAB keeps \\t");
+
     return assert_summary();
 }
 
