@@ -29,20 +29,16 @@ subprotocol / compression negotiation (→ 3.6.x, needs an upstream seam).
 
 ---
 
-## Next patch — 3.4.9
+## Next patch — 3.4.10
 
 | Item | Notes | Effort |
 |---|---|---|
-| **The bundles state the toolchain they need** (audit B6 + B7, G13). | The 3.4.x core bundle fails to compile on cyrius 6.6.6 at `const BOTE_LOG_LINE_BYTES` (measured during the audit), the pin hoosh, szal, thoth and t-ron carry. The minimum (≥ 6.7.2) is written only in the 3.4.0 CHANGELOG and DEPS-PATTERN, not in the file a vendoring repo actually opens. The bundle header is written by `cyrius distlib`, so either a comment at the top of `src/log.cyr` (the first module in both profiles) or an upstream request for a `# Requires cyrius:` header line taken from the pin. In the same place, say that a repo that *vendors* the core bundle must declare `sakshi` itself, because the sidecar does not list it and the libro → patra path that supplies it to pinned consumers does not exist for a copied file. | Small |
+| **bote's own tools: real schemas and real tool results** (audit B9). | The libro tools return bare JSON (`{"ok":true}`, `{"ok":false,"error":…}`), so since 3.4.8 they reach the client as text blocks, and a failure is not flagged `isError`. Return CallToolResults, with `ok:false` as `isError`. daimon calls `libro_tool_*` directly and passes a result that already has `content` through, so it is unaffected (checked in the 2026-10-15 audit). The libro, fs and web tools also register `{"type":"object"}` with no properties, so clients learn their arguments from description text and 3.4.8's compiled validation has nothing to check. Give each its properties and `required`. `tests/bote_libro_tools.tcyr` reads result fields directly and changes with the shapes. | Small–medium |
 
-## 3.4.x — the rest of the minor, one bite per patch
+## 3.4.x — the rest of the minor
 
-Each item lands as its own patch, verified before the next starts. The patch numbers are the
-intended order, not a promise.
-
-| Patch | Item | Notes | Effort |
-|---|---|---|---|
-| 3.4.10 | **bote's own tools: real schemas and real tool results** (audit B9). | The libro tools return bare JSON (`{"ok":true}`, `{"ok":false,"error":…}`), so since 3.4.8 they reach the client as text blocks, and a failure is not flagged `isError`. Return CallToolResults, with `ok:false` as `isError`. daimon calls `libro_tool_*` directly and passes a result that already has `content` through, so it is unaffected (checked in the 2026-10-15 audit). The libro, fs and web tools also register `{"type":"object"}` with no properties, so clients learn their arguments from description text and 3.4.8's compiled validation has nothing to check. Give each its properties and `required`. `tests/bote_libro_tools.tcyr` reads result fields directly and changes with the shapes. | Small–medium |
+Nothing further is queued for 3.4.x after 3.4.10. A finding that belongs in the minor (a
+conformance gap, a transport defect) lands here as its own patch, one bite per release.
 
 ## Consumer adoption track
 
@@ -201,8 +197,14 @@ None planned. Any one of these would:
 
 ## Upstream
 
-No open blockers. Two open filings, neither blocking, and one to file:
+No open blockers. Two open filings, neither blocking, and two to file:
 
+- **To file with cyrius — a toolchain requirement a bundle can carry** (audit G13, the
+  upstream half). bote states its minimum on a `# Minimum cyrius:` comment at the top of its first
+  module, because `cyrius distlib` writes no such header line, and an older compiler meeting a
+  newer construct gives a parser error ("expected '=', got identifier") rather than a version
+  message. Either a `# Requires cyrius: X.Y.Z` header line taken from the producer's pin, or a
+  predefined version symbol for `#if`, would let a bundle refuse an old toolchain by name.
 - **To file with cyrius — a vendoring-friendly pin** (audit G14). A `[deps.bote]` limited to
   `modules = ["dist/bote-core.cyr"]` still pulls bote's own `deps.libro` / `deps.majra` into the
   consumer (t-ron shows it), which is the reason hoosh, szal and thoth vendor the bundle by hand

@@ -299,6 +299,38 @@ jobs:
           fi
           exit $fail
 
+      - name: Bundles state their minimum cyrius
+        # The "Minimum cyrius:" line opens src/log.cyr, the first module of
+        # both bundles, so a repo that copies a bundle reads it in the file it
+        # copied. The number itself is measured locally with
+        # scripts/bundle-min-cyrius.sh, which builds this checkout on every
+        # installed toolchain. This step checks only what CI can check with
+        # the one toolchain it installs: both bundles state the same minimum,
+        # and it is not newer than the pin they are built with.
+        run: |
+          pin=$(sed -n 's/^cyrius = "\([0-9.]*\)"/\1/p' cyrius.cyml | head -1)
+          fail=0
+          seen=""
+          for b in dist/bote.cyr dist/bote-core.cyr; do
+            m=$(sed -n 's/^# Minimum cyrius: \([0-9.]*\)$/\1/p' "$b" | head -1)
+            if [ -z "$m" ]; then
+              echo "::error::$b states no '# Minimum cyrius:' line (it opens src/log.cyr)"
+              fail=1
+              continue
+            fi
+            if [ "$(printf '%s\n%s\n' "$m" "$pin" | sort -V | tail -1)" != "$pin" ]; then
+              echo "::error::$b says minimum cyrius $m, newer than the pin $pin"
+              fail=1
+            fi
+            if [ -n "$seen" ] && [ "$seen" != "$m" ]; then
+              echo "::error::the bundles disagree on the minimum cyrius ($seen vs $m)"
+              fail=1
+            fi
+            seen="$m"
+            echo "$b: minimum cyrius $m (pin $pin)"
+          done
+          exit $fail
+
       - name: Run tests
         # Test files split across compilation units (bote.tcyr, plus
         # per-module bote_<mod>.tcyr) to stay under the cyrius

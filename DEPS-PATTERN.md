@@ -101,6 +101,15 @@ dep libro requires 'ct' ... is not in the cyrius stdlib
 upstream as `2026-08-12-agnosai-deps-misleading-stdlib-error`). What it
 actually means is that `./lib/` does not yet contain that module.
 
+**Minimum cyrius: 6.7.2**, for both bundles. Each bundle states it on the
+`# Minimum cyrius:` line that opens `src/log.cyr`, its first module, so a
+repo that copies a bundle reads it in the file it copied. The number is
+measured, not inherited: `scripts/bundle-min-cyrius.sh` builds a checkout on
+every installed toolchain. 6.7.2 and later build both bundles, pass the
+core-only smoke test and answer a ping; 6.7.1 and earlier stop at `log.cyr`'s
+first `const`. CI checks that both bundles state the same minimum and that it
+is not newer than the pin. A repo on 6.6.x can take bote 3.3.17 at the newest.
+
 Cyrius deliberately does **not** auto-resolve stdlib — that is a
 supply-chain choice, not an oversight. Two things follow, and the
 **order matters**:
@@ -147,6 +156,15 @@ bote's own CI does, in this order — see `.github/workflows/ci.yml`.
 retired the vendoring** and consumes bote-core + sigil as ordinary git
 deps, the same way daimon does. Vendoring is not the fix — the sync step
 is.
+
+If you copy `dist/bote-core.cyr` into your tree anyway (hoosh, szal and
+thoth do), **declare `sakshi` in your own `[deps] stdlib`**. `log.cyr` calls
+sakshi, and the bundle's requires block does not include it. A pinned
+consumer gets it through bote's `deps.libro` (patra includes it); a copied
+file brings neither. Measured on 6.7.2 and 6.7.9: a copied core bundle with
+`string fmt alloc vec str syscalls io freelist` stops on undefined
+`sakshi_*` functions, and the same list plus `sakshi` builds and answers a
+ping.
 
 ## Profile selection
 
@@ -281,9 +299,10 @@ Stdlib footprint of the 13 modules: `string`, `fmt`, `alloc`,
 `vec`, `str`, `tagged`, `assert`, `fnptr`, `hashmap`, `bayan`,
 `chrono`, `freelist`, `sakshi`. `sakshi` is not on the sidecar: distlib's
 verify finds it already in scope through `lib/patra.cyr`'s own include
-(patra is libro's named dep), which is how a core consumer gets it too.
-⚠ `log.cyr` sizes its stack line buffer with a `const`, so the bundles
-need cyrius ≥ 6.7.2. No core module calls into `tls` / `sandhi` /
+(patra is libro's named dep), which is how a pinned core consumer gets it
+too; a copied bundle must declare it (above). `log.cyr` sizes its stack line
+buffer with a `const`, which is what sets the 6.7.2 minimum. No core module
+calls into `tls` / `sandhi` /
 `sigil` / `ws_server` / `slice`.
 
 ⚠ **`dist/bote-core.deps` names `sigil` and `ct` anyway (3.3.17).**

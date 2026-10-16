@@ -18,6 +18,61 @@ have per release.
 
 _(empty)_
 
+## [3.4.9] — 2026-10-15 · the bundles state their minimum cyrius (6.7.2, measured) and what a copied core bundle needs
+
+The roadmap's 3.4.9 item, findings B6 and B7 of the 2026-10-15 consumer audit. The bundles now say
+what toolchain they need, and what a repo that copies one must declare, in the file it copies.
+
+### Added — the bundles state their minimum cyrius
+
+- **Measured first.** `scripts/bundle-min-cyrius.sh` (new) copies the working tree, pins it to
+  each installed toolchain, provisions it from scratch, and requires three things: `src/main.cyr`
+  builds with no undefined function, the core-only smoke test passes, and the binary answers a
+  ping.
+
+  | cyrius | build | core smoke | ping | first failure |
+  |---|---|---|---|---|
+  | 6.6.20, 6.7.0, 6.7.1 | fail | — | — | `src/log.cyr:54:7: expected '=', got identifier 'BOTE_LOG_LINE_BYTES'` |
+  | 6.7.2 – 6.7.9, 6.7.13 | ok | ok | ok | |
+
+  So the 3.4.0 CHANGELOG's "≥ 6.7.2" holds, and nothing since has raised it. Until now it was
+  written only there and in DEPS-PATTERN. The audit found four repos on cyrius 6.6.6 (hoosh, szal,
+  thoth, t-ron), and only a re-vendor attempt would have told them.
+- **`# Minimum cyrius: 6.7.2`** now opens `src/log.cyr`, the first module of both bundles, so it
+  is among the first lines a repo sees in a copied `dist/*.cyr`. It sits under a note saying how
+  it was measured and when to re-measure. A second comment sits directly above the `const` an
+  older compiler stops at, and says what the error means. cyrius has no `#error` and no version
+  symbol, so a bundle cannot refuse an old toolchain by name. That is recorded as an upstream
+  request.
+- **What a copied core bundle needs.** Measured on 6.7.2 and 6.7.9: a consumer that copies
+  `dist/bote-core.cyr` and declares `string fmt alloc vec str syscalls io freelist` stops on six
+  undefined `sakshi_*` functions, and the same list plus `sakshi` builds and answers a ping. A
+  pinned consumer gets sakshi through bote's `deps.libro` (patra includes it); a copied file does
+  not. The same note at the top of `log.cyr` says so, and DEPS-PATTERN gains the vendoring
+  paragraph it lacked.
+- **CI step "Bundles state their minimum cyrius":** both bundles carry the line, it is the same
+  in both, and it is not newer than the pin. The measurement itself stays local, like the
+  `qemu-aarch64` sweep, because it needs every toolchain installed. CLAUDE.md's version-check step
+  says to re-run the script at a pin move or when bote starts using a newer language feature.
+
+### Changed
+
+- DEPS-PATTERN states the minimum up front, with how it was measured, and says a 6.6.x repo can
+  take bote 3.3.17 at the newest. README and CLAUDE.md's distribution section say the same in a
+  line. README's module count for `dist/bote.cyr` was 32 and is 33 (`conn.cyr`, 3.4.3).
+- Roadmap: the next patch is 3.4.10 (bote's own tools). Two upstream requests are recorded to
+  file: a toolchain requirement a bundle can carry, and a vendoring-friendly pin.
+- Re-measured on the final tree: 6.7.1 now stops at `src/log.cyr:74`, the `const` directly under
+  the comment that explains the error, and 6.7.2 passes.
+- Binaries are unchanged in size: `bote` 2,851,512 B, aarch64 3,326,344 B, agnos 2,815,848 B with
+  0 undefined. Every test file is also green under `qemu-aarch64`.
+
+### Performance
+
+- Comments and docs only; no compiled code changed. The logged row (pinned, load 1.0) is within
+  noise of 3.4.8's: `dispatch_tools_call` 2.743 µs against 2.817, `dispatch_tools_list` 1.617 µs
+  against 1.677.
+
 ## [3.4.8] — 2026-10-15 · schemas compiled at registration, every tool result a CallToolResult
 
 The roadmap's 3.4.8 item, findings B2–B4 of the 2026-10-15 consumer audit. bote's schema validator

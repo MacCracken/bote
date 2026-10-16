@@ -250,8 +250,11 @@ src/main_common.cyr        Entry helpers (dispatcher, mode selection, env bearer
 Dependencies rehydrate into `lib/` (gitignored) via `cyrius deps`.
 Cross-project deps **libro and majra** are git-pinned via
 `[deps.<name>]` in `cyrius.cyml`. Two consumer bundles ship in `dist/`:
-`bote.cyr` (full, 32 modules) and `bote-core.cyr` (core 13,
-transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md).
+`bote.cyr` (full, 33 modules) and `bote-core.cyr` (core 13,
+transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md). Both need
+**cyrius ≥ 6.7.2**, stated on the `# Minimum cyrius:` line near the top of each;
+a repo that copies the core bundle rather than pinning it must also declare
+`sakshi`.
 
 ---
 

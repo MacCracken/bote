@@ -38,7 +38,7 @@ Two consumer bundles (see `DEPS-PATTERN.md` for the contract):
 | `dist/bote.cyr` | default `[lib]` | 33 | Consumer needs the full transport surface |
 | `dist/bote-core.cyr` | `[lib.core]` | 13 | Consumer wraps Dispatcher / Registry / Prompts / Resources / Audit but supplies its own transport (e.g. t-ron's SecurityGate) |
 
-Regenerate with `cyrius distlib` (default) and `cyrius distlib core`; `cyrius distlib --check` checks both. CI gates each bundle **and its `.deps` sidecar** for freshness. Since cyrius 6.6.18 a sidecar names only the leaves `distlib`'s compile-verify proves the bundle needs (`hashmap bayan ws_server syscalls` / `hashmap bayan sigil ct`), and each bundle opens with a matching `# Requires` include block.
+Regenerate with `cyrius distlib` (default) and `cyrius distlib core`; `cyrius distlib --check` checks both. Both bundles need **cyrius ≥ 6.7.2**, stated on the `# Minimum cyrius:` line that opens `src/log.cyr` (their first module) and measured by `scripts/bundle-min-cyrius.sh`; a repo that copies the core bundle instead of pinning it must also declare `sakshi` (see DEPS-PATTERN.md). CI gates each bundle **and its `.deps` sidecar** for freshness. Since cyrius 6.6.18 a sidecar names only the leaves `distlib`'s compile-verify proves the bundle needs (`hashmap bayan ws_server syscalls` / `hashmap bayan sigil ct`), and each bundle opens with a matching `# Requires` include block.
 
 ## Binaries
 
@@ -135,7 +135,7 @@ All consumer apps with MCP tools (phylax, t-ron, sutra, jalwa, rasa, mneme, etc.
 8. Run benchmarks again — prove the wins
 9. If audit heavy → return to step 5
 10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, source citations for algorithms/formulas, guides and examples for new API surface, verify recipe version in zugot
-11. Version check — VERSION, `cyrius.cyml` cyrius pin, recipe (in zugot) all in sync
+11. Version check — VERSION, `cyrius.cyml` cyrius pin, recipe (in zugot) all in sync; at a pin move, or when bote starts using a newer language feature, re-run `./scripts/bundle-min-cyrius.sh` and keep the `# Minimum cyrius:` line that opens `src/log.cyr` equal to what it measures (CI checks only that both bundles carry the same line and that it is not newer than the pin)
 12. Regenerate `dist/bote.cyr` + `dist/bote-core.cyr` if `src/` or `[lib]` / `[lib.core]` changed
 13. Return to step 1
 
@@ -203,6 +203,7 @@ cyrius test tests/bote.tcyr            # Run a single test file
 for f in tests/*.tcyr; do cyrius test "$f"; done  # All tests
 cyrius bench tests/bote.bcyr           # Run benchmarks
 ./scripts/bench-log.sh                 # Benchmarks + append to benches/history.log
+./scripts/bundle-min-cyrius.sh         # Which installed toolchains build this checkout (sets "Minimum cyrius")
 cyrius distlib                         # Regenerate dist/bote.cyr
 cyrius distlib core                    # Regenerate dist/bote-core.cyr
 ```

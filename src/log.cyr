@@ -1,5 +1,22 @@
 # bote::log — operational logging through sakshi.
 #
+# ## Before you compile this (it is the first module of both dist bundles)
+#
+# Minimum cyrius: 6.7.2
+#
+#   6.7.2 and later compile both bundles, pass the core-only smoke test and
+#   answer a ping. 6.7.1 and earlier stop at the first `const` below, with
+#   "expected '=', got identifier". scripts/bundle-min-cyrius.sh measures
+#   this on every installed toolchain. Re-run it at every pin move, and
+#   whenever bote starts using a newer language feature.
+#
+#   A copied bundle (src/vendor/bote-core.cyr) rather than a [deps.bote]
+#   pin must also declare "sakshi" in its own [deps] stdlib. This module
+#   calls sakshi, and the bundle's requires block does not include it. A
+#   pinned consumer gets sakshi through bote's deps.libro (patra includes
+#   it); a copied file brings neither. Without it the build stops on
+#   undefined sakshi_* functions.
+#
 # ## Contract
 #
 # - **Every line goes through sakshi**, to sakshi's configured output, which
@@ -51,6 +68,9 @@
 # line. A value longer than `BOTE_LOG_VALUE_MAX` bytes is cut and ends `...`.
 # A line that outgrows its buffer ends `...` too.
 
+# A compiler older than cyrius 6.7.2 stops on the next line with "expected
+# '=', got identifier": it has no `const`. See "Minimum cyrius" at the top of
+# this module.
 const BOTE_LOG_LINE_BYTES = 280;
 const BOTE_LOG_TEXT_CAP = 256;
 
