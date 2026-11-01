@@ -117,6 +117,19 @@ fn resp_error_a(a, id, code, message) {
     return r;
 }
 
+fn resp_error_data_a(a, id, code, message, data) {
+    var e = alloc_via(a, 24);
+    store64(e, code);
+    store64(e + 8, message);
+    store64(e + 16, data);
+    var r = alloc_via(a, 32);
+    store64(r, "2.0");
+    store64(r + 8, id);
+    store64(r + 16, 0);
+    store64(r + 24, e);
+    return r;
+}
+
 fn resp_error(id, code, message) {
     var r = alloc(32);
     store64(r, "2.0");

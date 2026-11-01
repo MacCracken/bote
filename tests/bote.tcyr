@@ -166,6 +166,77 @@ fn _ra_heap_per_msg(msg, d, n) {
     return (alloc_used() - before) / n;
 }
 
+# A request for `method`, whose params are `prefix`, `fill` n times, `suffix`.
+fn _ra_fill_of(method, prefix, fill, n, suffix) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, "\",\"params\":");
+    str_builder_add_cstr(sb, prefix);
+    var i = 0;
+    while (i < n) {
+        str_builder_add_cstr(sb, fill);
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, suffix);
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+fn _ra_fill(method, prefix, n, suffix) { return _ra_fill_of(method, prefix, "x", n, suffix); }
+
+# `{"jsonrpc":"2.0","id":<id>,"method":"<method>"}`, each as given.
+fn _ra_msg(id, method) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":");
+    str_builder_add_cstr(sb, id);
+    str_builder_add_cstr(sb, ",\"method\":\"");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, "\"}");
+    return str_data(str_builder_build(sb));
+}
+
+# `n` copies of `fill`.
+fn _ra_rep(fill, n) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < n) {
+        str_builder_add_cstr(sb, fill);
+        i = i + 1;
+    }
+    return str_data(str_builder_build(sb));
+}
+
+var _ra_kept_prompt_args = 0;
+fn _ra_keep_prompt(args, claims) {
+    _ra_kept_prompt_args = args;
+    return "{\"messages\":[]}";
+}
+var _ra_kept_uri = 0;
+fn _ra_keep_uri(uri, claims) {
+    _ra_kept_uri = uri;
+    return "{\"contents\":[]}";
+}
+
+fn _ra_quoted(s) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\"");
+    str_builder_add_cstr(sb, s);
+    str_builder_add_cstr(sb, "\"");
+    return sb;
+}
+
+# _ra_heap_per_msg through the bridge's own tools/call wrapping.
+fn _ra_bridge_heap_per_msg(msg, d, n) {
+    bridge_process_message_a(bote_req_begin(), msg, d, 0);
+    var before = alloc_used();
+    var i = 0;
+    while (i < n) {
+        bridge_process_message_a(bote_req_begin(), msg, d, 0);
+        i = i + 1;
+    }
+    return (alloc_used() - before) / n;
+}
+
 # A handler and a sink may keep what they are handed (2.0 ABI).
 var _ra_kept_args = 0;
 fn _ra_keep_h(args, claims) {
@@ -2097,6 +2168,48 @@ fn main() {
     assert_eq(_ra_heap_per_msg(_ra_call("no_such_tool", ra_big), ra_d, 50), 0, "arena: 60 KB of arguments to an unknown tool leaves no heap");
     assert_eq(_ra_heap_per_msg(_ra_call("ra_int", ra_big), ra_d, 50), 0, "arena: 60 KB failing validation leaves no heap");
     assert_eq(_ra_heap_per_msg(_ra_call("ra_int", "[1]"), ra_d, ra_n), 0, "arena: non-object arguments leave no heap");
+
+    # What a client names and bote refuses, on the paths the binary serves.
+    var ra_pargs = vec_new();
+    vec_push(ra_pargs, prompt_arg_new("must", "required", 1));
+    dispatcher_register_prompt(ra_d, prompt_def_new("ra_prompt", "p", ra_pargs), &_ra_keep_prompt);
+    dispatcher_register_resource(ra_d, resource_def_new("ra://doc", "doc", 0, 0), &_ra_keep_uri);
+    assert_eq(_ra_heap_per_msg(_ra_fill("tools/list", "{\"cursor\":\"", 100, "\"}"), ra_d, ra_n), 0, "arena: an invalid cursor leaves no heap");
+    assert_eq(_ra_heap_per_msg(_ra_fill("prompts/get", "{\"name\":\"", 60000, "\"}"), ra_d, 50), 0, "arena: 60 KB naming no prompt leaves no heap");
+    assert_eq(_ra_heap_per_msg(_ra_fill("prompts/get", "{\"name\":\"ra_prompt\",\"arguments\":[\"", 60000, "\"]}"), ra_d, 50), 0, "arena: a prompt's non-object arguments leave no heap");
+    assert_eq(_ra_heap_per_msg(_ra_fill("prompts/get", "{\"name\":\"ra_prompt\",\"arguments\":{\"other\":\"", 60000, "\"}}"), ra_d, 50), 0, "arena: a prompt missing an argument leaves no heap");
+    assert_eq(_ra_heap_per_msg(_ra_fill("resources/read", "{\"uri\":\"", 60000, "\"}"), ra_d, 50), 0, "arena: 60 KB naming no resource leaves no heap");
+    assert_eq(_ra_heap_per_msg(_ra_fill_of("resources/read", "{\"uri\":\"", "\\u0001", 10000, "\"}"), ra_d, 50), 0, "arena: a uri of control bytes, six times as long escaped, leaves no heap");
+
+    # The error serializer: what a client wrote is in the id and in the message.
+    var ra_x = _ra_rep("x", 60000);
+    var ra_qx = str_data(str_builder_build(_ra_quoted(ra_x)));
+    assert_eq(_ra_heap_per_msg(_ra_msg("1", ra_x), ra_d, 50), 0, "arena: a 60 KB unknown method leaves no heap");
+    assert_eq(_ra_heap_per_msg(_ra_msg(ra_qx, "no/such"), ra_d, 50), 0, "arena: a 60 KB string id on a refusal leaves no heap");
+    assert_eq(_ra_heap_per_msg(_ra_fill("tools/call", "{\"name\":\"", 60000, "\"}"), ra_d, 50), 0, "arena: a 60 KB unknown tool name leaves no heap");
+    assert_eq(_ra_heap_per_msg(_ra_fill("tools/call", "{\"name\":\"ra_keep\",\"version\":\"", 60000, "\"}"), ra_d, 50), 0, "arena: a 60 KB tool version leaves no heap");
+    assert_eq(_ra_heap_per_msg(_ra_fill_of("tools/list", "{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"", "\\u0001", 10000, "\"}}"), ra_d, 50), 0, "arena: an unsupported version of control bytes leaves no heap");
+    assert_eq(_ra_bridge_heap_per_msg(_ra_fill("tools/call", "{\"name\":\"", 60000, "\"}"), ra_d, 50), 0, "arena: a 60 KB unknown tool name through the bridge leaves no heap");
+    assert_eq(_ra_bridge_heap_per_msg(_ra_fill_of("tools/call", "{\"name\":\"", "\\u0001", 10000, "\"}"), ra_d, 50), 0, "arena: a tool name of control bytes through the bridge leaves no heap");
+
+    # A validator message quotes the client's value, and a tool error result escapes it.
+    var ra_enum_props = vec_new();
+    vec_push(ra_enum_props, schema_prop_new("mode", "{\"type\":\"string\",\"enum\":[\"a\",\"b\"]}"));
+    registry_register(ra_reg, tool_def_new("ra_enum", "a", schema_new("object", ra_enum_props, vec_new())));
+    dispatcher_handle(ra_d, "ra_enum", &_ra_keep_h);
+    assert_eq(_ra_heap_per_msg(_ra_fill_of("tools/call", "{\"name\":\"ra_enum\",\"arguments\":{\"mode\":\"", "\\u0001", 10000, "\"}}"), ra_d, 50), 0, "arena: an enum value of control bytes leaves no heap");
+
+    # A deprecated tool costs no more than a plain one, however long its notice.
+    registry_register(ra_reg, tool_def_with_deprecated(tool_def_new("ra_oldd", "a", schema_new("object", 0, vec_new())), _ra_rep("d", 4000)));
+    dispatcher_handle(ra_d, "ra_oldd", &_ra_keep_h);
+    assert_eq(_ra_heap_per_msg(_ra_call("ra_oldd", "{}"), ra_d, ra_n) - _ra_heap_per_msg(_ra_call("ra_keep", "{}"), ra_d, ra_n), 0, "arena: a long deprecation notice leaves no heap");
+
+    # What a prompt or resource handler keeps must survive the next message too.
+    codec_process_message_a(bote_req_begin(), _ra_fill("prompts/get", "{\"name\":\"ra_prompt\",\"arguments\":{\"must\":\"", 4, "\"}}"), ra_d, 0);
+    codec_process_message_a(bote_req_begin(), _ra_fill("resources/read", "{\"uri\":\"ra://doc", 0, "\"}"), ra_d, 0);
+    codec_process_message_a(bote_req_begin(), _ra_fill("resources/read", "{\"uri\":\"", 200, "\"}"), ra_d, 0);
+    assert(_ra_kept_prompt_args != 0 && streq(_ra_kept_prompt_args, "{\"must\":\"xxxx\"}") == 1, "arena: a prompt handler's kept args survive the next message");
+    assert(_ra_kept_uri != 0 && streq(_ra_kept_uri, "ra://doc") == 1, "arena: a resource handler's kept uri survives the next message");
 
     # What a handler and a sink keep must survive the next message.
     var ra_call = _ra_call("ra_keep", "{\"mark\":\"kept-args\"}");

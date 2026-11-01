@@ -287,6 +287,42 @@ fn _mk_full() {
     return d;
 }
 
+# ---- MCP 2026-07-28 ----------------------------------------------------------
+
+# A modern request: `method`, with `extra` (`,"name":...` or "") beside `_meta`.
+fn _m(id, method, extra) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":");
+    str_builder_add_int(sb, id);
+    str_builder_add_cstr(sb, ",\"method\":\"");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, "\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientInfo\":{\"name\":\"c\",\"version\":\"1\"},\"io.modelcontextprotocol/clientCapabilities\":{}}");
+    str_builder_add_cstr(sb, extra);
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}
+
+# 1 when `r` is a result of this revision: resultType complete, serverInfo in _meta.
+fn _is_modern(r) {
+    if (r == 0) { return 0; }
+    if (_str_is(_get(r, "resultType"), "complete") == 0) { return 0; }
+    var si = _get(_get(r, "_meta"), "io.modelcontextprotocol/serverInfo");
+    if (si == 0) { return 0; }
+    return _str_is(_get(si, "name"), "bote");
+}
+
+# 1 when `r` carries the cache hints.
+fn _is_cacheable(r) {
+    if (bayan_json_v_is_int(_get(r, "ttlMs")) == 0) { return 0; }
+    return _str_is(_get(r, "cacheScope"), "private");
+}
+
+fn h_own_meta(args, claims) {
+    return "{\"_meta\":{\"mine\":1},\"resultType\":\"complete\",\"content\":[]}";
+}
+fn h_empty_obj(args, claims) { return "{ }"; }
+fn h_array(args, claims) { return "[1]"; }
+
 fn main() {
     alloc_init();
     fl_init();
@@ -693,10 +729,148 @@ fn main() {
     _expect(o_ok, "O1 initialize, initialized, tools/list, tools/call: each step answers as the spec says");
 
     # =========================================================================
+    # MCP 2026-07-28: the stateless path, beside the legacy one (3.5.0)
+    # =========================================================================
+    var md = _mk_full();
+
+    # server/discover: "Servers MUST implement it."
+    var dv = _expect_result(md, _m(1, "server/discover", ""), "M1 server/discover answers");
+    var dr = _result(dv);
+    _expect(_is_modern(dr), "M2 ...with resultType and serverInfo in _meta");
+    _expect(_is_cacheable(dr), "M3 ...and the cache hints the schema requires");
+    var dsv = _get(dr, "supportedVersions");
+    _expect(bayan_json_v_arr_len(dsv) == 5 && _str_is(bayan_json_v_arr_get(dsv, 0), "2026-07-28"), "M4 ...supportedVersions, newest first");
+    _expect(_str_is(bayan_json_v_arr_get(dsv, 1), "2025-11-25"), "M5 ...a dual-era server lists the older revisions");
+    var dcp = _get(dr, "capabilities");
+    _expect(bayan_json_v_is_obj(_get(dcp, "tools")) == 1 && bayan_json_v_is_obj(_get(dcp, "prompts")) == 1, "M6 ...capabilities");
+    _expect(_lc_contains(_last, "listChanged") == 0, "M7 ...and no listChanged, with nothing yet to deliver it");
+    var ldisc = dispatcher_new(tool_registry_new());
+    dispatcher_set_notifications(ldisc, 1);
+    _send(ldisc, _m(2, "server/discover", ""));
+    _expect(_lc_contains(_last, "listChanged") == 0, "M8 ...even on a dispatcher that pushes to legacy clients");
+    _expect_code(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\"}", 0 - 32602, "M9 server/discover with no _meta is malformed");
+
+    # A request's own _meta decides, and a required field missing is -32602.
+    _expect_code(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"}}}", 0 - 32602, "M10 no clientCapabilities is -32602");
+    _expect_code(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":[]}}}", 0 - 32602, "M11 clientCapabilities that is no object is -32602");
+    _expect_code(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":7,\"io.modelcontextprotocol/clientCapabilities\":{}}}}", 0 - 32602, "M12 a protocolVersion that is no string is -32602");
+
+    # -32022, with what bote does serve.
+    var uv = _expect_code(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"1900-01-01\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}", 0 - 32022, "M13 an unsupported version is -32022");
+    var ud = _get(_get(uv, "error"), "data");
+    _expect(_str_is(_get(ud, "requested"), "1900-01-01"), "M14 ...echoing what was asked for");
+    _expect(bayan_json_v_arr_len(_get(ud, "supported")) == 5, "M15 ...and listing what is supported");
+    _send(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"x\\\"y\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}");
+    _expect(_code(_parse(_last)) == 0 - 32022, "M16 ...with a quote in the requested version still valid JSON");
+
+    # Results of this revision.
+    var lv = _expect_result(md, _m(1, "tools/list", ""), "M17 tools/list");
+    _expect(_is_modern(_result(lv)) == 1 && _is_cacheable(_result(lv)) == 1, "M18 ...has resultType, serverInfo and the cache hints");
+    _expect(bayan_json_v_is_arr(_get(_result(lv), "tools")) == 1, "M19 ...and its tools");
+    var m_pl = _expect_result(md, _m(1, "prompts/list", ""), "M20 prompts/list");
+    _expect(_is_cacheable(_result(m_pl)), "M21 ...has the cache hints");
+    var rl = _expect_result(md, _m(1, "resources/list", ""), "M22 resources/list");
+    _expect(_is_cacheable(_result(rl)), "M23 ...has them");
+    var rt = _expect_result(md, _m(1, "resources/templates/list", ""), "M24 resources/templates/list");
+    _expect(_is_cacheable(_result(rt)), "M25 ...has them");
+    var rr = _expect_result(md, _m(1, "resources/read", ",\"uri\":\"mem://a\""), "M26 resources/read");
+    _expect(_is_cacheable(_result(rr)), "M27 ...has them");
+    var cc = _expect_result(md, _m(1, "tools/call", ",\"name\":\"test_echo\",\"arguments\":{}"), "M28 tools/call");
+    _expect(_is_modern(_result(cc)) == 1 && _is_tool_ok(cc) == 1, "M29 ...is a CallToolResult of this revision");
+    _expect(_get(_result(cc), "ttlMs") == 0, "M30 ...with no cache hints, which only the list results take");
+    var ce = _send(md, _m(1, "tools/call", ",\"name\":\"test_strict\",\"arguments\":{}"));
+    _expect(_is_tool_error(ce) == 1 && _is_modern(_result(ce)) == 1, "M31 a schema violation is still a tool error, of this revision");
+    var pg = _expect_result(md, _m(1, "prompts/get", ",\"name\":\"code_review\",\"arguments\":{\"code\":\"x\"}"), "M32 prompts/get");
+    _expect(_is_modern(_result(pg)), "M33 ...is of this revision");
+    var cp = _expect_result(md, _m(1, "completion/complete", ",\"ref\":{}"), "M34 completion/complete");
+    _expect(_is_modern(_result(cp)), "M35 ...is of this revision");
+
+    # What a handler set is left alone, and every shape of object works.
+    var hreg = tool_registry_new();
+    registry_register(hreg, tool_def_new("own", "o", schema_new("object", 0, vec_new())));
+    var hd = dispatcher_new(hreg);
+    dispatcher_handle(hd, "own", &h_own_meta);
+    _expect_result(hd, _m(1, "tools/call", ",\"name\":\"own\""), "M36 a result carrying its own _meta");
+    _expect(bayan_json_v_int(_get(_get(_result(_parse(_last)), "_meta"), "mine")) == 1, "M37 ...keeps it");
+    _expect(_lc_contains(_last, "serverInfo") == 0, "M38 ...and gets no second _meta");
+    dispatcher_set_completion(hd, &h_empty_obj);
+    var ec = _expect_result(hd, _m(1, "completion/complete", ",\"ref\":{}"), "M39 an empty result object");
+    _expect(_is_modern(_result(ec)), "M40 ...is valid and of this revision");
+    dispatcher_set_completion(hd, &h_array);
+    _expect_code(hd, _m(1, "completion/complete", ",\"ref\":{}"), 0 - 32603, "M41 a result that is no object is -32603");
+
+    # Errors of this revision.
+    var nf = _expect_code(md, _m(1, "resources/read", ",\"uri\":\"mem://none\""), 0 - 32602, "M42 a missing resource is -32602 here");
+    _expect(_str_is(_get(_get(_get(nf, "error"), "data"), "uri"), "mem://none"), "M43 ...still naming it");
+    _expect_code(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"mem://none\"}}", 0 - 32002, "M44 ...and -32002 for a legacy client");
+    _expect_code(md, _m(1, "ping", ""), 0 - 32601, "M45 ping is gone from this revision");
+    _expect_code(md, _m(1, "tools/call", ",\"name\":\"nope\""), 0 - 32602, "M46 an unknown tool is still -32602");
+
+    # Dual-era, in one process and in any order.
+    var iv = _expect_result(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2026-07-28\"}}", "M47 initialize offering this revision");
+    _expect(_str_is(_get(_result(iv), "protocolVersion"), "2025-11-25"), "M48 ...negotiates the newest legacy revision: initialize selects legacy");
+    _expect(_get(_result(iv), "resultType") == 0, "M49 ...with no resultType");
+    var mid = _expect_result(md, _m(1, "tools/list", ""), "M50 a modern request straight after");
+    _expect(_is_modern(_result(mid)), "M51 ...is served statelessly");
+    var ll = _expect_result(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", "M52 a legacy request after that");
+    _expect(_get(_result(ll), "resultType") == 0 && _get(_result(ll), "ttlMs") == 0, "M53 ...is legacy: _meta decides, nothing carries over");
+    _expect(_is_modern(_result(_expect_result(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}", "M54 a legacy ping still answers"))) == 0, "M55 ...as legacy");
+    var older = _expect_result(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2025-11-25\"}}}", "M56 an older revision named in _meta");
+    _expect(_get(_result(older), "resultType") == 0, "M57 ...is that revision's behaviour");
+    var plain = _expect_result(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"progressToken\":1}}}", "M58 legacy _meta with no protocolVersion");
+    _expect(_get(_result(plain), "resultType") == 0, "M59 ...stays legacy");
+
+    # An `initialize` is the legacy path, whatever its _meta names.
+    var mixed = _expect_result(md, _m(1, "initialize", ",\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"c\",\"version\":\"1\"}"), "M61 an initialize carrying a modern _meta");
+    _expect(_get(_result(mixed), "resultType") == 0, "M62 ...is answered on the legacy path");
+    _expect(_str_is(_get(_result(mixed), "protocolVersion"), "2025-11-25"), "M63 ...and never lands on a revision with no initialize");
+
+    # server/discover belongs to this revision, whatever else _meta says.
+    _expect_code(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{\"_meta\":{\"progressToken\":1}}}", 0 - 32602, "M64 server/discover with _meta and no protocolVersion");
+    _expect_code(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2025-11-25\"}}}", 0 - 32602, "M65 server/discover naming an older revision");
+
+    # tools/list is deterministic: registration order, in both eras, every time.
+    var modern_tools = _get(_result(_expect_result(md, _m(1, "tools/list", ""), "M66 a modern tools/list")), "tools");
+    var legacy_tools = _get(_result(_expect_result(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", "M67 a legacy tools/list")), "tools");
+    _expect(bayan_json_v_arr_len(modern_tools) == 4, "M68 ...lists every tool");
+    _expect(_str_is(_get(bayan_json_v_arr_get(modern_tools, 0), "name"), "test_echo")
+      && _str_is(_get(bayan_json_v_arr_get(modern_tools, 1), "name"), "test_strict")
+      && _str_is(_get(bayan_json_v_arr_get(modern_tools, 2), "name"), "test_none")
+      && _str_is(_get(bayan_json_v_arr_get(modern_tools, 3), "name"), "test_unhandled"),
+      "M69 tools/list is in registration order");
+    _expect(_str_is(_get(bayan_json_v_arr_get(legacy_tools, 3), "name"), "test_unhandled"), "M70 ...on the legacy path too");
+
+    # tools/call reads its fields from the router's pass, _meta before or after them.
+    var late = _expect_result(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"test_echo\",\"arguments\":{\"x\":1},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}", "M71 tools/call with _meta after its arguments");
+    _expect(_is_modern(_result(late)), "M72 ...is a modern call");
+
+    # The router tolerates no params at all, and reads `_meta` as what the key decodes to.
+    _expect(dispatcher_dispatch(md, req_with_params(req_new("1", "tools/list"), 0), 0) != 0, "M73 a request whose params were never set is answered");
+    var esc_key = _expect_result(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"\\u005fmeta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}", "M74 an escaped _meta key");
+    _expect(_is_modern(_result(esc_key)), "M75 ...selects this revision, as the key it decodes to");
+
+    # Bytes: a message of this revision leaves nothing on the heap.
+    var disc_msg = _m(1, "server/discover", "");
+    var list_msg = _m(2, "tools/list", "");
+    var bad_msg = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"1900-01-01\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}";
+    codec_process_message_a(bote_req_begin(), disc_msg, md, 0);
+    codec_process_message_a(bote_req_begin(), list_msg, md, 0);
+    codec_process_message_a(bote_req_begin(), bad_msg, md, 0);
+    var used0 = alloc_used();
+    var mi = 0;
+    while (mi < 100) {
+        codec_process_message_a(bote_req_begin(), disc_msg, md, 0);
+        codec_process_message_a(bote_req_begin(), list_msg, md, 0);
+        codec_process_message_a(bote_req_begin(), bad_msg, md, 0);
+        mi = mi + 1;
+    }
+    assert_eq(alloc_used() - used0, 0, "M60 discover, a modern list and a -32022 leave no heap");
+
+    # =========================================================================
     # Every response above, checked on its own
     # =========================================================================
 
-    assert(_seen > 70, "every scenario's response reached the shape check");
+    assert(_seen > 100, "every scenario's response reached the shape check");
     assert_eq(_nonconforming, 0, "every response is valid JSON and a JSON-RPC 2.0 Response object");
 
     return assert_summary();

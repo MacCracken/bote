@@ -96,8 +96,15 @@ fn codec_serialize_response_a(a, resp) {
     if (id == 0) { id = "null"; }
     var err = resp_error_obj(resp);
     if (err != 0) {
+        # Sized here: a client wrote the id and often the message, and a plain add
+        # past the room it has grows on the heap. An escaped byte is at most six.
+        var msg = rpc_err_message(err);
+        var data = rpc_err_data(err);
+        var room = 256 + strlen(id);
+        if (msg != 0) { room = room + strlen(msg) * 6; }
+        if (data != 0) { room = room + strlen(data); }
         var eb = str_builder_new_a(a);
-        _sb_grow_a(a, eb, 256);
+        _sb_grow_a(a, eb, room);
         str_builder_add_cstr(eb, "{\"jsonrpc\":\"");
         str_builder_add_cstr(eb, resp_jsonrpc(resp));
         str_builder_add_cstr(eb, "\",\"id\":");
@@ -105,9 +112,8 @@ fn codec_serialize_response_a(a, resp) {
         str_builder_add_cstr(eb, ",\"error\":{\"code\":");
         str_builder_add_int(eb, rpc_err_code(err));
         str_builder_add_cstr(eb, ",\"message\":\"");
-        _json_emit_escaped(eb, rpc_err_message(err));
+        _json_emit_escaped(eb, msg);
         str_builder_add_cstr(eb, "\"");
-        var data = rpc_err_data(err);
         if (data != 0) {
             str_builder_add_cstr(eb, ",\"data\":");
             str_builder_add_cstr(eb, data);

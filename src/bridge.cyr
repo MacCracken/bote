@@ -63,12 +63,14 @@ fn bridge_config_bearer_ctx(c)       { return load64(c + 40); }
 #      verbatim rather than re-stringified as a `text` payload.
 #   3. Anything else (scalar, string, non-block object, array) → wrap
 #      the JSON-escaped text under a synthesised `text` block.
-fn wrap_tool_result(result) {
+fn wrap_tool_result(result) { return wrap_tool_result_a(default_alloc(), result); }
+
+fn wrap_tool_result_a(a, result) {
     if (result == 0) { result = "null"; }
     if (jsonx_is_object(result) == 1) {
         # (1) Passthrough — has a `content` array.
         if (jsonx_has(result, "content") == 1) {
-            var c = jsonx_get_raw_a(bote_req_alloc(), result, "content");
+            var c = jsonx_get_raw_a(a, result, "content");
             if (c != 0) {
                 var ci = 0;
                 var clen = strlen(c);
@@ -85,29 +87,36 @@ fn wrap_tool_result(result) {
         # (2) Single content block — lift into the envelope without
         # decomposing. Preserves annotations (1.9.6 → 2.7.0).
         if (jsonx_has(result, "type") == 1) {
-            var sb_lift = str_builder_new();
+            var sb_lift = str_builder_new_a(a);
+            _sb_grow_a(a, sb_lift, strlen(result) + 16);
             str_builder_add_cstr(sb_lift, "{\"content\":[");
             str_builder_add_cstr(sb_lift, result);
             str_builder_add_cstr(sb_lift, "]}");
-            return str_data(str_builder_build(sb_lift));
+            return str_data(str_builder_build_a(a, sb_lift));
         }
     }
     # (3) Else build a synthesised text-block envelope. The text payload
     # is the raw JSON, JSON-escaped.
-    var sb = str_builder_new();
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, strlen(result) * 6 + 64);
     str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
     _json_emit_escaped(sb, result);
     str_builder_add_cstr(sb, "\"}]}");
-    return str_data(str_builder_build(sb));
+    return str_data(str_builder_build_a(a, sb));
 }
 
 # Wrap an error message into an MCP envelope with isError: true.
-fn wrap_error_result(message) {
-    var sb = str_builder_new();
+fn wrap_error_result(message) { return wrap_error_result_a(default_alloc(), message); }
+
+fn wrap_error_result_a(a, message) {
+    var sb = str_builder_new_a(a);
+    var room = 64;
+    if (message != 0) { room = room + strlen(message) * 6; }
+    _sb_grow_a(a, sb, room);
     str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
     if (message != 0) { _json_emit_escaped(sb, message); }
     str_builder_add_cstr(sb, "\"}],\"isError\":true}");
-    return str_data(str_builder_build(sb));
+    return str_data(str_builder_build_a(a, sb));
 }
 
 # ================================================================
@@ -134,11 +143,11 @@ fn _bridge_process_single(a, line, dispatcher, claims) {
         var success_result = resp_result(resp);
         var err_obj = resp_error_obj(resp);
         if (success_result != 0) {
-            var wrapped = wrap_tool_result(success_result);
+            var wrapped = wrap_tool_result_a(a, success_result);
             return codec_serialize_response_a(a, resp_success_a(a, resp_id(resp), wrapped));
         }
         if (err_obj != 0) {
-            var wrapped_err = wrap_error_result(rpc_err_message(err_obj));
+            var wrapped_err = wrap_error_result_a(a, rpc_err_message(err_obj));
             return codec_serialize_response_a(a, resp_success_a(a, resp_id(resp), wrapped_err));
         }
     }

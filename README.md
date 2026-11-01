@@ -186,10 +186,16 @@ bote implements [MCP](https://modelcontextprotocol.io/) over JSON-RPC 2.0.
 | `resources/list` / `resources/read` / `resources/templates/list` | Resources capability (when a `ResourceRegistry` is wired) | Resource metadata / contents / `{"resourceTemplates":[]}` (no URI-template registry) |
 | `completion/complete` | Completion capability | Argument completion values |
 | `ping` | Keepalive | Empty result — answered even on a dispatcher with no registries wired |
+| `server/discover` | 2026-07-28 only | Supported versions and capabilities, with the cache hints |
 
 Supported MCP protocol versions: `2024-11-05`, `2025-03-26`, `2025-06-18`,
 `2025-11-25` (default) — the same list for `initialize` negotiation and for the
 `MCP-Protocol-Version` header on every HTTP-family transport.
+
+`2026-07-28` is served beside them in one process, over stdio and Unix, and over WebSocket
+when no `MCP-Protocol-Version` header is sent. A request selects it in `params._meta`, and
+Streamable HTTP does not speak it yet. See
+[docs/spec-compliance.md](docs/spec-compliance.md#mcp-2026-07-28-stateless-path).
 
 ### Built-in tools (registered by default)
 
@@ -273,13 +279,13 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 1545 total across fifteen files (+ a core-only drift smoke)
+### Tests — 1637 total across fifteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1545 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1637 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 651 — core protocol/dispatch/codec/schema/session/transports
-cyrius test tests/conformance.tcyr        # 127 — JSON-RPC 2.0 + MCP 2025-11-25 conformance, by spec clause
+cyrius test tests/bote.tcyr               # 668 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/conformance.tcyr        # 202 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 55 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 56 — fs_write / fs_read / fs_mkdir
@@ -368,7 +374,7 @@ the same surface.
 |---|---|
 | [docs/architecture/overview.md](docs/architecture/overview.md) | Module map, data flow, six-transport surface |
 | [docs/development/roadmap.md](docs/development/roadmap.md) | Forward-facing only: next patch, 3.4.x → 3.6.x, open decisions, 4.0 criteria |
-| [docs/spec-compliance.md](docs/spec-compliance.md) | MCP 2025-11-25 conformance matrix |
+| [docs/spec-compliance.md](docs/spec-compliance.md) | MCP conformance matrix, 2025-11-25 and 2026-07-28 |
 | [docs/benchmarks-rust-v-cyrius.md](docs/benchmarks-rust-v-cyrius.md) | Side-by-side performance: Rust v0.92.0 vs Cyrius |
 | [docs/cyrius-feedback.md](docs/cyrius-feedback.md) | Port-era Cyrius language issues (historical — all resolved by cyrius 4.4.3) |
 | [docs/development/issues/](docs/development/issues/) | Consumer-filed bote issues with their resolutions; every one is closed and lives under `archive/` |

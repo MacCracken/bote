@@ -4,7 +4,8 @@
 > current version is in [`VERSION`](../../VERSION), pins are in [`cyrius.cyml`](../../cyrius.cyml),
 > and test and benchmark counts are in [`CLAUDE.md`](../../CLAUDE.md)'s testing table.
 >
-> **Spec**: bote speaks MCP through 2025-11-25. The current revision is **2026-07-28**.
+> **Spec**: bote's default is MCP 2025-11-25. The stateless core of **2026-07-28** is in, on stdio, Unix
+> and WebSocket; Streamable HTTP is next.
 > [spec-compliance.md](../spec-compliance.md) · [SECURITY.md](../../SECURITY.md) ·
 > [2026-11-01 closeout audit](../audit/2026-11-01-closeout.md)
 
@@ -17,45 +18,41 @@ ordinary work: reproduce it in bote and fix it.
 The 2.0 handler ABI (`fn h(args, claims) → result_cstr`) and the six transports are stable across the
 2.x → 3.x line, and patch releases add capabilities, not shape changes. The protocol surface is
 `initialize`, `tools/*`, `prompts/*`, `resources/list` + `read`, `completion/complete`, `ping`, and a
-polled push of `tools` / `prompts` `list_changed`. Four revisions are accepted, 2024-11-05 through
-2025-11-25, and every path is asserted by spec clause in `tests/conformance.tcyr`. One binary carries
-every transport, on x86_64, aarch64 and agnos, all CI-gated.
+polled push of `tools` / `prompts` `list_changed`. Four revisions are accepted through `initialize`,
+2024-11-05 through 2025-11-25, and every path is asserted by spec clause in `tests/conformance.tcyr`.
+One binary carries every transport, on x86_64, aarch64 and agnos, all CI-gated.
 
-**The gap that orders everything below:** MCP 2026-07-28 is a breaking revision, and bote does not
-speak it. A client that speaks only that revision cannot talk to bote; the spec's compatibility matrix
-lists that pairing as failing. A client that also speaks the older revisions still works. The spec lets
-one server serve both eras (a "dual-era" server), so bote can add the new revision without dropping
-the old one, and that is the plan.
+**The gap that orders everything below:** MCP 2026-07-28 is a breaking revision, and bote speaks it only
+in part. Since 3.5.0 a request carrying `_meta` `io.modelcontextprotocol/protocolVersion` takes the
+stateless path, with `server/discover` and the modern result shape, and an `initialize` takes today's
+path, in one process. Every transport that reads `MCP-Protocol-Version` still refuses the new version
+in that header, and a conforming client sends it on every POST, so a modern client reaches bote over
+stdio and Unix, and over WebSocket when it sends no such header, but not yet over Streamable HTTP.
 
 ---
 
 ## Next patch
 
-Nothing is queued. The 3.4.x line is closed by the 2026-11-01 audit. A defect found in it lands as its
-own patch ahead of the work below.
+**3.5.1 — Streamable HTTP, modern path.** See below. A defect found in the 3.5.0 core lands ahead of it.
 
 ## 3.5.x — MCP 2026-07-28, dual-era
 
 The largest open item, and the first. The revision removes `initialize`, `Mcp-Session-Id`, `ping`,
 `logging/setLevel`, `resources/subscribe`, the Streamable HTTP `GET` stream and `Last-Event-ID`. The
 protocol becomes stateless: each request carries its own version and capabilities. **Large: small bites,
-each verified before the next.** Read the spec's `schema.md`, `basic/versioning`, `server/discover` and
-`basic/transports/streamable-http` before the first bite; the changelog alone is not the full list.
+each verified before the next.**
 
-1. **Per-request version.** The codec routes on the request: `_meta` `io.modelcontextprotocol/protocolVersion`
-   selects the stateless path, and an `initialize` selects today's path. `UnsupportedProtocolVersionError`
-   (`-32022`), with `data.supported`. `_meta` client capabilities read per request.
-2. **`server/discover`**, which servers MUST implement, and `serverInfo` in each result's `_meta`.
-3. **Result shape.** `resultType: "complete"` on every modern result. `ttlMs` and `cacheScope` on the list
-   results and `resources/read`. `tools/list` in a deterministic order.
-4. **Streamable HTTP, modern path.** `MCP-Protocol-Version` on every POST, checked against `_meta`.
-   `Mcp-Method` and `Mcp-Name`, with mismatches refused as `400` + `-32020`. One message per POST.
-   `202` for a notification. `404` + `-32601` for an unknown method. `405` for a modern `GET` or
-   `DELETE`. `Mcp-Session-Id` and `Last-Event-ID` ignored on the modern path.
-5. **Error codes by era.** A missing resource is `-32602` on the modern path and stays `-32002` on the
-   legacy one. `-32021` for a missing client capability.
-6. **Conformance.** Extend `tests/conformance.tcyr` to the 2026-07-28 clauses, and keep the legacy
-   clauses passing on the same binary. Then change the default.
+1. **Streamable HTTP, modern path (3.5.1).** `validate_protocol_version` accepts `2026-07-28`.
+   `MCP-Protocol-Version` on every POST, checked against `_meta`. `Mcp-Method` and `Mcp-Name`, with
+   mismatches refused as `400` + `-32020`. One message per POST. `202` for a notification. `404` +
+   `-32601` for an unknown method. `405` for a modern `GET` or `DELETE`. `Mcp-Session-Id` and
+   `Last-Event-ID` ignored on the modern path. Read `basic/transports/streamable-http` first.
+2. **Client capabilities (3.5.1 or later).** `-32021` belongs to a request that needs a capability the
+   client did not declare. No request bote serves needs one today, so 3.5.0 requires the object and reads
+   nothing from it. The first feature that needs one adds the check.
+3. **Conformance and the default (3.5.2).** Run the 2026-07-28 clauses over every transport, keep the
+   legacy clauses passing on the same binary, and then decide whether the modern revision becomes the
+   documented default.
 
 Nothing here touches the handler ABI. The legacy path stays until a 4.0 removes it.
 
@@ -141,7 +138,7 @@ Not planned, because the current spec removes or deprecates them: the held-open 
   the archive to a sink, gate the tool on claims, or stop registering it by default.
 - **WebSocket subprotocol and compression.** WebSocket is not an MCP transport, so nothing requires
   these. Both would also need a seam in `lib/ws_server.cyr`.
-- **The default protocol version.** Item 6 of 3.5.x changes it. Whether it changes in that minor or
+- **The default protocol version.** Item 3 of 3.5.x changes it. Whether it changes in that minor or
   after a release of soak is a call for then.
 
 ## Housekeeping — rides any patch

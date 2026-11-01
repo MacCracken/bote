@@ -30,9 +30,25 @@ fn _mcp_is_supported(v) {
     return 0;
 }
 
+# The newest revision `initialize` negotiates. 2026-07-28 has no `initialize`, so
+# it is not on this list: a client offering it there gets legacy semantics.
 fn _mcp_latest_version() { return "2025-11-25"; }
 
-fn _bote_server_version() { return "3.4.15"; }
+# The stateless revision (3.5.0). A request says which revision it is, in its own
+# `_meta`, and nothing carries over from the one before it.
+fn _mcp_is_modern(v) {
+    if (v == 0) { return 0; }
+    if (streq(v, "2026-07-28") == 1) { return 1; }
+    return 0;
+}
+
+# Every revision bote serves, newest first, as a JSON array.
+fn _mcp_emit_versions(sb) {
+    str_builder_add_cstr(sb, "[\"2026-07-28\",\"2025-11-25\",\"2025-06-18\",\"2025-03-26\",\"2024-11-05\"]");
+    return 0;
+}
+
+fn _bote_server_version() { return "3.5.0"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -397,7 +413,11 @@ fn _emit_annotations(sb, ann) {
 # negotiated version. A version-exclusive capability would branch on the
 # negotiated version passed in here.
 fn _build_capabilities(sb, d) {
-    var lc = dispatcher_notifications(d);
+    return _build_capabilities_lc(sb, d, dispatcher_notifications(d));
+}
+
+# `lc` is whether listChanged may be promised, which needs a way to deliver it.
+fn _build_capabilities_lc(sb, d, lc) {
     str_builder_add_cstr(sb, "{\"tools\":{");
     if (lc == 1) { str_builder_add_cstr(sb, "\"listChanged\":true"); }
     str_builder_add_cstr(sb, "}");
@@ -417,6 +437,21 @@ fn _build_capabilities(sb, d) {
 }
 
 # Build the initialize response result body.
+# {"name":...,"version":...}. Escaped since 3.4.6: both come from the embedder
+# through dispatcher_set_server_info, and a quote in either broke the reply.
+fn _dsp_emit_server_info(sb, d) {
+    var sname = dispatcher_server_name(d);
+    if (sname == 0) { sname = "bote"; }
+    var sver = dispatcher_server_version(d);
+    if (sver == 0) { sver = _bote_server_version(); }
+    str_builder_add_cstr(sb, "{\"name\":\"");
+    _json_emit_escaped(sb, sname);
+    str_builder_add_cstr(sb, "\",\"version\":\"");
+    _json_emit_escaped(sb, sver);
+    str_builder_add_cstr(sb, "\"}");
+    return 0;
+}
+
 fn _build_initialize_result_a(a, d, params_cstr) {
     var requested = jsonx_get_str_a(a, params_cstr, "protocolVersion");
     var negotiated = _mcp_latest_version();
@@ -428,17 +463,9 @@ fn _build_initialize_result_a(a, d, params_cstr) {
     str_builder_add_cstr(sb, negotiated);
     str_builder_add_cstr(sb, "\",\"capabilities\":");
     _build_capabilities(sb, d);
-    var sname = dispatcher_server_name(d);
-    if (sname == 0) { sname = "bote"; }
-    var sver = dispatcher_server_version(d);
-    if (sver == 0) { sver = _bote_server_version(); }
-    # Escaped since 3.4.6: both come from the embedder through
-    # dispatcher_set_server_info, and a quote in either broke the reply.
-    str_builder_add_cstr(sb, ",\"serverInfo\":{\"name\":\"");
-    _json_emit_escaped(sb, sname);
-    str_builder_add_cstr(sb, "\",\"version\":\"");
-    _json_emit_escaped(sb, sver);
-    str_builder_add_cstr(sb, "\"}}");
+    str_builder_add_cstr(sb, ",\"serverInfo\":");
+    _dsp_emit_server_info(sb, d);
+    str_builder_add_cstr(sb, "}");
     return str_data(str_builder_build_a(a, sb));
 }
 
@@ -669,7 +696,7 @@ fn _dsp_tool_error_result(text) { return _dsp_tool_error_result_a(default_alloc(
 
 fn _dsp_tool_error_result_a(a, text) {
     var sb = str_builder_new_a(a);
-    _sb_grow_a(a, sb, strlen(text) + strlen(text) / 8 + 64);
+    _sb_grow_a(a, sb, strlen(text) * 6 + 64);
     str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
     if (text != 0) { _json_emit_escaped(sb, text); }
     str_builder_add_cstr(sb, "\"}],\"isError\":true}");
@@ -790,14 +817,14 @@ fn _dsp_coerce_result(name, result, fail_out) {
 # duplicates. A null cursor is read as absent, like a null params.
 fn _dsp_cursor_given(params) {
     if (params == 0) { return 0; }
-    var c = jsonx_get_raw(params, "cursor");
+    var c = jsonx_get_raw_a(bote_req_alloc(), params, "cursor");
     if (c == 0) { return 0; }
     if (load8(c) == 110) { return 0; }
     return 1;
 }
 
-fn _dsp_cursor_refusal(id) {
-    return resp_error(id, 0 - 32602, "invalid cursor: this server returns every item in one page and issues no cursors");
+fn _dsp_cursor_refusal_a(a, id) {
+    return resp_error_a(a, id, 0 - 32602, "invalid cursor: this server returns every item in one page and issues no cursors");
 }
 
 # prefix + name + suffix as one message cstr; suffix may be 0.
@@ -871,12 +898,174 @@ fn dispatcher_dispatch(d, request, claims) {
     return dispatcher_dispatch_a(default_alloc(), d, request, claims);
 }
 
+# ================================================================
+# MCP 2026-07-28 (3.5.0)
+#
+# bote serves this revision and the older ones from one process. Each request
+# says which it is: `_meta` naming this revision is served statelessly, and
+# anything else as it always was. A dual-era client probes with server/discover
+# and falls back to `initialize` on any error it does not recognise, so a legacy
+# client never sees this path.
+#
+# The methods are the same code on both paths. A modern result differs by what
+# surrounds it: resultType on all of them, `ttlMs` and `cacheScope` on the list
+# results and resources/read, and serverInfo in `_meta`.
+#
+# ttlMs is 0, which tells a client to re-fetch: a promise that a list stays fresh
+# needs a way to say it changed, and that is subscriptions/listen (roadmap 3.7.x).
+# For the same reason, this path advertises no listChanged. cacheScope is
+# "private" because a tool list may differ per authorization context.
+# ================================================================
+
+var DSP_META_VERSION = "io.modelcontextprotocol/protocolVersion";
+var DSP_META_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities";
+
+fn _dsp_emit_modern_meta(sb, d) {
+    str_builder_add_cstr(sb, "\"_meta\":{\"io.modelcontextprotocol/serverInfo\":");
+    _dsp_emit_server_info(sb, d);
+    str_builder_add_cstr(sb, "}");
+    return 0;
+}
+
+fn _build_discover_result_a(a, d) {
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, 512);
+    str_builder_add_cstr(sb, "{\"resultType\":\"complete\",\"supportedVersions\":");
+    _mcp_emit_versions(sb);
+    str_builder_add_cstr(sb, ",\"capabilities\":");
+    _build_capabilities_lc(sb, d, 0);
+    str_builder_add_cstr(sb, ",");
+    _dsp_emit_modern_meta(sb, d);
+    str_builder_add_cstr(sb, ",\"ttlMs\":0,\"cacheScope\":\"private\"}");
+    return str_data(str_builder_build_a(a, sb));
+}
+
+# -32022, naming what bote does serve, so a client can pick from it.
+fn _dsp_unsupported_version(a, id, requested) {
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, 128 + strlen(requested) * 6);
+    str_builder_add_cstr(sb, "{\"supported\":");
+    _mcp_emit_versions(sb);
+    str_builder_add_cstr(sb, ",\"requested\":\"");
+    _json_emit_escaped(sb, requested);
+    str_builder_add_cstr(sb, "\"}");
+    return resp_error_data_a(a, id, 0 - 32022, "Unsupported protocol version", str_data(str_builder_build_a(a, sb)));
+}
+
+fn _dsp_cacheable(method) {
+    if (streq(method, "tools/list") == 1) { return 1; }
+    if (streq(method, "prompts/list") == 1) { return 1; }
+    if (streq(method, "resources/list") == 1) { return 1; }
+    if (streq(method, "resources/templates/list") == 1) { return 1; }
+    if (streq(method, "resources/read") == 1) { return 1; }
+    return 0;
+}
+
+# `result` with this revision's fields added. What a handler already set is left
+# alone: a repeated key would make the object ambiguous.
+fn _dsp_modern_result(a, d, method, result) {
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, strlen(result) + 256);
+    str_builder_add_cstr(sb, "{");
+    var sep = "";
+    if (jsonx_has(result, "resultType") == 0) {
+        str_builder_add_cstr(sb, "\"resultType\":\"complete\"");
+        sep = ",";
+    }
+    if (_dsp_cacheable(method) == 1 && jsonx_has(result, "ttlMs") == 0) {
+        str_builder_add_cstr(sb, sep);
+        str_builder_add_cstr(sb, "\"ttlMs\":0,\"cacheScope\":\"private\"");
+        sep = ",";
+    }
+    if (jsonx_has(result, "_meta") == 0) {
+        str_builder_add_cstr(sb, sep);
+        _dsp_emit_modern_meta(sb, d);
+        sep = ",";
+    }
+    var n = strlen(result);
+    var i = _jx_skip_ws(result, n, 0) + 1;
+    i = _jx_skip_ws(result, n, i);
+    if (load8(result + i) != 125) { str_builder_add_cstr(sb, sep); }
+    str_builder_add_cstr(sb, result + i);
+    return str_data(str_builder_build_a(a, sb));
+}
+
+fn _dsp_modern_response(a, d, method, resp) {
+    if (resp == 0) { return 0; }
+    var err = resp_error_obj(resp);
+    if (err != 0) {
+        # -32002 is the older revisions' resource-not-found. This one uses
+        # -32602, and must not emit -32002 at all.
+        if (rpc_err_code(err) == BOTE_RPC_RESOURCE_NOT_FOUND) { store64(err, 0 - 32602); }
+        return resp;
+    }
+    var result = resp_result(resp);
+    if (jsonx_is_object(result) == 0) {
+        return resp_error_a(a, resp_id(resp), 0 - 32603, "internal error: the handler's result is not an object");
+    }
+    return resp_success_a(a, resp_id(resp), _dsp_modern_result(a, d, method, result));
+}
+
 # dispatcher_dispatch with bote's own bytes on `a`. `a` must outlive the response
 # and nothing else. Stays on the global heap: what a handler is handed (it may
 # keep it) and what a sink is handed (ditto).
 fn dispatcher_dispatch_a(a, d, request, claims) {
     if (req_is_notification(request) == 1) { return 0; }
+    var params = req_params(request);
+    var plen = 0;
+    if (params != 0) { plen = strlen(params); }
+    # One pass for `_meta` and what tools/call reads, so choosing the era costs that
+    # method no second walk of its params, and legacy traffic compares no method here.
+    var keys[80];
+    store64(&keys, "name");            store64(&keys + 8, 4);
+    store64(&keys + 16, "version");    store64(&keys + 24, 7);
+    store64(&keys + 32, "arguments");  store64(&keys + 40, 9);
+    store64(&keys + 48, "caller_id");  store64(&keys + 56, 9);
+    store64(&keys + 64, "_meta");      store64(&keys + 72, 5);
+    var pos[40];
+    _jx_scan(params, plen, &keys, 5, &pos);
 
+    var meta = _jx_raw_at_a(a, params, plen, load64(&pos + 32));
+    if (meta == 0 || jsonx_has(meta, DSP_META_VERSION) == 0) {
+        return _dsp_serve_a(a, d, request, claims, &pos, plen);
+    }
+    var method = req_method(request);
+    # `initialize` selects legacy semantics, whatever else it carries.
+    if (streq(method, "initialize") == 1) {
+        return _dsp_serve_a(a, d, request, claims, &pos, plen);
+    }
+
+    # A required field missing or of the wrong type is malformed: -32602.
+    var id = req_id(request);
+    var pv = jsonx_get_str_dec_a(a, meta, DSP_META_VERSION);
+    if (pv == 0) {
+        return resp_error_a(a, id, 0 - 32602, "io.modelcontextprotocol/protocolVersion must be a string");
+    }
+    if (_mcp_is_modern(pv) == 0) {
+        # An older revision named per request is that revision's behaviour.
+        if (_mcp_is_supported(pv) == 1) {
+            return _dsp_serve_a(a, d, request, claims, &pos, plen);
+        }
+        return _dsp_unsupported_version(a, id, pv);
+    }
+    var caps = jsonx_get_raw_a(a, meta, DSP_META_CAPABILITIES);
+    if (caps == 0 || jsonx_is_object(caps) == 0) {
+        return resp_error_a(a, id, 0 - 32602, "io.modelcontextprotocol/clientCapabilities is required and must be an object");
+    }
+
+    if (streq(method, "server/discover") == 1) {
+        return resp_success_a(a, id, _build_discover_result_a(a, d));
+    }
+    # Removed from this revision, with `initialize`.
+    if (streq(method, "ping") == 1) {
+        return resp_error_a(a, id, 0 - 32601, "method not found: ping");
+    }
+    return _dsp_modern_response(a, d, method, _dsp_serve_a(a, d, request, claims, &pos, plen));
+}
+
+# The methods themselves, for both eras: what differs between them is around this.
+# `pos` is the router's pass over the params: name, version, arguments, caller_id.
+fn _dsp_serve_a(a, d, request, claims, pos, plen) {
     var id = req_id(request);
     var method = req_method(request);
     var params = req_params(request);
@@ -884,22 +1073,14 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
     var handlers = dispatcher_handlers(d);
 
     if (streq(method, "tools/call") == 1) {
-        var plen = strlen(params);
-        var ckeys[64];
-        store64(&ckeys, "name");            store64(&ckeys + 8, 4);
-        store64(&ckeys + 16, "version");    store64(&ckeys + 24, 7);
-        store64(&ckeys + 32, "arguments");  store64(&ckeys + 40, 9);
-        store64(&ckeys + 48, "caller_id");  store64(&ckeys + 56, 9);
-        var cpos[32];
-        _jx_scan(params, plen, &ckeys, 4, &cpos);
-        var name = _jx_str_dec_at_a(a, params, plen, load64(&cpos));
+        var name = _jx_str_dec_at_a(a, params, plen, load64(pos));
         if (name == 0 || strlen(name) == 0) {
             var ne = bote_err_new_a(a, BOTE_ERR_INVALID_PARAMS, "", "missing or empty 'name' field");
             return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(ne)), str_data(bote_err_format_a(a, ne)));
         }
 
         # Optional: version negotiation
-        var ver = _jx_str_dec_at_a(a, params, plen, load64(&cpos + 8));
+        var ver = _jx_str_dec_at_a(a, params, plen, load64(pos + 8));
         if (ver != 0 && registry_get_versioned(reg, name, ver) == 0) {
             var sb = str_builder_new_a(a);
             str_builder_add_cstr_a(a, sb, "version '");
@@ -911,7 +1092,7 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
 
         # Extract arguments (default to "{}" if absent), caller_id (optional).
         # On the arena for now: every refusal below leaves nothing behind.
-        var args = _jx_raw_at_a(a, params, plen, load64(&cpos + 16));
+        var args = _jx_raw_at_a(a, params, plen, load64(pos + 16));
         if (args == 0) { args = "{}"; }
         var caller_id = 0;
 
@@ -929,7 +1110,7 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
         var verr2 = registry_validate_params_a(a, reg, name, args);
         if (verr2 != 0) {
             var vmsg = str_data(bote_err_format_a(a, verr2));
-            _dsp_record_refusal(d, name, params, plen, load64(&cpos + 24), vmsg);
+            _dsp_record_refusal(d, name, params, plen, load64(pos + 24), vmsg);
             if (bote_err_tag(verr2) == BOTE_ERR_TOOL_NOT_FOUND) {
                 return resp_error_a(a, id, bote_err_rpc_code(BOTE_ERR_TOOL_NOT_FOUND), vmsg);
             }
@@ -942,6 +1123,7 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
             var dep = tool_def_deprecated(t);
             if (dep != 0) {
                 var ds = str_builder_new_a(a);
+                _sb_grow_a(a, ds, (strlen(name) + strlen(dep)) * 6 + 64);
                 str_builder_add_cstr_a(a, ds, "{\"tool_name\":\"");
                 _json_emit_escaped(ds, name);
                 str_builder_add_cstr_a(a, ds, "\",\"message\":\"");
@@ -965,8 +1147,8 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
         if (audit_on == 1 || events_on == 1) {
             t_start = clock_now_ns();
             # A sink may keep what it is handed.
-            name = _jx_str_dec_at_a(default_alloc(), params, plen, load64(&cpos));
-            caller_id = _jx_str_at_a(default_alloc(), params, plen, load64(&cpos + 24));
+            name = _jx_str_dec_at_a(default_alloc(), params, plen, load64(pos));
+            caller_id = _jx_str_at_a(default_alloc(), params, plen, load64(pos + 24));
         }
         if (map_has(handlers, name) == 0) {
             var nf = bote_err_new_a(a, BOTE_ERR_TOOL_NOT_FOUND, name, 0);
@@ -1036,7 +1218,7 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
     }
 
     if (streq(method, "tools/list") == 1) {
-        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal(id); }
+        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal_a(a, id); }
         var lprofile = 0;
         if (params != 0) { lprofile = jsonx_get_str_a(a, params, "profile"); }
         return resp_success_a(a, id, _build_tools_list_result_a(a, reg, lprofile));
@@ -1046,12 +1228,12 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
     # is present). Otherwise fall through to method-not-found (-32601), which
     # matches the un-advertised capability.
     if (streq(method, "prompts/list") == 1 && dispatcher_prompts(d) != 0) {
-        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal(id); }
+        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal_a(a, id); }
         return resp_success_a(a, id, _build_prompts_list_result(a, dispatcher_prompts(d)));
     }
 
     if (streq(method, "prompts/get") == 1 && dispatcher_prompts(d) != 0) {
-        var pname = jsonx_get_str(params, "name");
+        var pname = jsonx_get_str_a(a, params, "name");
         if (pname == 0 || strlen(pname) == 0) {
             var pe = bote_err_new_a(a, BOTE_ERR_INVALID_PARAMS, "", "missing or empty 'name' field");
             return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(pe)), str_data(bote_err_format_a(a, pe)));
@@ -1060,7 +1242,7 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
         if (phandler == 0) {
             return resp_error_a(a, id, 0 - 32602, _dsp_named_msg_a(a, "prompt not found: ", pname, 0));
         }
-        var pargs = jsonx_get_raw(params, "arguments");
+        var pargs = jsonx_get_raw_a(a, params, "arguments");
         if (pargs == 0) { pargs = "{}"; }
         # The MCP prompts spec: invalid prompt name and missing required
         # arguments are both -32602 (3.4.5 added the second; the handler
@@ -1078,6 +1260,8 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
             str_builder_add_cstr_a(a, pmb, "'");
             return resp_error_a(a, id, 0 - 32602, str_data(str_builder_build_a(a, pmb)));
         }
+        # Past every refusal: a handler may keep what it is handed.
+        pargs = _slice_cstr(default_alloc(), pargs, 0, strlen(pargs));
         var presult = fncall2(phandler, pargs, claims);
         if (presult == 0) { presult = "{\"messages\":[]}"; }
         return _dsp_checked_result(a, id, presult);
@@ -1086,12 +1270,12 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
     # resources/* only when the resources capability is enabled (a
     # ResourceRegistry is present). Otherwise fall through to -32601.
     if (streq(method, "resources/list") == 1 && dispatcher_resources(d) != 0) {
-        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal(id); }
+        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal_a(a, id); }
         return resp_success_a(a, id, _build_resources_list_result(a, dispatcher_resources(d)));
     }
 
     if (streq(method, "resources/read") == 1 && dispatcher_resources(d) != 0) {
-        var ruri = jsonx_get_str_dec_a(default_alloc(), params, "uri");
+        var ruri = jsonx_get_str_dec_a(a, params, "uri");
         if (ruri == 0 || strlen(ruri) == 0) {
             var re = bote_err_new_a(a, BOTE_ERR_INVALID_PARAMS, "", "missing or empty 'uri' field");
             return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(re)), str_data(bote_err_format_a(a, re)));
@@ -1101,12 +1285,15 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
             # -32002 with the URI in `data`, as the MCP resources spec has
             # it. It was -32602 through 3.4.4.
             var rdb = str_builder_new_a(a);
+            _sb_grow_a(a, rdb, strlen(ruri) * 6 + 16);
             str_builder_add_cstr_a(a, rdb, "{\"uri\":\"");
             _json_emit_escaped(rdb, ruri);
             str_builder_add_cstr_a(a, rdb, "\"}");
-            return resp_error_data(id, BOTE_RPC_RESOURCE_NOT_FOUND,
+            return resp_error_data_a(a, id, BOTE_RPC_RESOURCE_NOT_FOUND,
               _dsp_named_msg_a(a, "resource not found: ", ruri, 0), str_data(str_builder_build_a(a, rdb)));
         }
+        # Past every refusal: a handler may keep what it is handed.
+        ruri = _slice_cstr(default_alloc(), ruri, 0, strlen(ruri));
         var rresult = fncall2(rhandler, ruri, claims);
         if (rresult == 0) { rresult = "{\"contents\":[]}"; }
         return _dsp_checked_result(a, id, rresult);
@@ -1119,7 +1306,7 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
     # templates". Gated like the other resources/* methods, and refuses a
     # pagination `cursor` like the other list methods.
     if (streq(method, "resources/templates/list") == 1 && dispatcher_resources(d) != 0) {
-        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal(id); }
+        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal_a(a, id); }
         return resp_success_a(a, id, "{\"resourceTemplates\":[]}");
     }
 
@@ -1134,6 +1321,11 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
         var cresult = fncall2(dispatcher_completion(d), cparams, claims);
         if (cresult == 0) { cresult = "{\"completion\":{\"values\":[]}}"; }
         return _dsp_checked_result(a, id, cresult);
+    }
+
+    # The router answers it for a request that named this revision.
+    if (streq(method, "server/discover") == 1) {
+        return resp_error_a(a, id, 0 - 32602, "server/discover needs _meta naming 2026-07-28 and clientCapabilities");
     }
 
     # Unknown method — JSON-RPC §5.1

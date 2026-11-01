@@ -18,6 +18,108 @@ have per release.
 
 _(empty)_
 
+## [3.5.0] — 2026-11-01 · MCP 2026-07-28's stateless core beside the legacy revisions in one process, and the heap hole 3.4.15 left open
+
+The first patch of the dual-era minor. A request that names `2026-07-28` in `params._meta` gets that revision, and every
+other request gets what it got before: 200,000 fuzzed legacy messages came back byte-identical to 3.4.15's. A conforming
+client reaches it over stdio and Unix. **Streamable HTTP does not speak it yet:** it answers `400` to
+`MCP-Protocol-Version: 2026-07-28`, the header such a client sends on every POST. That is 3.5.1. The handler ABI and the
+stated minimum cyrius (6.7.13) are unchanged.
+
+The bench A/B for the router led to a separate finding: **3.4.15's claim that a client cannot grow the heap was wrong for
+long values.** See Security.
+
+### Security
+
+- **A refused request with a long value still grew the heap, with no auth.** 3.4.15 moved request handling onto an arena
+  and measured it, but its measurements put the long value in the padding, a token or the arguments. A long `id`, method,
+  name, URI or cursor went a different way. The error serializer sized its builder at 256 bytes and then wrote those
+  values through the plain builder, which grows on the heap even when its first buffer is on the arena. `prompts/get`,
+  `resources/read` and the cursor check read their values onto the heap before refusing them, and the bridge built its
+  `tools/call` errors there. The binary registers both a prompt and a resource, so all of this was reachable on a stock
+  server. At
+  the 1 GiB the closeout audit saw kill the process, 577 KB per request is about 1,900 requests.
+
+  Measured on real binaries, RSS growth per request over 800 to 1,200 requests, on http, bridge, streamable and stdio:
+
+  | Request | 3.4.15 | 3.5.0 |
+  |---|---|---|
+  | 60 KB unknown method | 60,293–61,167 B | 0 |
+  | 60 KB string `id` on an unknown method | 60,293–61,167 B | 0 |
+  | 60 KB unknown tool name | 60,293–120,586 B | 0 |
+  | 60 KB unknown prompt | 120,586 B | 0 |
+  | 60 KB unknown resource | 298,844–300,592 B | 0 |
+  | Resource URI of 10,000 `\u0001` escapes | 576,717–579,338 B | 0 |
+  | 60 KB cursor | 60,293–61,167 B | 0 |
+
+  Unix and WebSocket share this code and were not measured. The same fix sizes the `-32022` reply, a tool error result
+  (a validator message quotes the client's value: `value '…' not in enum`) and the deprecation event. `tests/bote.tcyr`
+  adds 17 assertions, including that what a prompt or resource handler keeps survives the next message.
+- ⚠ **Still grows, as before:** a valid tool, prompt, resource or completion call leaves what its handler is handed and
+  whatever the handler allocates, because the 2.0 ABI lets a handler keep them. Roadmap 3.8.x.
+
+### Added
+
+- **Per-request protocol selection.** `dispatcher_dispatch_a` is now a router, and `_dsp_serve_a` holds the methods for
+  both eras, so handlers, validation, audit and events are the same on each. `_meta`
+  `io.modelcontextprotocol/protocolVersion` selects: `2026-07-28` is the stateless path, a supported older revision and a
+  request with no version are the legacy path, and anything else is `-32022` with `data.supported` and `data.requested`.
+  An `initialize` is always legacy, so it never lands on a revision that has no `initialize`. Nothing carries between
+  messages. Required `_meta` fields missing or of the wrong type are `-32602`.
+- **`server/discover`**, which servers MUST implement: `resultType`, `supportedVersions`, `capabilities`, `ttlMs`,
+  `cacheScope`. Without a modern `_meta` it is `-32602`.
+- **The modern result shape.** `resultType: "complete"` on every result, `serverInfo` in
+  `_meta["io.modelcontextprotocol/serverInfo"]`, and `ttlMs` + `cacheScope` on discover, the three lists,
+  `resources/templates/list` and `resources/read`. What a handler already set is left alone, since a repeated key would
+  make the object ambiguous. The hints are `0` and `"private"`, and no `listChanged` is advertised, because this revision
+  has no way to deliver a change until `subscriptions/listen` (roadmap 3.7.x).
+- **Era-specific errors.** A missing resource is `-32602` on the modern path and stays `-32002` on the legacy one. A
+  modern `ping` is `-32601`. A handler result that is not an object is `-32603`, since it cannot carry the fields.
+- `resp_error_data_a`, `wrap_tool_result_a`, `wrap_error_result_a`. The plain forms are unchanged.
+
+### Changed
+
+- The router makes one pass over the params for `_meta` and the fields `tools/call` reads, through the one scanner. An
+  escaped `_meta` key selects the same way.
+- `tests/conformance.tcyr` M1–M75, `scripts/transport-smoke.sh` runs both eras in one stdio process, and `SECURITY.md`'s
+  supported-versions table, which still named 3.3.x, is current.
+
+### Performance
+
+The first router cost `dispatch_tools_call` **+18.9%**. Two `streq` calls on every legacy request were about a third of
+that, and a second walk of the params was the rest. Reordering removed the first and sharing `tools/call`'s pass removed the
+second. Interleaved A/B, 15 alternating rounds, pinned to one core, 3.4.15 against 3.5.0, medians in ns:
+
+| Bench | 3.4.15 | 3.5.0 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 3,755 | 3,808 | +1.4% |
+| `dispatch_tools_call` | 1,995 | 2,030 | +1.8% |
+| `dispatch_tools_call_result` | 1,828 | 1,843 | +0.8% |
+| `dispatch_tools_list` | 1,533 | 1,674 | **+9.2%** |
+| `dispatch_initialize` | 1,394 | 1,712 | **+22.8%** |
+
+`dispatch_tools_call` read +0.3% and +2.8% in two other runs, so take it as 0 to 3%. The two slower rows are real and
+are not the path that matters: a client makes those calls once. `initialize` pays for a scan it used to skip, about 140 ns
+measured with the scan removed. `tools/list` spends about 15 ns on the scan, and shifting the code by 24 bytes changed
+nothing, so the rest is most likely the router's frame and key table.
+
+### Not done
+
+- Streamable HTTP's modern path, roadmap 3.5.1.
+- `-32021`: no request bote serves needs a client capability yet, so capabilities are required and not otherwise read.
+- `subscriptions/listen`, cancellation and progress on the modern path, roadmap 3.7.x.
+
+### Proof
+
+- **Legacy unchanged:** 200,000 fuzzed messages, 2 seeds, byte-identical to 3.4.15 with the version string put back.
+- **Arena:** a build that overwrites the arena on every rewind matched a normal one over 100,000 messages and passes
+  `tests/bote.tcyr` and `tests/conformance.tcyr`.
+- **Mutation:** 40 mutants of the router and the heap fix, all killed. Three survived at first, on behaviour with no test,
+  and those tests were then added.
+- **Real transports:** a modern `server/discover` answered on stdio, Unix, WebSocket, HTTP and the bridge on the built
+  binary, by hand. Only stdio is in `scripts/transport-smoke.sh`.
+- Tests: 1,545 → 1,637, on x86_64 and under `qemu-aarch64`. agnos compiles with 0 undefined and does not run here.
+
 ## [3.4.15] — 2026-11-01 · closeout: a website can no longer reach bote, a request leaves nothing on the heap, and the roadmap follows the current spec
 
 The P(-1) pass that closes 3.4.x. Four independent reviews found no memory-safety defect and a good deal else: any
@@ -26,6 +128,10 @@ unauthenticated client could kill the server in about 12 seconds. All of that is
 was deferred and why, are in [docs/audit/2026-11-01-closeout.md](docs/audit/2026-11-01-closeout.md). The handler ABI
 and the stated minimum cyrius (6.7.13) are unchanged. MCP's current revision is 2026-07-28, which bote does not speak
 yet; that now leads the roadmap.
+
+> ⚠ **Corrected at 3.5.0.** "A request leaves nothing on the heap" held for the scenarios measured here, not for every
+> request: a long value in a refused request's `id`, method, name, URI or cursor still grew the heap, with no auth. See
+> 3.5.0's Security section.
 
 ### Security
 

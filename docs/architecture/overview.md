@@ -176,8 +176,8 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
   authentication bypasses).
 
 tests/
-├── bote.tcyr                  — 651 core assertions
-├── conformance.tcyr           — 127 (JSON-RPC 2.0 + MCP 2025-11-25, by spec clause, via codec_process_message)
+├── bote.tcyr                  — 668 core assertions
+├── conformance.tcyr           — 202 (JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28, by spec clause, via codec_process_message)
 ├── bote_auth.tcyr             — 55 (bearer + allowlist + JWT + PKCE validators; 401 log lines)
 ├── bote_content.tcyr          — 25 (content blocks + annotations)
 ├── bote_fs_tools.tcyr         — 56 (fs_tools; refused-path log lines; control bytes read back as valid JSON)
@@ -208,7 +208,7 @@ docs/
 ├── benchmarks-rust-v-cyrius.md
 ├── cyrius-feedback.md         — port-era language issues (historical; all resolved)
 ├── resolved-lang-issues.md    — bote's upstream cyrius filings + the fix each landed
-├── spec-compliance.md         — MCP 2025-11-25 conformance matrix (incl. the open gaps)
+├── spec-compliance.md         — MCP conformance matrix, 2025-11-25 and 2026-07-28 (incl. the open gaps)
 ├── development/roadmap.md     — forward-facing only: next patch → 3.6.x, decisions, 4.0 criteria
 ├── development/issues/        — consumer-filed bote issues; all closed, under archive/
 └── audit/                     — dated audit reports
@@ -268,6 +268,23 @@ dispatch.
 
 ---
 
+## Protocol Eras
+
+One process serves both (a dual-era server, 3.5.0), and nothing carries between requests, so each message
+chooses for itself. `dispatcher_dispatch_a` makes one pass over the params and routes on what it finds:
+
+- **No `_meta` naming a version, and every `initialize`:** the legacy path.
+- **`_meta` naming a supported older revision:** the legacy path.
+- **`_meta` naming `2026-07-28`:** the required fields are checked, `server/discover` and `ping` are answered
+  in the router, and everything else goes through the same `_dsp_serve_a`, with its result reshaped by
+  `_dsp_modern_response` (`resultType`, cache hints, `serverInfo` in `_meta`).
+- **Any other version:** `-32022`.
+
+Handlers, schema validation, audit and events are the same on both paths. That one pass also reads the fields
+`tools/call` needs, so choosing the era costs that method no second walk of its params.
+
+---
+
 ## Error Codes
 
 | Code | Meaning |
@@ -276,15 +293,16 @@ dispatch.
 | -32600 | Invalid request (bad jsonrpc version, id or params type; empty batch; non-object element; valid JSON that is not a request) |
 | -32601 | Method not found (incl. a method behind an un-advertised capability) |
 | -32602 | Invalid params (unknown tool or tool version, missing / empty / non-string tool name, non-object `arguments`, invalid pagination cursor, unknown prompt or missing required prompt argument, missing `uri`) |
-| -32002 | Resource not found (`resources/read`, URI in `error.data`) |
+| -32002 | Resource not found (`resources/read`, URI in `error.data`), legacy path only: it is `-32602` on the 2026-07-28 path |
+| -32022 | Unsupported protocol version, on the 2026-07-28 path (`data.supported`, `data.requested`) |
 | -32000 | Tool execution / sandbox error — in `bote_err_rpc_code` for an embedder's own use; bote's dispatcher reports a failed tool as a result with `isError: true` instead |
+| -32003 | Transport closed / bind failed |
+| -32603 | Internal error |
+| -32800 | Request cancelled |
 
 A `tools/call` whose arguments fail the tool's `inputSchema` is **not** an error code: it is a
 result with `isError: true`, so the model can read what it got wrong (MCP 2025-11-25, SEP-1303).
 So is a handler that returns nothing.
-| -32003 | Transport closed / bind failed |
-| -32603 | Internal error |
-| -32800 | Request cancelled |
 
 Maintained in `src/error.cyr::bote_err_rpc_code`; `-32002` and the cursor refusal are set in
 `src/dispatch.cyr`.
@@ -405,10 +423,10 @@ standing rules are in CLAUDE.md under Key Principles.
 
 | Artifact | Count | Where |
 |---|---|---|
-| Core unit tests | 651 | `tests/bote.tcyr` |
-| Protocol conformance | 127 | `tests/conformance.tcyr` — by spec clause, through `codec_process_message` (3.4.5) |
+| Core unit tests | 668 | `tests/bote.tcyr` |
+| Protocol conformance | 202 | `tests/conformance.tcyr` — by spec clause, through `codec_process_message` (3.4.5) |
 | Module tests | 767 | `tests/bote_auth.tcyr` (45) + `bote_content.tcyr` (25) + `bote_fs_tools.tcyr` (56) + `bote_host.tcyr` (203) + `bote_jwt.tcyr` (59) + `bote_libro_tools.tcyr` (73) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (76) + `bote_web_tools.tcyr` (66) + `bote_ws.tcyr` (21) |
-| **Total assertions** | **1545** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
+| **Total assertions** | **1637** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
 | Benchmarks | 16 | `tests/bote.bcyr` |
 | Fuzz harnesses | 6 | `fuzz/*.fcyr` |
 

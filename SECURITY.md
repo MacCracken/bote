@@ -41,8 +41,12 @@ The primary security-relevant surface areas are:
   the life of the process. Since **3.4.15** everything bote allocates to answer a
   message goes on a request arena that the next message rewinds, including
   refusals before and after auth, so an unauthenticated client cannot grow the
-  heap. A valid tool call still leaves its `args` and whatever its handler
-  allocates, because the 2.0 handler ABI lets a handler keep them (roadmap 3.8.x).
+  heap with a refused request. That was only true for short values until **3.5.0**:
+  through 3.4.15 a long `id`, method, name, URI or cursor retained 61 to 577 KB per
+  refused request. A valid tool, prompt, resource or completion call still leaves
+  what its handler is handed and whatever the handler allocates, because the 2.0
+  handler ABI lets a handler keep them (roadmap 3.8.x). On a server without auth,
+  that means any client that can call one.
   Sessions expire, the store holds at most `BOTE_SESSION_MAX` (4096) and answers
   503 when full of live ones, and a session is minted only after `initialize`
   has succeeded.
@@ -92,9 +96,9 @@ The primary security-relevant surface areas are:
 
 | Version | Supported |
 | ------- | --------- |
-| 3.3.x   | Yes (current minor) |
-| 3.2.x   | Yes (prior minor) |
-| < 3.2   | No        |
+| 3.5.x   | Yes (current minor) |
+| 3.4.x   | Yes (prior minor) |
+| < 3.4   | No        |
 
 ## Reporting a Vulnerability
 

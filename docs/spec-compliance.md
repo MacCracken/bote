@@ -1,8 +1,8 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.4.15 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.5.0 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
-> ⚠ **The current MCP revision is 2026-07-28, and bote does not speak it yet.** It is a breaking revision: stateless, with no `initialize`, sessions or `ping`. A client that speaks only that revision cannot talk to bote; one that also speaks an older revision can. Everything below is against 2025-11-25. The plan is a dual-era server, roadmap 3.5.x.
+> ⚠ **bote speaks the current revision, 2026-07-28, in part.** Its stateless core works over stdio and Unix, and over WebSocket when no `MCP-Protocol-Version` header is sent. Streamable HTTP does not speak it yet: it refuses that version in the header a conforming client sends, roadmap 3.5.1. [The 2026-07-28 section](#mcp-2026-07-28-stateless-path) lists what is in. Every other table here is against 2025-11-25.
 
 This file lists what the shipped Cyrius implementation **covers today**, including the
 gaps — a ❌ row is a defect on the released binary, a ⏳ row is planned work. Both are
@@ -22,10 +22,13 @@ assertions, which is how the rows marked (3.4.5) were found.
 | `2025-03-26` | ✅ |
 | `2025-06-18` | ✅ (3.3.13) |
 | `2025-11-25` | ✅ **default** |
+| `2026-07-28` | ⚠️ stateless core, on the request path (3.5.0); not on Streamable HTTP |
 
-Negotiated via `initialize`. The server picks the highest mutually
-supported version. The list lives in exactly one place — `_mcp_is_supported`
-(`src/dispatch.cyr`); `session.cyr`'s header validator defers to it. Through
+The first four are negotiated via `initialize`. The server picks the highest
+mutually supported version, so `initialize` never lands on `2026-07-28`, which
+has no `initialize`. A request selects that revision itself, in `_meta`, and one
+process serves both eras. The legacy list lives in exactly one place —
+`_mcp_is_supported` (`src/dispatch.cyr`); `session.cyr`'s header validator defers to it. Through
 3.3.12 there were two copies, and the drift they allowed was asymmetric: a
 version missing from the header validator 400s on every HTTP-family transport
 while stdio negotiates it happily. Four assertions now pin the two readers
@@ -35,6 +38,31 @@ JSON-RPC batching was removed from the spec at `2025-06-18`; bote keeps acceptin
 batch arrays on every version (a superset is harmless to a client that never
 sends one, and refusing them per-version would break the earlier clients that
 legitimately batch).
+
+---
+
+## MCP 2026-07-28, stateless path
+
+Selected per request by `params._meta["io.modelcontextprotocol/protocolVersion"]`. A request without
+that key, and every `initialize`, takes the legacy path unchanged. Handlers are the same on both.
+Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`.
+
+| Spec Requirement | Status |
+|---|---|
+| Every request carries its version and client capabilities in `_meta`; a required field missing or of the wrong type is `-32602` | ✅ (3.5.0) |
+| An unsupported version is `-32022`, with `data.supported` and `data.requested` | ✅ (3.5.0) — the supported list is the same on both eras. `requested` is escaped, since a client wrote it |
+| An older revision named in `_meta` is served on the legacy path | ✅ (3.5.0) |
+| `server/discover`, which servers MUST implement: `resultType`, `supportedVersions`, `capabilities`, `ttlMs`, `cacheScope`. A discover request without `_meta` is `-32602` | ✅ (3.5.0) |
+| `resultType: "complete"` on every result | ✅ (3.5.0) — added to what a handler returned, and left alone if the handler set it |
+| `ttlMs` + `cacheScope` on `server/discover`, the `tools`, `prompts` and `resources` lists, `resources/templates/list` and `resources/read` | ✅ (3.5.0) — `0` and `"private"`. A longer lifetime needs change notification to invalidate it, and that is `subscriptions/listen`, roadmap 3.7.x |
+| `serverInfo` in `result._meta["io.modelcontextprotocol/serverInfo"]` | ✅ (3.5.0) |
+| A missing resource is `-32602`, never `-32002` | ✅ (3.5.0) — `-32002` stays on the legacy path |
+| `ping` and `initialize` are gone | ✅ (3.5.0) — a modern `ping` is `-32601`. An `initialize` selects the legacy path whatever `_meta` it carries, so it never lands on a revision that has no `initialize` |
+| No `listChanged` advertised | ✅ (3.5.0) — the modern era has no way to deliver it until `subscriptions/listen` |
+| `tools/list` in a deterministic order | ✅ registration order, in both eras |
+| Streamable HTTP: `MCP-Protocol-Version` against `_meta`, `Mcp-Method` / `Mcp-Name`, `-32020`, `202`, `404`, `405` | ⏳ roadmap 3.5.1 |
+| `-32021` for a missing client capability | ⏳ no request bote serves needs one yet; capabilities are required and not otherwise read |
+| `subscriptions/listen` and the rest of its notifications | ⏳ roadmap 3.7.x |
 
 ---
 
@@ -233,12 +261,12 @@ registered by default in the binaries.
 
 ---
 
-## Test Coverage (bote 3.4.5)
+## Test Coverage (bote 3.5.0)
 
 | Scope | Count | Source |
 |---|---|---|
-| **Protocol conformance by spec clause** — JSON-RPC 2.0 §4 / §5 / §4.1 / §5.1 / §6 (incl. the spec's own examples), MCP initialize + all four revisions, ping, cancellation, capability gating, pagination cursors, tools/list, the tools/call protocol-vs-execution error split, prompts, resources, completion, control bytes in a tool result, every handler-result shape, typed arguments; every response checked to be valid JSON and a §5 Response object | **127** | `tests/conformance.tcyr` (3.4.5) |
-| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / the per-request DEBUG line, the string escaper, registration checks, numbers per 2020-12 | **651** | `tests/bote.tcyr` |
+| **Protocol conformance by spec clause** — JSON-RPC 2.0 §4 / §5 / §4.1 / §5.1 / §6 (incl. the spec's own examples), MCP initialize + all four revisions, ping, cancellation, capability gating, pagination cursors, tools/list, the tools/call protocol-vs-execution error split, prompts, resources, completion, control bytes in a tool result, every handler-result shape, typed arguments; the 2026-07-28 stateless path; every response checked to be valid JSON and a §5 Response object | **202** | `tests/conformance.tcyr` (3.4.5; 3.5.0) |
+| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / the per-request DEBUG line, the string escaper, registration checks, numbers per 2020-12 | **668** | `tests/bote.tcyr` |
 | Bearer + allowlist + JWT + PKCE validators | **55** | `tests/bote_auth.tcyr` |
 | Content blocks + annotations | **25** | `tests/bote_content.tcyr` |
 | `fs_tools` path safety + root confinement + control bytes as valid JSON + schemas and annotations; decoded names, truncation, fs_mkdir | **56** | `tests/bote_fs_tools.tcyr` |
@@ -252,7 +280,7 @@ registered by default in the binaries.
 | Unix transport — sockaddr, accept-error policy, backoff, deadlines, closed-peer write, overlong lines, socket-path refusals | **76** | `tests/bote_transport_unix.tcyr` |
 | `web_tools` — scheme guard, SSRF guard (URL and resolved address), HTML stripper, entities, schemas and annotations, outbound deadline | **66** | `tests/bote_web_tools.tcyr` |
 | WebSocket config + wire-up + the send-deadline drop | **21** | `tests/bote_ws.tcyr` |
-| **Total assertions** | **1545** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
+| **Total assertions** | **1637** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
 | Hot-path benchmarks | **16** | `tests/bote.bcyr` |
 | Fuzz harnesses | **6** | `fuzz/*.fcyr` (in CI since 3.3.8; `jsonx_valid.fcyr` since 3.4.5, `ssrf_ipv6.fcyr` since 3.4.7) |
 | End-to-end transport round trips | 6 (stdio, HTTP, Unix, bridge, streamable, WS) | CI's "Transport smoke" step plus a per-release stdio probe on the built binary |

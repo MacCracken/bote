@@ -145,6 +145,13 @@ while 1:
     d+=c
 print(d.split(b"\r\n")[0].decode())' "$INIT")
 echo "$r" | grep -q ' 400 ' || err "a NUL in a body was not refused: $r"
+# MCP 2026-07-28 over stdio, and a legacy client on the same binary (3.5.0).
+MM='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
+r=$(printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{$MM}}" "$INIT" "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\",\"params\":{$MM}}" \
+  | timeout 5 $B stdio 2>/dev/null)
+echo "$r" | sed -n 1p | grep -q '"supportedVersions":\["2026-07-28"' || err "server/discover over stdio: $r"
+echo "$r" | sed -n 2p | grep -q '"protocolVersion":"2025-11-25"' || err "initialize beside a modern request: $r"
+echo "$r" | sed -n 3p | grep -q '"resultType":"complete"' || err "modern tools/list over stdio: $r"
 # What a root can hold (3.4.15): a tool stays in it through a symlink, and a FIFO
 # cannot hang the server.
 fsr="$L/fsroot"; fso="$PWD/$L/outside"; rm -rf "$fsr" "$fso"; mkdir -p "$fsr" "$fso"
