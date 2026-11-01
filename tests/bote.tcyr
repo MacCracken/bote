@@ -297,6 +297,30 @@ fn main() {
     # fallback's INVALID_PARAMS).
     assert_eq(bote_err_tag(miss_err), BOTE_ERR_SCHEMA_VIOLATION, "missing -> SCHEMA_VIOLATION (compiled at registration)");
 
+    # ---------------- registry: the required-only fallback (3.4.11) ----------------
+    # Registration always compiles a schema, so a definition reaches the
+    # fallback only with the compiled one taken away. A repeated key is valid
+    # to jsonx_valid, so it can arrive here from the wire.
+    var fbreg = tool_registry_new();
+    registry_register(fbreg, tool_def_new("scan", "scan tool", schema_p));
+    tool_def_with_compiled(registry_get(fbreg, "scan"), 0);
+    var fb_miss = registry_validate_params(fbreg, "scan", "{}");
+    assert(fb_miss != 0 && bote_err_tag(fb_miss) == BOTE_ERR_INVALID_PARAMS, "fallback: a missing required field -> INVALID_PARAMS");
+    assert(fb_miss != 0 && streq(bote_err_reason(fb_miss), "missing required field: path") == 1, "fallback: ...naming the field");
+    var rp_two = vec_new();
+    vec_push(rp_two, "path");
+    vec_push(rp_two, "mode");
+    registry_register(fbreg, tool_def_new("scan_two", "scan tool", schema_new("object", 0, rp_two)));
+    tool_def_with_compiled(registry_get(fbreg, "scan_two"), 0);
+    var fb_second = registry_validate_params(fbreg, "scan_two", "{\"path\":\"/tmp\"}");
+    assert(fb_second != 0 && streq(bote_err_reason(fb_second), "missing required field: mode") == 1, "fallback: every required field is checked, not only the first");
+    assert_eq(registry_validate_params(fbreg, "scan", "{\"path\":\"/tmp\"}"), 0, "fallback: the field present passes");
+    assert_eq(registry_validate_params(fbreg, "scan", "{\"path\":null}"), 0, "fallback: present means present, whatever the value");
+    assert(registry_validate_params(fbreg, "scan", "{\"x\":{\"path\":1}}") != 0, "fallback: a nested key is not the field");
+    assert(registry_validate_params(fbreg, "scan", "{\"x\":\"\\\"path\\\":1\"}") != 0, "fallback: a key spelled inside a string is not the field");
+    assert_eq(registry_validate_params(fbreg, "scan", "{\"path\":\"/a\",\"path\":\"/b\"}"), 0, "fallback: a repeated key is still present");
+    assert_eq(registry_validate_params(reg2, "scan", "{\"path\":\"/a\",\"path\":\"/b\"}"), 0, "compiled path: the same repeated key passes, so the two paths agree");
+
     # ---------------- registry: registration checks and compile (3.4.8) ----------------
     var rreg = tool_registry_new();
     var good = tool_def_new("svc.tools-list_v2", "ok", schema_new("object", 0, vec_new()));

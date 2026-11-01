@@ -260,12 +260,12 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 1374 total across fifteen files (+ a core-only drift smoke)
+### Tests — 1383 total across fifteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1374 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1383 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 536 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/bote.tcyr               # 545 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/conformance.tcyr        # 127 — JSON-RPC 2.0 + MCP 2025-11-25 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 45 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
@@ -289,25 +289,27 @@ cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dis
 cyrius bench tests/bote.bcyr
 ```
 
-A logged row — bote 3.4.1 on cyrius 6.7.9, single run (1-minute load 2.1, a quieter host than any row since), `AMD Ryzen 7 5800H`. 3.4.5 added a 15th bench, `jsonx_valid_request`, the syntax pass every message now gets (577 ns in its own row). The full history, with the host conditions
+A logged row — bote 3.4.11 on cyrius 6.7.18, single run (1-minute load 3.7), `AMD Ryzen 7 5800H`. The full history, with the host conditions
 each block was taken under, is [`benches/history.log`](benches/history.log).
 
 | Hot path | Avg |
 |---|---|
-| `dispatch_initialize` | ~1.34 µs |
-| `dispatch_tools_list` | ~1.89 µs |
-| `dispatch_tools_call` (no audit / event sink) | ~1.79 µs |
-| `jsonx_get_str_flat` | ~135 ns |
-| `jsonx_get_raw_nested` | ~370 ns |
-| `codec_parse_request` | ~1.36 µs |
-| `codec_serialize_response` | ~439 ns |
-| `codec_process_message` (full pipeline) | ~3.70 µs |
-| `validate_compiled_simple` | ~480 ns |
-| `validate_compiled_nested` | ~2.13 µs |
-| `schema_compile_simple` | ~2.27 µs |
-| `schema_compile_nested` | ~5.41 µs |
+| `dispatch_initialize` | ~1.52 µs |
+| `dispatch_tools_list` | ~1.76 µs |
+| `dispatch_tools_call` (no audit / event sink) | ~2.99 µs |
+| `dispatch_tools_call_result` (a handler returning a CallToolResult) | ~2.70 µs |
+| `jsonx_get_str_flat` | ~141 ns |
+| `jsonx_get_raw_nested` | ~398 ns |
+| `jsonx_valid_request` | ~573 ns |
+| `codec_parse_request` | ~1.46 µs |
+| `codec_serialize_response` | ~464 ns |
+| `codec_process_message` (full pipeline) | ~5.82 µs |
+| `validate_compiled_simple` | ~508 ns |
+| `validate_compiled_nested` | ~2.22 µs |
+| `schema_compile_simple` | ~2.55 µs |
+| `schema_compile_nested` | ~5.87 µs |
 | `auth_bearer_check_unset` | ~8 ns |
-| `auth_bearer_check_set` | ~737 ns |
+| `auth_bearer_check_set` | ~781 ns |
 
 > A single row is an illustration, not a measurement: run-to-run swings of
 > 5–10 % on the sub-microsecond rows are host state, and a one-byte shift in
@@ -317,7 +319,7 @@ each block was taken under, is [`benches/history.log`](benches/history.log).
 > logging added at no measurable cost; 3.4.1, where an unobserved `tools/call`
 > stopped making two `clock_gettime` syscalls, 1.35 µs each on this host; 3.3.17 for 6.6.14 → 6.6.20, where
 > `jsonx_get_str_flat`'s +16% is identical code sitting 4 bytes later in
-> its cache line). Numbers across toolchain lines are not comparable — the
+> its cache line; 3.4.11 for 6.7.9 → 6.7.18: a wash on the full pipeline). Numbers across toolchain lines are not comparable — the
 > 6.6.x emitter moved `dispatch_tools_call` and `codec_process_message`
 > well below their 6.5.x figures.
 

@@ -31,8 +31,17 @@ subprotocol / compression negotiation (→ 3.6.x, needs an upstream seam).
 
 ## Next patch
 
-Nothing is queued. The 3.4.x minor's planned work is done: the conformance suite, the audit's
-bote-side fixes (B1–B9), and the SSRF classifier gaps. The next work is one of:
+- **Name the failed step when a transport exits.** sandhi 1.10.10 closed bote's filing with
+  `sandhi_server_last_failure(opts, out_step, out_errno)`, and every fold from cyrius 6.7.13 has it.
+  `bote_main_log_exit` can still only say "socket, bind, listen or accept failed (is the port in
+  use?)". The http, streamable, ws and bridge transports move from `sandhi_server_run` to
+  `sandhi_server_run_opts` with a `sandhi_server_options_new()` each, the way the Unix transport
+  already logs its own errno. ⚠ This raises the minimum cyrius from 6.7.2 to 6.7.13, so re-measure
+  with `scripts/bundle-min-cyrius.sh`. CI requires both bundles to state one minimum, though only the
+  full bundle would need it.
+
+Beyond that, the 3.4.x minor's planned work is done: the conformance suite, the audit's bote-side
+fixes (B1–B9), and the SSRF classifier gaps. The next work after it is one of:
 
 - **an item from the consumer adoption track below**, taken when a named consumer is ready to move
   onto bote (each is its own patch); or
@@ -123,6 +132,15 @@ Both need a seam upstream that bote should **file, not wait for** — not yet fi
   profile (`[lib.guards]`: core plus those three modules, no transports), or moving the pure
   helpers into core. Weigh it the way `content.cyr` and `sandbox.cyr` were weighed below: on
   which consumers would include it, not on fit.
+- **bayan in the core bundle.** Since 3.4.11 no core module calls bayan; `registry_validate_params`
+  was the last. The `include "lib/bayan.cyr"` in `registry.cyr` remains, which is why
+  `dist/bote-core.deps` still names it. It costs a one-call consumer that copies the bundle 963,584 B
+  on cyrius 6.7.18 (1,239,776 B with it, 276,192 B without). Moving the include to `web_tools.cyr`, the
+  one module that uses bayan, is CLAUDE.md's own pattern and would make the sidecar `hashmap`. All 12
+  sibling repos that consume core declare `bayan` themselves, so none would break, and equally none
+  saves a byte until it drops that declaration; aegis, nein, t-ron and varna are the four that make no
+  bayan call of their own. A sidecar change is a consumer contract change, so it was not made as a side
+  effect of a pin move.
 - **`[lib.core]` membership.** The profile exists to bound a transport-free consumer's
   compile set (t-ron's SecurityGate). `content.cyr` joined at 3.3.6 on evidence — core
   consumers were hand-rolling content envelopes and re-implementing JSON escaping.
@@ -145,10 +163,10 @@ Both need a seam upstream that bote should **file, not wait for** — not yet fi
 
 Not tasks. Things that have bitten once and are checked, not assumed:
 
-- **libro's sigil pin is one patch past the fold.** libro 2.11.0 pins sigil 3.13.12; cyrius 6.7.9
-  folds 3.13.11, so `cyrius.lock` commit-pins 3.13.12 while `lib/sigil.cyr` is 3.13.11. libro reports
-  the thin set differs only in its header; cyrius 6.7.10 folds 3.13.12, so the next pin move should
-  close it. Check the sigil `commit` row against `lib/sigil.cyr`'s header then.
+- **A name a deprecation suggests may be newer than the bundles' minimum.** cyrius 6.7.18 deprecates
+  `json_get` in favour of `bayan_json_get_by_str` / `_by_cstr`, which first appear in the 6.7.17 fold.
+  In a bundled module, that rename would have moved the minimum from 6.7.2 to 6.7.17 to silence one
+  warning. Before adopting a suggested name, check which fold first carries it.
 - **Thin-sigil vs fold version.** Since cyrius 6.6.11 libro's `deps.sigil` selection is
   not vendored here (the fold wins over a thin profile of a stdlib leaf), so the CI step
   reports "no thin sigil vendored". If it ever finds a thin copy again, the resolver rule has
@@ -160,11 +178,6 @@ Not tasks. Things that have bitten once and are checked, not assumed:
 - **`qemu-aarch64` `getrandom`.** The full suite runs under qemu since 3.3.11; through
   3.3.10 three files exited 90 there on a missing passthrough. If it regresses to that
   shape, suspect the emulator or the toolchain's `ESYSXLAT` rows before bote.
-- **`dist/bote-core.deps` should drop `sigil` and `ct`** once cyrius fixes the filing under
-  Upstream. At each pin move, regenerate and read the sidecar: if it is still
-  `hashmap bayan sigil ct`, the filing is open. If it is `hashmap bayan`, the fix has landed;
-  say so in the CHANGELOG, since core consumers then fall back to libro's thin sigil (about
-  −870 KB for a one-call consumer, measured at 3.3.17).
 - **Benchmark rows that make a syscall move with the host kernel.** On the reference host
   (Ryzen 7 5800H, kernel 7.2.8, `spec_rstack_overflow: Safe RET`) one `clock_gettime` costs
   1.35 µs. That is what made `dispatch_tools_call` look +58% between the 3.3.13 row (logged on
@@ -198,7 +211,7 @@ None planned. Any one of these would:
 
 ## Upstream
 
-No open blockers. Two open filings, neither blocking, and two to file:
+No open blockers and no open filings. Two to file:
 
 - **To file with cyrius — a toolchain requirement a bundle can carry** (audit G13, the
   upstream half). bote states its minimum on a `# Minimum cyrius:` comment at the top of its first
@@ -212,20 +225,7 @@ No open blockers. Two open filings, neither blocking, and two to file:
   instead, and why all three sit 13 releases behind. A resolver that honours the selected
   module's `.deps` sidecar, or deps scoped to a profile, would remove the reason.
 
-- **cyrius** — `docs/development/issues/2026-10-15-bote-distlib-kept-fold-over-thin-profile-records-named-deps-need.md`.
-  `distlib` records libro's sigil needs (`sigil`, `ct`) on `dist/bote-core.deps` because the
-  resolver keeps the sigil fold over libro's thin profile and never credits the fold to libro.
-  Measured cost and consumer numbers are in the 3.3.17 CHANGELOG entry. cyrius placed it in
-  its 6.7.13 tools lane (2026-10-15): at the pin move that reaches 6.7.13, check the watch-list
-  item on `dist/bote-core.deps`.
-- **sandhi** — `docs/development/issues/2026-10-15-bote-server-run-failures-return-bare-1.md`.
-  The five serve entry points return a bare `1` for every failure (the bind's `EADDRINUSE` is
-  in a local and discarded), so bote's `transport failed` line can only name socket, bind,
-  listen and accept together; `_run_opts` — bote's — and `_run_async` also leak the listen
-  socket on each failed start. When sandhi ships a step + errno, `bote_main_log_exit` names
-  it, the way the Unix transport already does.
-
-bote's five historical toolchain filings are archived in the cyrius
+bote's six toolchain filings are archived in the cyrius
 repo (`docs/development/issues/archived/`) and indexed with their fixes in
 [resolved-lang-issues.md](../resolved-lang-issues.md);
 [cyrius-feedback.md](../cyrius-feedback.md) is the port-era language-issue log, all of it

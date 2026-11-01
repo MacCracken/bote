@@ -61,12 +61,12 @@ that selected that profile break at `cyrius deps` time.
 Since cyrius 6.6.18 a sidecar names exactly the stdlib leaves
 `distlib`'s compile-verify proves the bundle needs, and nothing
 from the producer's own `[deps] stdlib`. Everything those leaves
-need arrives through their own requires blocks. At 3.3.17:
+need arrives through their own requires blocks. At 3.4.11:
 
 | Sidecar | Leaves |
 |---|---|
 | `dist/bote.deps` | `hashmap bayan ws_server syscalls` (4; was 32 through 3.3.16) |
-| `dist/bote-core.deps` | `hashmap bayan sigil ct` (4; was 8) |
+| `dist/bote-core.deps` | `hashmap bayan` (2; was 4 through 3.4.10) |
 
 `cyrius deps` reads the sidecar and vendors those leaves. **A
 consumer that calls a stdlib family from its OWN code declares it
@@ -124,7 +124,8 @@ supply-chain choice, not an oversight. Two things follow, and the
    that declares only `string fmt alloc vec str syscalls io freelist` builds
    with zero undefined names and runs: of `dist/bote.cyr` on 6.6.20 at
    3.3.17, and of both `dist/bote.cyr` and `dist/bote-core.cyr` on 6.7.9 at
-   3.4.0 (the core one gets sakshi through libro → patra). Declare what your own code calls.
+   3.4.0 and on 6.7.18 at 3.4.11 (the core one gets sakshi through libro →
+   patra). Declare what your own code calls.
 2. Run **`cyrius lib sync --full`** to provision `./lib/` from the pinned
    toolchain snapshot, and only *then* `cyrius deps`, which **overlays**
    your declared `[deps.<name>]` git deps on top of that snapshot.
@@ -161,7 +162,7 @@ If you copy `dist/bote-core.cyr` into your tree anyway (hoosh, szal and
 thoth do), **declare `sakshi` in your own `[deps] stdlib`**. `log.cyr` calls
 sakshi, and the bundle's requires block does not include it. A pinned
 consumer gets it through bote's `deps.libro` (patra includes it); a copied
-file brings neither. Measured on 6.7.2 and 6.7.9: a copied core bundle with
+file brings neither. Measured on 6.7.2, 6.7.9 and 6.7.18: a copied core bundle with
 `string fmt alloc vec str syscalls io freelist` stops on undefined
 `sakshi_*` functions, and the same list plus `sakshi` builds and answers a
 ping.
@@ -305,19 +306,14 @@ buffer with a `const`, which is what sets the 6.7.2 minimum. No core module
 calls into `tls` / `sandhi` /
 `sigil` / `ws_server` / `slice`.
 
-⚠ **`dist/bote-core.deps` names `sigil` and `ct` anyway (3.3.17).**
-They are libro's needs, not core's. A core consumer gets libro
-transitively through bote's `deps.libro`, whatever profile it
-selects. libro 2.10.7+ leaves its sigil needs to its thin
-`sigil-mldsa` requires block, which bote never vendors because
-`sigil` is a stdlib leaf here. So `distlib`'s verify records the two
-leaves against the core bundle. Measured with a one-`ping` core
-consumer: 2,079,184 B on 3.3.17, against 2,628,808 B on 3.3.16,
-which also compiled the whole sigil fold (through libro's old
-27-leaf sidecar). With the two leaves removed, libro's thin sigil
-would serve instead at 1,209,096 B. The bundle ships as `distlib`
-writes it. The defect is cyrius's and is filed there
-(`2026-10-15-bote-distlib-kept-fold-over-thin-profile-records-named-deps-need.md`).
+**`dist/bote-core.deps` names neither `sigil` nor `ct` (3.4.11).** A
+core consumer gets libro transitively through bote's `deps.libro`,
+whatever profile it selects, and libro's thin `sigil-mldsa` selection
+serves it. Through 3.4.10 `distlib`'s verify recorded those two leaves
+against the core bundle, a cyrius defect fixed at 6.7.13. Measured with
+a one-`ping` core consumer on 3.4.11 and cyrius 6.7.18: 1,797,872 B
+pinned. The copied-bundle numbers are in the 3.4.11 CHANGELOG. A
+consumer that calls sigil or ct from its own code declares them.
 
 That "no core module calls sigil" is why `src/jwt.cyr` and `src/pkce.cyr` are in
 `[lib]` only and **not** in `[lib.core]`, even though both ship

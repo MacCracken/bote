@@ -9,7 +9,7 @@ the new pin.
 The port-era language-feedback log (all resolved by cyrius 4.4.3) is
 [docs/cyrius-feedback.md](cyrius-feedback.md). New toolchain issues are
 filed in the cyrius repo; bote's filings are archived there under
-`docs/development/issues/archived/` (five as of 3.3.12).
+`docs/development/issues/archived/` (six as of 3.4.11).
 
 ---
 
@@ -103,12 +103,31 @@ pre-trim count).
 
 ---
 
+## 2026-10 — `2026-10-15-bote-distlib-kept-fold-over-thin-profile-records-named-deps-need.md`
+
+**Symptom:** `cyrius distlib` wrote `sigil` and `ct` into
+`dist/bote-core.deps`, though no core module uses either. `cyrius deps`
+kept the sigil fold over libro's thin profile and never credited it to
+libro, so distlib's compile-verify recorded libro's needs against the
+bundle. A consumer of the core bundle compiled all of sigil for nothing.
+
+**Reported:** filed 2026-10-15, with the measured consumer cost from
+bote 3.3.17.
+
+**Fixed:** cyrius 6.7.13.
+
+**Bote adoption:** bote 3.4.11, where the sidecar became `hashmap bayan`
+and a one-call consumer that copies the bundle dropped 991,328 B on the
+same toolchain.
+
+---
+
 ## Pattern
 
 Every one of these followed the same workflow:
 
 1. bote hits a real-world upstream limitation during a feature ship
-2. The symptom + reproducer is written up as an issue — in the cyrius repo for a toolchain defect (where all five of bote's live today, under `docs/development/issues/archived/`), or under bote's `docs/development/issues/` for a bote-side one
+2. The symptom + reproducer is written up as an issue — in the cyrius repo for a toolchain defect (where all six of bote's live today, under `docs/development/issues/archived/`), or under bote's `docs/development/issues/` for a bote-side one
 3. The cyrius agent picks it up on their own schedule
 4. Upstream fix ships in a cyrius release
 5. bote bumps its pin + adopts

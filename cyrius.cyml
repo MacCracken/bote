@@ -5,7 +5,7 @@ description = "MCP core service in Cyrius — JSON-RPC 2.0, six transports, bear
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/bote"
 language = "cyrius"
-cyrius = "6.7.9"
+cyrius = "6.7.18"
 
 [build]
 entry = "src/main.cyr"
@@ -165,7 +165,7 @@ stdlib = [
 # FRONT moves everything. Check both structs on every bump.
 [deps.libro]
 git = "https://github.com/MacCracken/libro"
-tag = "2.11.0"
+tag = "2.11.3"
 modules = ["dist/libro.cyr"]
 
 # majra pub/sub — default profile (core pubsub engine, no backends). bote uses
@@ -174,5 +174,5 @@ modules = ["dist/libro.cyr"]
 # envelopes or network backends.
 [deps.majra]
 git = "https://github.com/MacCracken/majra"
-tag = "2.12.0"
+tag = "2.13.0"
 modules = ["dist/majra.cyr"]

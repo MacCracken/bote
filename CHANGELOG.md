@@ -18,6 +18,155 @@ have per release.
 
 _(empty)_
 
+## [3.4.11] — 2026-11-01 · cyrius 6.7.18, libro 2.11.3, majra 2.13.0, and one fallback off bayan's parser
+
+The toolchain and both git deps move to their latest tags, and the fold brings sigil, patra, sakshi,
+sandhi and bayan with them. The handler ABI, the wire and the minimum cyrius (6.7.2) are unchanged.
+The move took one source change: bayan 1.11.1 refuses a JSON object with a repeated key, and
+`registry_validate_params`'s fallback read arguments with that parser.
+
+### Changed — the pins
+
+| Dep | 3.4.10 | 3.4.11 | How it arrives |
+|---|---|---|---|
+| cyrius | 6.7.9 | 6.7.18 | the `cyrius =` pin |
+| libro | 2.11.0 | 2.11.3 | `[deps.libro]` |
+| majra | 2.12.0 | 2.13.0 | `[deps.majra]` |
+| sigil | 3.13.11 | 3.13.15 | the fold; libro's pin now equals it |
+| patra | 1.16.0 | 1.16.6 | the fold; libro's pin equals it |
+| sakshi | 2.5.8 | 2.5.10 | the fold |
+| bayan | 1.5.13 | 1.11.1 | the fold |
+| sandhi | 1.10.9 | 1.13.7 | the fold |
+
+Resolved from scratch in the CLAUDE.md order: 115 locked, four `commit` rows at the new tags,
+`cyrius deps --verify` clean, and the versions re-read after `cyrius build`. libro's sigil pin is no
+longer one patch past the fold, which closes that watch-list item.
+
+What reached bote, and what did not:
+
+- **libro.** `struct chain`, `struct entry` and `struct error` are identical to 2.11.0's, so the raw
+  offsets in `src/libro_tools.cyr` hold. Thirteen function bodies changed. bote calls none of them
+  directly. The two it reaches, `_proof_verify_common` and `_sb_proof_entry`, differ only in a log
+  literal's length. 2.11.3's stricter JSONL readers (`chain_import`, `filestore_verify_streamed`,
+  `filestore_load_and_verify`) are not on any bote path.
+- **majra.** The bodies of `pubsub_new`, `pubsub_subscribe` and `pubsub_publish` are identical to
+  2.12.0's. 2.13.0's PostgreSQL SCRAM and TLS are in `-backends`, which bote does not consume.
+- **sandhi.** The serve entry points' 0 / 1 return is unchanged, so `bote_main_log_exit` still reads
+  it correctly. 1.10.10's fix arrives with this fold: a failed bind or listen no longer leaks the
+  listen socket.
+- **kavach** (not a dep). Checked at 3.13.2: `ExecResult` still matches `src/sandbox.cyr`, and
+  `sandbox_exec` is still 2-arg.
+
+### Fixed
+
+- **`registry_validate_params`'s required-fields fallback answers a repeated key correctly.** bayan
+  1.11.1 refuses a JSON object with a repeated key, and `bayan_json_parse` returns 0 for one. The
+  fallback read arguments with it, so on this pin `{"path":"/a","path":"/b"}` came back `missing
+  required field: path` for a field that is there. RFC 8259 allows a repeated key and `jsonx_valid`
+  accepts one, so this input can arrive from the wire. The fallback now asks `jsonx_has`, the same
+  check `compiled_validate` makes for `required`, so the two paths agree.
+
+  **How far this reached:** nowhere that shipped. Registration always compiles a schema, so only a
+  `ToolDef` placed in the registry by other means gets to this path, and the wrong answer existed
+  only between this pin move and this fix.
+
+  Measured with a probe on both toolchains: on valid objects with no repeated key (17 cases) the old
+  lookup and `jsonx_has` agree. They differ on five malformed shapes such as `{"a":}` and `{,"a":1}`,
+  which `jsonx_valid` stops before dispatch. A library caller that skips the codec can see that
+  difference.
+- **The `json_get` deprecation warning is gone.** It was the one new warning this pin raised in
+  `src/`, which stays warning-clean. Its suggested replacements were deliberately not taken:
+  `bayan_json_get_by_str` and `_by_cstr` exist only from cyrius 6.7.17, in a module both bundles
+  carry, so renaming the call would have raised their minimum from 6.7.2 to 6.7.17.
+
+### Security
+
+Three upstream fixes reach bote through the fold, with no bote change:
+
+- **sigil 3.13.13–3.13.15:** X.509 nameConstraints (CYRIUS-2026-0042), the DER over-reads and a
+  ChaCha20-Poly1305 forgery. `web_fetch`'s HTTPS client reaches these through sandhi.
+- **`ws_server_recv` (CYRIUS-2026-0043):** every connection read into one process-global 1 MiB
+  buffer, so two connections on a pooled server could read each other's bytes. bote's own WebSocket
+  transport serves on the single-threaded `sandhi_server_run`, so the binary was not exposed. A
+  consumer running `_bote_ws_handler` on a pool was. The buffer is gone, and per-frame allocation is
+  what it was.
+- **The WebSocket handshake and control frames:** `ws_server_handshake` refuses a key that is not 22
+  base64 characters and `==`, and a control frame over 125 bytes fails the read.
+
+### Changed — the bundles
+
+- **`dist/bote-core.deps` drops `sigil` and `ct`,** now `hashmap bayan`. No core module uses either.
+  They were there because `distlib` recorded libro's needs against the bundle, which cyrius 6.7.13
+  fixed (bote's filing, open since 3.3.17). The bundle's `# Requires` block shrinks to match.
+  `dist/bote.deps` is unchanged, and neither sidecar needs bayan's new `slice` / `hashseed`, which it
+  includes itself.
+
+  **Who this reaches:** a consumer that called sigil or ct from its own code and leaned on this
+  sidecar. Of the 12 sibling repos that consume the core bundle, every one that makes such a call
+  declares them, so none breaks.
+
+  | Copied core bundle, one-call consumer | Binary | `string_data` |
+  |---|---|---|
+  | 3.4.10 on 6.7.9 | 1,709,968 B | 39,568 |
+  | 3.4.11 on 6.7.9 | 718,640 B | 27,142 |
+  | 3.4.11 on 6.7.18 | 1,239,776 B | 369,131 |
+
+  Dropping sigil and ct saves 991,328 B. bayan's Unicode tables give 521,136 B of that back on
+  6.7.18. The net is −470,192 B.
+- **The minimum cyrius stays 6.7.2.** Re-measured with `scripts/bundle-min-cyrius.sh`:
+
+  | cyrius | build | core smoke | ping | first failure |
+  |---|---|---|---|---|
+  | 6.6.20, 6.7.0, 6.7.1 | fail | — | — | `lib/patra.cyr:3765:24: expected identifier, got '-'` |
+  | 6.7.2, 6.7.3, 6.7.9, 6.7.10, 6.7.13, 6.7.16, 6.7.17, 6.7.18 | ok | ok | ok | |
+- **Consumers, built for real.** A copied core bundle with DEPS-PATTERN's list plus `sakshi` builds and
+  runs on 6.7.2, 6.7.9 and 6.7.18. `[deps.bote]` consumers declaring only `string fmt alloc vec str
+  syscalls io freelist`, resolved against a scratch clone tagged 3.4.11, build with 0 undefined and
+  answer a ping: core 1,797,872 B, full 3,200,464 B.
+
+### Added
+
+- `tests/bote.tcyr` +9, 1,374 → 1,383 in all. The fallback had no test, which is why the regression
+  above passed all 1,374 assertions. It now has coverage for a missing field and its name, a second
+  required field, a present field with any value, a nested key, a key spelled inside a string, and a
+  repeated key on both the fallback and the compiled path.
+- **Mutation-proven.** Four mutants, each killed by an assertion:
+  - back to bayan's `json_get` (fails exactly the repeated-key assertion);
+  - required fields never enforced;
+  - the check inverted;
+  - only the first required field checked.
+
+### Changed
+
+- Binaries: `bote` 3,213,728 B (3.4.10: 2,857,944, +355,784 B or +12.4%). `string_data` went 58,390 →
+  401,865, so 343,475 B of that is bayan's read-only Unicode data, which dead-code elimination cannot
+  remove (libro 2.11.1 measured the same). aarch64 3,745,912 B (3,328,680); agnos 3,182,184 B
+  (2,822,288) with 0 undefined. Capacity: `fn_table` 6956 / 131072, `identifiers` 220251 / 8388608,
+  `var_table` 3260 / 1048576.
+- Every test file is green on x86_64 and under `qemu-aarch64` 11.1.3. Every unit compiles for agnos
+  with 0 undefined. CI's step scripts for logging smoke, transport smoke, fuzz and the capacity gate
+  pass. `fmt`, `lint`, `vet` and `deny` are clean.
+- Roadmap: `sandhi_server_last_failure` is queued as the next patch, and bayan in the core bundle is
+  a new open decision. Both of bote's open upstream filings are closed.
+
+### Performance
+
+Interleaved A/B: 15 alternating rounds each, pinned to one core, load about 3.9, the 3.4.10 tree on
+6.7.9 against this tree on 6.7.18. A wash on the pipeline: `codec_process_message` is +0.8% and 12 of
+the 16 rows are within ±2%. The other four:
+
+| Bench | 6.7.9 (median) | 6.7.18 (median) | Delta |
+|---|---|---|---|
+| `jsonx_get_str_flat` | 162 ns | 142 ns | −12.3% |
+| `validate_compiled_simple` | 528 ns | 507 ns | −4.0% |
+| `dispatch_tools_call_result` | 2,622 ns | 2,692 ns | +2.7% |
+| `codec_parse_request` | 1,369 ns | 1,437 ns | +5.0% |
+
+`codec_parse_request`'s ranges do not overlap, so that row is a real shift for these two binaries.
+`src/codec.cyr` did not change and the cause was not chased. `jsonx_get_str_flat` is the row 3.3.17
+measured moving on code alignment alone. bayan's costlier JSON parsing does not reach these rows:
+bote's request path does not use bayan.
+
 ## [3.4.10] — 2026-10-15 · bote's own tools: real schemas, real tool results, and two defects they hid
 
 The roadmap's 3.4.10 item, audit B9: bote's own tools (libro, fs, web) get real input schemas,

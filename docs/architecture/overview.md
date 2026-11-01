@@ -165,18 +165,18 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
                               thread_local, sakshi, ct, keccak, random,
                               sigil, tls, sandhi; ws_server manually
                               included by transport_ws.cyr only)
-[deps.libro]   git = "MacCracken/libro"   tag = "2.11.0"  (its deps.patra 1.16.0 equals the fold's;
-                                                   its deps.sigil 3.13.12 is one past the fold)
-[deps.majra]   git = "MacCracken/majra"   tag = "2.12.0"
+[deps.libro]   git = "MacCracken/libro"   tag = "2.11.3"  (its deps.patra 1.16.6 and
+                                                   deps.sigil 3.13.15 equal the fold's)
+[deps.majra]   git = "MacCracken/majra"   tag = "2.13.0"
 
-  Those are the ONLY two [deps.<name>] blocks. sigil 3.13.11, sakshi 2.5.8,
-  patra 1.16.0 and bayan 1.5.13 arrive via the cyrius stdlib fold, not a git pin — the
+  Those are the ONLY two [deps.<name>] blocks. sigil 3.13.15, sakshi 2.5.10,
+  patra 1.16.6 and bayan 1.11.1 arrive via the cyrius stdlib fold, not a git pin — the
   former [deps.sigil] / [deps.sakshi] registry-lag pins were removed at
   3.3.1 (sigil's had gone stale and was holding bote behind two
   authentication bypasses).
 
 tests/
-├── bote.tcyr                  — 536 core assertions
+├── bote.tcyr                  — 545 core assertions
 ├── conformance.tcyr           — 127 (JSON-RPC 2.0 + MCP 2025-11-25, by spec clause, via codec_process_message)
 ├── bote_auth.tcyr             — 45 (bearer + allowlist + JWT + PKCE validators; 401 log lines)
 ├── bote_content.tcyr          — 25 (content blocks + annotations)
@@ -405,10 +405,10 @@ standing rules are in CLAUDE.md under Key Principles.
 
 | Artifact | Count | Where |
 |---|---|---|
-| Core unit tests | 536 | `tests/bote.tcyr` |
+| Core unit tests | 545 | `tests/bote.tcyr` |
 | Protocol conformance | 127 | `tests/conformance.tcyr` — by spec clause, through `codec_process_message` (3.4.5) |
 | Module tests | 711 | `tests/bote_auth.tcyr` (45) + `bote_content.tcyr` (25) + `bote_fs_tools.tcyr` (42) + `bote_host.tcyr` (197) + `bote_jwt.tcyr` (53) + `bote_libro_tools.tcyr` (64) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (68) + `bote_web_tools.tcyr` (63) + `bote_ws.tcyr` (21) |
-| **Total assertions** | **1374** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
+| **Total assertions** | **1383** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
 | Benchmarks | 16 | `tests/bote.bcyr` |
 | Fuzz harnesses | 6 | `fuzz/*.fcyr` |
 
