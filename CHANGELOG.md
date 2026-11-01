@@ -18,6 +18,85 @@ have per release.
 
 _(empty)_
 
+## [3.4.14] — 2026-11-01 · a JWT signature has one spelling on every toolchain, and corrections to 3.4.13
+
+`jwt_verify_hs256` now requires the signature segment to be exactly what the encoder writes, so one
+signature is one token string whatever the toolchain's decoder accepts. Building this showed that what
+3.4.13 said about the subject was wrong in three ways, corrected below. The handler ABI, the wire and
+the stated minimum cyrius (6.7.13) are unchanged.
+
+### Security
+
+- **A signature has one token string, on every supported toolchain.** After the HMAC passes, the
+  decoded signature is re-encoded and compared with the segment. What verifies, for one valid token:
+
+  | Signature spelled | 3.4.13 on 6.7.13 – 6.7.17 | 3.4.13 on 6.7.18 | 3.4.14 on any |
+  |---|---|---|---|
+  | canonically | verifies | verifies | verifies |
+  | with non-zero spare bits (3 forms) | verifies | refused | refused |
+  | with one `=` | verifies | **verifies** | refused |
+  | with any longer run of `=` | verifies | refused | refused |
+
+  Nobody could forge a token this way: every spelling carries the same MAC. The risk was to anything
+  keyed on a token's text, such as a revocation list or replay cache.
+- **Reach: nothing, today.** bote's binary does not call the verifier (its auth is `BOTE_BEARER_TOKENS`),
+  no sibling repo calls `jwt_verify_hs256` or `auth_validator_jwt_hs256`, and bote keeps no list keyed
+  on a token. This is for the embedder that wires it up.
+
+### Corrections to 3.4.13
+
+- **"A JWT signature has one spelling" on 6.7.18 was false.** One `=` still verified there: bayan 1.11.1
+  takes the padding that completes a group. The same claim was in `src/jwt.cyr`'s header.
+- **"Four spellings" below 6.7.18 was an undercount.** It was unbounded: any run of `=` on each of the
+  four spare-bit forms.
+- **"bote's own binary is pinned to 6.7.18" implied a reach it never had.** See above.
+
+### Changed — the guard is on the signature only, after the HMAC
+
+- The header and payload need no such check, because the HMAC covers them as text and only a key holder
+  can re-spell them. `jwt_b64u_decode` is unchanged, so a padded header with a good MAC still verifies.
+- A first version put the check in `jwt_b64u_decode`, for all three segments. It was measured and
+  dropped: it cost 5,040 ns and 376 B per valid verify, and it re-encoded the header before the HMAC, on
+  unverified bytes, on a heap that never frees. Measured here, 9 alternating rounds, pinned to one core:
+
+  | Per verify | 3.4.13 | 3.4.14 |
+  |---|---|---|
+  | valid token | 4,217 ns, 208 B | 4,466 ns, 256 B |
+  | forged token | 3,158 ns, 136 B | 3,173 ns, 136 B |
+
+### Changed — tests
+
+- `tests/bote_jwt.tcyr` 60 → 59, 1,421 → 1,420 in all. Three padded-signature assertions are added. The
+  four direct decoder assertions from 3.4.13 are removed: they pinned what bayan does on one toolchain,
+  and the property now lives in the verifier.
+- **Proven by running the file on real toolchains and mutating `src/`:**
+
+  | `tests/bote_jwt.tcyr` | 6.7.13 | 6.7.17 | 6.7.18 |
+  |---|---|---|---|
+  | with the guard | 59 pass | 59 pass | 59 pass |
+  | guard removed | 6 fail | 6 fail | 1 fail |
+  | length checked, bytes not compared | 3 fail | 3 fail | **passes** |
+
+  ⚠ That last cell is a limit, not a gap: on 6.7.18 the decoder already refuses what the compare would, so
+  CI, which runs only the pin, cannot see the compare removed. Dropping the length check changes no
+  answer on any toolchain, because a mismatch also differs at the terminator; it stays to keep `memeq`
+  inside the allocation. Inverting either check is killed by a crash in the test, not by an assertion.
+
+### Changed
+
+- Binaries: `bote` 3,213,704 B, aarch64 3,745,904 B, agnos 3,182,184 B with 0 undefined, the same file sizes
+  as 3.4.13. `fn_table` 6959 / 131072. Both `.deps` sidecars are unchanged. The full tree still needs
+  6.7.13, and 6.7.12 stops on `undefined variable 'SANDHI_SERVER_FAIL_CONFIG'`.
+- Every test file is green on x86_64 and under `qemu-aarch64` 11.1.3. Every unit compiles for agnos with
+  0 undefined. CI's step scripts and `fmt`, `lint`, `vet` and `deny` are clean.
+- Roadmap: canonical JWT signatures below 6.7.18 is closed, and nothing is queued.
+
+### Performance
+
+- `tests/bote.bcyr` links no JWT code. The logged row (load 3.7) is within noise of 3.4.12's:
+  `dispatch_tools_call` 2.982 µs against 2.944, `codec_process_message` 5.818 µs against 5.749. 3.4.13's
+  high row was the host, as its A/B said.
+
 ## [3.4.13] — 2026-11-01 · the core bundle stops requiring bayan, and a JWT change 3.4.11 left unrecorded
 
 Since 3.4.11 no core module calls bayan, so `dist/bote-core.cyr` stops requiring it. Checking who does
@@ -26,6 +105,10 @@ accepts. That is now written down and tested. The handler ABI, the wire and the 
 (6.7.13) are unchanged.
 
 ### Security
+
+> ⚠ **Corrected at 3.4.14.** This section is wrong in three places: one `=` still verified on 6.7.18,
+> spellings below 6.7.18 were unbounded rather than four, and bote's binary never called the verifier.
+> See 3.4.14's corrections.
 
 - **Recorded late: since 3.4.11 a JWT signature has one spelling, on cyrius 6.7.18 and later.** bayan
   1.11.1's base64 decoders refuse what is not canonical RFC 4648, and `jwt_b64u_decode` goes through

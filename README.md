@@ -260,9 +260,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 1421 total across fifteen files (+ a core-only drift smoke)
+### Tests — 1420 total across fifteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1421 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1420 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 576 — core protocol/dispatch/codec/schema/session/transports
@@ -271,7 +271,7 @@ cyrius test tests/bote_auth.tcyr          # 45 — bearer + allowlist + JWT + PK
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 42 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 197 — host registry + SSRF guard (IPv4 + IPv6)
-cyrius test tests/bote_jwt.tcyr           # 60 — JWT HS256 verify + exact alg + exp enforcement
+cyrius test tests/bote_jwt.tcyr           # 59 — JWT HS256 verify + exact alg + exp enforcement
 cyrius test tests/bote_libro_tools.tcyr   # 64 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256

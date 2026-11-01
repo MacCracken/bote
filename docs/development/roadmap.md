@@ -123,13 +123,6 @@ Both need a seam upstream that bote should **file, not wait for** — not yet fi
   profile (`[lib.guards]`: core plus those three modules, no transports), or moving the pure
   helpers into core. Weigh it the way `content.cyr` and `sandbox.cyr` were weighed below: on
   which consumers would include it, not on fit.
-- **Canonical JWT signatures below cyrius 6.7.18.** The bundles state 6.7.13, but only bayan 1.11.1,
-  the 6.7.18 fold, refuses non-canonical base64url. On 6.7.13 – 6.7.17 one signature has four
-  spellings and `jwt_verify_hs256` accepts all of them (measured: `tests/bote_jwt.tcyr` fails six
-  assertions on 6.7.17). bote's own binary is not affected, and no sibling repo sits in that range
-  today. Re-encoding the decoded signature in `jwt_verify_hs256` and comparing it with the segment
-  would hold on every toolchain, in about three lines. The alternative is to leave it to the pin and
-  the warning in `src/jwt.cyr`'s header.
 - **`[lib.core]` membership.** The profile exists to bound a transport-free consumer's
   compile set (t-ron's SecurityGate). `content.cyr` joined at 3.3.6 on evidence — core
   consumers were hand-rolling content envelopes and re-implementing JSON escaping.
