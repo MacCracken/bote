@@ -18,6 +18,8 @@
 # t-ron's per-tool authorization. web_search hits ONLY the operator-configured SearXNG base; absent config it
 # degrades honestly (no silent default to a third party). Both are network reads; there is no write surface.
 
+include "lib/bayan.cyr"
+
 var WEB_FETCH_CAP = 65536;     # max bytes web_fetch returns (readable text)
 var WEB_SEARCH_MAX = 10;       # hard ceiling on results returned
 var WEB_BODY_CAP = 2097152;    # 2 MiB: max raw response we will scan (a huge page is truncated, not OOM'd)

@@ -66,7 +66,7 @@ need arrives through their own requires blocks. At 3.4.11:
 | Sidecar | Leaves |
 |---|---|
 | `dist/bote.deps` | `hashmap bayan ws_server syscalls` (4; was 32 through 3.3.16) |
-| `dist/bote-core.deps` | `hashmap bayan` (2; was 4 through 3.4.10) |
+| `dist/bote-core.deps` | `hashmap` (1; was 2 through 3.4.12) |
 
 `cyrius deps` reads the sidecar and vendors those leaves. **A
 consumer that calls a stdlib family from its OWN code declares it
@@ -318,6 +318,19 @@ against the core bundle, a cyrius defect fixed at 6.7.13. Measured with
 a one-`ping` core consumer on 3.4.11 and cyrius 6.7.18: 1,797,872 B
 pinned. The copied-bundle numbers are in the 3.4.11 CHANGELOG. A
 consumer that calls sigil or ct from its own code declares them.
+
+**Nor does it name `bayan` (3.4.13).** No core module calls it.
+`jwt.cyr` and `web_tools.cyr` do, and each includes it itself, so
+`dist/bote.deps` is unchanged. What this saves depends on how you take
+core. Measured with a one-`ping` consumer on 3.4.13 and cyrius 6.7.18:
+
+| How | Binary | Why |
+|---|---|---|
+| copied, no `bayan` in your own `[deps] stdlib` | 276,192 B | nothing brings it (1,239,776 B through 3.4.12) |
+| pinned | 1,797,856 B | bote's `deps.libro` brings libro's thin sigil, which includes bayan |
+
+Declare `bayan` if your own code calls `json_*`, `base64_*` or anything
+else of its.
 
 That "no core module calls sigil" is why `src/jwt.cyr` and `src/pkce.cyr` are in
 `[lib]` only and **not** in `[lib.core]`, even though both ship

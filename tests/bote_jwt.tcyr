@@ -86,6 +86,13 @@ fn main() {
     var d_url = jwt_b64u_decode("-_4", 3, &len_slot);
     assert(d_url != 0, "URL-safe '-_4' decodes");
 
+    # Non-canonical input is refused (bayan 1.11.1, cyrius 6.7.18). 'QQ' and 'QR'
+    # would be one byte twice over: RFC 4648 §3.5 leaves the spare bits zero.
+    assert(jwt_b64u_decode("QQ", 2, &len_slot) != 0, "canonical 'QQ' decodes");
+    assert_eq(jwt_b64u_decode("QR", 2, &len_slot), 0, "non-zero spare bits refused (2-char tail)");
+    assert_eq(jwt_b64u_decode("QUF", 3, &len_slot), 0, "non-zero spare bits refused (3-char tail)");
+    assert_eq(jwt_b64u_decode("Q", 1, &len_slot), 0, "a one-character group refused");
+
     # ================================================================
     # JWT verify — known-good token from a hand-computed HS256 sign
     # ================================================================
@@ -102,12 +109,22 @@ fn main() {
     # Wrong secret rejects
     assert_eq(jwt_verify_hs256(token, "wrong-secret", 12), 0, "wrong secret rejects");
 
-    # Tampered signature rejects — flip the FIRST sig char (S→T).
-    # NB: tampering only the trailing chars can be a no-op after b64u
-    # decode because the low bits drop in a 3-rem tail; flipping a high
-    # byte produces a guaranteed-different decoded signature.
+    # Tampered signature rejects — flip the FIRST sig char (S→T), which
+    # changes the decoded signature on any decoder.
     var tampered = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.TflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
     assert_eq(jwt_verify_hs256(tampered, jwt_key, strlen(jwt_key)), 0, "tampered sig rejects");
+
+    # One signature, one token string. A 32-byte MAC leaves 2 spare bits in its
+    # last character, so `d`, `e` and `f` spell the same bytes as `c` to a
+    # decoder that ignores them, and a revocation list or replay cache keyed on
+    # the token's text could be walked around. Only bayan 1.11.1 refuses them:
+    # on cyrius 6.7.13 - 6.7.17 all four verify.
+    var spare_d = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5d";
+    var spare_e = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5e";
+    var spare_f = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5f";
+    assert_eq(jwt_verify_hs256(spare_d, jwt_key, strlen(jwt_key)), 0, "a re-spelled signature rejects (spare bits 01)");
+    assert_eq(jwt_verify_hs256(spare_e, jwt_key, strlen(jwt_key)), 0, "a re-spelled signature rejects (spare bits 10)");
+    assert_eq(jwt_verify_hs256(spare_f, jwt_key, strlen(jwt_key)), 0, "a re-spelled signature rejects (spare bits 11)");
 
     # Tampered payload (last char of payload changed) rejects — sig won't match
     var tamp_pl = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIzfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";

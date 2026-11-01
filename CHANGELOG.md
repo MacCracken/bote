@@ -18,6 +18,80 @@ have per release.
 
 _(empty)_
 
+## [3.4.13] — 2026-11-01 · the core bundle stops requiring bayan, and a JWT change 3.4.11 left unrecorded
+
+Since 3.4.11 no core module calls bayan, so `dist/bote-core.cyr` stops requiring it. Checking who does
+call it turned up something 3.4.11 should have recorded: the same bayan changed which JWTs bote
+accepts. That is now written down and tested. The handler ABI, the wire and the stated minimum cyrius
+(6.7.13) are unchanged.
+
+### Security
+
+- **Recorded late: since 3.4.11 a JWT signature has one spelling, on cyrius 6.7.18 and later.** bayan
+  1.11.1's base64 decoders refuse what is not canonical RFC 4648, and `jwt_b64u_decode` goes through
+  them. The 3.4.11 entry missed this.
+
+  | Input | 3.4.10 (6.7.9) | 3.4.11 and later (6.7.18) |
+  |---|---|---|
+  | `QR`, `QUF`: non-zero spare bits | accepted, the same bytes as `QQ`, `QUE` | refused |
+  | `Q`: a one-character group | accepted, length 0 | refused |
+  | a signature re-spelled in its spare bits | **verified** | refused |
+
+  A 32-byte HMAC leaves 2 spare bits in its last character, so one signature had four valid token
+  strings. A revocation list or replay cache keyed on the token's text could be walked around by
+  re-spelling it. Forging a token was never possible: all four carry the same MAC.
+- ⚠ **Only the 6.7.18 fold has this.** The bundles state 6.7.13, and 6.7.13 – 6.7.17 (bayan 1.9.0 – 1.11.0)
+  still accept all four spellings. bote's own binary is pinned to 6.7.18, and no sibling repo sits in that
+  range today. `src/jwt.cyr`'s header says so, and a guard that holds on every toolchain is an open
+  decision on the roadmap.
+
+### Changed — the core bundle
+
+- **`dist/bote-core.deps` is `hashmap`** (was `hashmap bayan`), and its `# Requires` block matches.
+  `include "lib/bayan.cyr"` leaves `src/registry.cyr`. The two modules that use bayan, `src/jwt.cyr`
+  (`base64url_decode`) and `src/web_tools.cyr`, now include it themselves, so `dist/bote.deps` is
+  unchanged. The 3.4.11 roadmap called `web_tools.cyr` the one user. That was wrong, from a grep that
+  only knew bayan's prefixed names; this time every function and variable bayan defines was checked
+  against each module.
+- **What it saves depends on how a repo takes core.** One-call consumer on cyrius 6.7.18:
+
+  | Consumer | 3.4.12 | 3.4.13 |
+  |---|---|---|
+  | copied core bundle, no `bayan` in its own `[deps] stdlib` | 1,239,776 B | 276,192 B (−77.7%) |
+  | pinned core bundle | 1,797,872 B | 1,797,856 B |
+  | pinned full bundle | 3,200,504 B | 3,200,504 B |
+
+  A pinned consumer keeps bayan because bote's `deps.libro` brings libro's thin sigil, which includes
+  it. That is the roadmap's G14 filing, and this measurement is now part of it.
+
+  **Who this reaches:** no sibling binary shrinks today. hoosh, szal and thoth copy the bundle but call
+  bayan themselves, and the rest pin it. Nothing breaks: all 12 repos that consume core declare `bayan`
+  themselves. A copied consumer builds and runs on 6.7.2, 6.7.9, 6.7.12, 6.7.13 and 6.7.18.
+
+### Added
+
+- `tests/bote_jwt.tcyr` +7, 1,414 → 1,421 in all: non-zero spare bits and a one-character group refused
+  by the decoder, and each of a signature's three other spellings refused by `jwt_verify_hs256`. The
+  behaviour is bayan's, and a mutation under `lib/` never reaches the compiler, so the proof is the real
+  toolchain: on cyrius 6.7.17 six of the seven fail, and the three token cases verify.
+
+### Changed
+
+- Binaries are the same size as 3.4.12's: `bote` 3,213,704 B, aarch64 3,745,904 B, agnos 3,182,184 B with 0
+  undefined. Capacity: `fn_table` 6959 / 131072. The minimum measures the same: the full tree needs
+  6.7.13, and 6.7.12 stops on `undefined variable 'SANDHI_SERVER_FAIL_CONFIG'`.
+- Every test file is green on x86_64 and under `qemu-aarch64` 11.1.3. Every unit compiles for agnos with
+  0 undefined. CI's step scripts and `fmt`, `lint`, `vet` and `deny` are clean.
+- Roadmap: bayan in the core bundle is closed, canonical JWT signatures below 6.7.18 is a new open
+  decision, and nothing is queued.
+
+### Performance
+
+- A wash. The logged row reads high (`dispatch_tools_call` 3.272 µs against 3.4.12's 2.944), and that is
+  the host: load was 5.4 and both builds are equally slow on it. Interleaved A/B against the 3.4.12 tag,
+  11 alternating rounds each, pinned to one core: `dispatch_tools_call` −0.1%, `codec_process_message`
+  +0.0%, every row within ±1%, and `jsonx_get_str_flat` +1.9%. The two bench binaries are the same size.
+
 ## [3.4.12] — 2026-11-01 · a transport that cannot serve says which step failed
 
 The roadmap's next item, and the last open thread from bote's sandhi filing. A failed start on http,

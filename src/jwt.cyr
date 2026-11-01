@@ -33,6 +33,10 @@
 #   - `exp` claim, if present in the payload, is strictly in the future
 #     (`clock_epoch_secs()`, RFC 7519 §4.1.4, no leeway) — checked only
 #     AFTER the signature verifies, so it never runs on attacker bytes
+#   - every segment is canonical base64url, ON CYRIUS 6.7.18 AND LATER ONLY.
+#     That is bayan 1.11.1's decoder. Through 6.7.17 spare bits are ignored,
+#     so one signature has four spellings: do not key a revocation list or
+#     replay cache on the token's text there.
 #
 # Returns 1 on valid, 0 on any failure. The validator wrapper
 # (`auth_validator_jwt_hs256`) returns the original token cstr on
@@ -41,6 +45,8 @@
 #
 # NOT validated: `nbf`, `iss`, `aud`, `sub`, `jti`. A consumer that
 # needs those must check them itself — say so, do not assume.
+
+include "lib/bayan.cyr"
 
 # base64url decode — uses cyrius stdlib's `lib/bayan.cyr` (which subsumed
 # the standalone lib/base64.cyr at 6.1.x).

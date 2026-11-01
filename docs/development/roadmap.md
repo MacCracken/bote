@@ -123,15 +123,13 @@ Both need a seam upstream that bote should **file, not wait for** — not yet fi
   profile (`[lib.guards]`: core plus those three modules, no transports), or moving the pure
   helpers into core. Weigh it the way `content.cyr` and `sandbox.cyr` were weighed below: on
   which consumers would include it, not on fit.
-- **bayan in the core bundle.** Since 3.4.11 no core module calls bayan; `registry_validate_params`
-  was the last. The `include "lib/bayan.cyr"` in `registry.cyr` remains, which is why
-  `dist/bote-core.deps` still names it. It costs a one-call consumer that copies the bundle 963,584 B
-  on cyrius 6.7.18 (1,239,776 B with it, 276,192 B without). Moving the include to `web_tools.cyr`, the
-  one module that uses bayan, is CLAUDE.md's own pattern and would make the sidecar `hashmap`. All 12
-  sibling repos that consume core declare `bayan` themselves, so none would break, and equally none
-  saves a byte until it drops that declaration; aegis, nein, t-ron and varna are the four that make no
-  bayan call of their own. A sidecar change is a consumer contract change, so it was not made as a side
-  effect of a pin move.
+- **Canonical JWT signatures below cyrius 6.7.18.** The bundles state 6.7.13, but only bayan 1.11.1,
+  the 6.7.18 fold, refuses non-canonical base64url. On 6.7.13 – 6.7.17 one signature has four
+  spellings and `jwt_verify_hs256` accepts all of them (measured: `tests/bote_jwt.tcyr` fails six
+  assertions on 6.7.17). bote's own binary is not affected, and no sibling repo sits in that range
+  today. Re-encoding the decoded signature in `jwt_verify_hs256` and comparing it with the segment
+  would hold on every toolchain, in about three lines. The alternative is to leave it to the pin and
+  the warning in `src/jwt.cyr`'s header.
 - **`[lib.core]` membership.** The profile exists to bound a transport-free consumer's
   compile set (t-ron's SecurityGate). `content.cyr` joined at 3.3.6 on evidence — core
   consumers were hand-rolling content envelopes and re-implementing JSON escaping.
@@ -213,8 +211,10 @@ No open blockers and no open filings. Two to file:
 - **To file with cyrius — a vendoring-friendly pin** (audit G14). A `[deps.bote]` limited to
   `modules = ["dist/bote-core.cyr"]` still pulls bote's own `deps.libro` / `deps.majra` into the
   consumer (t-ron shows it), which is the reason hoosh, szal and thoth vendor the bundle by hand
-  instead, and why all three sit 13 releases behind. A resolver that honours the selected
-  module's `.deps` sidecar, or deps scoped to a profile, would remove the reason.
+  instead, and why all three sit 13 releases behind. It is also why dropping `bayan` from the core
+  bundle (3.4.13) saved a pinned consumer nothing: libro brings it back, 1,797,856 B against 276,192 B
+  copied, measured with a one-`ping` consumer on 6.7.18. A resolver that honours the selected module's
+  `.deps` sidecar, or deps scoped to a profile, would remove the reason.
 
 bote's six toolchain filings are archived in the cyrius
 repo (`docs/development/issues/archived/`) and indexed with their fixes in
