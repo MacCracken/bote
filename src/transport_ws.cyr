@@ -133,7 +133,7 @@ fn _ws_check_protocol(cfd, buf, blen, config) {
 }
 
 # ================================================================
-# Upgrade handler — invoked per connection by sandhi_server_run
+# Upgrade handler — invoked per connection by sandhi's serve loop
 # ================================================================
 
 fn _bote_ws_handler(config, cfd, buf, n) {
@@ -176,7 +176,7 @@ fn _bote_ws_handler(config, cfd, buf, n) {
     # ⚠ 3.3.7 — REPLACE the inherited receive deadline before entering the
     # frame loop. This is a bug fix, not a tuning knob.
     #
-    # bote does not own this accept loop: `sandhi_server_run` sets
+    # bote does not own this accept loop: sandhi's serve loop sets
     # SO_RCVTIMEO on every accepted connection as a slowloris guard, with a
     # 30 s default (SANDHI_SERVER_DEFAULT_IDLE_MS). That is exactly right
     # for HTTP, where a request is expected promptly — and measured working:
@@ -224,12 +224,13 @@ fn _bote_ws_handler(config, cfd, buf, n) {
 }
 
 # ================================================================
-# Server entry — defers to stdlib sandhi_server_run
+# Server entry — defers to bote_conn_serve
 # ================================================================
 
 fn transport_ws_run(dispatcher, config) {
     store64(config + 40, dispatcher);
-    return sandhi_server_run(ws_config_addr(config),
+    return bote_conn_serve("ws",
+      ws_config_addr(config),
       ws_config_port(config),
       &_bote_ws_handler,
       config);

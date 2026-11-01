@@ -9,7 +9,9 @@
 #   - each answers `initialize` (ws: the upgrade answers 101);
 #   - the argv[0] aliases bote-streamable / bote-ws select their transports;
 #   - streamable keeps the tool set it had as a separate binary (the echo
-#     references, no fs_write) while http has the full one.
+#     references, no fs_write) while http has the full one;
+#   - each sandhi-served mode, started again on a port already held, exits 1
+#     and names the step and errno (3.4.12).
 # Needs curl and python3. CI runs it as the "Transport smoke" step.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -90,6 +92,18 @@ while b"\n" not in b:
 print(b.decode().strip())' "$sock" "$INIT")
 echo "$r" | grep -q '"protocolVersion"' || err "unix initialize: $r"
 
+# Every server above is still up, so a second one on its port has to fail. These
+# logs are .held, not .err: the check below fails the run on 'transport failed'.
+for m in "http 18390" "bridge 18391" "streamable 18392" "ws 18393"; do
+  read -r mode port <<< "$m"
+  rc=0; timeout 5 $B "$mode" "$port" 2> "$L/$mode.held" || rc=$?
+  [ "$rc" -eq 1 ] || err "$mode on a held port: rc=$rc, not 1"
+  grep -q "\[ERROR\] serve failed transport=$mode step=bind port=$port errno=98 cause=\"port in use\"" "$L/$mode.held" \
+    || err "$mode on a held port names no step: $(cat "$L/$mode.held")"
+  grep -q "\[ERROR\] transport failed transport=$mode rc=1" "$L/$mode.held" \
+    || err "$mode on a held port has no exit line: $(cat "$L/$mode.held")"
+done
+
 for f in "$L"/*.err; do grep -q 'transport failed' "$f" && err "$(basename "$f"): $(grep 'transport failed' "$f")"; done
 [ $fail -eq 0 ] || exit 1
-echo "transport smoke: http bridge streamable ws unix + both argv[0] aliases answer; streamable keeps its tool set"
+echo "transport smoke: http bridge streamable ws unix + both argv[0] aliases answer; streamable keeps its tool set; a held port names its step"

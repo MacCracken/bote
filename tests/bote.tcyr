@@ -152,6 +152,25 @@ fn _lc_has(hay, needle) {
     return 0;
 }
 
+# Hold a listening socket on the first free port of 18400-18499, so that a
+# serve on that port fails at bind. Stores the fd through `out_fd` and returns
+# the port, or 0 when none could be held.
+fn _held_port(out_fd) {
+    var p = 18400;
+    while (p < 18500) {
+        var st, sfd = tcp_socket();
+        if (is_err_result(st) == 1) { return 0; }
+        var bt, bv = sock_bind(sfd, 0x0100007F, p);
+        if (is_err_result(bt) == 0) {
+            sock_listen(sfd, 4);
+            store64(out_fd, sfd);
+            return p;
+        }
+        sock_close(sfd);
+        p = p + 1;
+    }
+    return 0;
+}
 
 fn main() {
     alloc_init();
@@ -1915,6 +1934,77 @@ fn main() {
     codec_process_message("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}", ld, 0);
     assert(_lc_has(_lc_buf, "status=notification") == 1, "a notification logs status=notification");
     _lc_end();
+    sakshi_set_level(SK_INFO);
+
+    # ---------------- conn: a failed serve says why (3.4.12) ----------------
+    assert(streq(bote_conn_serve_step_name(SANDHI_SERVER_FAIL_CONFIG), "config") == 1, "serve: step name config");
+    assert(streq(bote_conn_serve_step_name(SANDHI_SERVER_FAIL_ALLOC), "alloc") == 1, "serve: step name alloc");
+    assert(streq(bote_conn_serve_step_name(SANDHI_SERVER_FAIL_SOCKET), "socket") == 1, "serve: step name socket");
+    assert(streq(bote_conn_serve_step_name(SANDHI_SERVER_FAIL_BIND), "bind") == 1, "serve: step name bind");
+    assert(streq(bote_conn_serve_step_name(SANDHI_SERVER_FAIL_LISTEN), "listen") == 1, "serve: step name listen");
+    assert(streq(bote_conn_serve_step_name(SANDHI_SERVER_FAIL_ACCEPT), "accept") == 1, "serve: step name accept");
+    assert(streq(bote_conn_serve_step_name(SANDHI_SERVER_FAIL_THREAD), "thread") == 1, "serve: step name thread");
+    assert(streq(bote_conn_serve_step_name(SANDHI_SERVER_FAIL_NONE), "unknown") == 1, "serve: nothing recorded is unknown");
+
+    # bote_conn_serve moved the transports from no options struct to a new one.
+    # sandhi's serve loop reads these four, so a new struct must read as none.
+    var so = sandhi_server_options_new();
+    assert_eq(sandhi_server_options_get_idle_ms(so), sandhi_server_options_get_idle_ms(0), "serve: a new options struct has the idle budget of none");
+    assert_eq(sandhi_server_options_get_request_ms(so), sandhi_server_options_get_request_ms(0), "serve: ...the request budget of none");
+    assert_eq(sandhi_server_options_get_max_request(so), sandhi_server_options_get_max_request(0), "serve: ...the request cap of none");
+    assert_eq(sandhi_server_options_get_stop_flag(so), 0, "serve: ...and no stop flag");
+
+    # What each recorded failure logs. sandhi's record is set directly: socket
+    # and listen failures cannot be provoked on demand.
+    _lc_begin();
+    _sandhi_server_set_failure(so, SANDHI_SERVER_FAIL_SOCKET, 24);
+    bote_conn_log_serve_failure("http", 8390, so);
+    assert(_lc_has(_lc_buf, "step=socket") == 1 && _lc_has(_lc_buf, "errno=24") == 1, "serve: a socket failure logs the step and errno");
+    assert_eq(_lc_has(_lc_buf, "cause="), 0, "serve: ...and no cause, which is for a port in use");
+    _sandhi_server_set_failure(so, SANDHI_SERVER_FAIL_BIND, 13);
+    bote_conn_log_serve_failure("http", 80, so);
+    assert(_lc_has(_lc_buf, "step=bind") == 1 && _lc_has(_lc_buf, "errno=13") == 1, "serve: another bind errno is logged");
+    assert_eq(_lc_has(_lc_buf, "cause="), 0, "serve: ...and is not called a port in use");
+    _sandhi_server_set_failure(so, SANDHI_SERVER_FAIL_LISTEN, BOTE_ERRNO_EADDRINUSE);
+    bote_conn_log_serve_failure("http", 8390, so);
+    assert_eq(_lc_has(_lc_buf, "cause="), 0, "serve: the same errno at another step is not a port in use");
+    _sandhi_server_set_failure(so, SANDHI_SERVER_FAIL_ALLOC, 0);
+    bote_conn_log_serve_failure("http", 8390, so);
+    assert(_lc_has(_lc_buf, "step=alloc") == 1, "serve: an alloc failure logs its step");
+    assert_eq(_lc_has(_lc_buf, "errno="), 0, "serve: ...with no errno, since it has none");
+    bote_conn_log_serve_failure("http", 8390, 0);
+    assert(_lc_has(_lc_buf, "step=unknown") == 1, "serve: no options struct logs step=unknown");
+    _lc_end();
+
+    # The real path: a transport started on a port this test holds.
+    var hfd_slot[8];
+    var hport = _held_port(&hfd_slot);
+    assert(hport != 0, "serve: a port to hold in 18400-18499");
+    if (hport != 0) {
+        var hport_txt = str_data(str_from_int(hport));
+        var want_port = str_builder_new();
+        str_builder_add_cstr(want_port, "port=");
+        str_builder_add_cstr(want_port, hport_txt);
+        var want_port_c = str_data(str_builder_build(want_port));
+
+        _lc_begin();
+        var hrc = transport_http_run(dispatcher_new(tool_registry_new()), http_config_new("/mcp", 0x0100007F, hport));
+        assert_eq(hrc, 1, "serve: http on a held port returns 1");
+        assert_eq(_lc_count, 1, "serve: ...logging one line");
+        assert_eq(_lc_level, SK_ERROR, "serve: ...at ERROR");
+        assert(_lc_has(_lc_buf, "serve failed") == 1 && _lc_has(_lc_buf, "transport=http") == 1, "serve: ...naming the transport");
+        assert(_lc_has(_lc_buf, "step=bind") == 1, "serve: ...the step");
+        assert(_lc_has(_lc_buf, want_port_c) == 1, "serve: ...the port");
+        assert(_lc_has(_lc_buf, "errno=98") == 1, "serve: ...the errno");
+        assert(_lc_has(_lc_buf, "cause=\"port in use\"") == 1, "serve: ...and what it means");
+
+        _lc_begin();
+        var brc = transport_bridge_run(dispatcher_new(tool_registry_new()), bridge_config_new(0x0100007F, hport));
+        assert_eq(brc, 1, "serve: bridge on a held port returns 1");
+        assert(_lc_has(_lc_buf, "transport=bridge") == 1 && _lc_has(_lc_buf, "step=bind") == 1, "serve: ...and says why");
+        _lc_end();
+        sock_close(load64(&hfd_slot));
+    }
     sakshi_set_level(SK_INFO);
 
     return assert_summary();

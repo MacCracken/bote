@@ -176,7 +176,7 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
   authentication bypasses).
 
 tests/
-├── bote.tcyr                  — 545 core assertions
+├── bote.tcyr                  — 576 core assertions
 ├── conformance.tcyr           — 127 (JSON-RPC 2.0 + MCP 2025-11-25, by spec clause, via codec_process_message)
 ├── bote_auth.tcyr             — 45 (bearer + allowlist + JWT + PKCE validators; 401 log lines)
 ├── bote_content.tcyr          — 25 (content blocks + annotations)
@@ -405,10 +405,10 @@ standing rules are in CLAUDE.md under Key Principles.
 
 | Artifact | Count | Where |
 |---|---|---|
-| Core unit tests | 545 | `tests/bote.tcyr` |
+| Core unit tests | 576 | `tests/bote.tcyr` |
 | Protocol conformance | 127 | `tests/conformance.tcyr` — by spec clause, through `codec_process_message` (3.4.5) |
 | Module tests | 711 | `tests/bote_auth.tcyr` (45) + `bote_content.tcyr` (25) + `bote_fs_tools.tcyr` (42) + `bote_host.tcyr` (197) + `bote_jwt.tcyr` (53) + `bote_libro_tools.tcyr` (64) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (68) + `bote_web_tools.tcyr` (63) + `bote_ws.tcyr` (21) |
-| **Total assertions** | **1383** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
+| **Total assertions** | **1414** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
 | Benchmarks | 16 | `tests/bote.bcyr` |
 | Fuzz harnesses | 6 | `fuzz/*.fcyr` |
 

@@ -31,17 +31,8 @@ subprotocol / compression negotiation (→ 3.6.x, needs an upstream seam).
 
 ## Next patch
 
-- **Name the failed step when a transport exits.** sandhi 1.10.10 closed bote's filing with
-  `sandhi_server_last_failure(opts, out_step, out_errno)`, and every fold from cyrius 6.7.13 has it.
-  `bote_main_log_exit` can still only say "socket, bind, listen or accept failed (is the port in
-  use?)". The http, streamable, ws and bridge transports move from `sandhi_server_run` to
-  `sandhi_server_run_opts` with a `sandhi_server_options_new()` each, the way the Unix transport
-  already logs its own errno. ⚠ This raises the minimum cyrius from 6.7.2 to 6.7.13, so re-measure
-  with `scripts/bundle-min-cyrius.sh`. CI requires both bundles to state one minimum, though only the
-  full bundle would need it.
-
-Beyond that, the 3.4.x minor's planned work is done: the conformance suite, the audit's bote-side
-fixes (B1–B9), and the SSRF classifier gaps. The next work after it is one of:
+Nothing is queued. The 3.4.x minor's planned work is done: the conformance suite, the audit's
+bote-side fixes (B1–B9), and the SSRF classifier gaps. The next work is one of:
 
 - **an item from the consumer adoption track below**, taken when a named consumer is ready to move
   onto bote (each is its own patch); or

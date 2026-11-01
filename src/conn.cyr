@@ -1,9 +1,10 @@
-# bote::conn — per-connection socket deadlines for the transports (3.4.3).
+# bote::conn — per-connection socket deadlines for the transports (3.4.3),
+# and the serve entry the HTTP-family ones share (3.4.12).
 #
 # Every bote transport serves one connection at a time: the Unix transport
 # runs its own accept loop, and the HTTP-family ones run inside sandhi's
-# single-threaded `sandhi_server_run`. A connection that blocks the server
-# therefore blocks every other client too.
+# single-threaded `sandhi_server_run_opts`. A connection that blocks the
+# server therefore blocks every other client too.
 #
 # ## Send: on by default
 #
@@ -36,9 +37,20 @@
 # the environment (src/main_common.cyr). Milliseconds; 0 disables. On agnos
 # the stdlib records the deadline in its syscall peer instead of a socket
 # option, and a 0 there means the peer's 30 s default, not "never".
+#
+# ## Serving
+#
+# The HTTP-family transports start through bote_conn_serve. sandhi_server_run
+# takes no options struct, so a failed start recorded nothing and bote could
+# only say that socket, bind, listen or accept had failed. run_opts records
+# the step and the errno in the struct it is given. A new struct reads the same
+# defaults as none (tests/bote.tcyr pins that), so that record is the only
+# difference. It needs sandhi 1.10.10, which is what sets the minimum cyrius
+# at the top of src/log.cyr.
 
 var BOTE_SEND_TIMEOUT_MS = 30000;
 var BOTE_UNIX_IDLE_MS = 0;
+var BOTE_ERRNO_EADDRINUSE = 98;
 
 # Apply `ms` as fd's send (`send` = 1) or receive (`send` = 0) deadline.
 # ms <= 0 leaves the socket as it is. Returns 0 or the stdlib's -errno.
@@ -71,4 +83,45 @@ fn bote_conn_log_send_drop(transport, err) {
     bote_log_int(&ln, "send_timeout_ms", BOTE_SEND_TIMEOUT_MS);
     bote_log_emit(&ln);
     return 0;
+}
+
+# The log name of a SANDHI_SERVER_FAIL_* step. "unknown" is a failed serve with
+# nothing recorded, which means its options struct could not be allocated.
+fn bote_conn_serve_step_name(step) {
+    if (step == SANDHI_SERVER_FAIL_CONFIG) { return "config"; }
+    if (step == SANDHI_SERVER_FAIL_ALLOC) { return "alloc"; }
+    if (step == SANDHI_SERVER_FAIL_SOCKET) { return "socket"; }
+    if (step == SANDHI_SERVER_FAIL_BIND) { return "bind"; }
+    if (step == SANDHI_SERVER_FAIL_LISTEN) { return "listen"; }
+    if (step == SANDHI_SERVER_FAIL_ACCEPT) { return "accept"; }
+    if (step == SANDHI_SERVER_FAIL_THREAD) { return "thread"; }
+    return "unknown";
+}
+
+# One ERROR line for a serve that returned non-zero: the step that failed, and
+# the errno when that step has one. `opts` is the struct the serve was given.
+fn bote_conn_log_serve_failure(transport, port, opts) {
+    var step_slot[8]; var err_slot[8];
+    sandhi_server_last_failure(opts, &step_slot, &err_slot);
+    var step = load64(&step_slot);
+    var err = load64(&err_slot);
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_ERROR, "serve failed");
+    bote_log_str(&ln, "transport", transport);
+    bote_log_str(&ln, "step", bote_conn_serve_step_name(step));
+    bote_log_int(&ln, "port", port);
+    if (err != 0) { bote_log_int(&ln, "errno", err); }
+    if (step == SANDHI_SERVER_FAIL_BIND && err == BOTE_ERRNO_EADDRINUSE) {
+        bote_log_str(&ln, "cause", "port in use");
+    }
+    bote_log_emit(&ln);
+    return 0;
+}
+
+# Serve `handler_fp` on addr:port. Returns only on failure, having said why.
+fn bote_conn_serve(transport, addr, port, handler_fp, ctx) {
+    var opts = sandhi_server_options_new();
+    var rc = sandhi_server_run_opts(addr, port, handler_fp, ctx, opts);
+    if (rc != 0) { bote_conn_log_serve_failure(transport, port, opts); }
+    return rc;
 }

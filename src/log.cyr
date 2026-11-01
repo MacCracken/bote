@@ -2,13 +2,16 @@
 #
 # ## Before you compile this (it is the first module of both dist bundles)
 #
-# Minimum cyrius: 6.7.2
+# Minimum cyrius: 6.7.13
 #
-#   6.7.2 and later compile both bundles, pass the core-only smoke test and
-#   answer a ping. 6.7.1 and earlier stop at the first `const` below, with
-#   "expected '=', got identifier". scripts/bundle-min-cyrius.sh measures
-#   this on every installed toolchain. Re-run it at every pin move, and
-#   whenever bote starts using a newer language feature.
+#   6.7.13 and later compile both bundles, pass the core-only smoke test and
+#   answer a ping. 6.7.2 through 6.7.12 still compile dist/bote-core.cyr, but
+#   stop on dist/bote.cyr with "undefined variable
+#   'SANDHI_SERVER_FAIL_CONFIG'": its transports need sandhi 1.10.10. 6.7.1 and
+#   earlier stop at the first `const` below, with "expected '=', got
+#   identifier". scripts/bundle-min-cyrius.sh measures this on every installed
+#   toolchain. Re-run it at every pin move, and whenever bote starts using a
+#   newer language feature.
 #
 #   A copied bundle (src/vendor/bote-core.cyr) rather than a [deps.bote]
 #   pin must also declare "sakshi" in its own [deps] stdlib. This module

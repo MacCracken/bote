@@ -101,14 +101,18 @@ dep libro requires 'ct' ... is not in the cyrius stdlib
 upstream as `2026-08-12-agnosai-deps-misleading-stdlib-error`). What it
 actually means is that `./lib/` does not yet contain that module.
 
-**Minimum cyrius: 6.7.2**, for both bundles. Each bundle states it on the
-`# Minimum cyrius:` line that opens `src/log.cyr`, its first module, so a
+**Minimum cyrius: 6.7.13**, stated for both bundles. Each bundle states it on
+the `# Minimum cyrius:` line that opens `src/log.cyr`, its first module, so a
 repo that copies a bundle reads it in the file it copied. The number is
 measured, not inherited: `scripts/bundle-min-cyrius.sh` builds a checkout on
-every installed toolchain. 6.7.2 and later build both bundles, pass the
-core-only smoke test and answer a ping; 6.7.1 and earlier stop at `log.cyr`'s
-first `const`. CI checks that both bundles state the same minimum and that it
-is not newer than the pin. A repo on 6.6.x can take bote 3.3.17 at the newest.
+every installed toolchain. 6.7.13 and later build both bundles, pass the
+core-only smoke test and answer a ping. 6.7.2 through 6.7.12 still build
+`dist/bote-core.cyr`, which has no transport, but stop on `dist/bote.cyr` with
+`undefined variable 'SANDHI_SERVER_FAIL_CONFIG'`, because its transports need
+sandhi 1.10.10. 6.7.1 and earlier stop at `log.cyr`'s first `const`. CI checks
+that both bundles state the same minimum and that it is not newer than the pin.
+A repo on 6.7.2 through 6.7.12 can take the full bundle at 3.4.11 at the
+newest, and a repo on 6.6.x bote 3.3.17.
 
 Cyrius deliberately does **not** auto-resolve stdlib — that is a
 supply-chain choice, not an oversight. Two things follow, and the

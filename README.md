@@ -251,8 +251,8 @@ Dependencies rehydrate into `lib/` (gitignored) via `cyrius deps`.
 Cross-project deps **libro and majra** are git-pinned via
 `[deps.<name>]` in `cyrius.cyml`. Two consumer bundles ship in `dist/`:
 `bote.cyr` (full, 33 modules) and `bote-core.cyr` (core 13,
-transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md). Both need
-**cyrius ≥ 6.7.2**, stated on the `# Minimum cyrius:` line near the top of each;
+transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md). Both state
+**cyrius ≥ 6.7.13** on the `# Minimum cyrius:` line near the top of each (`bote-core.cyr` alone still builds from 6.7.2);
 a repo that copies the core bundle rather than pinning it must also declare
 `sakshi`.
 
@@ -260,12 +260,12 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 1383 total across fifteen files (+ a core-only drift smoke)
+### Tests — 1414 total across fifteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1383 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1414 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 545 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/bote.tcyr               # 576 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/conformance.tcyr        # 127 — JSON-RPC 2.0 + MCP 2025-11-25 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 45 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks

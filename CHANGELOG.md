@@ -18,6 +18,95 @@ have per release.
 
 _(empty)_
 
+## [3.4.12] — 2026-11-01 · a transport that cannot serve says which step failed
+
+The roadmap's next item, and the last open thread from bote's sandhi filing. A failed start on http,
+bridge, streamable or ws could only be logged as "socket, bind, listen or accept failed". Those four
+now name the step and the errno, as the Unix transport has since 3.4.0. This raises the stated minimum
+cyrius from 6.7.2 to 6.7.13.
+
+### Changed — what a failed start logs
+
+Started on a port that is already held:
+
+| | Line |
+|---|---|
+| 3.4.11 | `[ERROR] transport failed transport=http rc=1 cause="socket, bind, listen or accept failed (is the port in use?)"` |
+| 3.4.12 | `[ERROR] serve failed transport=http step=bind port=8390 errno=98 cause="port in use"` |
+| | `[ERROR] transport failed transport=http rc=1` |
+
+- **`step`** is one of `socket`, `bind`, `listen`, `accept`, `alloc`, `config` or `thread`, from sandhi's
+  own record. `unknown` means the options struct itself could not be allocated.
+- **`errno`** is left out for a step that has none.
+- **`cause`** is on the new line only, and only for `EADDRINUSE` at bind. A monitor that matched the old
+  `cause=` text on `transport failed` needs the new line. The exit code is still 1.
+- The line comes from the transport, not the binary, so an embedder calling `transport_http_run` and
+  the like gets it too.
+
+### Added
+
+- `bote_conn_serve(transport, addr, port, handler_fp, ctx)` in `src/conn.cyr`, the serve entry all four
+  transports now share, with `bote_conn_log_serve_failure` and `bote_conn_serve_step_name`.
+- **`tests/bote.tcyr` +31**, 1,383 → 1,414 in all: every step name, what each kind of failure logs, http
+  and bridge on a port the test holds, and a new options struct reading as none.
+- **`scripts/transport-smoke.sh`** starts each of the four modes again on a port already held, and
+  requires exit 1, the step line and the exit line. The in-process tests reach only http and bridge, so
+  this is what covers streamable and ws, and CI's "Transport smoke" step runs it.
+- **Mutation-proven.** 17 mutants, each killed by an assertion or the smoke:
+  - the serve never logging, or passing no options struct;
+  - `cause` on any step, or on any bind errno;
+  - `errno` logged when 0, the wrong step name, WARN for ERROR, the port dropped;
+  - each of the four transports back on bare `sandhi_server_run`, and ws carrying http's label;
+  - a new options struct differing in its idle budget, request budget, request cap or stop flag.
+
+  The first form of that last group edited `lib/sandhi.cyr` and survived, because `cyrius test` restores
+  `lib/` before compiling, even with `--no-deps`. Driving it with sandhi's setters from the test side
+  kills all four.
+
+### Changed — behaviour that did not
+
+- **Serving is unchanged.** `sandhi_server_run` is `sandhi_server_run_opts` with `opts = 0`, and of the
+  options that loop reads, a new struct gives the same idle budget (30 s), request budget (60 s), request
+  cap and no stop flag. `tests/bote.tcyr` pins all four, so a sandhi default that drifts fails here and
+  not in a client. WebSocket still replaces the inherited receive deadline as it did.
+
+### Changed — the minimum cyrius
+
+- **Both bundles now state 6.7.13.** `sandhi_server_last_failure` first folds at 6.7.13 (sandhi 1.13.1;
+  6.7.12 still has 1.10.9), and there is no way for a bundle to test its toolchain. Measured with
+  `scripts/bundle-min-cyrius.sh`:
+
+  | cyrius | build | core smoke | ping | first failure |
+  |---|---|---|---|---|
+  | 6.7.1 | fail | — | — | `lib/patra.cyr:3765:24: expected identifier, got '-'` |
+  | 6.7.2, 6.7.9, 6.7.10, 6.7.11, 6.7.12 | fail | — | — | `src/conn.cyr: undefined variable 'SANDHI_SERVER_FAIL_CONFIG'` |
+  | 6.7.13, 6.7.14, 6.7.18 | ok | ok | ok | |
+
+- **`dist/bote-core.cyr` itself needs no more than it did.** It has no transport, and a copied core bundle
+  builds and runs on 6.7.2, 6.7.9, 6.7.12, 6.7.13 and 6.7.18. CI requires both bundles to state one
+  minimum, so the line says 6.7.13 and `src/log.cyr` and DEPS-PATTERN.md give the detail.
+
+  **Who this reaches:** nobody today. The two sibling repos that select the full bundle, daimon and
+  itihas, are on cyrius 6.6.x and bote 3.3.x, already below the old minimum. A repo on 6.7.2–6.7.12 can
+  take the full bundle at 3.4.11 at the newest.
+
+### Changed
+
+- Binaries: `bote` 3,213,704 B (3.4.11: 3,213,728); aarch64 3,745,904 B (3,745,912); agnos 3,182,184 B with
+  0 undefined. Capacity: `fn_table` 6959 / 131072. Both `.deps` sidecars are unchanged.
+- Every test file is green on x86_64 and under `qemu-aarch64` 11.1.3. Every unit compiles for agnos with
+  0 undefined. CI's step scripts and `fmt`, `lint`, `vet` and `deny` are clean.
+- Only the bind failure runs for real, on x86_64 and aarch64. The other steps are logged from a record
+  set by the test, because they cannot be provoked on demand, and agnos's 98 for `EADDRINUSE` is read
+  from its syscall peer's comment, not run.
+- Roadmap: nothing is queued. bayan in the core bundle stays an open decision.
+
+### Performance
+
+- `tests/bote.bcyr` links neither `src/conn.cyr` nor any transport. The logged row (load 5.3) is within
+  noise of 3.4.11's: `dispatch_tools_call` 2.944 µs against 2.988, `codec_process_message` 5.749 µs
+  against 5.823.
+
 ## [3.4.11] — 2026-11-01 · cyrius 6.7.18, libro 2.11.3, majra 2.13.0, and one fallback off bayan's parser
 
 The toolchain and both git deps move to their latest tags, and the fold brings sigil, patra, sakshi,

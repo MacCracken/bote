@@ -541,7 +541,7 @@ fn _strm_handle_get(cfd, buf, n, config) {
 }
 
 # ================================================================
-# Top-level handler — dispatched by stdlib sandhi_server_run
+# Top-level handler — dispatched by sandhi's serve loop
 # ================================================================
 
 fn _strm_handle(config, cfd, buf, n) {
@@ -571,7 +571,8 @@ fn _strm_handle(config, cfd, buf, n) {
 fn transport_streamable_run(dispatcher, config) {
     _strm_init();
     store64(config + 56, dispatcher);
-    return sandhi_server_run(streamable_config_addr(config),
+    return bote_conn_serve("streamable",
+      streamable_config_addr(config),
       streamable_config_port(config),
       &_strm_handle,
       config);

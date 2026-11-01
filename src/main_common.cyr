@@ -246,9 +246,7 @@ fn bote_main_log_start(transport, port, path, auth_on) {
 }
 
 # The exit line. A clean stop is INFO; a transport that returned non-zero is
-# ERROR. The four sandhi-served transports return a bare 1 for a failed
-# socket, bind, listen or a fatal accept, with no errno, so the line names
-# all four; the Unix transport logs its own errno before returning.
+# ERROR. Each transport has already logged the step and the errno.
 fn bote_main_log_exit(transport, rc) {
     var ln[BOTE_LOG_LINE_BYTES];
     if (rc == 0) {
@@ -258,9 +256,6 @@ fn bote_main_log_exit(transport, rc) {
         bote_log_line(&ln, SK_ERROR, "transport failed");
         bote_log_str(&ln, "transport", transport);
         bote_log_int(&ln, "rc", rc);
-        if (streq(transport, "stdio") == 0 && streq(transport, "unix") == 0) {
-            bote_log_str(&ln, "cause", "socket, bind, listen or accept failed (is the port in use?)");
-        }
     }
     bote_log_emit(&ln);
     return rc;

@@ -110,7 +110,7 @@ fn _http_peek_method(body) {
 }
 
 # ================================================================
-# Request handler — invoked per connection by sandhi_server_run
+# Request handler — invoked per connection by sandhi's serve loop
 # ================================================================
 
 fn _http_handle(config, cfd, buf, n) {
@@ -188,12 +188,13 @@ fn _http_handle(config, cfd, buf, n) {
 }
 
 # ================================================================
-# Server entry — defers to stdlib sandhi_server_run
+# Server entry — defers to bote_conn_serve
 # ================================================================
 
 fn transport_http_run(dispatcher, config) {
     store64(config + 48, dispatcher);
-    return sandhi_server_run(http_config_addr(config),
+    return bote_conn_serve("http",
+      http_config_addr(config),
       http_config_port(config),
       &_http_handle,
       config);
