@@ -115,7 +115,7 @@ fn schema_prop_value(p) { return load64(p + 8); }
 # Profiles are opaque consumer-defined tags (e.g. "security", "web", "full")
 # used to expose curated tool subsets via a `profile` filter on tools/list.
 # bote does no interpretation — membership is exact-match; an untagged tool
-# (profiles == 0) is in no profile. See _build_tools_list_result in dispatch.
+# (profiles == 0) is in no profile. See _build_tools_list_result_a in dispatch.
 
 fn tool_def_new(name, description, input_schema) {
     var d = alloc(64);
@@ -278,6 +278,48 @@ fn _reg_log_refused(tool_def, why) {
 # The input schema is compiled here unless tool_def_with_compiled already
 # attached one (3.4.8). Through 3.4.7 nothing compiled it, so every tool was
 # checked only for its required fields.
+# One WARN for a keyword on a property that tools/list advertises and validation
+# does not enforce, so that a schema's author is told, and the tool still works:
+# extra keywords are the client's to read. See the validator's subset in
+# schema.cyr. A non-string `enum` and a type array are the same gap.
+fn _reg_warn_kw(tool, key, kw) {
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_WARN, "schema keyword not enforced");
+    bote_log_str(&ln, "tool", tool);
+    bote_log_str(&ln, "property", key);
+    bote_log_str(&ln, "keyword", kw);
+    bote_log_emit(&ln);
+    return 0;
+}
+
+fn _reg_warn_unenforced(tool_def) {
+    var props = schema_properties(tool_def_input_schema(tool_def));
+    if (props == 0) { return 0; }
+    var i = 0;
+    while (i < vec_len(props)) {
+        var pair = vec_get(props, i);
+        var v = schema_prop_value(pair);
+        var kws = "anyOf oneOf allOf not $ref pattern minLength maxLength minItems maxItems const ";
+        var start = 0;
+        var k = 0;
+        while (load8(kws + k) != 0) {
+            if (load8(kws + k) == 32) {
+                var kw = alloc_via(bote_req_alloc(), k - start + 1);
+                memcpy(kw, kws + start, k - start);
+                store8(kw + k - start, 0);
+                if (jsonx_has(v, kw) == 1) { _reg_warn_kw(tool_def_name(tool_def), schema_prop_key(pair), kw); }
+                start = k + 1;
+            }
+            k = k + 1;
+        }
+        if (jsonx_has(v, "type") == 1 && jsonx_get_str(v, "type") == 0) {
+            _reg_warn_kw(tool_def_name(tool_def), schema_prop_key(pair), "type array");
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn registry_register(r, tool_def) {
     var why = registry_check_tool_def(tool_def);
     if (why != 0) {
@@ -289,6 +331,7 @@ fn registry_register(r, tool_def) {
     if (tool_def_compiled(tool_def) == 0) {
         tool_def_with_compiled(tool_def, compiled_compile(tool_def_input_schema(tool_def)));
     }
+    _reg_warn_unenforced(tool_def);
     var name = tool_def_name(tool_def);
     var entries = registry_entries(r);
     var names = registry_names(r);
@@ -414,22 +457,27 @@ fn _vp_first_nonws(s) {
 }
 
 fn registry_validate_params(r, name, params_cstr) {
-    if (registry_contains(r, name) == 0) {
-        return bote_err_new(BOTE_ERR_TOOL_NOT_FOUND, name, 0);
-    }
+    return registry_validate_params_a(default_alloc(), r, name, params_cstr);
+}
+
+# registry_validate_params with the error and its text on `a`.
+fn registry_validate_params_a(a, r, name, params_cstr) {
     var t = registry_get(r, name);
+    if (t == 0) {
+        return bote_err_new_a(a, BOTE_ERR_TOOL_NOT_FOUND, name, 0);
+    }
 
     # 1. params must be a JSON object.
     if (_vp_first_nonws(params_cstr) != 123) {
-        return bote_err_new(BOTE_ERR_INVALID_PARAMS, name, "params must be an object");
+        return bote_err_new_a(a, BOTE_ERR_INVALID_PARAMS, name, "params must be an object");
     }
 
     # 2. Compiled schema path (preferred — full type/enum/bounds/nested checks).
     var compiled = tool_def_compiled(t);
     if (compiled != 0) {
-        var violations = compiled_validate(compiled, params_cstr);
-        if (vec_len(violations) > 0) {
-            return bote_err_with_violations(BOTE_ERR_SCHEMA_VIOLATION, name, violations);
+        var violations = compiled_check_a(a, compiled, params_cstr);
+        if (violations != 0) {
+            return bote_err_with_violations_a(a, BOTE_ERR_SCHEMA_VIOLATION, name, violations);
         }
         return 0;
     }
@@ -449,11 +497,11 @@ fn registry_validate_params(r, name, params_cstr) {
     while (i < nreq) {
         var req_key = vec_get(required, i);
         if (jsonx_has(params_cstr, req_key) == 0) {
-            var sb = str_builder_new();
-            str_builder_add_cstr(sb, "missing required field: ");
-            str_builder_add_cstr(sb, req_key);
-            var msg = str_builder_build(sb);
-            return bote_err_new(BOTE_ERR_INVALID_PARAMS, name, str_data(msg));
+            var sb = str_builder_new_a(a);
+            str_builder_add_cstr_a(a, sb, "missing required field: ");
+            str_builder_add_cstr_a(a, sb, req_key);
+            var msg = str_builder_build_a(a, sb);
+            return bote_err_new_a(a, BOTE_ERR_INVALID_PARAMS, name, str_data(msg));
         }
         i = i + 1;
     }

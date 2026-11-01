@@ -22,7 +22,10 @@ include "lib/bayan.cyr"
 
 var WEB_FETCH_CAP = 65536;     # max bytes web_fetch returns (readable text)
 var WEB_SEARCH_MAX = 10;       # hard ceiling on results returned
-var WEB_BODY_CAP = 2097152;    # 2 MiB: max raw response we will scan (a huge page is truncated, not OOM'd)
+var WEB_BODY_CAP = 2097152;    # 2 MiB: the largest response read; a larger one fails the call
+# The most one outbound request may take. Every client waits on it: the server
+# handles one call at a time. 0 disables it. The binary reads BOTE_WEB_TIMEOUT_MS.
+var BOTE_WEB_TIMEOUT_MS = 15000;
 
 # ---- MCP result blocks (mirror _fs_result) --------------------------------
 fn _web_result(msg, is_err) {
@@ -57,7 +60,7 @@ fn _web_starts_with(s, prefix) {
 fn _web_arg_number(args, key) {
     var raw = jsonx_get_raw(args, key);
     if (raw == 0) { return 0; }
-    return str_to_int(str_from(raw));
+    return _sch_parse_int(raw);
 }
 # _web_is_http: 1 if `url` begins with http:// or https:// (the only schemes web_fetch follows). PURE.
 fn _web_is_http(url) {
@@ -136,7 +139,13 @@ fn _web_html_to_text(src, len, dst, cap) {
                 elif ((eb < 32) || (eb == 127)) { }   # a control-byte entity (&#12; etc.) -> drop (see below)
                 else {
                     if (pend_space == 1) { if (off > 0) { off = _web_emit(dst, off, cap, 32); } pend_space = 0; }
-                    off = _web_emit(dst, off, cap, eb);
+                    # &#233; is a code point, not a byte: two of them in UTF-8.
+                    if (eb >= 128) {
+                        off = _web_emit(dst, off, cap, 192 + (eb / 64));
+                        off = _web_emit(dst, off, cap, 128 + (eb % 64));
+                    } else {
+                        off = _web_emit(dst, off, cap, eb);
+                    }
                 }
                 i = i + (ent % 1048576);
             } else {
@@ -217,7 +226,13 @@ fn _web_get(url) {
     var h = sandhi_headers_new();
     sandhi_headers_set(h, "User-Agent", "bote-web/1.0 (AGNOS)");
     sandhi_headers_set(h, "Accept", "*/*");
-    var r = sandhi_http_get(url, h);
+    var o = sandhi_http_options_new_a(bote_req_alloc());
+    sandhi_http_options_connect_ms(o, BOTE_WEB_TIMEOUT_MS);
+    sandhi_http_options_read_ms(o, BOTE_WEB_TIMEOUT_MS);
+    sandhi_http_options_write_ms(o, BOTE_WEB_TIMEOUT_MS);
+    sandhi_http_options_total_ms(o, BOTE_WEB_TIMEOUT_MS);
+    sandhi_http_options_max_response_bytes(o, WEB_BODY_CAP);
+    var r = sandhi_http_get_opts_a(bote_req_alloc(), url, h, o);
     if (sandhi_http_err_kind(r) != SANDHI_OK) { return 0; }
     return r;
 }
@@ -382,7 +397,7 @@ fn web_fetch_handler(args, claims) {
     var body = sandhi_http_body(r);
     var blen = sandhi_http_body_len(r);
     if (blen > WEB_BODY_CAP) { blen = WEB_BODY_CAP; }
-    var out = alloc(WEB_FETCH_CAP + 1);
+    var out = alloc_via(bote_req_alloc(), WEB_FETCH_CAP + 1);
     _web_html_to_text(body, blen, out, WEB_FETCH_CAP);
     if (load8(out) == 0) { return _web_ok("(the page returned no readable text)"); }
     return _web_ok(out);

@@ -18,6 +18,153 @@ have per release.
 
 _(empty)_
 
+## [3.4.15] — 2026-11-01 · closeout: a website can no longer reach bote, a request leaves nothing on the heap, and the roadmap follows the current spec
+
+The P(-1) pass that closes 3.4.x. Four independent reviews found no memory-safety defect and a good deal else: any
+website could drive `bote bridge`'s file tools, the other HTTP transports did not validate `Origin`, and an
+unauthenticated client could kill the server in about 12 seconds. All of that is fixed. The full findings, and what
+was deferred and why, are in [docs/audit/2026-11-01-closeout.md](docs/audit/2026-11-01-closeout.md). The handler ABI
+and the stated minimum cyrius (6.7.13) are unchanged. MCP's current revision is 2026-07-28, which bote does not speak
+yet; that now leads the roadmap.
+
+### Security
+
+- **A website can no longer reach bote.** A present `Origin` not on `BOTE_ALLOWED_ORIGINS` gets 403 on every
+  HTTP-family transport, before anything else runs, and with no list set every present `Origin` is refused. Through
+  3.4.14 no list meant no check, the binary had no way to set one, and `bote bridge` answered
+  `Access-Control-Allow-Origin: *` with the fs tools registered, so any page the operator opened could read and write
+  under `BOTE_FS_ROOT`. A client that sends no `Origin` is unaffected. A refused bridge request no longer reaches a
+  tool: a miss used to dispatch and only hide the reply, and `Origin: null` matched a sandboxed iframe.
+- **An unauthenticated client can no longer exhaust memory.** See Memory below.
+- **A schema-checked integer is the integer the handler reads.** `libro_retention {"value":1e3}` validated as 1000 and
+  the handler read 13, because `str_to_int` skips non-digits; 2^64 wrapped to 0. Python's `json.dumps(1000.0)` writes
+  `1000.0`, so ordinary clients reach this. Handlers now read through the validator's own parser, and an integer past
+  what can be held is refused.
+- **`web_fetch` and `web_search` have deadlines,** `BOTE_WEB_TIMEOUT_MS`, default 15 s. One silent URL used to stop every
+  client for good. DNS is not covered: sandhi's resolver has no timeout yet (roadmap, Upstream).
+- **The fs tools stay in their root through a symlink.** Confinement was a string check, so any link already in the root
+  escaped it, for read, write and mkdir. A path may no longer pass through one, `fs_write` replaces a link rather than
+  writing through it, and a FIFO no longer hangs the server. The check is by name, because the stdlib has no `openat`.
+- **The audit trail names the configured identity.** A client's `caller_id` chose the `agent_id` in the hash-linked chain;
+  it now stays in the details as a claim. A refused `tools/call` also reaches the audit and event sinks now, where it
+  left no trace.
+- **`BOTE_BEARER_TOKENS` set with no token refuses to start.** It logged a WARN and served with auth off.
+- **`ssrf_check` on its own** now reads an authority as a client does: `http://169.254.169.254?@example.com/`,
+  `http://a@b@127.0.0.1/` and `http://0x7f.0.0.1/` passed it. `web_fetch` was already safe, at the resolved address.
+- **Sessions expire.** Nothing checked a session's age and nothing called the pruner, and `initialize` minted one before
+  validation. A session is now minted after `initialize` succeeds, checked for age, and the store holds at most
+  `BOTE_SESSION_MAX` (4096), answering 503 when full of live sessions.
+
+### Fixed
+
+- **One key scanner, and it decodes.** `_jx_scan` is now the only walker of a JSON object's keys, and `_jx_find_value_pos`
+  is its one-key form. A key matches as what it decodes to, so `"c\u006et"` cannot skip a type check that `cnt` would
+  meet, and `method`, tool names, versions and URIs are decoded: `"method":"tools\/list"` was `-32601`. A decoded NUL
+  matches nothing. The decoder moved from `fs_tools` into `jsonx`.
+- **Every response string is valid UTF-8** (RFC 8259 §8.1). `bote_json_escape` replaces an invalid sequence with U+FFFD, at
+  the one point every string passes through. Binary files, Latin-1 pages and `&#233;` made strict parsers refuse the
+  whole message.
+- **Every handler's result is one line of valid JSON.** `prompts/get`, `resources/read` and `completion/complete` sent
+  theirs unchecked (now `-32603`), and a pretty-printing handler split a line on stdio and Unix.
+- **Numbers:** `-0.9` passed `minimum: 0` and `10.9` passed `maximum: 10`. **Schemas:** the schema `false` allowed
+  everything; it now allows nothing, and registration warns about each keyword it advertises and does not enforce.
+- **Line framing:** an overlong line lost its head silently and ran its tail as a new message. It now gets one `-32700`
+  and is skipped to its newline, on stdio and Unix.
+- **HTTP:** a `Content-Length` that is no number is 400, a NUL hiding trailing bytes is 400, and the POST SSE piggyback stops
+  at the first failed write, as the GET path does.
+- **Unix socket:** a path over 107 bytes is refused rather than bound truncated, a failed chmod is an error, and only a
+  socket is replaced at the path, not somebody's file.
+- **fs tools:** `fs_mkdir` reports failure, `fs_read` says when it truncated and refuses a binary file rather than cutting it at
+  the first NUL, surrogate pairs and escaped paths are decoded, and a failed write leaves the old file whole.
+- **JSON-RPC:** a request with a readable id and no method is answered with that id. `completion/complete` refuses non-object
+  params. A null tool or nameless prompt is refused at registration, where it crashed the list that followed.
+- **`libro_query`:** `offset` + `limit` could wrap and return nothing with `ok:true`.
+- **`web_fetch`:** a page over 256 KiB failed with "transport error"; `WEB_BODY_CAP` (2 MiB) was dead code and now applies.
+- **`bote ws`** gains `BOTE_WS_IDLE_MS`. SECURITY.md promised an opt-in the binary could not reach.
+- **Logging:** a long line overflowed sakshi's buffer and glued two records together; bote's cap now sits below it.
+
+### Memory
+
+`alloc` never frees, and nothing was rewound between requests, so a server's memory was bytes-per-request times requests.
+Every byte bote allocates to answer a message now goes on a request arena (`bote_req_begin`, in `protocol.cyr`), rewound when the
+next message starts, on every transport. New `_a` forms carry it through the codec, dispatch, validation and the responses; the old
+entry points are wrappers and behave as they did. Measured on the real binaries, RSS growth:
+
+| Scenario | 3.4.14 | B / request | 3.4.15 | B / request |
+|---|---|---|---|---|
+| 60 KB ping, no auth, 3,000 requests | 174 MiB | 60,817 | 0 | 0 |
+| 60 KB rejected token, 2,000 | 230 MiB | 120,586 | 0 | 0 |
+| 60 KB arguments to an unknown tool, 2,000 | 346 MiB | 181,404 | 0 | 0 |
+| `tools/list` over http, 3,000 | 96 MiB | 33,554 | 0 | 0 |
+| `tools/list` over stdio, 20,000 | 630 MiB | 33,030 | 0 | 0 |
+| WebSocket header claiming 1 MiB, 300 connections | 300 MiB | 1,048,576 | 0 | 0 |
+
+- ⚠ **What still grows:** a tool call that passes validation leaves its `args` and whatever its handler allocates, because
+  the 2.0 ABI lets a handler keep them. `args` reaches the heap only past the last refusal. Roadmap 3.8.x.
+- WebSocket frames are read through the public `ws_server_recv_frame` into one buffer, so a header claiming 1 MiB stores
+  nothing. Unix uses one read buffer instead of 128 KiB per connection. Validation stops at `BOTE_SCH_MAX_VIOLATIONS` (32).
+
+### Changed — behaviour an embedder can see
+
+- `transport_http_run`, `transport_streamable_run` and `transport_ws_run` refuse a present `Origin` when no list is configured.
+  Pass a list, or `*`, with `*_config_with_allowed_origins`. `bridge_config_with_origins` with an empty list refuses too.
+- `session_store_create` can return 0, and `session_store_validate` refuses an expired session.
+- The libro audit sink no longer takes `agent_id` from `caller_id`.
+- An audit or event sink now sees refused calls.
+- `fs_write` is atomic. `fs_read` of a file holding a NUL is an error.
+
+### Performance
+
+WebSocket replies waited on the peer's delayed ACK, because a frame's header and payload are separate writes. `TCP_NODELAY`
+takes a round trip from **41,000 µs to 50 µs**, median.
+
+Interleaved A/B: 15 alternating rounds, pinned to one core, load about 9, 3.4.14 against 3.4.15, medians:
+
+| Bench | 3.4.14 | 3.4.15 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 6,158 ns | 4,292 ns | −30.3% |
+| `dispatch_tools_call` | 3,172 ns | 2,290 ns | −27.8% |
+| `dispatch_tools_call_result` | 2,871 ns | 2,105 ns | −26.7% |
+| `codec_parse_request` | 1,528 ns | 969 ns | −36.6% |
+| `codec_serialize_response` | 491 ns | 215 ns | −56.2% |
+| `validate_compiled_nested` | 2,372 ns | 2,037 ns | −14.1% |
+| `jsonx_get_str_flat` | 150 ns | 187 ns | **+24.7%** |
+| `jsonx_get_raw_nested` | 423 ns | 462 ns | **+9.2%** |
+| `schema_compile_nested` | 6,167 ns | 6,652 ns | **+7.9%** |
+| `auth_bearer_check_set` | 830 ns | 872 ns | **+5.1%** |
+
+The four slower rows are real: a single-key lookup now goes through the one scanner, and decodes escaped keys. The pipeline
+those lookups sit inside is 30% faster. The other wins: one pass over a message, a success response sized once, no violations
+vec on success, and streamable no longer building an event its sink discards.
+
+### Added
+
+- `BOTE_ALLOWED_ORIGINS`, `BOTE_WEB_TIMEOUT_MS`, `BOTE_WS_IDLE_MS`.
+- Tests: 1,420 → 1,545. `tests/bote.tcyr` asserts 0 heap bytes per message on every refusal, and that what a handler or sink
+  keeps survives the next message. `scripts/transport-smoke.sh` gains what a unit test cannot set up: hostile Origins on every
+  mode, real bearer tokens, a refused `initialize`, and symlinks and FIFOs under `BOTE_FS_ROOT`.
+- **Mutation-proven.** 33 mutants of these fixes, each killed by an assertion, a smoke check or a hang.
+- **Poisoned arena.** A build that overwrites the arena on every rewind gives byte-identical output to a normal build over
+  100,000 fuzzed messages, and passes the suite, so no request reads another's bytes.
+- [docs/audit/2026-11-01-closeout.md](docs/audit/2026-11-01-closeout.md).
+
+### Changed
+
+- **The roadmap is rewritten** around open 3.x work, decided on bote's own merits: the consumer adoption track is gone. MCP
+  2026-07-28 is the new 3.5.x, as a dual-era server, because a client that speaks only that revision cannot talk to bote today.
+  3.6.x is HTTP authorization, 3.7.x threaded dispatch rebased on `subscriptions/listen`, and the old plan's held-open `GET`,
+  `logging/setLevel` and `resources/subscribe`, which the spec removed, are dropped. [spec-compliance.md](docs/spec-compliance.md)
+  says so at the top, and lists the gaps it did not: `outputSchema`, `title`, `icons`, `instructions`, RFC 9728.
+- CLAUDE.md: consumers are not this project's problem unless they report a bug; the request-arena and one-scanner rules.
+- Binaries: `bote` 3,243,328 B (3.4.14: 3,213,704); aarch64 3,812,384 B; agnos 3,207,672 B with 0 undefined. `fn_table` 7016 / 131072.
+  Every test file is green on x86_64 and under `qemu-aarch64` 11.1.3. The minimum measures the same: the full tree needs 6.7.13.
+  `dist/bote.deps` and `dist/bote-core.deps` are unchanged.
+
+### Deferred, with reasons in the audit report
+
+The per-write send deadline against a slow reader (3.7.x), `libro_retention`'s dropped archive (open decision), `version`
+selecting a schema but not a handler (3.9.x), and tying a session to its token.
+
 ## [3.4.14] — 2026-11-01 · a JWT signature has one spelling on every toolchain, and corrections to 3.4.13
 
 `jwt_verify_hs256` now requires the signature segment to be exactly what the encoder writes, so one

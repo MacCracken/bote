@@ -68,7 +68,7 @@ fn wrap_tool_result(result) {
     if (jsonx_is_object(result) == 1) {
         # (1) Passthrough — has a `content` array.
         if (jsonx_has(result, "content") == 1) {
-            var c = jsonx_get_raw(result, "content");
+            var c = jsonx_get_raw_a(bote_req_alloc(), result, "content");
             if (c != 0) {
                 var ci = 0;
                 var clen = strlen(c);
@@ -120,13 +120,13 @@ fn wrap_error_result(message) {
 #              (JSON-RPC 2.0 forbids both result+error; SY wants the envelope)
 # Other methods (initialize, tools/list, batch elements) pass through unchanged.
 
-fn _bridge_process_single(line, dispatcher, claims) {
+fn _bridge_process_single(a, line, dispatcher, claims) {
     # The codec's own admission checks, so a request the codec refuses is
     # refused here the same way (3.4.5; this was a second copy before).
     var err_slot[8];
-    var req = _cdc_admit(line, &err_slot);
+    var req = _cdc_admit_a(a, line, &err_slot);
     if (req == 0) { return load64(&err_slot); }
-    var resp = dispatcher_dispatch(dispatcher, req, claims);
+    var resp = dispatcher_dispatch_a(a, dispatcher, req, claims);
     if (resp == 0) { return 0; }
 
     # Bridge wrapping only applies to tools/call.
@@ -135,29 +135,33 @@ fn _bridge_process_single(line, dispatcher, claims) {
         var err_obj = resp_error_obj(resp);
         if (success_result != 0) {
             var wrapped = wrap_tool_result(success_result);
-            return codec_serialize_response(resp_success(resp_id(resp), wrapped));
+            return codec_serialize_response_a(a, resp_success_a(a, resp_id(resp), wrapped));
         }
         if (err_obj != 0) {
             var wrapped_err = wrap_error_result(rpc_err_message(err_obj));
-            return codec_serialize_response(resp_success(resp_id(resp), wrapped_err));
+            return codec_serialize_response_a(a, resp_success_a(a, resp_id(resp), wrapped_err));
         }
     }
-    return codec_serialize_response(resp);
+    return codec_serialize_response_a(a, resp);
 }
 
 fn bridge_process_message(input, dispatcher, claims) {
-    if (input == 0) { return _cdc_parse_error("empty input"); }
+    return bridge_process_message_a(default_alloc(), input, dispatcher, claims);
+}
+
+fn bridge_process_message_a(a, input, dispatcher, claims) {
+    if (input == 0) { return _cdc_parse_error_a(a, "empty input"); }
     var len = strlen(input);
     var i = _cdc_skip_ws(input, len, 0);
-    if (i >= len) { return _cdc_parse_error("empty input"); }
-    if (jsonx_valid(input, len) == 0) { return _cdc_parse_error("invalid JSON"); }
+    if (i >= len) { return _cdc_parse_error_a(a, "empty input"); }
+    if (jsonx_valid(input, len) == 0) { return _cdc_parse_error_a(a, "invalid JSON"); }
     var first = load8(input + i);
 
     # Batch arrays defer to the codec (no per-element wrapping; the bridge
     # contract is single-tool-call → MCP envelope).
-    if (first == 91) { return codec_process_message(input, dispatcher, claims); }
-    if (first == 123) { return _bridge_process_single(input, dispatcher, claims); }
-    return _cdc_invalid_request("expected object or array");
+    if (first == 91) { return codec_process_message_a(a, input, dispatcher, claims); }
+    if (first == 123) { return _bridge_process_single(a, input, dispatcher, claims); }
+    return _cdc_invalid_request_a(a, "expected object or array");
 }
 
 # ================================================================
@@ -168,41 +172,40 @@ fn bridge_process_message(input, dispatcher, claims) {
 # into _http_send_* via the extra_headers slot. allowed_origins is a vec or 0.
 
 fn _bridge_cors_origin(allowed_origins, request_origin) {
-    if (allowed_origins == 0) { return "*"; }
+    if (request_origin == 0 || allowed_origins == 0) { return 0; }
     var n = vec_len(allowed_origins);
     var i = 0;
     while (i < n) {
         if (streq(vec_get(allowed_origins, i), "*") == 1) { return "*"; }
         i = i + 1;
     }
-    if (n == 0) { return "*"; }
-    if (request_origin != 0) {
-        var j = 0;
-        while (j < n) {
-            if (streq(vec_get(allowed_origins, j), request_origin) == 1) {
-                return request_origin;
-            }
-            j = j + 1;
+    var j = 0;
+    while (j < n) {
+        if (streq(vec_get(allowed_origins, j), request_origin) == 1) {
+            return request_origin;
         }
+        j = j + 1;
     }
-    # 1.9.6 audit M3: don't echo allowed_origins[0] on miss. That would
-    # leak the first allowed origin to any cross-origin requester.
-    # `null` is a spec-compliant value — browser will block the response.
-    return "null";
+    return 0;
 }
 
+# The CORS headers for an Origin that passed, or none: no header at all is what
+# tells a browser no, and `null` would match a sandboxed iframe's Origin.
 fn _bridge_cors_headers(allowed_origins, request_origin) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "Access-Control-Allow-Origin: ");
-    str_builder_add_cstr(sb, _bridge_cors_origin(allowed_origins, request_origin));
-    str_builder_add_cstr(sb, "\r\nAccess-Control-Allow-Methods: POST, GET, OPTIONS\r\n");
-    str_builder_add_cstr(sb, "Access-Control-Allow-Headers: content-type\r\n");
-    return str_data(str_builder_build(sb));
+    var acao = _bridge_cors_origin(allowed_origins, request_origin);
+    if (acao == 0) { return ""; }
+    var a = bote_req_alloc();
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, "Access-Control-Allow-Origin: ");
+    str_builder_add_cstr_a(a, sb, acao);
+    str_builder_add_cstr_a(a, sb, "\r\nVary: Origin\r\nAccess-Control-Allow-Methods: POST, GET, OPTIONS\r\n");
+    str_builder_add_cstr_a(a, sb, "Access-Control-Allow-Headers: content-type, authorization\r\n");
+    return str_data(str_builder_build_a(a, sb));
 }
 
 fn _bridge_send_health(cfd, allowed_origins, request_origin) {
     var cors = _bridge_cors_headers(allowed_origins, request_origin);
-    sandhi_server_send_response(cfd, HTTP_OK, "OK", "text/plain", "ok", 2, cors);
+    sandhi_server_send_response_a(bote_req_alloc(), cfd, HTTP_OK, "OK", "text/plain", "ok", 2, cors);
     return 0;
 }
 
@@ -219,19 +222,26 @@ fn _bridge_handle(config, cfd, buf, n) {
     var allowed_origins = bridge_config_origins(config);
     var dispatcher      = bridge_config_dispatcher(config);
 
-    var method = sandhi_server_get_method(buf, n);
-    var path   = sandhi_server_get_path(buf, n);
-    var origin = sandhi_server_find_header(buf, n, "Origin");
+    var a = bote_req_begin();
+    var method = sandhi_server_get_method_a(a, buf, n);
+    var path   = sandhi_server_get_path_a(a, buf, n);
+    var origin = sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Origin");
+    # Before everything, the preflight included: an Origin the operator did not
+    # allow never reaches a tool.
+    if (bote_origin_ok(origin, allowed_origins) == 0) {
+        bote_http_refuse(cfd, SK_WARN, "bridge", HTTP_FORBIDDEN, "Forbidden", "origin");
+        return 0;
+    }
     var cors   = _bridge_cors_headers(allowed_origins, origin);
 
     # OPTIONS preflight
     if (streq(method, "OPTIONS") == 1) {
-        sandhi_server_send_204(cfd, cors);
+        sandhi_server_send_204_a(bote_req_alloc(), cfd, cors);
         return 0;
     }
     # GET /health
     if (streq(method, "GET") == 1) {
-        if (streq(sandhi_server_path_only(path), "/health") == 1) {
+        if (streq(sandhi_server_path_only_a(bote_req_alloc(), path), "/health") == 1) {
             _bridge_send_health(cfd, allowed_origins, origin);
             return 0;
         }
@@ -244,13 +254,13 @@ fn _bridge_handle(config, cfd, buf, n) {
         return 0;
     }
     # Only "/" is the bridge endpoint.
-    if (streq(sandhi_server_path_only(path), "/") == 0) {
+    if (streq(sandhi_server_path_only_a(bote_req_alloc(), path), "/") == 0) {
         bote_http_refuse(cfd, SK_DEBUG, "bridge", HTTP_NOT_FOUND, "Not Found", "path");
         return 0;
     }
 
     # Reject ambiguous Transfer-Encoding (HTTP smuggling guard, RFC 9112)
-    if (sandhi_server_find_header(buf, n, "Transfer-Encoding") != 0) {
+    if (sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Transfer-Encoding") != 0) {
         bote_http_refuse(cfd, SK_WARN, "bridge", HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding"); return 0;
     }
     # Bearer auth (no-op when no validator configured)
@@ -262,6 +272,10 @@ fn _bridge_handle(config, cfd, buf, n) {
 
     # 413 cap on oversized declared bodies (audit M1). 60 KB headroom
     # keeps us inside the 64 KB recv buffer with room for headers.
+    if (bote_http_clen_bad(buf, n) == 1) {
+        bote_http_refuse(cfd, SK_WARN, "bridge", HTTP_BAD_REQUEST, "Bad Request", "content_length");
+        return 0;
+    }
     var declared_clen = sandhi_server_content_length(buf, n);
     if (declared_clen > 61440) {
         bote_http_refuse(cfd, SK_WARN, "bridge", HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large", "payload_too_large"); return 0;
@@ -276,16 +290,21 @@ fn _bridge_handle(config, cfd, buf, n) {
     if (clen <= 0) { clen = n - body_off; }
     if (clen < 0) { clen = 0; }
     if (clen > n - body_off) { clen = n - body_off; }
-    var body = alloc(clen + 1);
-    memcpy(body, buf + body_off, clen);
+    var body = buf + body_off;
     store8(body + clen, 0);
-
-    var resp = bridge_process_message(body, dispatcher, load64(&claims_slot));
-    if (resp == 0) {
-        sandhi_server_send_204(cfd, cors);
+    # A NUL would end the message early, and whatever follows it would go
+    # unread by the syntax check.
+    if (strlen(body) != clen) {
+        bote_http_refuse(cfd, SK_WARN, "bridge", HTTP_BAD_REQUEST, "Bad Request", "nul_in_body");
         return 0;
     }
-    sandhi_server_send_response(cfd, HTTP_OK, "OK", "application/json",
+
+    var resp = bridge_process_message_a(a, body, dispatcher, load64(&claims_slot));
+    if (resp == 0) {
+        sandhi_server_send_204_a(bote_req_alloc(), cfd, cors);
+        return 0;
+    }
+    sandhi_server_send_response_a(bote_req_alloc(), cfd, HTTP_OK, "OK", "application/json",
       resp, strlen(resp), cors);
     return 0;
 }

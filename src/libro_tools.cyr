@@ -113,8 +113,9 @@ fn _lt_merkle_leaf_count(t) { return load64(t + 8); }
 fn _lt_get_int(args, key) {
     var raw = jsonx_get_raw(args, key);
     if (raw == 0) { return 0; }
-    # raw is a cstr like "42"; wrap + parse
-    return str_to_int(str_from(raw));
+    # The validator's reading, so `1e3` is 1000 here too. str_to_int skips
+    # non-digits, which made it 13, and wraps.
+    return _sch_parse_int(raw);
 }
 
 # The CallToolResult for a tool's JSON object `json` (3.4.10): the JSON as a
@@ -233,7 +234,7 @@ fn libro_tool_query(args, claims) {
     var start = offset;
     if (start < 0) { start = 0; }
     var end = total;
-    if (limit > 0 && start + limit < end) { end = start + limit; }
+    if (limit > 0 && limit < end - start) { end = start + limit; }
     var i = start;
     while (i < end) {
         vec_push(page, vec_get(matched, i));

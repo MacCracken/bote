@@ -463,6 +463,14 @@ fn main() {
     assert_streq(ssrf_ipv6_bytes_str(_v6(0xFE80, 0, 0, 0, 0, 0, 0, 1)), "fe80:0:0:0:0:0:0:1", "ssrf_ipv6_bytes_str(fe80::1)");
     assert_streq(ssrf_ipv6_bytes_str(_v6(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0xABCD)), "2001:db8:0:0:0:0:0:abcd", "ssrf_ipv6_bytes_str(2001:db8::abcd)");
 
+    # ---------------- 3.4.15: the authority, as a connecting client reads it ----------------
+    assert_eq(ssrf_check("http://169.254.169.254?@example.com/"), SSRF_METADATA, "authority: ? ends it, so this @ is no userinfo");
+    assert_eq(ssrf_check("http://169.254.169.254#@example.com/"), SSRF_METADATA, "authority: # ends it too");
+    assert_eq(ssrf_check("http://a@b@127.0.0.1/"), SSRF_LOOPBACK, "authority: the last @ ends the userinfo");
+    assert_eq(ssrf_check("http://user:pw@example.com/"), SSRF_OK, "authority: a plain userinfo still passes");
+    assert_eq(ssrf_check("http://0x7f.0.0.1/"), SSRF_PARSE, "hex: a 0x label is refused");
+    assert_eq(ssrf_check("http://a0x1.example.com/"), SSRF_OK, "hex: only at the start of a label");
+
     return assert_summary();
 }
 

@@ -29,11 +29,15 @@ fn TOPIC_SANDBOX_ERROR()     { return "bote/sandbox/error"; }
 # ================================================================
 
 fn event_sink_new(publish_fp, ctx) {
-    var s = alloc(16);
+    var s = alloc(24);
     store64(s, publish_fp);
     store64(s + 8, ctx);
+    store64(s + 16, 0);
     return s;
 }
+
+# Say this sink ignores tool-call events, so dispatch need not build them.
+fn event_sink_set_list_only(s) { store64(s + 16, 1); return s; }
 
 # A no-op sink: publish_fp = 0, ctx = 0. Equivalent to "events disabled".
 fn event_sink_noop() {

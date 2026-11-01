@@ -106,6 +106,25 @@ fn _fake_none(ctx, host, family) {
     return 0;
 }
 
+# A listener that accepts nothing and says nothing, on the first free port of
+# 18500-18599. Stores the fd through `out_fd`, and returns the port or 0.
+fn _silent_port(out_fd) {
+    var p = 18500;
+    while (p < 18600) {
+        var st, sfd = tcp_socket();
+        if (is_err_result(st) == 1) { return 0; }
+        var bt, bv = sock_bind(sfd, 0x0100007F, p);
+        if (is_err_result(bt) == 0) {
+            sock_listen(sfd, 4);
+            store64(out_fd, sfd);
+            return p;
+        }
+        sock_close(sfd);
+        p = p + 1;
+    }
+    return 0;
+}
+
 fn main() {
     alloc_init();
     var dst = alloc(256);
@@ -261,6 +280,27 @@ fn main() {
         whi = whi + 1;
     }
     assert_eq(whn, 2, "tools/list: both web tools are read-only and open-world");
+
+    # ---------------- an outbound request has a deadline (3.4.15) ----------------
+    # A silent server used to hold this call, and every client behind it, for good.
+    var sil_slot[8];
+    var sil_port = _silent_port(&sil_slot);
+    assert(sil_port != 0, "deadline: a port to hold in 18500-18599");
+    if (sil_port != 0) {
+        var was_ms = BOTE_WEB_TIMEOUT_MS;
+        BOTE_WEB_TIMEOUT_MS = 300;
+        var usb = str_builder_new();
+        str_builder_add_cstr(usb, "http://127.0.0.1:");
+        str_builder_add_int(usb, sil_port);
+        str_builder_add_cstr(usb, "/");
+        var t0 = clock_now_ns();
+        var sil_r = _web_get(str_data(str_builder_build(usb)));
+        var took_ms = (clock_now_ns() - t0) / 1000000;
+        assert_eq(sil_r, 0, "deadline: a silent server is a failed fetch");
+        assert(took_ms < 5000, "deadline: ...within the deadline, not forever");
+        BOTE_WEB_TIMEOUT_MS = was_ms;
+        sock_close(load64(&sil_slot));
+    }
 
     return assert_summary();
 }

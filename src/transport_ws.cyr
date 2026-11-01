@@ -17,7 +17,7 @@
 # sandhi_server_find_header directly (cyrius bug — the http_*→sandhi_*
 # rename missed it). Remove this shim once that lands.
 fn http_find_header(buf, blen, name): i64 {
-    return sandhi_server_find_header(buf, blen, name);
+    return sandhi_server_find_header_a(bote_req_alloc(), buf, blen, name);
 }
 include "lib/ws_server.cyr"
 
@@ -104,20 +104,14 @@ fn ws_config_idle_ms(c)           { return load64(c + 64); }
 # ================================================================
 
 fn _ws_check_origin(cfd, buf, blen, config) {
-    var allowed = ws_config_allowed_origins(config);
-    if (allowed == 0) { return 0; }
-    var origin = sandhi_server_find_header(buf, blen, "Origin");
-    var orig = origin;
-    if (orig == 0) { orig = ""; }
-    if (validate_origin(orig, allowed) != 0) {
-        bote_http_refuse(cfd, SK_WARN, "ws", HTTP_FORBIDDEN, "Forbidden", "origin");
-        return HTTP_FORBIDDEN;
-    }
-    return 0;
+    var origin = sandhi_server_find_header_a(bote_req_alloc(), buf, blen, "Origin");
+    if (bote_origin_ok(origin, ws_config_allowed_origins(config)) == 1) { return 0; }
+    bote_http_refuse(cfd, SK_WARN, "ws", HTTP_FORBIDDEN, "Forbidden", "origin");
+    return HTTP_FORBIDDEN;
 }
 
 fn _ws_check_protocol(cfd, buf, blen, config) {
-    var v = sandhi_server_find_header(buf, blen, "MCP-Protocol-Version");
+    var v = sandhi_server_find_header_a(bote_req_alloc(), buf, blen, "MCP-Protocol-Version");
     if (v == 0) {
         if (ws_config_require_protocol(config) == 1) {
             bote_http_refuse(cfd, SK_DEBUG, "ws", HTTP_BAD_REQUEST, "Bad Request", "protocol_version_missing");
@@ -132,6 +126,36 @@ fn _ws_check_protocol(cfd, buf, blen, config) {
     return 0;
 }
 
+# One frame's bytes, the whole of what a frame may hold: this transport serves
+# one connection at a time. ws_server_recv allocates the length a frame's header
+# claims before any of its payload arrives, on a heap that never frees, so 14
+# bytes from a peer cost 1 MiB, once per connection.
+var _ws_frame_buf = 0;
+
+# The next data frame as a cstr, in _ws_frame_buf, valid until the next call.
+# 0 when the peer closed, a frame broke a bound, or the socket failed.
+fn _bote_ws_recv(ws) {
+    if (_ws_frame_buf == 0) { _ws_frame_buf = alloc(WS_MAX_PAYLOAD + 1); }
+    var op_slot[8];
+    while (1 == 1) {
+        var n = ws_server_recv_frame(ws, _ws_frame_buf, WS_MAX_PAYLOAD, &op_slot);
+        if (n < 0) { return 0; }
+        var op = load64(&op_slot);
+        if (op == WS_OP_CLOSE) {
+            ws_server_send_close(ws, 1000, "");
+            return 0;
+        }
+        if (op >= 8) {
+            if (n > 125) { return 0; }
+            if (op == WS_OP_PING) { ws_server_send_pong(ws, _ws_frame_buf, n); }
+        } elif (op == WS_OP_TEXT || op == WS_OP_BINARY || op == WS_OP_CONTINUATION) {
+            store8(_ws_frame_buf + n, 0);
+            return _ws_frame_buf;
+        }
+    }
+    return 0;
+}
+
 # ================================================================
 # Upgrade handler — invoked per connection by sandhi's serve loop
 # ================================================================
@@ -142,21 +166,22 @@ fn _bote_ws_handler(config, cfd, buf, n) {
     # and never reads the replies used to park the server in write(2) for
     # good, and with it every other client of this single-threaded loop.
     bote_conn_send_deadline(cfd);
-    var method = sandhi_server_get_method(buf, n);
-    var path   = sandhi_server_get_path(buf, n);
+    var a = bote_req_begin();
+    var method = sandhi_server_get_method_a(a, buf, n);
+    var path   = sandhi_server_get_path_a(a, buf, n);
 
     # Only GET on the configured endpoint is valid for a WS upgrade.
     if (streq(method, "GET") == 0) {
         bote_http_refuse(cfd, SK_DEBUG, "ws", HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed", "method");
         return 0;
     }
-    if (streq(sandhi_server_path_only(path), ws_config_path(config)) == 0) {
+    if (streq(sandhi_server_path_only_a(bote_req_alloc(), path), ws_config_path(config)) == 0) {
         bote_http_refuse(cfd, SK_DEBUG, "ws", HTTP_NOT_FOUND, "Not Found", "path");
         return 0;
     }
 
     if (_ws_check_origin(cfd, buf, n, config) != 0) { return 0; }
-    if (sandhi_server_find_header(buf, n, "Transfer-Encoding") != 0) {
+    if (sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Transfer-Encoding") != 0) {
         bote_http_refuse(cfd, SK_WARN, "ws", HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding"); return 0;
     }
     var claims_slot[8]; store64(&claims_slot, 0);
@@ -203,12 +228,17 @@ fn _bote_ws_handler(config, cfd, buf, n) {
     var idle_s = idle_ms / 1000;
     sock_set_recv_timeout(cfd, idle_s, (idle_ms - idle_s * 1000) * 1000);
 
+    # ws_server_send_frame writes the header and the payload separately, so
+    # without this every reply waits on the peer's delayed ACK: about 40 ms.
+    sock_set_nodelay(cfd, 1);
+
     # Each frame is one JSON-RPC message. Loop until peer closes or the
     # socket errors out (ws_server_recv returns 0).
     while (1 == 1) {
-        var msg = ws_server_recv(ws);
+        a = bote_req_begin();
+        var msg = _bote_ws_recv(ws);
         if (msg == 0) { return 0; }
-        var resp = codec_process_message(msg, ws_config_dispatcher(config), ws_claims);
+        var resp = codec_process_message_a(a, msg, ws_config_dispatcher(config), ws_claims);
         if (resp != 0) {
             # 3.4.3: a failed frame write (the send deadline firing, or the
             # peer gone) leaves the stream desynchronised mid-frame, so the

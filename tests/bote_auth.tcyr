@@ -22,12 +22,31 @@ include "lib/sandhi.cyr"
 include "lib/assert.cyr"
 
 include "src/log.cyr"
+include "src/protocol.cyr"
 include "src/auth.cyr"
 
 # Mock validator that only accepts a single hardcoded token.
 fn mock_validator(token, ctx) {
     if (streq(token, "secret123") == 1) { return 1; }
     return 0;
+}
+
+# A request holding `Content-Length: <v>`, or none when v is 0.
+fn _make_clen(v) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "POST /mcp HTTP/1.1\r\nHost: x.x\r\n");
+    if (v != 0) {
+        str_builder_add_cstr(sb, "Content-Length: ");
+        str_builder_add_cstr(sb, v);
+        str_builder_add_cstr(sb, "\r\n");
+    }
+    str_builder_add_cstr(sb, "\r\n");
+    return str_data(str_builder_build(sb));
+}
+
+fn _clen_bad(v) {
+    var r = _make_clen(v);
+    return bote_http_clen_bad(r, strlen(r));
 }
 
 # Helper to build a fake HTTP request as a cstr (NUL-terminated buffer
@@ -218,6 +237,40 @@ fn main() {
     auth_bearer_check(2, r1, strlen(r1), fp, 0, 0);
     assert_eq(_lc_count, 0, "an accepted token logs nothing");
     _lc_end();
+
+    # ---------------- 3.4.15: a Content-Length is a number or a 400 ----------------
+    assert_eq(_clen_bad(0), 0, "clen: absent is fine");
+    assert_eq(_clen_bad("42"), 0, "clen: digits are fine");
+    assert_eq(_clen_bad("0"), 0, "clen: zero is fine");
+    assert_eq(_clen_bad("abc"), 1, "clen: letters are refused");
+    assert_eq(_clen_bad("-1"), 1, "clen: a sign is refused");
+    assert_eq(_clen_bad("+40"), 1, "clen: a plus is refused");
+    assert_eq(_clen_bad("1, 1"), 1, "clen: a list is refused");
+
+    # ---------------- 3.4.15: a refused token leaves nothing, kept claims survive ----------------
+    var big_tok = str_builder_new();
+    str_builder_add_cstr(big_tok, "Bearer ");
+    var bti = 0;
+    while (bti < 6000) { str_builder_add_cstr(big_tok, "0123456789"); bti = bti + 1; }
+    var big_req = _make_req(str_data(str_builder_build(big_tok)));
+    var big_n = strlen(big_req);
+    bote_req_begin();
+    auth_bearer_extract(big_req, big_n);
+    var before = alloc_used();
+    var bri = 0;
+    while (bri < 50) {
+        bote_req_begin();
+        auth_bearer_extract(big_req, big_n);
+        bri = bri + 1;
+    }
+    assert_eq(alloc_used() - before, 0, "arena: reading a 60 KB token leaves no heap");
+    var keep_req = _make_req("Bearer kept-token");
+    var keep_slot[8];
+    bote_req_begin();
+    assert_eq(auth_bearer_check(0, keep_req, strlen(keep_req), &auth_validator_allow_all, 0, &keep_slot), 0, "arena: a valid token passes");
+    bote_req_begin();
+    auth_bearer_extract(big_req, big_n);
+    assert(streq(load64(&keep_slot), "kept-token") == 1, "arena: claims a handler may keep survive the next message");
 
     return assert_summary();
 }

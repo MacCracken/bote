@@ -70,9 +70,9 @@ fn libro_audit_log(ctx, event) {
     var action_str  = str_from(action_cstr);
     var details_str = str_from(tool_call_event_to_json(event));
 
-    # caller_id takes precedence over configured agent_id
-    var agent_cstr = tool_call_event_caller_id(event);
-    if (agent_cstr == 0) { agent_cstr = libro_audit_agent_id(ctx); }
+    # The configured identity only. caller_id is whatever the client put in
+    # its params, so it stays in the details as a claim, not as who did this.
+    var agent_cstr = libro_audit_agent_id(ctx);
 
     if (agent_cstr != 0) {
         chain_append_with_agent(chain, severity, source_str, action_str,

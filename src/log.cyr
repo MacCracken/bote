@@ -75,7 +75,7 @@
 # '=', got identifier": it has no `const`. See "Minimum cyrius" at the top of
 # this module.
 const BOTE_LOG_LINE_BYTES = 280;
-const BOTE_LOG_TEXT_CAP = 256;
+const BOTE_LOG_TEXT_CAP = 216;
 
 var BOTE_LOG_OFF = 0 - 1;
 var BOTE_LOG_UNKNOWN = 0 - 100;

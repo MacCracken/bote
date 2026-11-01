@@ -27,11 +27,11 @@
 # Authorization header → token cstr
 # ================================================================
 
-# Return a fresh alloc'd cstr containing the token after "Bearer ", or
-# 0 if the header is absent or doesn't start with "Bearer ".
+# Return a cstr on the request arena containing the token after "Bearer ",
+# or 0 if the header is absent or doesn't start with "Bearer ".
 # Per RFC 6750 §2.1, the scheme name is case-insensitive.
 fn auth_bearer_extract(buf, blen) {
-    var hdr = sandhi_server_find_header(buf, blen, "Authorization");
+    var hdr = sandhi_server_find_header_a(bote_req_alloc(), buf, blen, "Authorization");
     if (hdr == 0) { return 0; }
 
     # Match "Bearer " (7 chars) case-insensitively at the start
@@ -64,7 +64,7 @@ fn auth_bearer_extract(buf, blen) {
 
     var token_len = end - start;
     if (token_len <= 0) { return 0; }
-    var out = alloc(token_len + 1);
+    var out = alloc_via(bote_req_alloc(), token_len + 1);
     memcpy(out, hdr + start, token_len);
     store8(out + token_len, 0);
     return out;
@@ -126,15 +126,16 @@ fn auth_validator_allowlist(token, allowed_vec) {
 # Send a spec-compliant 401 with WWW-Authenticate. `realm` is what
 # clients display in their auth prompt (e.g. "mcp" or your app name).
 fn auth_send_unauthorized(cfd, realm) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "WWW-Authenticate: Bearer realm=\"");
-    if (realm == 0) { str_builder_add_cstr(sb, "mcp"); }
-    else { str_builder_add_cstr(sb, realm); }
-    str_builder_add_cstr(sb, "\"\r\n");
-    var hdrs = str_data(str_builder_build(sb));
+    var ra = bote_req_alloc();
+    var sb = str_builder_new_a(ra);
+    str_builder_add_cstr_a(ra, sb, "WWW-Authenticate: Bearer realm=\"");
+    if (realm == 0) { str_builder_add_cstr_a(ra, sb, "mcp"); }
+    else { str_builder_add_cstr_a(ra, sb, realm); }
+    str_builder_add_cstr_a(ra, sb, "\"\r\n");
+    var hdrs = str_data(str_builder_build_a(ra, sb));
     # sandhi_server_send_response builds: status line + Content-Type + Content-Length
     # + extra hdrs + blank line + body. We want a 401 with our header.
-    sandhi_server_send_response(cfd, HTTP_UNAUTHORIZED, "Unauthorized",
+    sandhi_server_send_response_a(ra, cfd, HTTP_UNAUTHORIZED, "Unauthorized",
       "text/plain", "", 0, hdrs);
     return 0;
 }
@@ -169,7 +170,7 @@ fn bote_http_refuse(cfd, level, transport, status, text, reason) {
     bote_log_int(&ln, "status", status);
     bote_log_str(&ln, "reason", reason);
     bote_log_emit(&ln);
-    sandhi_server_send_status(cfd, status, text);
+    sandhi_server_send_status_a(bote_req_alloc(), cfd, status, text);
     return status;
 }
 
@@ -191,7 +192,30 @@ fn auth_bearer_check(cfd, buf, blen, validator_fp, validator_ctx, claims_out) {
         return HTTP_UNAUTHORIZED;
     }
     # 2.5.0: surface validator's return so transport can thread to handler.
+    # A handler may keep its claims, so a validator that returns the token
+    # gets it copied off the request arena.
+    if (claims == token) {
+        var kept = alloc(strlen(token) + 1);
+        memcpy(kept, token, strlen(token) + 1);
+        claims = kept;
+    }
     if (claims_out != 0) { store64(claims_out, claims); }
+    return 0;
+}
+
+# 1 when the request carries a Content-Length that is not a number. sandhi reads
+# a malformed one as 0, the same as none, and a body would then be read to the
+# end of the buffer on a length nobody declared.
+fn bote_http_clen_bad(buf, n) {
+    var v = sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Content-Length");
+    if (v == 0) { return 0; }
+    if (load8(v) == 0) { return 1; }
+    var i = 0;
+    while (load8(v + i) != 0) {
+        var c = load8(v + i);
+        if (c < 48 || c > 57) { return 1; }
+        i = i + 1;
+    }
     return 0;
 }
 

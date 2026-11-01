@@ -14,6 +14,15 @@
 # is a demo tool; the root confinement is a floor, not a full sandbox.
 
 var FS_READ_CAP = 65536;    # max bytes fs_read returns
+var FS_READ_NOTE = 32;      # room after them for the truncation note and a NUL
+var BOTE_ERRNO_ENOENT = 2;
+# agnos defines no O_NONBLOCK, and its file_open ignores flags it does not know.
+#ifdef CYRIUS_TARGET_AGNOS
+var BOTE_O_NONBLOCK = 0;
+#endif
+#ifndef CYRIUS_TARGET_AGNOS
+var BOTE_O_NONBLOCK = O_NONBLOCK;
+#endif
 
 # ---- root + path safety ---------------------------------------------------
 
@@ -79,69 +88,22 @@ fn _fs_mkparents(full, include_last) {
 # string escapes here. Writes the decoded length to *len_out and returns a
 # fresh NUL-terminated buffer (decoded length <= input length + UTF-8 for \u).
 
-fn _fs_hexval(c) {
-    if ((c >= 48) && (c <= 57))  { return c - 48; }        # 0-9
-    if ((c >= 97) && (c <= 102)) { return (c - 97) + 10; }  # a-f
-    if ((c >= 65) && (c <= 70))  { return (c - 65) + 10; }  # A-F
-    return 0 - 1;
-}
-
+# JSON string escapes -> bytes, in a fresh NUL-terminated buffer. The decoded
+# length goes through `len_out`: a `\u0000` makes it longer than strlen.
 fn _fs_unescape(src, len_out) {
     var n = strlen(src);
-    var out = alloc(n + 1);                  # decoded is never longer than src
-    var i = 0;
-    var o = 0;
-    while (i < n) {
-        var c = load8(src + i);
-        if ((c == 92) && ((i + 1) < n)) {    # backslash
-            var d = load8(src + i + 1);
-            if (d == 110)      { store8(out + o, 10); o = o + 1; i = i + 2; }   # \n
-            elif (d == 116)    { store8(out + o, 9);  o = o + 1; i = i + 2; }   # \t
-            elif (d == 114)    { store8(out + o, 13); o = o + 1; i = i + 2; }   # \r
-            elif (d == 34)     { store8(out + o, 34); o = o + 1; i = i + 2; }   # \"
-            elif (d == 92)     { store8(out + o, 92); o = o + 1; i = i + 2; }   # \\
-            elif (d == 47)     { store8(out + o, 47); o = o + 1; i = i + 2; }   # \/
-            elif (d == 98)     { store8(out + o, 8);  o = o + 1; i = i + 2; }   # \b
-            elif (d == 102)    { store8(out + o, 12); o = o + 1; i = i + 2; }   # \f
-            elif ((d == 117) && ((i + 5) < n)) {                                # \uXXXX
-                var h1 = _fs_hexval(load8(src + i + 2));
-                var h2 = _fs_hexval(load8(src + i + 3));
-                var h3 = _fs_hexval(load8(src + i + 4));
-                var h4 = _fs_hexval(load8(src + i + 5));
-                if ((h1 < 0) || (h2 < 0) || (h3 < 0) || (h4 < 0)) {
-                    store8(out + o, d); o = o + 1; i = i + 2;    # malformed -> keep 'u'
-                } else {
-                    var cp = ((h1 * 4096) + (h2 * 256)) + ((h3 * 16) + h4);
-                    if (cp < 128) {
-                        store8(out + o, cp); o = o + 1;
-                    } elif (cp < 2048) {
-                        store8(out + o, 192 + (cp / 64)); o = o + 1;
-                        store8(out + o, 128 + (cp - ((cp / 64) * 64))); o = o + 1;
-                    } else {
-                        var hi = cp / 4096;
-                        var mid = (cp / 64) - (hi * 64);
-                        var lo = cp - ((cp / 64) * 64);
-                        store8(out + o, 224 + hi); o = o + 1;
-                        store8(out + o, 128 + mid); o = o + 1;
-                        store8(out + o, 128 + lo); o = o + 1;
-                    }
-                    i = i + 6;
-                }
-            }
-            else { store8(out + o, d); o = o + 1; i = i + 2; }  # unknown escape -> keep char
-        } else {
-            store8(out + o, c); o = o + 1; i = i + 1;
-        }
-    }
-    store8(out + o, 0);
-    store64(len_out, o);
+    var out = alloc(n + 1);
+    store64(len_out, _jx_unescape_into(src, n, out));
     return out;
 }
 
 # ---- result builders ------------------------------------------------------
 
+var _fs_read_buf = 0;
 fn _fs_result(msg, is_err) {
     var sb = str_builder_new();
+    var ml = strlen(msg);
+    _sb_grow(sb, ml + ml / 8 + 96);
     str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
     _json_emit_escaped(sb, msg);
     str_builder_add_cstr(sb, "\"}],\"isError\":");
@@ -165,11 +127,65 @@ fn _fs_refuse(tool, path, msg) {
 fn _fs_ok(msg)  { return _fs_result(msg, 0); }
 fn _fs_err(msg) { return _fs_result(msg, 1); }
 
+# The `path` argument as the name it means: `caf\u00e9.txt` is café.txt. 0 when
+# it is absent, or holds a NUL, which would end the name early.
+fn _fs_arg_path(args) {
+    var raw = jsonx_get_str(args, "path");
+    if (raw == 0) { return 0; }
+    var lslot[8];
+    store64(&lslot, 0);
+    var p = _fs_unescape(raw, &lslot);
+    if (strlen(p) != load64(&lslot)) { return 0; }
+    return p;
+}
+
+# 1 when the directory file_open just failed on with `fd` is simply not there.
+# agnos answers -1 for every failure, so there the path is tried again following
+# links: if that opens, the first open refused a link.
+fn _fs_open_missing(path, fd) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var f = file_open(path, O_RDONLY, 0);
+    if (f >= 0) {
+        file_close(f);
+        return 0;
+    }
+    return 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (fd == 0 - BOTE_ERRNO_ENOENT) { return 1; }
+    return 0;
+    #endif
+}
+
+# 1 when no directory on the way to `full`, below the root, is a symlink: a link
+# already in the root must not carry a tool out of it. A directory that does not
+# exist yet ends the walk, since nothing past it can be a link. No openat in the
+# stdlib, so this checks by name, and a local writer racing it could still swap
+# one in. No tool can create a symlink.
+fn _fs_walk_ok(full) {
+    var i = strlen(_fs_root()) + 1;
+    var n = strlen(full);
+    while (i < n) {
+        if (load8(full + i) == 47) {
+            store8(full + i, 0);
+            var fd = file_open(full, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
+            var missing = 0;
+            if (fd >= 0) { file_close(fd); }
+            else { missing = _fs_open_missing(full, fd); }
+            store8(full + i, 47);
+            if (missing == 1) { return 1; }
+            if (fd < 0) { return 0; }
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
 # ---- handlers -------------------------------------------------------------
 
 # fs_write {path, content} -> writes content to <root>/<path> (parents mkdir'd).
 fn fs_write_handler(args, claims) {
-    var path = jsonx_get_str(args, "path");
+    var path = _fs_arg_path(args);
     if (_fs_path_unsafe(path) == 1) {
         return _fs_refuse("fs_write", path, "fs_write: refused unsafe path (must be relative, no '..')");
     }
@@ -181,8 +197,14 @@ fn fs_write_handler(args, claims) {
     var dlen = load64(&lslot);
 
     var full = _fs_join(path);
+    if (_fs_walk_ok(full) == 0) {
+        return _fs_refuse("fs_write", path, "fs_write: refused a path through a symlink");
+    }
     _fs_mkparents(full, 0);
-    var wrote = file_write_all(full, data, dlen);
+    # Atomic: a symlink at `full` is replaced rather than written through, a
+    # FIFO cannot hang the server, and a failure leaves the old file whole.
+    var wrote = file_write_atomic(full, data, dlen);
+    if (wrote == 0) { wrote = dlen; }
     if (wrote < 0) {
         var sbe = str_builder_new();
         str_builder_add_cstr(sbe, "fs_write: failed to write ");
@@ -199,33 +221,81 @@ fn fs_write_handler(args, claims) {
 
 # fs_read {path} -> returns the (capped) file contents as a text block.
 fn fs_read_handler(args, claims) {
-    var path = jsonx_get_str(args, "path");
+    var path = _fs_arg_path(args);
     if (_fs_path_unsafe(path) == 1) {
         return _fs_refuse("fs_read", path, "fs_read: refused unsafe path (must be relative, no '..')");
     }
     var full = _fs_join(path);
-    var buf = alloc(FS_READ_CAP + 1);
-    var got = file_read_all(full, buf, FS_READ_CAP);
+    if (_fs_walk_ok(full) == 0) {
+        return _fs_refuse("fs_read", path, "fs_read: refused a path through a symlink");
+    }
+    if (_fs_read_buf == 0) { _fs_read_buf = alloc(FS_READ_CAP + FS_READ_NOTE); }
+    var buf = _fs_read_buf;
+    # O_NONBLOCK: a FIFO with no writer would otherwise park this call, and with
+    # it every client of the server.
+    var fd = file_open(full, O_RDONLY | BOTE_O_NONBLOCK | O_NOFOLLOW, 0);
+    var got = fd;
+    if (fd >= 0) {
+        got = 0;
+        var more = 1;
+        while (more == 1) {
+            var n = file_read(fd, buf + got, FS_READ_CAP + 1 - got);
+            if (n < 0) { got = n; more = 0; }
+            elif (n == 0) { more = 0; }
+            else {
+                got = got + n;
+                if (got > FS_READ_CAP) { more = 0; }
+            }
+        }
+        file_close(fd);
+    }
     if (got < 0) {
         var sbe = str_builder_new();
         str_builder_add_cstr(sbe, "fs_read: cannot read ");
         str_builder_add_cstr(sbe, full);
         return _fs_err(str_data(str_builder_build(sbe)));
     }
+    var cut = 0;
+    if (got > FS_READ_CAP) {
+        cut = 1;
+        got = FS_READ_CAP;
+        # Not through the middle of a character.
+        while (got > 0 && (load8(buf + got) & 192) == 128) { got = got - 1; }
+    }
+    var z = 0;
+    while (z < got) {
+        if (load8(buf + z) == 0) { return _fs_err("fs_read: a binary file (it holds a NUL byte)"); }
+        z = z + 1;
+    }
     store8(buf + got, 0);
-    # NOTE: _json_emit_escaped stops at NUL, so an embedded NUL truncates the
-    # rendered text — acceptable for text/source files (the demo's use).
+    if (cut == 1) {
+        # Silently short, a model writing this back would destroy the rest.
+        memcpy(buf + got, "\n[fs_read: truncated]", 22);
+    }
     return _fs_ok(buf);
 }
 
 # fs_mkdir {path} -> creates <root>/<path> (and any missing parents).
 fn fs_mkdir_handler(args, claims) {
-    var path = jsonx_get_str(args, "path");
+    var path = _fs_arg_path(args);
     if (_fs_path_unsafe(path) == 1) {
         return _fs_refuse("fs_mkdir", path, "fs_mkdir: refused unsafe path (must be relative, no '..')");
     }
     var full = _fs_join(path);
+    if (_fs_walk_ok(full) == 0) {
+        return _fs_refuse("fs_mkdir", path, "fs_mkdir: refused a path through a symlink");
+    }
     _fs_mkparents(full, 1);
+    # The answer is whether the directory is there now: over a file, or under
+    # one, mkdir fails and this said "created" anyway.
+    var dfd = file_open(full, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
+    if (dfd < 0) {
+        var sbe = str_builder_new();
+        str_builder_add_cstr(sbe, "fs_mkdir: cannot create ");
+        str_builder_add_cstr(sbe, full);
+        return _fs_err(str_data(str_builder_build(sbe)));
+    }
+    file_close(dfd);
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "created directory ");
     str_builder_add_cstr(sb, full);

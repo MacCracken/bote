@@ -176,21 +176,21 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
   authentication bypasses).
 
 tests/
-├── bote.tcyr                  — 576 core assertions
+├── bote.tcyr                  — 651 core assertions
 ├── conformance.tcyr           — 127 (JSON-RPC 2.0 + MCP 2025-11-25, by spec clause, via codec_process_message)
-├── bote_auth.tcyr             — 45 (bearer + allowlist + JWT + PKCE validators; 401 log lines)
+├── bote_auth.tcyr             — 55 (bearer + allowlist + JWT + PKCE validators; 401 log lines)
 ├── bote_content.tcyr          — 25 (content blocks + annotations)
-├── bote_fs_tools.tcyr         — 42 (fs_tools; refused-path log lines; control bytes read back as valid JSON)
-├── bote_host.tcyr             — 197 (host registry + SSRF + resolved-address classifiers + the IPv6 parser vs cyrius's)
+├── bote_fs_tools.tcyr         — 56 (fs_tools; refused-path log lines; control bytes read back as valid JSON)
+├── bote_host.tcyr             — 203 (host registry + SSRF + resolved-address classifiers + the IPv6 parser vs cyrius's)
 ├── bote_jwt.tcyr              — 59 (JWT HS256 verify)
-├── bote_libro_tools.tcyr      — 64 (libro_tools; incl. the tampered-chain
+├── bote_libro_tools.tcyr      — 73 (libro_tools; incl. the tampered-chain
 │                                 error decode + populated-chain proof paths)
 ├── bote_log.tcyr              — 50 (src/log.cyr: levels, line bytes, escaping, truncation)
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 53 (streamable HTTP / SSE)
-├── bote_transport_unix.tcyr   — 68 (unix socket transport + accept policy + deadlines + closed-peer write)
-├── bote_web_tools.tcyr        — 63 (web_tools; URL + resolved-address SSRF guard)
+├── bote_transport_unix.tcyr   — 76 (unix socket transport + accept policy + deadlines + closed-peer write)
+├── bote_web_tools.tcyr        — 66 (web_tools; URL + resolved-address SSRF guard)
 ├── bote_ws.tcyr               — 21 (WebSocket; send-deadline drop)
 ├── bote_core_only_smoke.tcyr  — drift guard (includes only dist/bote-core.cyr)
 └── bote.bcyr                  — 16 hot-path benchmarks
@@ -405,10 +405,10 @@ standing rules are in CLAUDE.md under Key Principles.
 
 | Artifact | Count | Where |
 |---|---|---|
-| Core unit tests | 576 | `tests/bote.tcyr` |
+| Core unit tests | 651 | `tests/bote.tcyr` |
 | Protocol conformance | 127 | `tests/conformance.tcyr` — by spec clause, through `codec_process_message` (3.4.5) |
-| Module tests | 717 | `tests/bote_auth.tcyr` (45) + `bote_content.tcyr` (25) + `bote_fs_tools.tcyr` (42) + `bote_host.tcyr` (197) + `bote_jwt.tcyr` (59) + `bote_libro_tools.tcyr` (64) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (68) + `bote_web_tools.tcyr` (63) + `bote_ws.tcyr` (21) |
-| **Total assertions** | **1420** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
+| Module tests | 767 | `tests/bote_auth.tcyr` (45) + `bote_content.tcyr` (25) + `bote_fs_tools.tcyr` (56) + `bote_host.tcyr` (203) + `bote_jwt.tcyr` (59) + `bote_libro_tools.tcyr` (73) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (76) + `bote_web_tools.tcyr` (66) + `bote_ws.tcyr` (21) |
+| **Total assertions** | **1545** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
 | Benchmarks | 16 | `tests/bote.bcyr` |
 | Fuzz harnesses | 6 | `fuzz/*.fcyr` |
 

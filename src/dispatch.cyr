@@ -32,7 +32,7 @@ fn _mcp_is_supported(v) {
 
 fn _mcp_latest_version() { return "2025-11-25"; }
 
-fn _bote_server_version() { return "3.4.14"; }
+fn _bote_server_version() { return "3.4.15"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -192,6 +192,7 @@ fn _emit_tool_name_payload(name) {
 # inserts handler. Returns 0 on success, BoteError ptr on failure.
 # Emits TOPIC_TOOL_REGISTERED on success.
 fn dispatcher_register_tool(d, tool_def, handler_fp) {
+    if (tool_def == 0) { return bote_err_new(BOTE_ERR_INVALID_PARAMS, "", "tool definition is null"); }
     var name = tool_def_name(tool_def);
     var verr = validate_tool_name(name);
     if (verr != 0) { return verr; }
@@ -222,6 +223,9 @@ fn dispatcher_deregister_tool(d, name) {
 # `prompts` capability on at initialize (see _build_capabilities). Prompt
 # names are freeform (no project_tool underscore convention). Returns 0.
 fn dispatcher_register_prompt(d, prompt_def, handler_fp) {
+    if (prompt_def == 0 || prompt_def_name(prompt_def) == 0) {
+        return bote_err_new(BOTE_ERR_INVALID_PARAMS, "", "prompt definition has no name");
+    }
     var preg = dispatcher_prompts(d);
     if (preg == 0) {
         preg = prompt_registry_new();
@@ -245,6 +249,9 @@ fn dispatcher_register_prompt(d, prompt_def, handler_fp) {
 # `resources` capability on at initialize (see _build_capabilities).
 # Returns 0.
 fn dispatcher_register_resource(d, resource_def, handler_fp) {
+    if (resource_def == 0 || resource_def_uri(resource_def) == 0) {
+        return bote_err_new(BOTE_ERR_INVALID_PARAMS, "", "resource definition has no uri");
+    }
     var rreg = dispatcher_resources(d);
     if (rreg == 0) {
         rreg = resource_registry_new();
@@ -410,12 +417,13 @@ fn _build_capabilities(sb, d) {
 }
 
 # Build the initialize response result body.
-fn _build_initialize_result(d, params_cstr) {
-    var requested = jsonx_get_str(params_cstr, "protocolVersion");
+fn _build_initialize_result_a(a, d, params_cstr) {
+    var requested = jsonx_get_str_a(a, params_cstr, "protocolVersion");
     var negotiated = _mcp_latest_version();
     if (_mcp_is_supported(requested) == 1) { negotiated = requested; }
 
-    var sb = str_builder_new();
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, 512);
     str_builder_add_cstr(sb, "{\"protocolVersion\":\"");
     str_builder_add_cstr(sb, negotiated);
     str_builder_add_cstr(sb, "\",\"capabilities\":");
@@ -431,12 +439,13 @@ fn _build_initialize_result(d, params_cstr) {
     str_builder_add_cstr(sb, "\",\"version\":\"");
     _json_emit_escaped(sb, sver);
     str_builder_add_cstr(sb, "\"}}");
-    return str_data(str_builder_build(sb));
+    return str_data(str_builder_build_a(a, sb));
 }
 
 # Build the prompts/list response result body.
-fn _build_prompts_list_result(preg) {
-    var sb = str_builder_new();
+fn _build_prompts_list_result(a, preg) {
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, 4096);
     str_builder_add_cstr(sb, "{\"prompts\":[");
     var lst = prompt_registry_list(preg);
     var n = vec_len(lst);
@@ -478,7 +487,7 @@ fn _build_prompts_list_result(preg) {
         i = i + 1;
     }
     str_builder_add_cstr(sb, "]}");
-    return str_data(str_builder_build(sb));
+    return str_data(str_builder_build_a(a, sb));
 }
 
 # Does tool `t` belong in a `profile`-filtered listing? A null profile means
@@ -494,15 +503,50 @@ fn _tool_matches_profile(t, profile) {
 # {"profile":"<tag>"} in tools/list params, only tools tagged with that
 # profile are returned (exact-match). When absent (0), the full tool list is
 # returned — byte-identical to pre-extension behavior.
-fn _build_tools_list_result(reg, profile) {
-    var sb = str_builder_new();
+# Room for one tool's entry in tools/list. The helpers that write it grow a
+# builder on the heap, so this sizes the arena builder up front. A short
+# estimate costs one growth on the heap, nothing worse.
+fn _dsp_room(cstr) {
+    if (cstr == 0) { return 0; }
+    return 2 * strlen(cstr);
+}
+
+fn _dsp_tool_list_room(t) {
+    var n = 256 + _dsp_room(tool_def_name(t)) + _dsp_room(tool_def_description(t));
+    n = n + _dsp_room(tool_def_version(t)) + _dsp_room(tool_def_deprecated(t));
+    var props = schema_properties(tool_def_input_schema(t));
+    if (props != 0) {
+        var i = 0;
+        while (i < vec_len(props)) {
+            var pair = vec_get(props, i);
+            n = n + 8 + _dsp_room(schema_prop_key(pair)) + _dsp_room(schema_prop_value(pair));
+            i = i + 1;
+        }
+    }
+    var req = schema_required(tool_def_input_schema(t));
+    if (req != 0) {
+        var j = 0;
+        while (j < vec_len(req)) { n = n + 8 + _dsp_room(vec_get(req, j)); j = j + 1; }
+    }
+    return n;
+}
+
+fn _build_tools_list_result_a(a, reg, profile) {
+    var sb = str_builder_new_a(a);
+    var room = 64;
+    var rnames = registry_names(reg);
+    var ri = 0;
+    while (ri < vec_len(rnames)) {
+        room = room + _dsp_tool_list_room(registry_get(reg, vec_get(rnames, ri)));
+        ri = ri + 1;
+    }
+    _sb_grow_a(a, sb, room);
     str_builder_add_cstr(sb, "{\"tools\":[");
-    var lst = registry_list(reg);
-    var n = vec_len(lst);
+    var n = vec_len(rnames);
     var i = 0;
     var emitted = 0;
     while (i < n) {
-        var t = vec_get(lst, i);
+        var t = registry_get(reg, vec_get(rnames, i));
         if (_tool_matches_profile(t, profile) == 0) {
             i = i + 1;
             continue;
@@ -530,7 +574,7 @@ fn _build_tools_list_result(reg, profile) {
         i = i + 1;
     }
     str_builder_add_cstr(sb, "]}");
-    return str_data(str_builder_build(sb));
+    return str_data(str_builder_build_a(a, sb));
 }
 
 # Extract and validate the tool name from a tools/call request's params.
@@ -555,6 +599,14 @@ fn _dsp_sink_live(sink) {
     return 1;
 }
 
+# 1 when an event sink wants tool-call events: live, and not one that takes only
+# tool-set changes (event_sink_set_list_only).
+fn _dsp_sink_wants_calls(sink) {
+    if (_dsp_sink_live(sink) == 0) { return 0; }
+    if (load64(sink + 16) == 1) { return 0; }
+    return 1;
+}
+
 # MCP's code for resources/read on a URI nothing serves (resources spec,
 # "Error Handling"). It sits in JSON-RPC's server-defined range.
 var BOTE_RPC_RESOURCE_NOT_FOUND = 0 - 32002;
@@ -563,12 +615,65 @@ var BOTE_RPC_RESOURCE_NOT_FOUND = 0 - 32002;
 # "isError":true}. Kept here rather than in content.cyr so the dispatcher
 # needs no module it did not need before; content_text_error_response is
 # the public name for it.
-fn _dsp_tool_error_result(text) {
-    var sb = str_builder_new();
+# A refused call is a call: the audit trail and the failed-call topic see it as
+# they see one that failed in its handler. Copied to the heap, since a sink may
+# keep what it is handed.
+fn _dsp_record_refusal(d, name, params, plen, caller_pos, msg) {
+    var audit_on = _dsp_sink_live(dispatcher_audit_sink(d));
+    var events_on = _dsp_sink_wants_calls(dispatcher_event_sink(d));
+    if (audit_on == 0 && events_on == 0) { return 0; }
+    var h = default_alloc();
+    var ev = tool_call_event_new(_slice_cstr(h, name, 0, strlen(name)), 0, 0,
+      _slice_cstr(h, msg, 0, strlen(msg)), _jx_str_at_a(h, params, plen, caller_pos));
+    if (audit_on == 1) { audit_sink_log(dispatcher_audit_sink(d), ev); }
+    if (events_on == 1) {
+        event_sink_publish(dispatcher_event_sink(d), TOPIC_TOOL_FAILED(), tool_call_event_to_json(ev));
+    }
+    return 0;
+}
+
+# `s` on one line. stdio and the Unix transport frame a message by its newline,
+# and in valid JSON a raw LF or CR can only be whitespace between tokens, so a
+# handler that pretty-prints cannot be allowed to split a response.
+fn _dsp_one_line(a, s) {
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c == 10 || c == 13) { break; }
+        i = i + 1;
+    }
+    if (i == n) { return s; }
+    var out = alloc_via(a, n + 1);
+    var o = 0;
+    i = 0;
+    while (i < n) {
+        var ch = load8(s + i);
+        if (ch != 10 && ch != 13) { store8(out + o, ch); o = o + 1; }
+        i = i + 1;
+    }
+    store8(out + o, 0);
+    return out;
+}
+
+# A prompt, resource or completion handler's result goes into the response as it
+# stands, so it has to be JSON, on one line. Only tools/call checked this.
+fn _dsp_checked_result(a, id, result) {
+    if (jsonx_valid(result, strlen(result)) == 0) {
+        return resp_error_a(a, id, 0 - 32603, "internal error: the handler returned invalid JSON");
+    }
+    return resp_success_a(a, id, _dsp_one_line(a, result));
+}
+
+fn _dsp_tool_error_result(text) { return _dsp_tool_error_result_a(default_alloc(), text); }
+
+fn _dsp_tool_error_result_a(a, text) {
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, strlen(text) + strlen(text) / 8 + 64);
     str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
     if (text != 0) { _json_emit_escaped(sb, text); }
     str_builder_add_cstr(sb, "\"}],\"isError\":true}");
-    return str_data(str_builder_build(sb));
+    return str_data(str_builder_build_a(a, sb));
 }
 
 # A successful tool call's result carrying `text` as one text block (3.4.8).
@@ -659,6 +764,7 @@ fn _dsp_coerce_result(name, result, fail_out) {
         store64(fail_out, m1);
         return _dsp_tool_error_result(m1);
     }
+    result = _dsp_one_line(default_alloc(), result);
     var shape = _dsp_result_shape(result);
     if ((shape & DSP_SHAPE_CONTENT) != 0) {
         if ((shape & DSP_SHAPE_ISERROR) != 0) {
@@ -695,12 +801,14 @@ fn _dsp_cursor_refusal(id) {
 }
 
 # prefix + name + suffix as one message cstr; suffix may be 0.
-fn _dsp_named_msg(prefix, name, suffix) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, prefix);
-    if (name != 0) { str_builder_add_cstr(sb, name); }
-    if (suffix != 0) { str_builder_add_cstr(sb, suffix); }
-    return str_data(str_builder_build(sb));
+fn _dsp_named_msg(prefix, name, suffix) { return _dsp_named_msg_a(default_alloc(), prefix, name, suffix); }
+
+fn _dsp_named_msg_a(a, prefix, name, suffix) {
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, prefix);
+    if (name != 0) { str_builder_add_cstr_a(a, sb, name); }
+    if (suffix != 0) { str_builder_add_cstr_a(a, sb, suffix); }
+    return str_data(str_builder_build_a(a, sb));
 }
 
 # The first argument `pdef` declares required that `args_obj` (a JSON
@@ -722,8 +830,9 @@ fn _prompt_missing_required(pdef, args_obj) {
 }
 
 # Build the resources/list response result body.
-fn _build_resources_list_result(rreg) {
-    var sb = str_builder_new();
+fn _build_resources_list_result(a, rreg) {
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, 4096);
     str_builder_add_cstr(sb, "{\"resources\":[");
     var lst = resource_registry_list(rreg);
     var n = vec_len(lst);
@@ -749,7 +858,7 @@ fn _build_resources_list_result(rreg) {
         i = i + 1;
     }
     str_builder_add_cstr(sb, "]}");
-    return str_data(str_builder_build(sb));
+    return str_data(str_builder_build_a(a, sb));
 }
 
 # ================================================================
@@ -759,6 +868,13 @@ fn _build_resources_list_result(rreg) {
 # Returns a JsonRpcResponse ptr, or 0 if the request is a notification.
 
 fn dispatcher_dispatch(d, request, claims) {
+    return dispatcher_dispatch_a(default_alloc(), d, request, claims);
+}
+
+# dispatcher_dispatch with bote's own bytes on `a`. `a` must outlive the response
+# and nothing else. Stays on the global heap: what a handler is handed (it may
+# keep it) and what a sink is handed (ditto).
+fn dispatcher_dispatch_a(a, d, request, claims) {
     if (req_is_notification(request) == 1) { return 0; }
 
     var id = req_id(request);
@@ -767,154 +883,42 @@ fn dispatcher_dispatch(d, request, claims) {
     var reg = dispatcher_registry(d);
     var handlers = dispatcher_handlers(d);
 
-    if (streq(method, "initialize") == 1) {
-        return resp_success(id, _build_initialize_result(d, params));
-    }
-
-    # ping — the MCP keepalive. The receiver MUST answer promptly with an
-    # empty result; a client that gets an error back reads the server as
-    # unhealthy and may tear the session down.
-    #
-    # Deliberately ahead of every capability gate and taking no params: a
-    # ping has to work on a bare dispatcher with no registries wired, which
-    # is the state a client probes during startup. Emits no audit or event
-    # record — it is liveness, not activity, and a keepalive every few
-    # seconds would swamp the chain.
-    #
-    # bote answers pings; it does not originate them. Server→client pings
-    # need the push path that real-time streaming brings (roadmap 3.5.x).
-    if (streq(method, "ping") == 1) {
-        return resp_success(id, "{}");
-    }
-
-    if (streq(method, "tools/list") == 1) {
-        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal(id); }
-        var lprofile = 0;
-        if (params != 0) { lprofile = jsonx_get_str(params, "profile"); }
-        return resp_success(id, _build_tools_list_result(reg, lprofile));
-    }
-
-    # prompts/* only when the prompts capability is enabled (a PromptRegistry
-    # is present). Otherwise fall through to method-not-found (-32601), which
-    # matches the un-advertised capability.
-    if (streq(method, "prompts/list") == 1 && dispatcher_prompts(d) != 0) {
-        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal(id); }
-        return resp_success(id, _build_prompts_list_result(dispatcher_prompts(d)));
-    }
-
-    if (streq(method, "prompts/get") == 1 && dispatcher_prompts(d) != 0) {
-        var pname = jsonx_get_str(params, "name");
-        if (pname == 0 || strlen(pname) == 0) {
-            var pe = bote_err_new(BOTE_ERR_INVALID_PARAMS, "", "missing or empty 'name' field");
-            return resp_error(id, bote_err_rpc_code(bote_err_tag(pe)), str_data(bote_err_format(pe)));
-        }
-        var phandler = prompt_registry_handler(dispatcher_prompts(d), pname);
-        if (phandler == 0) {
-            return resp_error(id, 0 - 32602, _dsp_named_msg("prompt not found: ", pname, 0));
-        }
-        var pargs = jsonx_get_raw(params, "arguments");
-        if (pargs == 0) { pargs = "{}"; }
-        # The MCP prompts spec: invalid prompt name and missing required
-        # arguments are both -32602 (3.4.5 added the second; the handler
-        # used to be called without them).
-        if (jsonx_is_object(pargs) == 0) {
-            return resp_error(id, 0 - 32602, _dsp_named_msg("'arguments' must be an object for prompt '", pname, "'"));
-        }
-        var pmissing = _prompt_missing_required(prompt_registry_get(dispatcher_prompts(d), pname), pargs);
-        if (pmissing != 0) {
-            var pmb = str_builder_new();
-            str_builder_add_cstr(pmb, "missing required argument '");
-            str_builder_add_cstr(pmb, pmissing);
-            str_builder_add_cstr(pmb, "' for prompt '");
-            str_builder_add_cstr(pmb, pname);
-            str_builder_add_cstr(pmb, "'");
-            return resp_error(id, 0 - 32602, str_data(str_builder_build(pmb)));
-        }
-        var presult = fncall2(phandler, pargs, claims);
-        if (presult == 0) { presult = "{\"messages\":[]}"; }
-        return resp_success(id, presult);
-    }
-
-    # resources/* only when the resources capability is enabled (a
-    # ResourceRegistry is present). Otherwise fall through to -32601.
-    if (streq(method, "resources/list") == 1 && dispatcher_resources(d) != 0) {
-        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal(id); }
-        return resp_success(id, _build_resources_list_result(dispatcher_resources(d)));
-    }
-
-    if (streq(method, "resources/read") == 1 && dispatcher_resources(d) != 0) {
-        var ruri = jsonx_get_str(params, "uri");
-        if (ruri == 0 || strlen(ruri) == 0) {
-            var re = bote_err_new(BOTE_ERR_INVALID_PARAMS, "", "missing or empty 'uri' field");
-            return resp_error(id, bote_err_rpc_code(bote_err_tag(re)), str_data(bote_err_format(re)));
-        }
-        var rhandler = resource_registry_handler(dispatcher_resources(d), ruri);
-        if (rhandler == 0) {
-            # -32002 with the URI in `data`, as the MCP resources spec has
-            # it. It was -32602 through 3.4.4.
-            var rdb = str_builder_new();
-            str_builder_add_cstr(rdb, "{\"uri\":\"");
-            _json_emit_escaped(rdb, ruri);
-            str_builder_add_cstr(rdb, "\"}");
-            return resp_error_data(id, BOTE_RPC_RESOURCE_NOT_FOUND,
-              _dsp_named_msg("resource not found: ", ruri, 0), str_data(str_builder_build(rdb)));
-        }
-        var rresult = fncall2(rhandler, ruri, claims);
-        if (rresult == 0) { rresult = "{\"contents\":[]}"; }
-        return resp_success(id, rresult);
-    }
-
-    # resources/templates/list (3.4.1). bote has no resource-template
-    # registry (RFC 6570 URI templates), so the honest answer is an empty
-    # list. It used to be -32601, which some clients send whenever
-    # `resources` is advertised and read as a server failure rather than "no
-    # templates". Gated like the other resources/* methods, and refuses a
-    # pagination `cursor` like the other list methods.
-    if (streq(method, "resources/templates/list") == 1 && dispatcher_resources(d) != 0) {
-        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal(id); }
-        return resp_success(id, "{\"resourceTemplates\":[]}");
-    }
-
-    # completion/complete only when a completion handler is set. The handler
-    # receives the raw params ({ref, argument, ...}) and returns the full
-    # {"completion":{"values":[...]}} body. Otherwise fall through to -32601.
-    if (streq(method, "completion/complete") == 1 && dispatcher_completion(d) != 0) {
-        var cparams = params;
-        if (cparams == 0) { cparams = "{}"; }
-        var cresult = fncall2(dispatcher_completion(d), cparams, claims);
-        if (cresult == 0) { cresult = "{\"completion\":{\"values\":[]}}"; }
-        return resp_success(id, cresult);
-    }
-
     if (streq(method, "tools/call") == 1) {
-        var err_slot[8];
-        store64(&err_slot, 0);
-        var name = _extract_tool_name(params, &err_slot);
-        if (name == 0) {
-            var ne = load64(&err_slot);
-            return resp_error(id, bote_err_rpc_code(bote_err_tag(ne)), str_data(bote_err_format(ne)));
+        var plen = strlen(params);
+        var ckeys[64];
+        store64(&ckeys, "name");            store64(&ckeys + 8, 4);
+        store64(&ckeys + 16, "version");    store64(&ckeys + 24, 7);
+        store64(&ckeys + 32, "arguments");  store64(&ckeys + 40, 9);
+        store64(&ckeys + 48, "caller_id");  store64(&ckeys + 56, 9);
+        var cpos[32];
+        _jx_scan(params, plen, &ckeys, 4, &cpos);
+        var name = _jx_str_dec_at_a(a, params, plen, load64(&cpos));
+        if (name == 0 || strlen(name) == 0) {
+            var ne = bote_err_new_a(a, BOTE_ERR_INVALID_PARAMS, "", "missing or empty 'name' field");
+            return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(ne)), str_data(bote_err_format_a(a, ne)));
         }
 
         # Optional: version negotiation
-        var ver = jsonx_get_str(params, "version");
+        var ver = _jx_str_dec_at_a(a, params, plen, load64(&cpos + 8));
         if (ver != 0 && registry_get_versioned(reg, name, ver) == 0) {
-            var sb = str_builder_new();
-            str_builder_add_cstr(sb, "version '");
-            str_builder_add_cstr(sb, ver);
-            str_builder_add_cstr(sb, "' not found");
-            var verr = bote_err_new(BOTE_ERR_INVALID_PARAMS, name, str_data(str_builder_build(sb)));
-            return resp_error(id, bote_err_rpc_code(bote_err_tag(verr)), str_data(bote_err_format(verr)));
+            var sb = str_builder_new_a(a);
+            str_builder_add_cstr_a(a, sb, "version '");
+            str_builder_add_cstr_a(a, sb, ver);
+            str_builder_add_cstr_a(a, sb, "' not found");
+            var verr = bote_err_new_a(a, BOTE_ERR_INVALID_PARAMS, name, str_data(str_builder_build_a(a, sb)));
+            return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(verr)), str_data(bote_err_format_a(a, verr)));
         }
 
-        # Extract arguments (default to "{}" if absent), caller_id (optional)
-        var args = jsonx_get_raw(params, "arguments");
+        # Extract arguments (default to "{}" if absent), caller_id (optional).
+        # On the arena for now: every refusal below leaves nothing behind.
+        var args = _jx_raw_at_a(a, params, plen, load64(&cpos + 16));
         if (args == 0) { args = "{}"; }
-        var caller_id = jsonx_get_str(params, "caller_id");
+        var caller_id = 0;
 
         # A non-object `arguments` breaks CallToolRequest's own schema: the
         # request is malformed, which is a protocol error.
         if (jsonx_is_object(args) == 0) {
-            return resp_error(id, 0 - 32602, _dsp_named_msg("'arguments' must be an object for tool '", name, "'"));
+            return resp_error_a(a, id, 0 - 32602, _dsp_named_msg_a(a, "'arguments' must be an object for tool '", name, "'"));
         }
 
         # Validate. An unknown tool is a protocol error (-32602). Arguments
@@ -922,12 +926,14 @@ fn dispatcher_dispatch(d, request, claims) {
         # result with isError, so the model sees what it got wrong and can
         # retry (MCP 2025-11-25, SEP-1303). They were a -32602 protocol
         # error through 3.4.4.
-        var verr2 = registry_validate_params(reg, name, args);
+        var verr2 = registry_validate_params_a(a, reg, name, args);
         if (verr2 != 0) {
+            var vmsg = str_data(bote_err_format_a(a, verr2));
+            _dsp_record_refusal(d, name, params, plen, load64(&cpos + 24), vmsg);
             if (bote_err_tag(verr2) == BOTE_ERR_TOOL_NOT_FOUND) {
-                return resp_error(id, bote_err_rpc_code(BOTE_ERR_TOOL_NOT_FOUND), str_data(bote_err_format(verr2)));
+                return resp_error_a(a, id, bote_err_rpc_code(BOTE_ERR_TOOL_NOT_FOUND), vmsg);
             }
-            return resp_success(id, _dsp_tool_error_result(str_data(bote_err_format(verr2))));
+            return resp_success_a(a, id, _dsp_tool_error_result_a(a, vmsg));
         }
 
         # Deprecation event (best-effort; never blocks dispatch)
@@ -935,14 +941,14 @@ fn dispatcher_dispatch(d, request, claims) {
         if (t != 0) {
             var dep = tool_def_deprecated(t);
             if (dep != 0) {
-                var ds = str_builder_new();
-                str_builder_add_cstr(ds, "{\"tool_name\":\"");
+                var ds = str_builder_new_a(a);
+                str_builder_add_cstr_a(a, ds, "{\"tool_name\":\"");
                 _json_emit_escaped(ds, name);
-                str_builder_add_cstr(ds, "\",\"message\":\"");
+                str_builder_add_cstr_a(a, ds, "\",\"message\":\"");
                 _json_emit_escaped(ds, dep);
-                str_builder_add_cstr(ds, "\"}");
+                str_builder_add_cstr_a(a, ds, "\"}");
                 event_sink_publish(dispatcher_event_sink(d), TOPIC_TOOL_DEPRECATED(),
-                  str_data(str_builder_build(ds)));
+                  str_data(str_builder_build_a(a, ds)));
             }
         }
 
@@ -954,12 +960,17 @@ fn dispatcher_dispatch(d, request, claims) {
         # clock_gettime syscall, measured at 1.35 µs on the reference host —
         # together over half of an unobserved tools/call.
         var audit_on = _dsp_sink_live(dispatcher_audit_sink(d));
-        var events_on = _dsp_sink_live(dispatcher_event_sink(d));
+        var events_on = _dsp_sink_wants_calls(dispatcher_event_sink(d));
         var t_start = 0;
-        if (audit_on == 1 || events_on == 1) { t_start = clock_now_ns(); }
+        if (audit_on == 1 || events_on == 1) {
+            t_start = clock_now_ns();
+            # A sink may keep what it is handed.
+            name = _jx_str_dec_at_a(default_alloc(), params, plen, load64(&cpos));
+            caller_id = _jx_str_at_a(default_alloc(), params, plen, load64(&cpos + 24));
+        }
         if (map_has(handlers, name) == 0) {
-            var nf = bote_err_new(BOTE_ERR_TOOL_NOT_FOUND, name, 0);
-            var msg_nh = str_data(bote_err_format(nf));
+            var nf = bote_err_new_a(a, BOTE_ERR_TOOL_NOT_FOUND, name, 0);
+            var msg_nh = str_data(bote_err_format_a(a, nf));
             if (audit_on == 1 || events_on == 1) {
                 var dur_nh = (clock_now_ns() - t_start) / 1000000;
                 var ev_nh = tool_call_event_new(name, dur_nh, 0, msg_nh, caller_id);
@@ -969,9 +980,12 @@ fn dispatcher_dispatch(d, request, claims) {
                       tool_call_event_to_json(ev_nh));
                 }
             }
-            return resp_error(id, bote_err_rpc_code(bote_err_tag(nf)), msg_nh);
+            return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(nf)), msg_nh);
         }
         var fp = map_get(handlers, name);
+        # A handler may keep `args` (2.0 ABI), so it reaches the heap here,
+        # past every refusal, and not before.
+        args = _slice_cstr(default_alloc(), args, 0, strlen(args));
         # 2.0 ABI: fncall2 with claims (always 0 in 2.0; populated in 2.x)
         # Whatever the handler returned, the client gets a CallToolResult
         # (_dsp_coerce_result, 3.4.8). A failed call — no result, invalid
@@ -998,12 +1012,134 @@ fn dispatcher_dispatch(d, request, claims) {
                 }
             }
         }
-        return resp_success(id, result);
+        return resp_success_a(a, id, result);
+    }
+
+    if (streq(method, "initialize") == 1) {
+        return resp_success_a(a, id, _build_initialize_result_a(a, d, params));
+    }
+
+    # ping — the MCP keepalive. The receiver MUST answer promptly with an
+    # empty result; a client that gets an error back reads the server as
+    # unhealthy and may tear the session down.
+    #
+    # Deliberately ahead of every capability gate and taking no params: a
+    # ping has to work on a bare dispatcher with no registries wired, which
+    # is the state a client probes during startup. Emits no audit or event
+    # record — it is liveness, not activity, and a keepalive every few
+    # seconds would swamp the chain.
+    #
+    # bote answers pings; it does not originate them. Server→client pings
+    # need the push path that real-time streaming brings (roadmap 3.5.x).
+    if (streq(method, "ping") == 1) {
+        return resp_success_a(a, id, "{}");
+    }
+
+    if (streq(method, "tools/list") == 1) {
+        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal(id); }
+        var lprofile = 0;
+        if (params != 0) { lprofile = jsonx_get_str_a(a, params, "profile"); }
+        return resp_success_a(a, id, _build_tools_list_result_a(a, reg, lprofile));
+    }
+
+    # prompts/* only when the prompts capability is enabled (a PromptRegistry
+    # is present). Otherwise fall through to method-not-found (-32601), which
+    # matches the un-advertised capability.
+    if (streq(method, "prompts/list") == 1 && dispatcher_prompts(d) != 0) {
+        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal(id); }
+        return resp_success_a(a, id, _build_prompts_list_result(a, dispatcher_prompts(d)));
+    }
+
+    if (streq(method, "prompts/get") == 1 && dispatcher_prompts(d) != 0) {
+        var pname = jsonx_get_str(params, "name");
+        if (pname == 0 || strlen(pname) == 0) {
+            var pe = bote_err_new_a(a, BOTE_ERR_INVALID_PARAMS, "", "missing or empty 'name' field");
+            return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(pe)), str_data(bote_err_format_a(a, pe)));
+        }
+        var phandler = prompt_registry_handler(dispatcher_prompts(d), pname);
+        if (phandler == 0) {
+            return resp_error_a(a, id, 0 - 32602, _dsp_named_msg_a(a, "prompt not found: ", pname, 0));
+        }
+        var pargs = jsonx_get_raw(params, "arguments");
+        if (pargs == 0) { pargs = "{}"; }
+        # The MCP prompts spec: invalid prompt name and missing required
+        # arguments are both -32602 (3.4.5 added the second; the handler
+        # used to be called without them).
+        if (jsonx_is_object(pargs) == 0) {
+            return resp_error_a(a, id, 0 - 32602, _dsp_named_msg_a(a, "'arguments' must be an object for prompt '", pname, "'"));
+        }
+        var pmissing = _prompt_missing_required(prompt_registry_get(dispatcher_prompts(d), pname), pargs);
+        if (pmissing != 0) {
+            var pmb = str_builder_new_a(a);
+            str_builder_add_cstr_a(a, pmb, "missing required argument '");
+            str_builder_add_cstr_a(a, pmb, pmissing);
+            str_builder_add_cstr_a(a, pmb, "' for prompt '");
+            str_builder_add_cstr_a(a, pmb, pname);
+            str_builder_add_cstr_a(a, pmb, "'");
+            return resp_error_a(a, id, 0 - 32602, str_data(str_builder_build_a(a, pmb)));
+        }
+        var presult = fncall2(phandler, pargs, claims);
+        if (presult == 0) { presult = "{\"messages\":[]}"; }
+        return _dsp_checked_result(a, id, presult);
+    }
+
+    # resources/* only when the resources capability is enabled (a
+    # ResourceRegistry is present). Otherwise fall through to -32601.
+    if (streq(method, "resources/list") == 1 && dispatcher_resources(d) != 0) {
+        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal(id); }
+        return resp_success_a(a, id, _build_resources_list_result(a, dispatcher_resources(d)));
+    }
+
+    if (streq(method, "resources/read") == 1 && dispatcher_resources(d) != 0) {
+        var ruri = jsonx_get_str_dec_a(default_alloc(), params, "uri");
+        if (ruri == 0 || strlen(ruri) == 0) {
+            var re = bote_err_new_a(a, BOTE_ERR_INVALID_PARAMS, "", "missing or empty 'uri' field");
+            return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(re)), str_data(bote_err_format_a(a, re)));
+        }
+        var rhandler = resource_registry_handler(dispatcher_resources(d), ruri);
+        if (rhandler == 0) {
+            # -32002 with the URI in `data`, as the MCP resources spec has
+            # it. It was -32602 through 3.4.4.
+            var rdb = str_builder_new_a(a);
+            str_builder_add_cstr_a(a, rdb, "{\"uri\":\"");
+            _json_emit_escaped(rdb, ruri);
+            str_builder_add_cstr_a(a, rdb, "\"}");
+            return resp_error_data(id, BOTE_RPC_RESOURCE_NOT_FOUND,
+              _dsp_named_msg_a(a, "resource not found: ", ruri, 0), str_data(str_builder_build_a(a, rdb)));
+        }
+        var rresult = fncall2(rhandler, ruri, claims);
+        if (rresult == 0) { rresult = "{\"contents\":[]}"; }
+        return _dsp_checked_result(a, id, rresult);
+    }
+
+    # resources/templates/list (3.4.1). bote has no resource-template
+    # registry (RFC 6570 URI templates), so the honest answer is an empty
+    # list. It used to be -32601, which some clients send whenever
+    # `resources` is advertised and read as a server failure rather than "no
+    # templates". Gated like the other resources/* methods, and refuses a
+    # pagination `cursor` like the other list methods.
+    if (streq(method, "resources/templates/list") == 1 && dispatcher_resources(d) != 0) {
+        if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal(id); }
+        return resp_success_a(a, id, "{\"resourceTemplates\":[]}");
+    }
+
+    # completion/complete only when a completion handler is set. The handler
+    # receives the raw params ({ref, argument, ...}) and returns the full
+    # {"completion":{"values":[...]}} body. Otherwise fall through to -32601.
+    if (streq(method, "completion/complete") == 1 && dispatcher_completion(d) != 0) {
+        if (jsonx_is_object(params) == 0) {
+            return resp_error_a(a, id, 0 - 32602, "completion/complete params must be an object");
+        }
+        var cparams = _slice_cstr(default_alloc(), params, 0, strlen(params));
+        var cresult = fncall2(dispatcher_completion(d), cparams, claims);
+        if (cresult == 0) { cresult = "{\"completion\":{\"values\":[]}}"; }
+        return _dsp_checked_result(a, id, cresult);
     }
 
     # Unknown method — JSON-RPC §5.1
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "method not found: ");
-    str_builder_add_cstr(sb, method);
-    return resp_error(id, 0 - 32601, str_data(str_builder_build(sb)));
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, 128);
+    str_builder_add_cstr_a(a, sb, "method not found: ");
+    str_builder_add_cstr_a(a, sb, method);
+    return resp_error_a(a, id, 0 - 32601, str_data(str_builder_build_a(a, sb)));
 }

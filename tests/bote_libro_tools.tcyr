@@ -45,6 +45,7 @@ include "src/audit.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
+include "src/audit_libro.cyr"
 include "src/libro_tools.cyr"
 
 # 1 when cstr `hay` contains cstr `needle`.
@@ -252,6 +253,22 @@ fn main() {
     assert_eq(vec_len(load64(pchain)), before_n, "...and still untouched");
     var rk2 = libro_tool_retention("{\"policy\":\"keep_count\",\"value\":2}", 0);
     assert(_lt_shape_ok(rk2, 0) == 1 && streq(_scf(rk2, "retained"), "2") == 1, "retention keep_count 2 keeps two entries");
+
+    # ---------------- 3.4.15: the integer a handler reads is the one validated ----------------
+    assert_eq(_lt_get_int("{\"v\":1e3}", "v"), 1000, "int: 1e3 is 1000, not 13");
+    assert_eq(_lt_get_int("{\"v\":1.0}", "v"), 1, "int: 1.0 is 1, not 10");
+    assert_eq(_lt_get_int("{\"v\":0.5e1}", "v"), 5, "int: 0.5e1 is 5, not 51");
+    assert_eq(_lt_get_int("{\"v\":-0e5}", "v"), 0, "int: -0e5 is 0, not -5");
+    assert(_lt_get_int("{\"v\":18446744073709551616}", "v") > 0, "int: 2^64 does not wrap to 0");
+    assert(registry_validate_params(reg, "libro_retention", "{\"policy\":\"keep_count\",\"value\":18446744073709551616}") != 0, "int: 2^64 is refused before retention runs");
+    assert_eq(registry_validate_params(reg, "libro_retention", "{\"policy\":\"keep_count\",\"value\":1e3}"), 0, "int: 1e3 passes validation as an integer");
+    # The audit trail names the configured identity, whatever the client says.
+    var aud_chain = chain_new();
+    var aud = libro_audit_with_agent_id(libro_audit_new(aud_chain), "service-account");
+    libro_audit_log(aud, tool_call_event_new("t", 0, 1, 0, "root@victim"));
+    var aud_e = vec_get(_lt_chain_entries(aud_chain), 0);
+    assert(streq(str_data(_lt_entry_agent_id(aud_e)), "service-account") == 1, "audit: caller_id cannot choose agent_id");
+    assert(_lc_has(str_data(load64(aud_e + 48)), "root@victim") == 1, "audit: ...it stays in the details as a claim");
 
     # ---------------- 3.4.10: real input schemas, enforced by the dispatcher ----------------
     assert(registry_validate_params(reg, "libro_proof", "{}") != 0, "schema: libro_proof requires index");

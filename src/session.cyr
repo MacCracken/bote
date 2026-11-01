@@ -33,31 +33,36 @@ fn validate_protocol_version(v) {
 }
 
 # ================================================================
+# bote_origin_ok(origin_cstr, allowed_origins_vec) → 1 / 0
+#
+# What every HTTP-family transport asks before it does anything else. MCP:
+# servers MUST validate Origin, and a present, invalid one gets 403. No Origin
+# passes: a browser sends one on anything cross-origin, and a command-line
+# client sends none. With no list every present Origin is refused, so a website
+# cannot reach a server nobody configured for it. Allocates nothing, because it
+# runs before auth.
+# ================================================================
+fn bote_origin_ok(origin, allowed_origins) {
+    if (origin == 0) { return 1; }
+    if (strlen(origin) == 0) { return 1; }
+    if (allowed_origins == 0) { return 0; }
+    var n = vec_len(allowed_origins);
+    var i = 0;
+    while (i < n) {
+        var o = vec_get(allowed_origins, i);
+        if (streq(o, "*") == 1 || streq(o, origin) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
 # validate_origin(origin_cstr, allowed_origins_vec) → 0 ok / err_msg cstr
 # ================================================================
 fn validate_origin(origin, allowed_origins) {
-    # Empty Origin header is allowed (same-origin requests omit it).
-    if (origin == 0) { return 0; }
-    if (strlen(origin) == 0) { return 0; }
-
-    if (allowed_origins != 0) {
-        var n = vec_len(allowed_origins);
-        # Wildcard short-circuit.
-        var i = 0;
-        while (i < n) {
-            if (streq(vec_get(allowed_origins, i), "*") == 1) { return 0; }
-            i = i + 1;
-        }
-        if (n == 0) { return "no origins allowed (strict mode)"; }
-        # Exact match.
-        var j = 0;
-        while (j < n) {
-            if (streq(vec_get(allowed_origins, j), origin) == 1) { return 0; }
-            j = j + 1;
-        }
-    } else {
-        return "no origins allowed (strict mode)";
-    }
+    if (bote_origin_ok(origin, allowed_origins) == 1) { return 0; }
+    if (allowed_origins == 0) { return "no origins allowed (strict mode)"; }
+    if (vec_len(allowed_origins) == 0) { return "no origins allowed (strict mode)"; }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "origin not allowed: ");
     str_builder_add_cstr(sb, origin);
@@ -182,7 +187,17 @@ fn session_store_ids(st) { return load64(st + 8); }
 fn session_store_timeout_ns(st) { return load64(st + 16); }
 
 # Create a new session and return its ID (cstr).
+# The most live sessions a store holds. Each costs a few KB for the life of the
+# process, and `initialize` is the one request that needs no session, so a
+# client looping on it must not be able to grow this without limit.
+var BOTE_SESSION_MAX = 4096;
+
+# Returns the new session id, or 0 when the store is full of live sessions.
 fn session_store_create(st, protocol_version) {
+    if (vec_len(session_store_ids(st)) >= BOTE_SESSION_MAX) {
+        session_store_prune_expired(st);
+        if (vec_len(session_store_ids(st)) >= BOTE_SESSION_MAX) { return 0; }
+    }
     var sid = _gen_session_id();
     var now = clock_now_ns();
     var session = mcp_session_new(sid, protocol_version, now);
@@ -195,7 +210,12 @@ fn session_store_create(st, protocol_version) {
 fn session_store_validate(st, sid) {
     var s = map_get(session_store_sessions(st), sid);
     if (s == 0) { return 0; }
-    mcp_session_touch(s, clock_now_ns());
+    var now = clock_now_ns();
+    if (now - mcp_session_last_active(s) >= session_store_timeout_ns(st)) {
+        session_store_prune_expired(st);
+        return 0;
+    }
+    mcp_session_touch(s, now);
     return s;
 }
 

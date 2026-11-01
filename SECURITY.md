@@ -24,11 +24,39 @@ The primary security-relevant surface areas are:
   default 30 s), so a client that stops reading is dropped instead of wedging
   the server for everyone. Read deadlines: sandhi's idle and whole-request
   budgets on the HTTP family, opt-in `ws_config_with_idle_ms` on an upgraded
-  WebSocket, opt-in `BOTE_UNIX_IDLE_MS` on the Unix transport — a quiet client
-  holds those two single-threaded servers unless the operator opts in.
+  WebSocket (`BOTE_WS_IDLE_MS` in the binary), opt-in `BOTE_UNIX_IDLE_MS` on the
+  Unix transport — a quiet client holds those two single-threaded servers unless
+  the operator opts in. The send deadline is per write, so a client that keeps
+  reading a little at a time is not dropped and can slow every other client;
+  threaded dispatch (roadmap 3.7.x) is the answer to that one.
+- **Browsers** — since **3.4.15** every HTTP-family transport refuses a present
+  `Origin` that is not on `BOTE_ALLOWED_ORIGINS` with 403, before anything else
+  runs, and with no list set every present `Origin` is refused. No `Origin` passes,
+  because a command-line client sends none. Through 3.4.14 the transports checked
+  only when a list was configured, the binary offered no way to configure one, and
+  `bote bridge` answered `Access-Control-Allow-Origin: *` with its file tools
+  registered, so any website the operator visited could read and write under
+  `BOTE_FS_ROOT`. `*` in the list is the operator's explicit choice and logs a WARN.
+- **Memory** — `alloc` never frees, so what a request leaves on the heap stays for
+  the life of the process. Since **3.4.15** everything bote allocates to answer a
+  message goes on a request arena that the next message rewinds, including
+  refusals before and after auth, so an unauthenticated client cannot grow the
+  heap. A valid tool call still leaves its `args` and whatever its handler
+  allocates, because the 2.0 handler ABI lets a handler keep them (roadmap 3.8.x).
+  Sessions expire, the store holds at most `BOTE_SESSION_MAX` (4096) and answers
+  503 when full of live ones, and a session is minted only after `initialize`
+  has succeeded.
 - **Tool dispatch** — handler functions are user-provided. Arguments are
   validated against the registered JSON Schema before invocation; validation
-  failures are returned as error responses, not propagated.
+  failures are returned as error responses, not propagated. Registration warns
+  about any schema keyword it advertises and does not enforce. Every call,
+  refused ones included, reaches the audit sink, and the audited identity is the
+  configured one: a client's `caller_id` is recorded as a claim, not as who acted.
+- **Filesystem tools** — confined to `BOTE_FS_ROOT`. Since **3.4.15** a path may not
+  pass through a symlink, `fs_write` replaces a symlink rather than writing through
+  it, and a FIFO cannot hang the server. The check is by name, because the stdlib
+  has no `openat`, so a local writer racing it inside the root could still swap a
+  link in. No tool can create one. This is a floor, not a sandbox.
 - **Outbound requests** — the `host` module's SSRF guard rejects URLs targeting
   loopback / link-local / private / cloud-metadata endpoints (IPv4 and IPv6)
   before any network call. `web_fetch`, the built-in tool that fetches a
@@ -44,7 +72,10 @@ The primary security-relevant surface areas are:
   and a literal that does not parse is refused too. 198.18.0.0/15 is
   deliberately allowed: fake-IP DNS proxies answer every name inside it.
   `web_search` is deliberately unguarded (its endpoint is the operator's
-  `BOTE_SEARXNG_URL`).
+  `BOTE_SEARXNG_URL`). Since **3.4.15** both have a deadline
+  (`BOTE_WEB_TIMEOUT_MS`, default 15 s), because every client waits on an outbound
+  call. It does not cover DNS: sandhi's resolver has no timeout yet, so a lost
+  reply can still stall the server.
 - **Logging** — operational logs go through sakshi to stderr (or
   `BOTE_LOG_FILE`), never to stdout, which carries the stdio transport's
   JSON-RPC stream. No bearer token, JWT, request body, tool argument or full

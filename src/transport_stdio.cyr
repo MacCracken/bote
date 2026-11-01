@@ -28,7 +28,7 @@ fn _stdio_process_lines(dispatcher) {
             store8(_stdio_buf + scanned, 0);
             if (line_len > 0) {
                 var line_ptr = _stdio_buf + line_start;
-                var resp = codec_process_message(line_ptr, dispatcher, 0);
+                var resp = codec_process_message_a(bote_req_begin(), line_ptr, dispatcher, 0);
                 if (resp != 0) {
                     sys_write(1, resp, strlen(resp));
                     sys_write(1, "\n", 1);
@@ -54,10 +54,14 @@ fn _stdio_process_lines(dispatcher) {
 # newline-terminated message, writes responses to stdout.
 fn transport_stdio_run(dispatcher) {
     _stdio_init();
+    var skipping = 0;
     while (1 == 1) {
         var space = STDIO_BUF_SIZE - _stdio_buf_len;
         if (space <= 0) {
-            # Line too long — drop the buffer and continue
+            var over = codec_line_too_long();
+            sys_write(1, over, strlen(over));
+            sys_write(1, "\n", 1);
+            skipping = 1;
             _stdio_buf_len = 0;
             space = STDIO_BUF_SIZE;
         }
@@ -66,13 +70,21 @@ fn transport_stdio_run(dispatcher) {
             # EOF — process any final line that lacks a trailing newline
             if (_stdio_buf_len > 0) {
                 store8(_stdio_buf + _stdio_buf_len, 0);
-                var resp = codec_process_message(_stdio_buf, dispatcher, 0);
+                var resp = codec_process_message_a(bote_req_begin(), _stdio_buf, dispatcher, 0);
                 if (resp != 0) {
                     sys_write(1, resp, strlen(resp));
                     sys_write(1, "\n", 1);
                 }
             }
             return 0;
+        }
+        if (skipping == 1) {
+            var at = _stdio_buf + _stdio_buf_len;
+            var le = codec_line_end(at, n);
+            if (le < 0) { continue; }
+            skipping = 0;
+            n = n - le;
+            if (n > 0) { memcpy(at, at + le, n); }
         }
         _stdio_buf_len = _stdio_buf_len + n;
         _stdio_process_lines(dispatcher);

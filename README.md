@@ -93,7 +93,18 @@ BOTE_BEARER_TOKENS="tok-a,tok-b" ./build/bote http 8390
 # missing or wrong → 401 with WWW-Authenticate: Bearer realm="mcp"
 ```
 
-Stdio + Unix sockets are local-only and skip the bearer check.
+Stdio + Unix sockets are local-only and skip the bearer check. `BOTE_BEARER_TOKENS` set with no
+token in it refuses to start.
+
+### Browsers
+
+An HTTP-family transport refuses a present `Origin` with 403 unless it is on the list, and the list is
+empty until you set one. A client that sends no `Origin`, such as `curl` or an MCP client library, is
+not affected.
+
+```sh
+BOTE_ALLOWED_ORIGINS="https://app.example,http://localhost:3000" ./build/bote bridge 8391
+```
 
 ### Connection deadlines
 
@@ -101,7 +112,9 @@ Every transport serves one client at a time, so each connection gets a **send de
 a client that stops reading for `BOTE_SEND_TIMEOUT_MS` (default 30000) is dropped instead of
 wedging the server. The Unix transport's receive deadline, `BOTE_UNIX_IDLE_MS`, is **off** by
 default, because a Unix client may legitimately keep its connection quiet between requests; set it
-to reap idle peers. Both take milliseconds, and `0` disables.
+to reap idle peers. `BOTE_WS_IDLE_MS` is the same for WebSocket. `BOTE_WEB_TIMEOUT_MS` (default 15000)
+bounds an outbound `web_fetch` or `web_search`, since every client waits on it. All take milliseconds,
+and `0` disables.
 
 ```sh
 BOTE_SEND_TIMEOUT_MS=10000 BOTE_UNIX_IDLE_MS=60000 ./build/bote unix /run/bote.sock
@@ -260,25 +273,25 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 1420 total across fifteen files (+ a core-only drift smoke)
+### Tests — 1545 total across fifteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1420 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 1545 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 576 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/bote.tcyr               # 651 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/conformance.tcyr        # 127 — JSON-RPC 2.0 + MCP 2025-11-25 conformance, by spec clause
-cyrius test tests/bote_auth.tcyr          # 45 — bearer + allowlist + JWT + PKCE validators
+cyrius test tests/bote_auth.tcyr          # 55 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
-cyrius test tests/bote_fs_tools.tcyr      # 42 — fs_write / fs_read / fs_mkdir
-cyrius test tests/bote_host.tcyr          # 197 — host registry + SSRF guard (IPv4 + IPv6)
+cyrius test tests/bote_fs_tools.tcyr      # 56 — fs_write / fs_read / fs_mkdir
+cyrius test tests/bote_host.tcyr          # 203 — host registry + SSRF guard (IPv4 + IPv6)
 cyrius test tests/bote_jwt.tcyr           # 59 — JWT HS256 verify + exact alg + exp enforcement
-cyrius test tests/bote_libro_tools.tcyr   # 64 — libro_tools wrappers
+cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals
-cyrius test tests/bote_transport_unix.tcyr # 68 — Unix transport: sockaddr, accept-error policy, backoff, deadlines, closed-peer write
-cyrius test tests/bote_web_tools.tcyr     # 63 — web_fetch / web_search + the SSRF guard (URL and resolved address)
+cyrius test tests/bote_transport_unix.tcyr # 76 — Unix transport: sockaddr, accept-error policy, backoff, deadlines, closed-peer write
+cyrius test tests/bote_web_tools.tcyr     # 66 — web_fetch / web_search + the SSRF guard (URL and resolved address)
 cyrius test tests/bote_ws.tcyr            # 21 — WebSocket config + wire-up + the send-deadline drop
 cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dist/bote-core.cyr
 ```
@@ -289,27 +302,27 @@ cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dis
 cyrius bench tests/bote.bcyr
 ```
 
-A logged row — bote 3.4.11 on cyrius 6.7.18, single run (1-minute load 3.7), `AMD Ryzen 7 5800H`. The full history, with the host conditions
+A logged row — bote 3.4.15 on cyrius 6.7.18, single run (1-minute load 8.6), `AMD Ryzen 7 5800H`. The full history, with the host conditions
 each block was taken under, is [`benches/history.log`](benches/history.log).
 
 | Hot path | Avg |
 |---|---|
-| `dispatch_initialize` | ~1.52 µs |
-| `dispatch_tools_list` | ~1.76 µs |
-| `dispatch_tools_call` (no audit / event sink) | ~2.99 µs |
-| `dispatch_tools_call_result` (a handler returning a CallToolResult) | ~2.70 µs |
-| `jsonx_get_str_flat` | ~141 ns |
-| `jsonx_get_raw_nested` | ~398 ns |
-| `jsonx_valid_request` | ~573 ns |
-| `codec_parse_request` | ~1.46 µs |
-| `codec_serialize_response` | ~464 ns |
-| `codec_process_message` (full pipeline) | ~5.82 µs |
-| `validate_compiled_simple` | ~508 ns |
-| `validate_compiled_nested` | ~2.22 µs |
-| `schema_compile_simple` | ~2.55 µs |
-| `schema_compile_nested` | ~5.87 µs |
+| `dispatch_initialize` | ~1.55 µs |
+| `dispatch_tools_list` | ~1.70 µs |
+| `dispatch_tools_call` (no audit / event sink) | ~2.23 µs |
+| `dispatch_tools_call_result` (a handler returning a CallToolResult) | ~2.06 µs |
+| `jsonx_get_str_flat` | ~183 ns |
+| `jsonx_get_raw_nested` | ~455 ns |
+| `jsonx_valid_request` | ~585 ns |
+| `codec_parse_request` | ~953 ns |
+| `codec_serialize_response` | ~210 ns |
+| `codec_process_message` (full pipeline) | ~4.19 µs |
+| `validate_compiled_simple` | ~491 ns |
+| `validate_compiled_nested` | ~1.99 µs |
+| `schema_compile_simple` | ~2.83 µs |
+| `schema_compile_nested` | ~6.43 µs |
 | `auth_bearer_check_unset` | ~8 ns |
-| `auth_bearer_check_set` | ~781 ns |
+| `auth_bearer_check_set` | ~851 ns |
 
 > A single row is an illustration, not a measurement: run-to-run swings of
 > 5–10 % on the sub-microsecond rows are host state, and a one-byte shift in
@@ -319,7 +332,7 @@ each block was taken under, is [`benches/history.log`](benches/history.log).
 > logging added at no measurable cost; 3.4.1, where an unobserved `tools/call`
 > stopped making two `clock_gettime` syscalls, 1.35 µs each on this host; 3.3.17 for 6.6.14 → 6.6.20, where
 > `jsonx_get_str_flat`'s +16% is identical code sitting 4 bytes later in
-> its cache line; 3.4.11 for 6.7.9 → 6.7.18: a wash on the full pipeline). Numbers across toolchain lines are not comparable — the
+> its cache line; 3.4.11 for 6.7.9 → 6.7.18: a wash on the full pipeline; 3.4.15, the closeout: the full pipeline 30% faster, and a single-key lookup slower for going through the one scanner). Numbers across toolchain lines are not comparable — the
 > 6.6.x emitter moved `dispatch_tools_call` and `codec_process_message`
 > well below their 6.5.x figures.
 

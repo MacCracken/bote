@@ -49,7 +49,7 @@ fn _unix_process_lines(cfd, dispatcher, buf, blen_ptr) {
             store8(buf + scanned, 0);
             var line_len = scanned - line_start;
             if (line_len > 0) {
-                var resp = codec_process_message(buf + line_start, dispatcher, 0);
+                var resp = codec_process_message_a(bote_req_begin(), buf + line_start, dispatcher, 0);
                 if (resp != 0) {
                     if (_unix_reply(cfd, resp) < 0) { return 0 - 1; }
                 }
@@ -158,14 +158,21 @@ fn _unix_backoff_next(cur_ms) {
     return next;
 }
 
+# One connection is served at a time, so one read buffer serves them all.
+var _unix_buf = 0;
 fn _unix_handle_client(cfd, dispatcher) {
-    var buf = alloc(UNIX_BUF_SIZE);
-    var blen_slot = alloc(8);
+    if (_unix_buf == 0) { _unix_buf = alloc(UNIX_BUF_SIZE); }
+    var buf = _unix_buf;
+    var blen_store[8];
+    var blen_slot = &blen_store;
     store64(blen_slot, 0);
+    var skipping = 0;
     while (1 == 1) {
         var blen = load64(blen_slot);
         var space = UNIX_BUF_SIZE - blen;
         if (space <= 0) {
+            if (_unix_reply(cfd, codec_line_too_long()) < 0) { return 0; }
+            skipping = 1;
             store64(blen_slot, 0);
             blen = 0;
             space = UNIX_BUF_SIZE;
@@ -190,10 +197,17 @@ fn _unix_handle_client(cfd, dispatcher) {
             # EOF — flush any final unterminated line.
             if (blen > 0) {
                 store8(buf + blen, 0);
-                var resp = codec_process_message(buf, dispatcher, 0);
+                var resp = codec_process_message_a(bote_req_begin(), buf, dispatcher, 0);
                 if (resp != 0) { _unix_reply(cfd, resp); }
             }
             return 0;
+        }
+        if (skipping == 1) {
+            var le = codec_line_end(buf + blen, n);
+            if (le < 0) { continue; }
+            skipping = 0;
+            n = n - le;
+            if (n > 0) { memcpy(buf + blen, buf + blen + le, n); }
         }
         store64(blen_slot, blen + n);
         if (_unix_process_lines(cfd, dispatcher, buf, blen_slot) < 0) { return 0; }
@@ -242,6 +256,16 @@ fn transport_unix_run(dispatcher, path) {
     # bare `syscall(SYS_` in src/ outright.
     #
     # The accept call was NOT style. See the sys_accept4 note below.
+    # sockaddr_un holds 107 bytes: a longer path would bind one name and chmod
+    # another, so the socket keeps the umask's mode.
+    if (strlen(path) > 107) { return _unix_log_fail("path_too_long", path, 36); }
+    # Only a socket is replaced. It is the one thing open(2) refuses here, so an
+    # open that works means a file, and that is somebody's data.
+    var pfd = file_open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW, 0);
+    if (pfd >= 0) {
+        file_close(pfd);
+        return _unix_log_fail("path_not_a_socket", path, 17);
+    }
     sys_unlink(path);
     var sfd = sys_socket(AF_UNIX, SOCK_STREAM, 0);
     if (sfd < 0) { return _unix_log_fail("socket", path, 0 - sfd); }
@@ -252,7 +276,12 @@ fn transport_unix_run(dispatcher, path) {
     # 1.9.6 audit L1: restrict perms so only the owning UID can connect.
     # Without this the socket inherits the process umask (typically 0022 →
     # mode 0755) and any local user can dial it.
-    sys_chmod(path, 0x180);            # 0o600 = 384 decimal = 0x180
+    var cr = sys_chmod(path, 0x180);   # 0o600 = 384 decimal = 0x180
+    if (cr < 0) {
+        sys_close(sfd);
+        sys_unlink(path);
+        return _unix_log_fail("chmod", path, 0 - cr);
+    }
     var lr = sys_listen(sfd, 16);
     if (lr < 0) { sys_close(sfd); return _unix_log_fail("listen", path, 0 - lr); }
     var ll[BOTE_LOG_LINE_BYTES];

@@ -90,37 +90,160 @@ fn _jx_skip_struct(buf, len, i, open, close) {
     return i;
 }
 
-# Find a key inside a flat JSON object (one level). Returns index of the
-# value's first byte (after `:` and whitespace), or 0 - 1 if not found.
-fn _jx_find_value_pos(buf, len, key) {
-    var klen = strlen(key);
+# The code unit of a low surrogate `\uDC00`-`\uDFFF` at src + i, or -1.
+fn _jx_low_surrogate(src, i, n) {
+    if (i + 5 >= n) { return 0 - 1; }
+    if (load8(src + i) != 92 || load8(src + i + 1) != 117) { return 0 - 1; }
+    var h1 = _jx_hexval(load8(src + i + 2));
+    var h2 = _jx_hexval(load8(src + i + 3));
+    var h3 = _jx_hexval(load8(src + i + 4));
+    var h4 = _jx_hexval(load8(src + i + 5));
+    if ((h1 < 0) || (h2 < 0) || (h3 < 0) || (h4 < 0)) { return 0 - 1; }
+    var cu = ((h1 * 4096) + (h2 * 256)) + ((h3 * 16) + h4);
+    if (cu < 56320 || cu > 57343) { return 0 - 1; }
+    return cu;
+}
+
+fn _jx_hexval(c) {
+    if ((c >= 48) && (c <= 57))  { return c - 48; }        # 0-9
+    if ((c >= 97) && (c <= 102)) { return (c - 97) + 10; }  # a-f
+    if ((c >= 65) && (c <= 70))  { return (c - 65) + 10; }  # A-F
+    return 0 - 1;
+}
+# Decode the JSON string body at src (n bytes, its escapes unread) into out,
+# which has room for n + 1, and may be src itself. Returns the decoded length; a
+# `\u0000` leaves a NUL inside it. An escape it cannot read is kept as its
+# character. A lone surrogate becomes U+FFFD.
+fn _jx_unescape_into(src, n, out) {
+    var i = 0;
+    var o = 0;
+    while (i < n) {
+        var c = load8(src + i);
+        if ((c == 92) && ((i + 1) < n)) {    # backslash
+            var d = load8(src + i + 1);
+            if (d == 110)      { store8(out + o, 10); o = o + 1; i = i + 2; }   # \n
+            elif (d == 116)    { store8(out + o, 9);  o = o + 1; i = i + 2; }   # \t
+            elif (d == 114)    { store8(out + o, 13); o = o + 1; i = i + 2; }   # \r
+            elif (d == 34)     { store8(out + o, 34); o = o + 1; i = i + 2; }   # \"
+            elif (d == 92)     { store8(out + o, 92); o = o + 1; i = i + 2; }   # \\
+            elif (d == 47)     { store8(out + o, 47); o = o + 1; i = i + 2; }   # \/
+            elif (d == 98)     { store8(out + o, 8);  o = o + 1; i = i + 2; }   # \b
+            elif (d == 102)    { store8(out + o, 12); o = o + 1; i = i + 2; }   # \f
+            elif ((d == 117) && ((i + 5) < n)) {                                # \uXXXX
+                var h1 = _jx_hexval(load8(src + i + 2));
+                var h2 = _jx_hexval(load8(src + i + 3));
+                var h3 = _jx_hexval(load8(src + i + 4));
+                var h4 = _jx_hexval(load8(src + i + 5));
+                if ((h1 < 0) || (h2 < 0) || (h3 < 0) || (h4 < 0)) {
+                    store8(out + o, d); o = o + 1; i = i + 2;    # malformed -> keep 'u'
+                } else {
+                    var cp = ((h1 * 4096) + (h2 * 256)) + ((h3 * 16) + h4);
+                    var low = _jx_low_surrogate(src, i + 6, n);
+                    if (cp >= 55296 && cp <= 56319 && low >= 0) {
+                        # A surrogate pair is one code point, four UTF-8 bytes.
+                        cp = 65536 + ((cp - 55296) * 1024) + (low - 56320);
+                        store8(out + o, 240 + (cp / 262144)); o = o + 1;
+                        store8(out + o, 128 + ((cp / 4096) % 64)); o = o + 1;
+                        store8(out + o, 128 + ((cp / 64) % 64)); o = o + 1;
+                        store8(out + o, 128 + (cp % 64)); o = o + 1;
+                        i = i + 6;
+                    } elif (cp >= 55296 && cp <= 57343) {
+                        # A lone surrogate is not text: U+FFFD.
+                        store8(out + o, 239); o = o + 1;
+                        store8(out + o, 191); o = o + 1;
+                        store8(out + o, 189); o = o + 1;
+                    } elif (cp < 128) {
+                        store8(out + o, cp); o = o + 1;
+                    } elif (cp < 2048) {
+                        store8(out + o, 192 + (cp / 64)); o = o + 1;
+                        store8(out + o, 128 + (cp - ((cp / 64) * 64))); o = o + 1;
+                    } else {
+                        var hi = cp / 4096;
+                        var mid = (cp / 64) - (hi * 64);
+                        var lo = cp - ((cp / 64) * 64);
+                        store8(out + o, 224 + hi); o = o + 1;
+                        store8(out + o, 128 + mid); o = o + 1;
+                        store8(out + o, 128 + lo); o = o + 1;
+                    }
+                    i = i + 6;
+                }
+            }
+            else { store8(out + o, d); o = o + 1; i = i + 2; }  # unknown escape -> keep char
+        } else {
+            store8(out + o, c); o = o + 1; i = i + 1;
+        }
+    }
+    store8(out + o, 0);
+    return o;
+}
+
+# 1 when the n bytes at p hold a backslash.
+fn _jx_has_escape(p, n) {
+    var i = 0;
+    while (i < n) {
+        if (load8(p + i) == 92) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# One pass over the object at buf for `n` keys: `keys` holds a (cstr, length)
+# pair per key, and pos[i] gets the offset of the first occurrence's value, or
+# -1. This is the one key scanner: _jx_find_value_pos is its one-key form, so
+# the codec, the dispatcher and the validator cannot read a message differently.
+# A key is matched as what it decodes to: `"c\u006et"` is the key `cnt`, here for
+# the validator and for a handler alike.
+fn _jx_scan(buf, len, keys, n, pos) {
+    var k = 0;
+    while (k < n) { store64(pos + k * 8, 0 - 1); k = k + 1; }
     var i = _jx_skip_ws(buf, len, 0);
-    if (i >= len || load8(buf + i) != 123) { return 0 - 1; }
+    if (i >= len || load8(buf + i) != 123) { return 0; }
     i = i + 1;
+    var left = n;
+    var dec[256];
     while (i < len) {
         i = _jx_skip_ws(buf, len, i);
-        if (i >= len) { return 0 - 1; }
-        var c = load8(buf + i);
-        if (c == 125) { return 0 - 1; }
-        if (c != 34) { return 0 - 1; }
-        # Read key
+        if (i >= len) { return 0; }
+        if (load8(buf + i) != 34) { return 0; }
         var ks = i + 1;
         var ke = _jx_skip_string(buf, len, i);
-        var key_len_actual = ke - ks - 1;
-        var key_match = 0;
-        if (key_len_actual == klen && memeq(buf + ks, key, klen) == 1) {
-            key_match = 1;
+        var kl = ke - ks - 1;
+        var kp = buf + ks;
+        if (kl > 0 && kl < 256 && _jx_has_escape(kp, kl) == 1) {
+            kl = _jx_unescape_into(kp, kl, &dec);
+            kp = &dec;
         }
         i = _jx_skip_ws(buf, len, ke);
-        if (i >= len || load8(buf + i) != 58) { return 0 - 1; }
+        if (i >= len || load8(buf + i) != 58) { return 0; }
         i = _jx_skip_ws(buf, len, i + 1);
-        if (key_match == 1) { return i; }
-        # Skip the value
+        k = 0;
+        while (k < n) {
+            if (kl == load64(keys + k * 16 + 8) && load64(pos + k * 8) < 0) {
+                if (memeq(kp, load64(keys + k * 16), kl) == 1) {
+                    store64(pos + k * 8, i);
+                    left = left - 1;
+                    if (left == 0) { return 0; }
+                    k = n;
+                }
+            }
+            k = k + 1;
+        }
         var ve = _jx_skip_value(buf, len, i);
         i = _jx_skip_ws(buf, len, ve);
         if (i < len && load8(buf + i) == 44) { i = i + 1; }
     }
-    return 0 - 1;
+    return 0;
+}
+
+# Find a key inside a flat JSON object (one level). Returns index of the
+# value's first byte (after `:` and whitespace), or 0 - 1 if not found.
+fn _jx_find_value_pos(buf, len, key) {
+    var k[16];
+    store64(&k, key);
+    store64(&k + 8, strlen(key));
+    var p[8];
+    _jx_scan(buf, len, &k, 1, &p);
+    return load64(&p);
 }
 
 # Get raw JSON value bytes for key. Returns cstr (alloc'd, null-terminated)
@@ -156,6 +279,64 @@ fn jsonx_get_str(obj_cstr, key) {
     memcpy(out, obj_cstr + pos + 1, inner_len);
     store8(out + inner_len, 0);
     return out;
+}
+
+# The value at pos as jsonx_get_raw returns it: its raw JSON bytes, owned by `a`.
+fn _jx_raw_at_a(a, buf, len, pos) {
+    if (pos < 0) { return 0; }
+    var end = _jx_skip_value(buf, len, pos);
+    var n = end - pos;
+    var out = alloc_via(a, n + 1);
+    memcpy(out, buf + pos, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# The value at pos as jsonx_get_str returns it: 0 unless it is a string.
+fn _jx_str_at_a(a, buf, len, pos) {
+    if (pos < 0) { return 0; }
+    if (load8(buf + pos) != 34) { return 0; }
+    var end = _jx_skip_string(buf, len, pos);
+    var inner_len = end - pos - 2;
+    if (inner_len < 0) { inner_len = 0; }
+    var out = alloc_via(a, inner_len + 1);
+    memcpy(out, buf + pos + 1, inner_len);
+    store8(out + inner_len, 0);
+    return out;
+}
+
+# _jx_str_at_a with its escapes decoded: what the string means, for the fields
+# bote itself compares. `"tools\/list"` is tools/list, and a client that writes
+# it that way must not get -32601. A decoded NUL would end the cstr early and
+# make it mean something else, so that string stays as it was sent, and matches
+# nothing.
+fn _jx_str_dec_at_a(a, buf, len, pos) {
+    var s = _jx_str_at_a(a, buf, len, pos);
+    if (s == 0) { return 0; }
+    var n = strlen(s);
+    if (_jx_has_escape(s, n) == 0) { return s; }
+    var out = alloc_via(a, n + 1);
+    var dn = _jx_unescape_into(s, n, out);
+    if (strlen(out) != dn) { return s; }
+    return out;
+}
+
+fn jsonx_get_str_dec_a(a, obj_cstr, key) {
+    if (obj_cstr == 0) { return 0; }
+    var len = strlen(obj_cstr);
+    return _jx_str_dec_at_a(a, obj_cstr, len, _jx_find_value_pos(obj_cstr, len, key));
+}
+
+fn jsonx_get_raw_a(a, obj_cstr, key) {
+    if (obj_cstr == 0) { return 0; }
+    var len = strlen(obj_cstr);
+    return _jx_raw_at_a(a, obj_cstr, len, _jx_find_value_pos(obj_cstr, len, key));
+}
+
+fn jsonx_get_str_a(a, obj_cstr, key) {
+    if (obj_cstr == 0) { return 0; }
+    var len = strlen(obj_cstr);
+    return _jx_str_at_a(a, obj_cstr, len, _jx_find_value_pos(obj_cstr, len, key));
 }
 
 # Returns 1 if obj_cstr contains key, 0 otherwise.
@@ -398,6 +579,37 @@ fn _jx_add_escape(sb, c) {
 # surrounding quotes. The output is always a valid JSON string body. A NUL
 # ends a cstr, so text after an embedded NUL is not emitted. Returns 0, and
 # 0 for a null cstr, which appends nothing.
+# The length of the UTF-8 sequence at p, or 0 when it is not one (RFC 3629):
+# overlong forms, surrogates and anything past U+10FFFF are not. A NUL fails the
+# continuation test, so it never reads past the end of a cstr.
+fn _jx_utf8_len(p) {
+    var c = load8(p);
+    var n = 0;
+    var lo = 128;
+    var hi = 191;
+    if (c >= 194 && c <= 223) { n = 2; }
+    elif (c >= 224 && c <= 239) {
+        n = 3;
+        if (c == 224) { lo = 160; }
+        if (c == 237) { hi = 159; }
+    } elif (c >= 240 && c <= 244) {
+        n = 4;
+        if (c == 240) { lo = 144; }
+        if (c == 244) { hi = 143; }
+    } else {
+        return 0;
+    }
+    var b = load8(p + 1);
+    if (b < lo || b > hi) { return 0; }
+    var k = 2;
+    while (k < n) {
+        b = load8(p + k);
+        if (b < 128 || b > 191) { return 0; }
+        k = k + 1;
+    }
+    return n;
+}
+
 fn bote_json_escape(sb, cstr) {
     if (cstr == 0) { return 0; }
     var start = 0;
@@ -412,8 +624,23 @@ fn bote_json_escape(sb, cstr) {
             _jx_add_run(sb, cstr + start, i - start);
             _jx_add_escape(sb, c);
             start = i + 1;
+            i = i + 1;
+        } elif (c < 128) {
+            i = i + 1;
+        } else {
+            # RFC 8259 §8.1: JSON text is UTF-8. A file, a page or a client
+            # may hand bote anything, and a strict parser refuses the whole
+            # message over one bad byte.
+            var u = _jx_utf8_len(cstr + i);
+            if (u == 0) {
+                _jx_add_run(sb, cstr + start, i - start);
+                str_builder_add_cstr(sb, "\\ufffd");
+                start = i + 1;
+                i = i + 1;
+            } else {
+                i = i + u;
+            }
         }
-        i = i + 1;
     }
     return 0;
 }

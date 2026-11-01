@@ -99,10 +99,11 @@ fn _bote_bearer_from_env(out_fp, out_ctx) {
     if (csv == 0) { store64(out_fp, 0); store64(out_ctx, 0); return 0; }
     var allowed = _split_csv_tokens(csv);
     if (vec_len(allowed) == 0) {
-        # Set but empty (or only commas): the operator asked for auth and is
-        # not getting it. Say so; the token values themselves never reach a log.
-        bote_log_warn("BOTE_BEARER_TOKENS is set but holds no token; bearer auth is OFF");
-        store64(out_fp, 0); store64(out_ctx, 0); return 0;
+        # Set but empty (or only commas): the operator asked for auth, so
+        # refuse to start rather than serve without it. The token values
+        # themselves never reach a log.
+        bote_log_error("BOTE_BEARER_TOKENS is set but holds no token");
+        store64(out_fp, 0); store64(out_ctx, 0); return 0 - 1;
     }
     var ln[BOTE_LOG_LINE_BYTES];
     bote_log_line(&ln, SK_INFO, "bearer auth enabled");
@@ -214,9 +215,30 @@ fn _bote_env_ms(name, cur) {
 # Connection deadlines from the environment (src/conn.cyr): BOTE_SEND_TIMEOUT_MS
 # (default 30000) and BOTE_UNIX_IDLE_MS (default 0, none). Logged at INFO when
 # either differs from its default.
+# BOTE_ALLOWED_ORIGINS: the Origins a browser may reach this server from, comma
+# separated, or `*`. Unset, the list is 0 and every present Origin gets 403.
+fn bote_main_origins_from_env() {
+    var csv = getenv("BOTE_ALLOWED_ORIGINS");
+    if (csv == 0) { return 0; }
+    var origins = _split_csv_tokens(csv);
+    var i = 0;
+    while (i < vec_len(origins)) {
+        if (streq(vec_get(origins, i), "*") == 1) {
+            bote_log_warn("BOTE_ALLOWED_ORIGINS holds *: any website may call this server");
+        }
+        i = i + 1;
+    }
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_INFO, "allowed origins");
+    bote_log_int(&ln, "origins", vec_len(origins));
+    bote_log_emit(&ln);
+    return origins;
+}
+
 fn bote_main_conn_from_env() {
     BOTE_SEND_TIMEOUT_MS = _bote_env_ms("BOTE_SEND_TIMEOUT_MS", BOTE_SEND_TIMEOUT_MS);
     BOTE_UNIX_IDLE_MS = _bote_env_ms("BOTE_UNIX_IDLE_MS", BOTE_UNIX_IDLE_MS);
+    BOTE_WEB_TIMEOUT_MS = _bote_env_ms("BOTE_WEB_TIMEOUT_MS", BOTE_WEB_TIMEOUT_MS);
     if (BOTE_SEND_TIMEOUT_MS != 30000 || BOTE_UNIX_IDLE_MS != 0) {
         var ln[BOTE_LOG_LINE_BYTES];
         bote_log_line(&ln, SK_INFO, "connection deadlines");

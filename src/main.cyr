@@ -127,7 +127,8 @@ fn main() {
     # / ws). Stdio + unix sockets are local-only and don't get the check.
     var auth_fp_slot[8]; var auth_ctx_slot[8];
     store64(&auth_fp_slot, 0); store64(&auth_ctx_slot, 0);
-    _bote_bearer_from_env(&auth_fp_slot, &auth_ctx_slot);
+    if (_bote_bearer_from_env(&auth_fp_slot, &auth_ctx_slot) < 0) { return 2; }
+    var allowed_origins = bote_main_origins_from_env();
     var bearer_fp = load64(&auth_fp_slot);
     var bearer_ctx = load64(&auth_ctx_slot);
 
@@ -154,6 +155,7 @@ fn main() {
         if (arg != 0) { sport = bote_main_port(arg, 8392); }
         var scfg = streamable_config_new("/mcp", INADDR_LOOPBACK(), sport);
         streamable_config_with_session_store(scfg, session_store);
+        streamable_config_with_allowed_origins(scfg, allowed_origins);
         if (bearer_fp != 0) { streamable_config_with_bearer_validator(scfg, bearer_fp, bearer_ctx); }
         bote_main_log_start("streamable", sport, 0, bearer_fp != 0);
         return bote_main_log_exit("streamable", transport_streamable_run(sdisp, scfg));
@@ -163,6 +165,8 @@ fn main() {
         var wport = 8393;
         if (arg != 0) { wport = bote_main_port(arg, 8393); }
         var wcfg = ws_config_new("/mcp", INADDR_LOOPBACK(), wport);
+        ws_config_with_allowed_origins(wcfg, allowed_origins);
+        ws_config_with_idle_ms(wcfg, _bote_env_ms("BOTE_WS_IDLE_MS", 0));
         if (bearer_fp != 0) { ws_config_with_bearer_validator(wcfg, bearer_fp, bearer_ctx); }
         bote_main_log_start("ws", wport, 0, bearer_fp != 0);
         return bote_main_log_exit("ws", transport_ws_run(wdisp, wcfg));
@@ -189,6 +193,7 @@ fn main() {
         var port = 8390;
         if (arg != 0) { port = bote_main_port(arg, 8390); }
         var cfg = http_config_new("/mcp", INADDR_LOOPBACK(), port);
+        http_config_with_allowed_origins(cfg, allowed_origins);
         if (bearer_fp != 0) { http_config_with_bearer_validator(cfg, bearer_fp, bearer_ctx); }
         bote_main_log_start("http", port, 0, bearer_fp != 0);
         return bote_main_log_exit("http", transport_http_run(dispatcher, cfg));
@@ -205,9 +210,7 @@ fn main() {
         var bport = 8391;
         if (arg != 0) { bport = bote_main_port(arg, 8391); }
         var bcfg = bridge_config_new(INADDR_LOOPBACK(), bport);
-        var origins = vec_new();
-        vec_push(origins, "*");
-        bridge_config_with_origins(bcfg, origins);
+        bridge_config_with_origins(bcfg, allowed_origins);
         if (bearer_fp != 0) { bridge_config_with_bearer_validator(bcfg, bearer_fp, bearer_ctx); }
         bote_main_log_start("bridge", bport, 0, bearer_fp != 0);
         return bote_main_log_exit("bridge", transport_bridge_run(dispatcher, bcfg));

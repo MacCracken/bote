@@ -65,6 +65,17 @@ fn _ux_has(hay, needle) {
     return 0;
 }
 
+# 1 when cstr `hay` contains cstr `needle`.
+fn _ov_has(hay, needle) {
+    var i = 0;
+    var nl = strlen(needle);
+    while (load8(hay + i) != 0) {
+        if (memeq(hay + i, needle, nl) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -348,6 +359,48 @@ fn main() {
     sys_close(fa);
     sys_close(fb);
     BOTE_SEND_TIMEOUT_MS = 30000;
+    #endif
+
+    # ---------------- 3.4.15: a line too long is one error, and its tail no message ----------------
+    #ifndef CYRIUS_TARGET_AGNOS
+    var ovr[8];
+    assert_eq(sys_socketpair(1, 1, 0, &ovr), 0, "overlong: socketpair");
+    var ov_a = load32(&ovr);
+    var ov_b = load32(&ovr + 4);
+    var ov_d = dispatcher_new(tool_registry_new());
+    var ov_chunk = alloc(4097);
+    memset(ov_chunk, 120, 4096);
+    store8(ov_chunk + 4096, 0);
+    # The tail of the long line would be a valid message if it were run: that is
+    # what it did. Its id (77) must never be answered.
+    var ov_sent = 0;
+    while (ov_sent < UNIX_BUF_SIZE) { sock_send_all(ov_b, ov_chunk, 4096); ov_sent = ov_sent + 4096; }
+    var ov_tail = "{\"jsonrpc\":\"2.0\",\"id\":77,\"method\":\"ping\"}\n{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"ping\"}\n";
+    sock_send_all(ov_b, ov_tail, strlen(ov_tail));
+    # The idle deadline ends the client: nothing more is coming.
+    sock_set_recv_timeout(ov_a, 1, 0);
+    _unix_handle_client(ov_a, ov_d);
+    var ov_out = alloc(4096);
+    var ov_t, ov_n = sock_recv(ov_b, ov_out, 4095);
+    assert(is_err_result(ov_t) == 0 && ov_n > 0, "overlong: answered");
+    if (is_err_result(ov_t) == 0 && ov_n > 0) { store8(ov_out + ov_n, 0); }
+    assert(_ov_has(ov_out, "-32700") == 1, "overlong: answered with one parse error");
+    assert(_ov_has(ov_out, "\"id\":5") == 1, "overlong: the next line is served");
+    assert_eq(_ov_has(ov_out, "\"id\":77"), 0, "overlong: its tail never runs as a message");
+    sys_close(ov_a);
+    sys_close(ov_b);
+
+    # A path that is no socket is not replaced, and one too long is not cut.
+    var pf = "build/unix-not-a-socket";
+    file_write_all(pf, "keep me", 7);
+    assert_eq(transport_unix_run(ov_d, pf), 1, "path: a regular file is refused");
+    var pb = alloc(16);
+    assert_eq(file_read_all(pf, pb, 7), 7, "path: ...and left alone");
+    sys_unlink(pf);
+    var plong = alloc(200);
+    memset(plong, 97, 150);
+    store8(plong + 150, 0);
+    assert_eq(transport_unix_run(ov_d, plong), 1, "path: one too long for sockaddr_un is refused");
     #endif
 
     return assert_summary();

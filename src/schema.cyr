@@ -19,6 +19,7 @@ enum SchemaTypeTag {
     SCH_ARRAY = 4;
     SCH_OBJECT = 5;
     SCH_ANY = 6;
+    SCH_NEVER = 7;
 }
 
 # ================================================================
@@ -220,12 +221,14 @@ fn _sch_num_parse(v, val_out) {
 
 
 # Strip surrounding quotes from a JSON-string cstr ("hello" → hello).
-# Caller guarantees v is a string literal. Returns alloc'd cstr.
-fn _sch_unquote(v) {
+# Caller guarantees v is a string literal. Returns a cstr owned by `a`.
+fn _sch_unquote(v) { return _sch_unquote_a(default_alloc(), v); }
+
+fn _sch_unquote_a(a, v) {
     var len = strlen(v);
     if (len < 2) { return ""; }
     var inner = len - 2;
-    var out = alloc(inner + 1);
+    var out = alloc_via(a, inner + 1);
     memcpy(out, v + 1, inner);
     store8(out + inner, 0);
     return out;
@@ -242,8 +245,10 @@ fn _sch_parse_int(v) {
 
 # Walk a top-level JSON array (cstr starting with `[`); push each raw element
 # bytes into a returned vec of cstrs.
-fn _sch_split_array(buf) {
-    var out = vec_new();
+fn _sch_split_array(buf) { return _sch_split_array_a(default_alloc(), buf); }
+
+fn _sch_split_array_a(a, buf) {
+    var out = vec_new_a(a);
     if (buf == 0) { return out; }
     var len = strlen(buf);
     var i = _cdc_skip_ws(buf, len, 0);
@@ -257,10 +262,10 @@ fn _sch_split_array(buf) {
         var start = i;
         var end = _jx_skip_value(buf, len, i);
         var elen = end - start;
-        var elem = alloc(elen + 1);
+        var elem = alloc_via(a, elen + 1);
         memcpy(elem, buf + start, elen);
         store8(elem + elen, 0);
-        vec_push(out, elem);
+        vec_push_a(a, out, elem);
         i = _cdc_skip_ws(buf, len, end);
         if (i < len) { if (load8(buf + i) == 44) { i = i + 1; } }
     }
@@ -272,6 +277,9 @@ fn _sch_split_array(buf) {
 # ================================================================
 
 fn parse_property(raw_json) {
+    # The schema `false` allows nothing (2020-12). Read as "no type", it allowed
+    # anything.
+    if (raw_json != 0 && streq(raw_json, "false") == 1) { return prop_new(SCH_NEVER); }
     var type_str = jsonx_get_str(raw_json, "type");
     var tag = SCH_ANY;
     if (type_str != 0) {
@@ -426,18 +434,45 @@ fn compiled_compile(schema) {
 #
 # Returns vec of violation cstrs. Empty vec == ok.
 
-fn _violation(violations, path, msg) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, path);
-    str_builder_add_cstr(sb, ": ");
-    str_builder_add_cstr(sb, msg);
-    vec_push(violations, str_data(str_builder_build(sb)));
+# `slot` is {vec, allocator, count}. The vec is created by the first violation,
+# so a request that passes validation allocates none. Collection stops at
+# BOTE_SCH_MAX_VIOLATIONS: a message can hold far more, and a client learns
+# nothing from the thousandth that it did not from the thirty-second.
+var BOTE_SCH_MAX_VIOLATIONS = 32;
+fn _vs_alloc(slot) { return load64(slot + 8); }
+fn _vs_full(slot) {
+    if (load64(slot + 16) >= BOTE_SCH_MAX_VIOLATIONS) { return 1; }
+    return 0;
+}
+
+fn _violation_push(slot, msg) {
+    if (_vs_full(slot) == 1) { return 0; }
+    var a = _vs_alloc(slot);
+    var v = load64(slot);
+    if (v == 0) { v = vec_new_a(a); store64(slot, v); }
+    vec_push_a(a, v, msg);
+    store64(slot + 16, load64(slot + 16) + 1);
+    return 0;
+}
+
+fn _violation(slot, path, msg) {
+    if (_vs_full(slot) == 1) { return 0; }
+    var a = _vs_alloc(slot);
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, path);
+    str_builder_add_cstr_a(a, sb, ": ");
+    str_builder_add_cstr_a(a, sb, msg);
+    _violation_push(slot, str_data(str_builder_build_a(a, sb)));
     return 0;
 }
 
 fn _validate_value(path, value, prop, violations) {
     var tag = prop_tag(prop);
     if (tag == SCH_ANY) { return 0; }
+    if (tag == SCH_NEVER) {
+        _violation(violations, path, "not allowed by the schema");
+        return 0;
+    }
 
     if (tag == SCH_STRING) {
         if (_sch_is_string(value) == 0) {
@@ -446,7 +481,7 @@ fn _validate_value(path, value, prop, violations) {
         }
         var allowed = prop_enum_values(prop);
         if (allowed != 0) {
-            var raw_str = _sch_unquote(value);
+            var raw_str = _sch_unquote_a(_vs_alloc(violations), value);
             var n = vec_len(allowed);
             var i = 0;
             var found = 0;
@@ -455,11 +490,12 @@ fn _validate_value(path, value, prop, violations) {
                 i = i + 1;
             }
             if (found == 0) {
-                var sb = str_builder_new();
-                str_builder_add_cstr(sb, "value '");
-                str_builder_add_cstr(sb, raw_str);
-                str_builder_add_cstr(sb, "' not in enum");
-                _violation(violations, path, str_data(str_builder_build(sb)));
+                var ea = _vs_alloc(violations);
+                var sb = str_builder_new_a(ea);
+                str_builder_add_cstr_a(ea, sb, "value '");
+                str_builder_add_cstr_a(ea, sb, raw_str);
+                str_builder_add_cstr_a(ea, sb, "' not in enum");
+                _violation(violations, path, str_data(str_builder_build_a(ea, sb)));
             }
         }
         return 0;
@@ -472,11 +508,21 @@ fn _validate_value(path, value, prop, violations) {
             return 0;
         }
         var nv = load64(&nslot);
+        # A fractional value is past its truncation: -0.9 is under 0 and 10.9
+        # is over 10, though each truncates onto the bound.
+        var nfrac = 0;
+        if (_sch_num_parse(value, &nslot) == 1) { nfrac = 1; }
+        var nneg = 0;
+        if (_sch_first_nonws(value) == 45) { nneg = 1; }
         if (prop_has_min(prop) == 1) {
-            if (nv < prop_min(prop)) { _violation(violations, path, "less than minimum"); }
+            if (nv < prop_min(prop) || (nfrac == 1 && nneg == 1 && nv == prop_min(prop))) {
+                _violation(violations, path, "less than minimum");
+            }
         }
         if (prop_has_max(prop) == 1) {
-            if (nv > prop_max(prop)) { _violation(violations, path, "greater than maximum"); }
+            if (nv > prop_max(prop) || (nfrac == 1 && nneg == 0 && nv == prop_max(prop))) {
+                _violation(violations, path, "greater than maximum");
+            }
         }
         return 0;
     }
@@ -488,6 +534,12 @@ fn _validate_value(path, value, prop, violations) {
             return 0;
         }
         var iv = load64(&islot);
+        # Past the range a value can be held in, a handler would read a
+        # different number from the one sent.
+        if (iv >= SCH_NUM_SAT || iv <= 0 - SCH_NUM_SAT) {
+            _violation(violations, path, "integer out of range");
+            return 0;
+        }
         if (prop_has_min(prop) == 1) {
             if (iv < prop_min(prop)) { _violation(violations, path, "less than minimum"); }
         }
@@ -511,16 +563,17 @@ fn _validate_value(path, value, prop, violations) {
         }
         var items_prop = prop_items(prop);
         if (items_prop != 0) {
-            var elems = _sch_split_array(value);
+            var ia = _vs_alloc(violations);
+            var elems = _sch_split_array_a(ia, value);
             var n = vec_len(elems);
             var i = 0;
-            while (i < n) {
-                var sb = str_builder_new();
-                str_builder_add_cstr(sb, path);
-                str_builder_add_cstr(sb, "[");
-                str_builder_add_int(sb, i);
-                str_builder_add_cstr(sb, "]");
-                _validate_value(str_data(str_builder_build(sb)), vec_get(elems, i), items_prop, violations);
+            while (i < n && _vs_full(violations) == 0) {
+                var sb = str_builder_new_a(ia);
+                str_builder_add_cstr_a(ia, sb, path);
+                str_builder_add_cstr_a(ia, sb, "[");
+                str_builder_add_int_a(ia, sb, i);
+                str_builder_add_cstr_a(ia, sb, "]");
+                _validate_value(str_data(str_builder_build_a(ia, sb)), vec_get(elems, i), items_prop, violations);
                 i = i + 1;
             }
         }
@@ -556,13 +609,14 @@ fn _validate_against(path, value_cstr, compiled, violations) {
         while (ri < nr) {
             var rkey = vec_get(req, ri);
             if (jsonx_has(value_cstr, rkey) == 0) {
-                var sb = str_builder_new();
-                str_builder_add_cstr(sb, "missing required field: ");
-                str_builder_add_cstr(sb, rkey);
+                var ra = _vs_alloc(violations);
+                var sb = str_builder_new_a(ra);
+                str_builder_add_cstr_a(ra, sb, "missing required field: ");
+                str_builder_add_cstr_a(ra, sb, rkey);
                 if (strlen(path) > 0) {
-                    _violation(violations, path, str_data(str_builder_build(sb)));
+                    _violation(violations, path, str_data(str_builder_build_a(ra, sb)));
                 } else {
-                    vec_push(violations, str_data(str_builder_build(sb)));
+                    _violation_push(violations, str_data(str_builder_build_a(ra, sb)));
                 }
             }
             ri = ri + 1;
@@ -572,18 +626,21 @@ fn _validate_against(path, value_cstr, compiled, violations) {
     var names = compiled_names(compiled);
     var nn = vec_len(names);
     var ni = 0;
-    while (ni < nn) {
+    var vlen = strlen(value_cstr);
+    var pa = _vs_alloc(violations);
+    while (ni < nn && _vs_full(violations) == 0) {
         var name = vec_get(names, ni);
-        if (jsonx_has(value_cstr, name) == 1) {
-            var raw_val = jsonx_get_raw(value_cstr, name);
+        var vpos = _jx_find_value_pos(value_cstr, vlen, name);
+        if (vpos != 0 - 1) {
             var prop = compiled_get_property(compiled, name);
+            var raw_val = _jx_raw_at_a(pa, value_cstr, vlen, vpos);
             var sub_path = name;
             if (strlen(path) > 0) {
-                var sbp = str_builder_new();
-                str_builder_add_cstr(sbp, path);
-                str_builder_add_cstr(sbp, ".");
-                str_builder_add_cstr(sbp, name);
-                sub_path = str_data(str_builder_build(sbp));
+                var sbp = str_builder_new_a(pa);
+                str_builder_add_cstr_a(pa, sbp, path);
+                str_builder_add_cstr_a(pa, sbp, ".");
+                str_builder_add_cstr_a(pa, sbp, name);
+                sub_path = str_data(str_builder_build_a(pa, sbp));
             }
             _validate_value(sub_path, raw_val, prop, violations);
         }
@@ -595,11 +652,22 @@ fn _validate_against(path, value_cstr, compiled, violations) {
 # Public entry: validate `params_cstr` against `compiled`.
 # Returns vec of violation cstrs (empty vec == ok).
 fn compiled_validate(compiled, params_cstr) {
-    var violations = vec_new();
+    var v = compiled_check_a(default_alloc(), compiled, params_cstr);
+    if (v == 0) { return vec_new(); }
+    return v;
+}
+
+# compiled_validate without the empty vec: the violations, on `a`, or 0 when
+# there are none.
+fn compiled_check_a(a, compiled, params_cstr) {
+    var slot[24];
+    store64(&slot, 0);
+    store64(&slot + 8, a);
+    store64(&slot + 16, 0);
     if (_sch_is_object(params_cstr) == 0) {
-        vec_push(violations, "params must be an object");
-        return violations;
+        _violation_push(&slot, "params must be an object");
+        return load64(&slot);
     }
-    _validate_against("", params_cstr, compiled, violations);
-    return violations;
+    _validate_against("", params_cstr, compiled, &slot);
+    return load64(&slot);
 }

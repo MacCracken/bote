@@ -1,6 +1,8 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.4.14 (cyrius 6.7.18) | **Last Audited**: 2026-10-15 (at 3.4.5, with `tests/conformance.tcyr`)
+> **Spec Version**: 2025-11-25 (default) | **Bote Version**: 3.4.15 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+>
+> ⚠ **The current MCP revision is 2026-07-28, and bote does not speak it yet.** It is a breaking revision: stateless, with no `initialize`, sessions or `ping`. A client that speaks only that revision cannot talk to bote; one that also speaks an older revision can. Everything below is against 2025-11-25. The plan is a dual-era server, roadmap 3.5.x.
 
 This file lists what the shipped Cyrius implementation **covers today**, including the
 gaps — a ❌ row is a defect on the released binary, a ⏳ row is planned work. Both are
@@ -44,11 +46,12 @@ legitimately batch).
 | Invalid JSON is `-32700`; valid JSON that is not a request is `-32600` (§5.1) | `jsonx_valid` + `codec` | ✅ (3.4.5) — the whole message is syntax-checked (RFC 8259, nesting ≤ 64) before anything reads it. Through 3.4.4 `not valid json` was `-32600`, the spec's truncated-object example was dispatched as a notification, and `"id":01` was echoed back as invalid JSON |
 | `id` is a string, a number or null; `params`, if present, is an object or an array (§4) | `codec::_cdc_admit` | ✅ (3.4.5) — otherwise `-32600`. An explicit `"params":null` is read as absent. A null id is answered, though MCP forbids a client to send one |
 | Spec error codes (-32700, -32600, -32601, -32602, -32002, -32000, -32003, -32603, -32800) | `error` + `dispatch` | ✅ (`-32002` since 3.4.5) |
-| Every response is valid JSON: strings escaped per RFC 8259 §7, control bytes included | `jsonx::bote_json_escape` | ✅ (3.4.6) — through 3.4.5 the escaper left control bytes other than LF / CR / TAB raw, so a tool result holding an ESC or a BEL (an ANSI-coloured log through `fs_read`) was not JSON, and an embedder's `serverInfo` was not escaped at all. Asserted by the conformance suite's standing valid-JSON check (J15, F12) and a fuzz property |
+| Every response is valid JSON: strings escaped per RFC 8259 §7, control bytes included, and valid UTF-8 (§8.1), invalid bytes as U+FFFD (3.4.15); every handler's result on one line of valid JSON (3.4.15) | `jsonx::bote_json_escape`, `dispatch::_dsp_checked_result` | ✅ (3.4.6) — through 3.4.5 the escaper left control bytes other than LF / CR / TAB raw, so a tool result holding an ESC or a BEL (an ANSI-coloured log through `fs_read`) was not JSON, and an embedder's `serverInfo` was not escaped at all. Asserted by the conformance suite's standing valid-JSON check (J15, F12) and a fuzz property |
 | `initialize` handshake (serverInfo + capabilities + version negotiation; `serverInfo` configurable via `dispatcher_set_server_info`) | `dispatch` | ✅ |
 | `ping` → empty `{}` result (spec: the receiver *MUST* respond promptly) | `dispatch` | ✅ (3.3.13) — answered ahead of every capability gate, so a bare dispatcher replies; emits no audit or event record (liveness, not activity). bote answers pings, it does not originate them |
 | `notifications/initialized` / `notifications/cancelled` — accepted, never answered | `codec` (no response to any notification) | ✅ (`cancelled` is ignored: there is no in-flight work to cancel until threaded dispatch, 3.5.x) |
 | `tools/list` with full `inputSchema` | `dispatch` + `registry` | ✅ |
+| `outputSchema`; `title` and `icons`; `instructions` in `initialize` | — | ⏳ not implemented, roadmap 3.8.x. `structuredContent` goes out on bote's own libro tools |
 | Pagination: `nextCursor` omitted when there is no next page; an invalid `cursor` is `-32602` | `dispatch` | ✅ (3.4.5) — bote returns every item in one page and never issues a cursor, so any `cursor` a client sends is invalid and gets `-32602`, the spec's code for one, on `tools/list`, `prompts/list`, `resources/list` and `resources/templates/list`. A null `cursor` is read as absent. Through 3.4.4 a cursor was ignored and the first page sent again, which a client concatenating pages would take as duplicates |
 | `tools/call` with arguments + version selection | `dispatch` + `schema` | ✅ |
 | `tools/call` error split: an unknown tool or a malformed CallToolRequest (missing / empty / non-string `name`, non-object `arguments`) is a protocol error `-32602`; arguments failing the tool's `inputSchema` are a tool execution error, a result with `isError: true` | `dispatch` | ✅ (3.4.5) — per the tools spec's "Error Handling" and SEP-1303. Through 3.4.4 an unknown tool was `-32601` and a schema violation `-32602`. The dispatcher has no per-session negotiated version, so this split applies to every revision. 2025-06-18 already listed "invalid input data" as a tool execution error |
@@ -82,13 +85,15 @@ legitimately batch).
 | Input schemas compiled at registration, so every tool's arguments are validated | `registry::registry_register` → `compiled_compile` | ✅ (3.4.8) — through 3.4.7 nothing compiled a schema, so only `required` was ever checked in production |
 | JSON Schema subset — string, number, integer, boolean, array, object, ANY | `schema::SchemaTypeTag` | ✅ |
 | String enum constraint | `prop_enum_values` | ✅ |
-| Numeric bounds (`minimum`, `maximum`) for number + integer | `prop_min` / `prop_max` | ✅ — exponents read (3.4.8); a value is truncated toward zero, so a fractional bound can admit a value just outside it |
+| Numeric bounds (`minimum`, `maximum`) for number + integer | `prop_min` / `prop_max` | ✅ — exponents read (3.4.8); a fractional value is compared as itself (3.4.15), and a fractional bound is truncated |
 | `integer` per JSON Schema 2020-12 (a zero fractional part counts: `5.0`, `1e2`) | `schema::_sch_num_parse` | ✅ (3.4.8; any `.` was refused before) |
 | Required field check | `compiled_required` | ✅ |
 | Recursive nested object validation | `_validate_against` | ✅ |
 | Array `items` typing | `prop_items` | ✅ |
 | Multi-violation reporting (collect all, don't fail-fast) | `compiled_validate` returns vec | ✅ |
 | Permissive on extra (unknown) fields | by design | ✅ |
+| Schema `false` allows nothing | `SCH_NEVER` | ✅ (3.4.15; it allowed anything) |
+| Keywords outside the subset (`anyOf`, `oneOf`, `allOf`, `not`, `$ref`, `pattern`, length and item bounds, `const`, type arrays, non-string enums) | `registry::_reg_warn_unenforced` | 🟡 advertised in `tools/list`, not enforced; a WARN at registration names each (3.4.15). Roadmap 3.8.x |
 
 ## Session Management
 
@@ -97,14 +102,14 @@ legitimately batch).
 | `MCP-Protocol-Version` header parsing + validation | `session::validate_protocol_version` + per-transport `_check_protocol` | ✅ |
 | `MCP-Session-Id` — server-issued on `initialize`, validated on subsequent | `session::SessionStore` + per-transport `_check_session` | ✅ HTTP / streamable / bridge |
 | Session creation on initialize (auto, returned in response header) | `session_store_create` + handler hook | ✅ |
-| Session timeout + pruning (configurable; default 1h) | `session_store_prune_expired` | ✅ |
+| Session timeout + pruning (configurable; default 1h) | `session_store_validate` + `session_store_prune_expired` | ✅ (3.4.15) — through 3.4.14 nothing checked a session's age and nothing called the pruner, so a session never expired. The store now holds at most `BOTE_SESSION_MAX` (4096) and answers 503 when full of live sessions; a session is minted only after `initialize` succeeds |
 | Random 128-bit SID, 32-hex encoded, from the kernel CSPRNG via `random_bytes()` (`getrandom(2)`); the process **refuses to mint a session ID** if that fails rather than fall back to anything guessable | `_gen_session_id` | ✅ (3.2.0; was `/dev/urandom` by raw syscall) |
 
 ## Security
 
 | Spec Requirement | Module | Status |
 |---|---|---|
-| Origin allow-list (DNS rebinding protection — 403 on rejection) | `session::validate_origin` + per-transport `_check_origin` | ✅ |
+| Origin validated on every HTTP-family transport (DNS rebinding protection — 403 on rejection); `BOTE_ALLOWED_ORIGINS` sets the list | `session::bote_origin_ok` + per-transport `_check_origin` | ✅ (3.4.15) — a present Origin must be listed, and with no list every present one is refused. Through 3.4.14 no list meant no check, the binary had no way to set one, and `bote bridge` allowed `*` |
 | Wildcard `*` and exact-match origins | same | ✅ |
 | Strict mode (empty allow-list rejects all) | same | ✅ |
 | CORS preflight (OPTIONS / + 3 ACA-* headers) | `bridge::_bridge_cors_headers` | ✅ |
@@ -117,7 +122,8 @@ legitimately batch).
 | **JWT HS256 verifier** (RFC 7519 / 7515) — `alg` read as an exact JSON field (not a substring scan), constant-time HMAC compare, the signature segment canonical base64url, `exp` enforced *after* the signature verifies with no leeway, malformed `exp` rejects, `exp` absent accepts; `auth_validator_jwt_hs256` plugs into the bearer middleware | `jwt::jwt_verify_hs256` | ✅ (2.2.0; `exp` + exact `alg` at 3.2.0; ships in `dist/bote.cyr` since 3.2.0) |
 | **RFC 7636 PKCE-S256** — `pkce_code_verifier` (CSPRNG) + `pkce_code_challenge_s256` | `pkce` | ✅ (2.3.0; ships in `dist/bote.cyr` since 3.2.0) |
 | **Pluggable sandbox runner** — fn-pointer + ctx adapter for tool handlers (kavach-shaped), noop default, error envelope on a null runner | `sandbox::sandbox_run` | ✅ (2.1.0; ships in `dist/bote.cyr` since **3.3.13** — before that it was in `src/` only and reached no consumer). Not in `dist/bote-core.cyr` |
-| Asymmetric JWT (RS256 / ES256) | — | ⏳ an open decision, not a dependency — see the roadmap |
+| Asymmetric JWT (RS256 / ES256) | — | ⏳ roadmap 3.6.x |
+| OAuth 2.0 Protected Resource Metadata (RFC 9728), `WWW-Authenticate` `resource_metadata` / `scope`, `insufficient_scope`, audience validation (RFC 8707) | — | ⏳ roadmap 3.6.x. Required of an HTTP server that does authorization |
 
 ## Transports
 
@@ -232,21 +238,21 @@ registered by default in the binaries.
 | Scope | Count | Source |
 |---|---|---|
 | **Protocol conformance by spec clause** — JSON-RPC 2.0 §4 / §5 / §4.1 / §5.1 / §6 (incl. the spec's own examples), MCP initialize + all four revisions, ping, cancellation, capability gating, pagination cursors, tools/list, the tools/call protocol-vs-execution error split, prompts, resources, completion, control bytes in a tool result, every handler-result shape, typed arguments; every response checked to be valid JSON and a §5 Response object | **127** | `tests/conformance.tcyr` (3.4.5) |
-| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / the per-request DEBUG line, the string escaper, registration checks, numbers per 2020-12 | **576** | `tests/bote.tcyr` |
-| Bearer + allowlist + JWT + PKCE validators | **45** | `tests/bote_auth.tcyr` |
+| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / the per-request DEBUG line, the string escaper, registration checks, numbers per 2020-12 | **651** | `tests/bote.tcyr` |
+| Bearer + allowlist + JWT + PKCE validators | **55** | `tests/bote_auth.tcyr` |
 | Content blocks + annotations | **25** | `tests/bote_content.tcyr` |
-| `fs_tools` path safety + root confinement + control bytes as valid JSON + schemas and annotations | **42** | `tests/bote_fs_tools.tcyr` |
-| HostRegistry + IPv4 / IPv6 SSRF (URL and resolved address; each 3.4.7 range named) + the IPv6 parser against cyrius's + hot-reload | **197** | `tests/bote_host.tcyr` |
+| `fs_tools` path safety + root confinement + control bytes as valid JSON + schemas and annotations; decoded names, truncation, fs_mkdir | **56** | `tests/bote_fs_tools.tcyr` |
+| HostRegistry + IPv4 / IPv6 SSRF (URL and resolved address; each 3.4.7 range named) + the IPv6 parser against cyrius's + hot-reload | **203** | `tests/bote_host.tcyr` |
 | JWT HS256 — signature, exact `alg`, `exp` (mutation-proven), canonical signature on every toolchain | **59** | `tests/bote_jwt.tcyr` |
-| `libro_tools` incl. tampered-chain decode + populated-chain proof + CallToolResults, the retention guard, RFC 3339 timestamps, schemas | **64** | `tests/bote_libro_tools.tcyr` |
+| `libro_tools` incl. tampered-chain decode + populated-chain proof + CallToolResults, the retention guard, RFC 3339 timestamps, schemas, integers as validated, audit identity | **73** | `tests/bote_libro_tools.tcyr` |
 | Operational logging over sakshi | **50** | `tests/bote_log.tcyr` |
 | RFC 7636 PKCE-S256 | **17** | `tests/bote_pkce.tcyr` |
 | Sandbox runner adapter | **13** | `tests/bote_sandbox.tcyr` |
 | Streamable HTTP — event ids, resumption, per-session outbound, drain selection | **53** | `tests/bote_streamable.tcyr` |
-| Unix transport — sockaddr, accept-error policy, backoff, deadlines, closed-peer write | **68** | `tests/bote_transport_unix.tcyr` |
-| `web_tools` — scheme guard, SSRF guard (URL and resolved address), HTML stripper, entities, schemas and annotations | **63** | `tests/bote_web_tools.tcyr` |
+| Unix transport — sockaddr, accept-error policy, backoff, deadlines, closed-peer write, overlong lines, socket-path refusals | **76** | `tests/bote_transport_unix.tcyr` |
+| `web_tools` — scheme guard, SSRF guard (URL and resolved address), HTML stripper, entities, schemas and annotations, outbound deadline | **66** | `tests/bote_web_tools.tcyr` |
 | WebSocket config + wire-up + the send-deadline drop | **21** | `tests/bote_ws.tcyr` |
-| **Total assertions** | **1420** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
+| **Total assertions** | **1545** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
 | Hot-path benchmarks | **16** | `tests/bote.bcyr` |
 | Fuzz harnesses | **6** | `fuzz/*.fcyr` (in CI since 3.3.8; `jsonx_valid.fcyr` since 3.4.5, `ssrf_ipv6.fcyr` since 3.4.7) |
 | End-to-end transport round trips | 6 (stdio, HTTP, Unix, bridge, streamable, WS) | CI's "Transport smoke" step plus a per-release stdio probe on the built binary |

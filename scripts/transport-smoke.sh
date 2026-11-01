@@ -4,14 +4,17 @@
 #
 #   ./scripts/build-all.sh && ./scripts/transport-smoke.sh
 #
-# Starts http / bridge / streamable / ws / unix on loopback ports 18390-18395
+# Starts http / bridge / streamable / ws / unix on loopback ports 18390-18398
 # and a socket under build/tsmoke/, and checks:
 #   - each answers `initialize` (ws: the upgrade answers 101);
 #   - the argv[0] aliases bote-streamable / bote-ws select their transports;
 #   - streamable keeps the tool set it had as a separate binary (the echo
 #     references, no fs_write) while http has the full one;
 #   - each sandhi-served mode, started again on a port already held, exits 1
-#     and names the step and errno (3.4.12).
+#     and names the step and errno (3.4.12);
+#   - a hostile Origin gets 403 on every HTTP-family mode, a listed one passes,
+#     an empty BOTE_BEARER_TOKENS refuses to start, and the fs tools stay in
+#     their root through a symlink and do not hang on a FIFO (3.4.15).
 # Needs curl and python3. CI runs it as the "Transport smoke" step.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -103,6 +106,78 @@ for m in "http 18390" "bridge 18391" "streamable 18392" "ws 18393"; do
   grep -q "\[ERROR\] transport failed transport=$mode rc=1" "$L/$mode.held" \
     || err "$mode on a held port has no exit line: $(cat "$L/$mode.held")"
 done
+
+# Origin (3.4.15): MCP says a present, invalid Origin gets 403. No list is set
+# here, so every website is refused, and a client that sends no Origin is not.
+for m in "http 18390 /mcp" "bridge 18391 /" "streamable 18392 /mcp"; do
+  read -r mode port path <<< "$m"
+  c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H 'Origin: https://evil.example' -d "$INIT" "http://127.0.0.1:$port$path")
+  [ "$c" = "403" ] || err "$mode answered a hostile Origin with $c, not 403"
+done
+c=$(curl -s -o /dev/null -w '%{http_code}' -X OPTIONS -H 'Origin: https://evil.example' http://127.0.0.1:18391/)
+[ "$c" = "403" ] || err "bridge answered a hostile preflight with $c, not 403"
+c=$(curl -s -o /dev/null -w '%{http_code}' -H 'Origin: https://evil.example' -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' http://127.0.0.1:18393/mcp)
+[ "$c" = "403" ] || err "ws answered a hostile Origin with $c, not 403"
+# An operator's list lets a named Origin in, and only that one.
+BOTE_ALLOWED_ORIGINS=https://ok.example start origins "$L/origins.err" $B bridge 18396
+wait_port 18396 || err "nothing listening on 18396"
+h=$(curl -s -D - -o /dev/null -X OPTIONS -H 'Origin: https://ok.example' http://127.0.0.1:18396/)
+echo "$h" | grep -qi '^access-control-allow-origin: https://ok.example' || err "bridge did not allow a listed Origin: $h"
+c=$(curl -s -o /dev/null -w '%{http_code}' -H 'Origin: https://evil.example' -d "$INIT" http://127.0.0.1:18396/)
+[ "$c" = "403" ] || err "bridge with a list answered a hostile Origin with $c, not 403"
+# A session exists once initialize has succeeded (3.4.15): a refused one gets none.
+h=$(curl -s -D - -o /dev/null "${H[@]}" -d '{"method":"initialize"' http://127.0.0.1:18392/mcp)
+echo "$h" | grep -qi '^mcp-session-id:' && err "a refused initialize was given a session: $h"
+h=$(curl -s -D - -o /dev/null "${H[@]}" -d "$INIT" http://127.0.0.1:18392/mcp)
+echo "$h" | grep -qi '^mcp-session-id:' || err "initialize got no session: $h"
+# A Content-Length that is no number, and a NUL hiding bytes (3.4.15).
+c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H 'Content-Length: abc' -d "$INIT" http://127.0.0.1:18390/mcp)
+[ "$c" = "400" ] || err "a malformed Content-Length got $c, not 400"
+r=$(python3 -I -c 'import socket,sys
+b=sys.argv[1].encode()+b"\0garbage"
+s=socket.create_connection(("127.0.0.1",18390),timeout=3)
+s.sendall(b"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"%len(b)+b)
+d=b""
+while 1:
+    c=s.recv(4096)
+    if not c: break
+    d+=c
+print(d.split(b"\r\n")[0].decode())' "$INIT")
+echo "$r" | grep -q ' 400 ' || err "a NUL in a body was not refused: $r"
+# What a root can hold (3.4.15): a tool stays in it through a symlink, and a FIFO
+# cannot hang the server.
+fsr="$L/fsroot"; fso="$PWD/$L/outside"; rm -rf "$fsr" "$fso"; mkdir -p "$fsr" "$fso"
+echo secret-bytes > "$fso/secret"
+ln -s "$fso" "$fsr/dlink"; ln -s "$fso/secret" "$fsr/flink"; ln -s "$fso/new" "$fsr/dangling"; mkfifo "$fsr/pipe"
+fscall() { # tool json-args
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" \
+    | BOTE_FS_ROOT="$fsr" timeout 5 $B stdio 2>/dev/null
+}
+r=$(fscall fs_read '{"path":"dlink/secret"}'); echo "$r" | grep -q '"isError":true' || err "fs_read went through a directory symlink: $r"
+r=$(fscall fs_read '{"path":"flink"}'); echo "$r" | grep -q '"isError":true' || err "fs_read went through a file symlink: $r"
+r=$(fscall fs_write '{"path":"dlink/planted","content":"x"}'); echo "$r" | grep -q '"isError":true' || err "fs_write went through a directory symlink: $r"
+[ -e "$fso/planted" ] && err "fs_write planted a file outside the root"
+fscall fs_write '{"path":"flink","content":"overwritten"}' > /dev/null
+grep -q secret-bytes "$fso/secret" || err "fs_write wrote through a file symlink"
+fscall fs_write '{"path":"dangling","content":"x"}' > /dev/null
+[ -e "$fso/new" ] && err "fs_write created a file through a dangling symlink"
+r=$(fscall fs_mkdir '{"path":"dlink/made"}'); echo "$r" | grep -q '"isError":true' || err "fs_mkdir went through a symlink: $r"
+[ -e "$fso/made" ] && err "fs_mkdir created a directory outside the root"
+r=$(fscall fs_read '{"path":"pipe"}'); [ -n "$r" ] || err "fs_read hung on a FIFO"
+r=$(fscall fs_write '{"path":"pipe","content":"x"}'); [ -n "$r" ] || err "fs_write hung on a FIFO"
+# Bearer auth: a token list starts and is enforced.
+BOTE_BEARER_TOKENS=tok-a,tok-b start bearer "$L/bearer.err" $B http 18398
+wait_port 18398 || err "bearer: nothing listening on 18398 (did a token list stop it starting?)"
+c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -d "$INIT" http://127.0.0.1:18398/mcp)
+[ "$c" = "401" ] || err "bearer: no token got $c, not 401"
+c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H 'Authorization: Bearer wrong' -d "$INIT" http://127.0.0.1:18398/mcp)
+[ "$c" = "401" ] || err "bearer: a wrong token got $c, not 401"
+c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H 'Authorization: Bearer tok-b' -d "$INIT" http://127.0.0.1:18398/mcp)
+[ "$c" = "200" ] || err "bearer: a right token got $c, not 200"
+# Bearer auth asked for and not configured is a refusal to start, not auth off.
+rc=0; BOTE_BEARER_TOKENS=, timeout 5 $B http 18397 2> "$L/nobearer.held" || rc=$?
+[ "$rc" -eq 2 ] || err "BOTE_BEARER_TOKENS=, started anyway (rc=$rc)"
 
 for f in "$L"/*.err; do grep -q 'transport failed' "$f" && err "$(basename "$f"): $(grep 'transport failed' "$f")"; done
 [ $fail -eq 0 ] || exit 1

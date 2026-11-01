@@ -76,6 +76,47 @@ fn resp_success(id, result) {
     return r;
 }
 
+# The request arena (3.4.15). `alloc` never frees, so what a request leaves on
+# the heap stays for the life of the process. Every byte bote allocates to
+# answer one message goes here instead, and each transport rewinds it when the
+# next message starts. What outlives a request stays on the heap: `args` and
+# everything else a handler or a sink is handed, since either may keep it, and
+# sessions. One arena: the transports serve one message at a time.
+var _bote_req_al = 0;
+fn bote_req_alloc() {
+    if (_bote_req_al == 0) { _bote_req_al = arena_allocator_growable(65536); }
+    return _bote_req_al;
+}
+
+# Start a message: whatever the previous one left on the arena is gone.
+fn bote_req_begin() {
+    var al = bote_req_alloc();
+    reset_via(al);
+    return al;
+}
+
+fn resp_success_a(a, id, result) {
+    var r = alloc_via(a, 32);
+    store64(r, "2.0");
+    store64(r + 8, id);
+    store64(r + 16, result);
+    store64(r + 24, 0);
+    return r;
+}
+
+fn resp_error_a(a, id, code, message) {
+    var e = alloc_via(a, 24);
+    store64(e, code);
+    store64(e + 8, message);
+    store64(e + 16, 0);
+    var r = alloc_via(a, 32);
+    store64(r, "2.0");
+    store64(r + 8, id);
+    store64(r + 16, 0);
+    store64(r + 24, e);
+    return r;
+}
+
 fn resp_error(id, code, message) {
     var r = alloc(32);
     store64(r, "2.0");

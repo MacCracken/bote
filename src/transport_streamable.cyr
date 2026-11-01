@@ -215,7 +215,7 @@ fn _strm_notify_publish(ctx, topic, payload) {
 # Build the client-notification EventSink for a SessionStore. Pass to
 # dispatcher_set_events so tool register/dereg fan out to session buffers.
 fn strm_notify_sink(store) {
-    return event_sink_new(&_strm_notify_publish, store);
+    return event_sink_set_list_only(event_sink_new(&_strm_notify_publish, store));
 }
 
 # ================================================================
@@ -286,21 +286,15 @@ fn _strm_init() {
 # ================================================================
 
 fn _strm_check_origin(cfd, buf, blen, config) {
-    var allowed = streamable_config_allowed_origins(config);
-    if (allowed == 0) { return 0; }
-    var origin = sandhi_server_find_header(buf, blen, "Origin");
-    var orig = origin;
-    if (orig == 0) { orig = ""; }
-    if (validate_origin(orig, allowed) != 0) {
-        bote_http_refuse(cfd, SK_WARN, "streamable", HTTP_FORBIDDEN, "Forbidden", "origin");
-        return HTTP_FORBIDDEN;
-    }
-    return 0;
+    var origin = sandhi_server_find_header_a(bote_req_alloc(), buf, blen, "Origin");
+    if (bote_origin_ok(origin, streamable_config_allowed_origins(config)) == 1) { return 0; }
+    bote_http_refuse(cfd, SK_WARN, "streamable", HTTP_FORBIDDEN, "Forbidden", "origin");
+    return HTTP_FORBIDDEN;
 }
 
 # Streamable spec REQUIRES MCP-Protocol-Version on every request.
 fn _strm_check_protocol(cfd, buf, blen) {
-    var v = sandhi_server_find_header(buf, blen, "MCP-Protocol-Version");
+    var v = sandhi_server_find_header_a(bote_req_alloc(), buf, blen, "MCP-Protocol-Version");
     if (v == 0) {
         bote_http_refuse(cfd, SK_DEBUG, "streamable", HTTP_BAD_REQUEST, "Bad Request", "protocol_version_missing");
         return HTTP_BAD_REQUEST;
@@ -315,7 +309,7 @@ fn _strm_check_protocol(cfd, buf, blen) {
 fn _strm_check_session(cfd, buf, blen, config, method) {
     var st = streamable_config_session_store(config);
     if (st == 0) { return 0; }
-    var sid = sandhi_server_find_header(buf, blen, "MCP-Session-Id");
+    var sid = sandhi_server_find_header_a(bote_req_alloc(), buf, blen, "MCP-Session-Id");
     if (sid == 0) {
         if (streq(method, "initialize") == 1) { return 0; }
         bote_http_refuse(cfd, SK_DEBUG, "streamable", HTTP_NOT_FOUND, "Not Found", "session_missing");
@@ -329,7 +323,7 @@ fn _strm_check_session(cfd, buf, blen, config, method) {
 }
 
 fn _strm_peek_method(body) {
-    var m = jsonx_get_str(body, "method");
+    var m = jsonx_get_str_a(bote_req_alloc(), body, "method");
     if (m == 0) { return ""; }
     return m;
 }
@@ -341,7 +335,7 @@ fn _strm_peek_method(body) {
 # Does the client's Accept header allow an SSE (text/event-stream) response?
 # Absent Accept → treated as no (answer with application/json).
 fn _strm_accepts_sse(buf, n) {
-    var acc = sandhi_server_find_header(buf, n, "Accept");
+    var acc = sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Accept");
     if (acc == 0) { return 0; }
     if (strstr(acc, "text/event-stream") >= 0) { return 1; }
     return 0;
@@ -352,7 +346,7 @@ fn _strm_accepts_sse(buf, n) {
 fn _strm_post_session_outbound(buf, n, config) {
     var st = streamable_config_session_store(config);
     if (st == 0) { return 0; }
-    var sid = sandhi_server_find_header(buf, n, "MCP-Session-Id");
+    var sid = sandhi_server_find_header_a(bote_req_alloc(), buf, n, "MCP-Session-Id");
     if (sid == 0) { return 0; }
     var session = session_store_validate(st, sid);
     if (session == 0) { return 0; }
@@ -363,17 +357,18 @@ fn _strm_post_session_outbound(buf, n, config) {
 # purpose: a synthetic id would pollute the client's Last-Event-ID (see
 # _strm_handle_get) — only the drained notifications carry resumable ids.
 fn _strm_response_frame(resp) {
-    var rb = str_builder_new();
-    str_builder_add_cstr(rb, "event: message\ndata: ");
-    str_builder_add_cstr(rb, resp);
-    str_builder_add_cstr(rb, "\n\n");
-    return str_data(str_builder_build(rb));
+    var a = bote_req_alloc();
+    var rb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, rb, "event: message\ndata: ");
+    str_builder_add_cstr_a(a, rb, resp);
+    str_builder_add_cstr_a(a, rb, "\n\n");
+    return str_data(str_builder_build_a(a, rb));
 }
 
 fn _strm_handle_post(cfd, buf, n, config) {
     var claims_slot[8]; store64(&claims_slot, 0);
     if (_strm_check_origin(cfd, buf, n, config) != 0) { return 0; }
-    if (sandhi_server_find_header(buf, n, "Transfer-Encoding") != 0) {
+    if (sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Transfer-Encoding") != 0) {
         bote_http_refuse(cfd, SK_WARN, "streamable", HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding"); return 0;
     }
     if (auth_bearer_check(cfd, buf, n,
@@ -387,6 +382,10 @@ fn _strm_handle_post(cfd, buf, n, config) {
         bote_http_refuse(cfd, SK_DEBUG, "streamable", HTTP_BAD_REQUEST, "Bad Request", "malformed_request");
         return 0;
     }
+    if (bote_http_clen_bad(buf, n) == 1) {
+        bote_http_refuse(cfd, SK_WARN, "streamable", HTTP_BAD_REQUEST, "Bad Request", "content_length");
+        return 0;
+    }
     var clen = sandhi_server_content_length(buf, n);
     if (clen > 61440) {
         bote_http_refuse(cfd, SK_WARN, "streamable", HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large", "payload_too_large"); return 0;
@@ -394,29 +393,42 @@ fn _strm_handle_post(cfd, buf, n, config) {
     if (clen <= 0) { clen = n - bo; }
     if (clen < 0) { clen = 0; }
     if (clen > n - bo) { clen = n - bo; }
-    var body = alloc(clen + 1);
-    memcpy(body, buf + bo, clen);
+    # In place: the request buffer is this handler's, and the headers read
+    # below sit before the body.
+    var body = buf + bo;
     store8(body + clen, 0);
+    # A NUL would end the message early, and whatever follows it would go
+    # unread by the syntax check.
+    if (strlen(body) != clen) {
+        bote_http_refuse(cfd, SK_WARN, "streamable", HTTP_BAD_REQUEST, "Bad Request", "nul_in_body");
+        return 0;
+    }
 
     var rpc_method = _strm_peek_method(body);
     if (_strm_check_session(cfd, buf, n, config, rpc_method) != 0) { return 0; }
 
     var extra = 0;
     var st = streamable_config_session_store(config);
-    if (st != 0 && streq(rpc_method, "initialize") == 1) {
-        var pv = jsonx_get_str(jsonx_get_raw(body, "params"), "protocolVersion");
+    var resp = codec_process_message_a(bote_req_alloc(), body, streamable_config_dispatcher(config), load64(&claims_slot));
+
+    # A session exists once `initialize` has succeeded. Minted before dispatch,
+    # a request the codec refused still got one.
+    if (st != 0 && streq(rpc_method, "initialize") == 1 && resp != 0 && jsonx_has(resp, "result") == 1) {
+        var pv = jsonx_get_str(jsonx_get_raw_a(bote_req_alloc(), body, "params"), "protocolVersion");
         if (pv == 0) { pv = "2025-11-25"; }
         var sid = session_store_create(st, pv);
-        var sb = str_builder_new();
+        if (sid == 0) {
+            bote_http_refuse(cfd, SK_WARN, "streamable", HTTP_SERVICE_UNAVAILABLE, "Service Unavailable", "session_store_full");
+            return 0;
+        }
+        var sb = str_builder_new_a(bote_req_alloc());
         str_builder_add_cstr(sb, "MCP-Session-Id: ");
         str_builder_add_cstr(sb, sid);
         str_builder_add_cstr(sb, "\r\n");
-        extra = str_data(str_builder_build(sb));
+        extra = str_data(str_builder_build_a(bote_req_alloc(), sb));
     }
-
-    var resp = codec_process_message(body, streamable_config_dispatcher(config), load64(&claims_slot));
     if (resp == 0) {
-        sandhi_server_send_204(cfd, extra);
+        sandhi_server_send_204_a(bote_req_alloc(), cfd, extra);
         return 0;
     }
     # Piggyback: when the client accepts SSE and its session has pending
@@ -428,21 +440,28 @@ fn _strm_handle_post(cfd, buf, n, config) {
     var pso = _strm_post_session_outbound(buf, n, config);
     if (pso != 0 && _strm_accepts_sse(buf, n) == 1
       && resumption_buffer_len(session_outbound_buffer(pso)) > 0) {
-        sandhi_server_send_chunked_start(cfd, HTTP_OK, "text/event-stream", extra);
+        sandhi_server_send_chunked_start_a(bote_req_alloc(), cfd, HTTP_OK, "text/event-stream", extra);
         var rframe = _strm_response_frame(resp);
-        sandhi_server_send_chunk(cfd, rframe, strlen(rframe));
+        # A failed write means the peer stopped reading: drop it at once, as the
+        # GET path does, or each event waits out its own send deadline while
+        # every other client waits too.
+        var pw = sandhi_server_send_chunk(cfd, rframe, strlen(rframe));
         var pend = resumption_buffer_events(session_outbound_buffer(pso));
         var pi = 0;
         var pn = vec_len(pend);
-        while (pi < pn) {
+        while (pi < pn && pw >= 0) {
             var w = stream_event_to_wire(vec_get(pend, pi));
-            sandhi_server_send_chunk(cfd, w, strlen(w));
+            pw = sandhi_server_send_chunk(cfd, w, strlen(w));
             pi = pi + 1;
+        }
+        if (pw < 0) {
+            bote_conn_log_send_drop("streamable", pw);
+            return 0;
         }
         sandhi_server_send_chunked_end(cfd);
         return 0;
     }
-    sandhi_server_send_response(cfd, HTTP_OK, "OK", "application/json",
+    sandhi_server_send_response_a(bote_req_alloc(), cfd, HTTP_OK, "OK", "application/json",
       resp, strlen(resp), extra);
     return 0;
 }
@@ -454,11 +473,12 @@ fn _strm_handle_post(cfd, buf, n, config) {
 # Send `retry: <ms>\n\n` over the chunked stream. Per SSE spec this hints
 # the client at how long to wait before reconnecting.
 fn _strm_send_retry(cfd, retry_ms) {
-    var sb = str_builder_new();
+    var a = bote_req_alloc();
+    var sb = str_builder_new_a(a);
     str_builder_add_cstr(sb, "retry: ");
     str_builder_add_int(sb, retry_ms);
     str_builder_add_cstr(sb, "\n\n");
-    var s = str_data(str_builder_build(sb));
+    var s = str_data(str_builder_build_a(a, sb));
     sandhi_server_send_chunk(cfd, s, strlen(s));
     return 0;
 }
@@ -478,7 +498,7 @@ fn _strm_drain_events(rbuf, last_id) {
 
 fn _strm_handle_get(cfd, buf, n, config) {
     if (_strm_check_origin(cfd, buf, n, config) != 0) { return 0; }
-    if (sandhi_server_find_header(buf, n, "Transfer-Encoding") != 0) {
+    if (sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Transfer-Encoding") != 0) {
         bote_http_refuse(cfd, SK_WARN, "streamable", HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding"); return 0;
     }
     if (auth_bearer_check(cfd, buf, n,
@@ -495,7 +515,7 @@ fn _strm_handle_get(cfd, buf, n, config) {
     var rbuf = _strm_resumption;
     var st = streamable_config_session_store(config);
     if (st != 0) {
-        var sid = sandhi_server_find_header(buf, n, "MCP-Session-Id");
+        var sid = sandhi_server_find_header_a(bote_req_alloc(), buf, n, "MCP-Session-Id");
         if (sid != 0) {
             var session = session_store_validate(st, sid);
             if (session != 0) {
@@ -508,7 +528,7 @@ fn _strm_handle_get(cfd, buf, n, config) {
     # send deadline (src/conn.cyr) a client that stopped reading fails a
     # write, and carrying on would make each later write wait out the full
     # deadline again, so the first failure ends the stream.
-    var sse_r = sandhi_server_send_chunked_start(cfd, HTTP_OK, "text/event-stream", 0);
+    var sse_r = sandhi_server_send_chunked_start_a(bote_req_alloc(), cfd, HTTP_OK, "text/event-stream", 0);
     if (sse_r < 0) { bote_conn_log_send_drop("streamable", sse_r); return 0; }
 
     # Primer — an SSE COMMENT (leading ':'), NOT an event. It confirms the
@@ -521,7 +541,7 @@ fn _strm_handle_get(cfd, buf, n, config) {
     if (sse_r < 0) { bote_conn_log_send_drop("streamable", sse_r); return 0; }
 
     # Drain buffered notifications (unconditional when there is no cursor).
-    var last_id = sandhi_server_find_header(buf, n, "Last-Event-ID");
+    var last_id = sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Last-Event-ID");
     var drain = _strm_drain_events(rbuf, last_id);
     var di = 0;
     var dn = vec_len(drain);
@@ -548,11 +568,12 @@ fn _strm_handle(config, cfd, buf, n) {
     # 3.4.3: bound every write to this client, the SSE stream included
     # (src/conn.cyr).
     bote_conn_send_deadline(cfd);
-    var method = sandhi_server_get_method(buf, n);
-    var path   = sandhi_server_get_path(buf, n);
+    var a = bote_req_begin();
+    var method = sandhi_server_get_method_a(a, buf, n);
+    var path   = sandhi_server_get_path_a(a, buf, n);
 
     # Path must match the configured endpoint (strip query first).
-    if (streq(sandhi_server_path_only(path), streamable_config_path(config)) == 0) {
+    if (streq(sandhi_server_path_only_a(bote_req_alloc(), path), streamable_config_path(config)) == 0) {
         bote_http_refuse(cfd, SK_DEBUG, "streamable", HTTP_NOT_FOUND, "Not Found", "path");
         return 0;
     }
