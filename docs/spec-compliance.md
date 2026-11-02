@@ -1,8 +1,8 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.5.1 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.5.2 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
-> ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not; `Mcp-Param` headers are the last transport gap. Every other table here is against 2025-11-25.
+> ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not. Every other table here is against 2025-11-25.
 
 This file lists what the shipped Cyrius implementation **covers today**, including the
 gaps — a ❌ row is a defect on the released binary, a ⏳ row is planned work. Both are
@@ -62,16 +62,19 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | `ping` and `initialize` are gone | ✅ (3.5.0) — a modern `ping` is `-32601`. An `initialize` selects the legacy path whatever `_meta` it carries, so it never lands on a revision that has no `initialize` |
 | No `listChanged` advertised | ✅ (3.5.0) — the modern era has no way to deliver it until `subscriptions/listen` |
 | `tools/list` in a deterministic order | ✅ registration order, in both eras |
-| Every POST: `MCP-Protocol-Version` and `Mcp-Method`, and `Mcp-Name` on `tools/call`, `resources/read` and `prompts/get`. Missing, invalid or disagreeing with the body is `400` + `-32020` | ✅ (3.5.1) `src/http_era.cyr`, on `bote http` and `bote streamable`. Names are case-insensitive, values case-sensitive |
+| Every POST: `MCP-Protocol-Version` and `Mcp-Method`, and `Mcp-Name` on `tools/call`, `resources/read` and `prompts/get`. Missing, invalid or disagreeing with the body is `400` + `-32020` | ✅ (3.5.1) `src/http_era.cyr`, on `bote http`, `bote streamable` and (3.5.2) `bote bridge`. Names are case-insensitive, values case-sensitive. A field on two lines combines into a value that matches nothing, so it is refused (3.5.2) |
 | `Mcp-Name` in the `=?base64?…?=` sentinel, decoded before the comparison | ✅ (3.5.1) lower-case markers only, canonical Base64 only |
-| An unsupported version is `400` + `-32022`; a method bote does not implement is `404` + `-32601`; a missing required field is `400` + `-32602` | ✅ (3.5.1) every `-32602` is `400`, the one rule that meets any reading of "required field". `-32603` is `500`. The spec gives neither of those last two a status |
+| An unsupported version is `400` + `-32022`; a method bote does not implement is `404` + `-32601`; a `_meta` missing a required field is `400` + `-32602` | ✅ (3.5.1, corrected at 3.5.2) that clause is about `_meta`. Every other `-32602` and `-32603` is in-band on a `200`: the spec gives them no status, and the official client reads a JSON-RPC error out of a `200` or a `400`, not out of a `500` |
 | A notification is `202` with no body | ✅ (3.5.1), in both eras. It was `204` through 3.5.0, which 2025-11-25 does not allow either |
 | One message per POST | ✅ (3.5.1) a batch, a response or a non-object is `400`, a batch that names this revision included |
 | Responses in `application/json` | ✅ the spec lets the server choose per request. SSE arrives with `subscriptions/listen` |
 | `GET` and `DELETE` are `405` to a request naming this revision, with `Allow` | ✅ (3.5.1). A legacy `GET` keeps its stream |
 | `Mcp-Session-Id` and `Last-Event-ID` are ignored, and no session is minted | ✅ (3.5.1) |
-| `Mcp-Param-{Name}`, for a tool that declares `x-mcp-header` | ⏳ roadmap 3.5.2. No bote tool declares one |
+| `Mcp-Param-{Name}`, for a tool that declares `x-mcp-header` | ✅ (3.5.2) a value in the body needs its header, decoded and equal, integers compared by value and booleans as `true` / `false`. Missing, malformed, mismatched or undecodable is `400` + `-32020`. A header with no value in the body is refused too, which the spec's table does not ask for and no conforming client meets. A header the tool does not declare is ignored |
+| An `x-mcp-header` that breaks the rules makes the tool invalid | ✅ (3.5.2) registration refuses it, since a client would drop the tool: an empty or non-token name, a type other than string, integer or boolean, a repeat ignoring case, or anywhere but a chain of `properties` keys |
+| Integers mirrored in a header stay in the safe range | ✅ (3.5.2) a value past ±(2^53 − 1) is refused with `-32020`, even with its header |
 | `-32021` for a missing client capability | ⏳ no request bote serves needs one yet; capabilities are required and not otherwise read |
+| A third-party client | ❌ none has run against bote. The official SDK's source and the conformance suite's server scenarios have been read and replayed in 109 checks over real sockets on `http`, `streamable`, `bridge` and stdio, which is not the same thing |
 | `subscriptions/listen` and the rest of its notifications | ⏳ roadmap 3.7.x |
 
 ---
@@ -147,7 +150,7 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 
 | Spec Requirement | Module | Status |
 |---|---|---|
-| Origin validated on every HTTP-family transport (DNS rebinding protection — 403 on rejection); `BOTE_ALLOWED_ORIGINS` sets the list | `session::bote_origin_ok` + per-transport `_check_origin` | ✅ (3.4.15) — a present Origin must be listed, and with no list every present one is refused. Through 3.4.14 no list meant no check, the binary had no way to set one, and `bote bridge` allowed `*` |
+| Origin validated on every HTTP-family transport (DNS rebinding protection — 403 on rejection); `BOTE_ALLOWED_ORIGINS` sets the list | `session::bote_origin_ok` + per-transport `_check_origin` | ✅ (3.5.2) with no list the server's own loopback address passes, an Origin of `http://` + the request's `Host` on `localhost`, `127.0.0.1` or `[::1]`, which the conformance suite requires and which no rebinding page can send. (3.4.15) — a present Origin must be listed, and with no list every present one is refused. Through 3.4.14 no list meant no check, the binary had no way to set one, and `bote bridge` allowed `*` |
 | Wildcard `*` and exact-match origins | same | ✅ |
 | Strict mode (empty allow-list rejects all) | same | ✅ |
 | CORS preflight (OPTIONS / + 3 ACA-* headers) | `bridge::_bridge_cors_headers` | ✅ |

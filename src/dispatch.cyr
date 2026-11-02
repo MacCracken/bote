@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.5.1"; }
+fn _bote_server_version() { return "3.5.2"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -1006,6 +1006,9 @@ fn _dsp_modern_response(a, d, method, resp) {
     return resp_success_a(a, resp_id(resp), _dsp_modern_result(a, d, method, result));
 }
 
+# Named, because HTTP sends this one -32602 as a 400.
+var DSP_CAPS_MISSING = "io.modelcontextprotocol/clientCapabilities is required and must be an object";
+
 # dispatcher_dispatch with bote's own bytes on `a`. `a` must outlive the response
 # and nothing else. Stays on the global heap: what a handler is handed (it may
 # keep it) and what a sink is handed (ditto).
@@ -1050,7 +1053,7 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
     }
     var caps = jsonx_get_raw_a(a, meta, DSP_META_CAPABILITIES);
     if (caps == 0 || jsonx_is_object(caps) == 0) {
-        return resp_error_a(a, id, 0 - 32602, "io.modelcontextprotocol/clientCapabilities is required and must be an object");
+        return resp_error_a(a, id, 0 - 32602, DSP_CAPS_MISSING);
     }
 
     if (streq(method, "server/discover") == 1) {

@@ -66,6 +66,41 @@ fn bote_origin_ok(origin, allowed_origins) {
 }
 
 # ================================================================
+# bote_origin_self(origin_cstr, host_cstr, allowed_origins_vec) → 1 / 0
+#
+# 1 when `origin` is the server's own loopback address, the request's `Host` as a
+# URL. With no list set that one Origin passes: it is a page on this very port, and
+# a rebinding page's Origin carries the attacker's name, so it cannot be this. A
+# list, once set, is the whole policy.
+# ================================================================
+fn _ses_loopback(host) {
+    var n = 0;
+    if (memeq(host, "localhost", 9) == 1) { n = 9; }
+    elif (memeq(host, "127.0.0.1", 9) == 1) { n = 9; }
+    elif (memeq(host, "[::1]", 5) == 1) { n = 5; }
+    if (n == 0) { return 0; }
+    if (load8(host + n) == 0 || load8(host + n) == 58) { return 1; }
+    return 0;
+}
+
+fn bote_origin_self(origin, host, allowed_origins) {
+    if (origin == 0 || host == 0) { return 0; }
+    if (allowed_origins != 0 && vec_len(allowed_origins) > 0) { return 0; }
+    if (strlen(host) < 5 || _ses_loopback(host) == 0) { return 0; }
+    var n = strlen(origin);
+    if (n > 7 && memeq(origin, "http://", 7) == 1) { return streq(origin + 7, host); }
+    if (n > 8 && memeq(origin, "https://", 8) == 1) { return streq(origin + 8, host); }
+    return 0;
+}
+
+# What a transport asks of a request's Origin. `Host` is read only for an Origin the
+# list has already refused.
+fn bote_http_origin_ok(origin, allowed_origins, buf, n) {
+    if (bote_origin_ok(origin, allowed_origins) == 1) { return 1; }
+    return bote_origin_self(origin, sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Host"), allowed_origins);
+}
+
+# ================================================================
 # validate_origin(origin_cstr, allowed_origins_vec) → 0 ok / err_msg cstr
 # ================================================================
 fn validate_origin(origin, allowed_origins) {

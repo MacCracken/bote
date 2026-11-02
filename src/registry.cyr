@@ -102,7 +102,7 @@ fn schema_prop_value(p) { return load64(p + 8); }
 # ToolDef
 # ================================================================
 #
-# Layout (64 bytes):
+# Layout (72 bytes):
 #   +0  name         cstr
 #   +8  description  cstr
 #   +16 input_schema ptr to ToolSchema
@@ -111,6 +111,7 @@ fn schema_prop_value(p) { return load64(p + 8); }
 #   +40 annotations  ptr to ToolAnnotations or 0
 #   +48 compiled     ptr to CompiledSchema or 0 (set by tool_def_with_compiled)
 #   +56 profiles     vec of cstr tags or 0 (set by tool_def_with_profiles)
+#   +64 param_headers vec of ParamHeader or 0 (read from the schema at registration)
 #
 # Profiles are opaque consumer-defined tags (e.g. "security", "web", "full")
 # used to expose curated tool subsets via a `profile` filter on tools/list.
@@ -118,7 +119,7 @@ fn schema_prop_value(p) { return load64(p + 8); }
 # (profiles == 0) is in no profile. See _build_tools_list_result_a in dispatch.
 
 fn tool_def_new(name, description, input_schema) {
-    var d = alloc(64);
+    var d = alloc(72);
     store64(d, name);
     store64(d + 8, description);
     store64(d + 16, input_schema);
@@ -127,6 +128,7 @@ fn tool_def_new(name, description, input_schema) {
     store64(d + 40, 0);
     store64(d + 48, 0);
     store64(d + 56, 0);
+    store64(d + 64, 0);
     return d;
 }
 
@@ -144,6 +146,7 @@ fn tool_def_deprecated(d) { return load64(d + 32); }
 fn tool_def_annotations(d) { return load64(d + 40); }
 fn tool_def_compiled(d) { return load64(d + 48); }
 fn tool_def_profiles(d) { return load64(d + 56); }
+fn tool_def_param_headers(d) { return load64(d + 64); }
 
 # Exact-match membership: 1 if `profile` (non-null) is one of the tool's
 # profile tags, else 0. A null profile or an untagged tool returns 0.
@@ -212,6 +215,208 @@ fn _reg_subschema_ok(raw) {
     return 0;
 }
 
+# ================================================================
+# x-mcp-header
+# ================================================================
+#
+# A tool can have an argument mirrored into an `Mcp-Param-{Name}` header. A client
+# drops a tool whose annotation breaks the rules, so bote refuses to register one,
+# and HTTP checks the headers against what is read here.
+#
+# ParamHeader (16 bytes):
+#   +0 field  cstr, the whole header name
+#   +8 path   vec of cstr, the `properties` keys that lead to the value
+
+var REG_MCP_HEADER = "x-mcp-header";
+
+fn param_header_field(p) { return load64(p); }
+fn param_header_path(p) { return load64(p + 8); }
+
+# The words of the space-separated `s`, as a vec of cstrs.
+fn _reg_words(s) {
+    var out = vec_new();
+    var start = 0;
+    var k = 0;
+    while (load8(s + k) != 0) {
+        if (load8(s + k) == 32) {
+            var w = alloc(k - start + 1);
+            memcpy(w, s + start, k - start);
+            store8(w + k - start, 0);
+            vec_push(out, w);
+            start = k + 1;
+        }
+        k = k + 1;
+    }
+    return out;
+}
+
+# The keywords that hold a subschema but do not extend a chain of `properties`
+# keys. Reading only these, and not every value, keeps a `default` or an `enum` that
+# happens to hold the word from counting as an annotation.
+var _reg_below_kws = 0;
+
+fn _reg_below() {
+    if (_reg_below_kws == 0) {
+        _reg_below_kws = _reg_words("items prefixItems contains additionalProperties unevaluatedProperties unevaluatedItems propertyNames not if then else oneOf anyOf allOf patternProperties dependentSchemas $defs definitions ");
+    }
+    return _reg_below_kws;
+}
+
+# 1 when `c` is an RFC 9110 tchar.
+fn _reg_tchar(c) {
+    if (c >= 48 && c <= 57) { return 1; }
+    if (c >= 65 && c <= 90) { return 1; }
+    if (c >= 97 && c <= 122) { return 1; }
+    if (c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39) { return 1; }
+    if (c == 42 || c == 43 || c == 45 || c == 46 || c == 94 || c == 95) { return 1; }
+    if (c == 96 || c == 124 || c == 126) { return 1; }
+    return 0;
+}
+
+fn _reg_token_ok(s) {
+    if (load8(s) == 0) { return 0; }
+    var i = 0;
+    while (load8(s + i) != 0) {
+        if (_reg_tchar(load8(s + i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn _reg_lower(c) {
+    if (c >= 65 && c <= 90) { return c + 32; }
+    return c;
+}
+
+# 1 when two cstrs differ at most in the case of their ASCII letters.
+fn _reg_ieq(x, y) {
+    var i = 0;
+    while (_reg_lower(load8(x + i)) == _reg_lower(load8(y + i))) {
+        if (load8(x + i) == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The schema `raw` has an annotation: why it is not allowed, or 0, having added it
+# to `out`. `reach` says the keys that led here were all `properties` keys.
+fn _reg_header_take(raw, path, reach, out) {
+    if (reach == 0 || vec_len(path) == 0) {
+        return "x-mcp-header must sit on a property reached through `properties` keys alone";
+    }
+    var name = jsonx_get_str_dec_a(default_alloc(), raw, REG_MCP_HEADER);
+    if (name == 0 || _reg_token_ok(name) == 0) {
+        return "x-mcp-header must be a non-empty HTTP token";
+    }
+    var ty = jsonx_get_str(raw, "type");
+    if (ty == 0 || (streq(ty, "string") == 0 && streq(ty, "integer") == 0 && streq(ty, "boolean") == 0)) {
+        return "x-mcp-header needs a property of type string, integer or boolean";
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "Mcp-Param-");
+    str_builder_add_cstr(sb, name);
+    var field = str_data(str_builder_build(sb));
+    var i = 0;
+    while (i < vec_len(out)) {
+        if (_reg_ieq(field, param_header_field(vec_get(out, i))) == 1) {
+            return "x-mcp-header values must be unique, ignoring case";
+        }
+        i = i + 1;
+    }
+    var p = alloc(16);
+    store64(p, field);
+    store64(p + 8, path);
+    vec_push(out, p);
+    return 0;
+}
+
+fn _reg_path_with(path, key) {
+    var out = vec_new();
+    var i = 0;
+    while (i < vec_len(path)) {
+        vec_push(out, vec_get(path, i));
+        i = i + 1;
+    }
+    vec_push(out, key);
+    return out;
+}
+
+# 1 when `kw` holds an object of subschemas by name.
+fn _reg_by_name(kw) {
+    if (streq(kw, "patternProperties") == 1 || streq(kw, "dependentSchemas") == 1) { return 1; }
+    if (streq(kw, "$defs") == 1 || streq(kw, "definitions") == 1) { return 1; }
+    return 0;
+}
+
+# Walk what the keyword `kw` of _reg_below holds: one subschema, an array of them,
+# or an object of them by name.
+fn _reg_scan_below(kw, v, out) {
+    var subs = vec_new();
+    if (_sch_is_array(v) == 1) {
+        subs = _sch_split_array(v);
+    } elif (_reg_by_name(kw) == 1) {
+        var m = _jx_members(v);
+        var k = 1;
+        while (k < vec_len(m)) {
+            vec_push(subs, vec_get(m, k));
+            k = k + 2;
+        }
+    } else {
+        vec_push(subs, v);
+    }
+    var i = 0;
+    while (i < vec_len(subs)) {
+        var why = _reg_scan_headers(vec_get(subs, i), vec_new(), 0, out);
+        if (why != 0) { return why; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Walk the schema `raw`. Returns why an annotation in it is not allowed, or 0.
+fn _reg_scan_headers(raw, path, reach, out) {
+    if (jsonx_is_object(raw) == 0) { return 0; }
+    var why = 0;
+    if (jsonx_has(raw, REG_MCP_HEADER) == 1) {
+        why = _reg_header_take(raw, path, reach, out);
+        if (why != 0) { return why; }
+    }
+    var m = _jx_members(jsonx_get_raw(raw, "properties"));
+    var i = 0;
+    while (i < vec_len(m)) {
+        why = _reg_scan_headers(vec_get(m, i + 1), _reg_path_with(path, vec_get(m, i)), reach, out);
+        if (why != 0) { return why; }
+        i = i + 2;
+    }
+    var kws = _reg_below();
+    i = 0;
+    while (i < vec_len(kws)) {
+        var v = jsonx_get_raw(raw, vec_get(kws, i));
+        if (v != 0) {
+            why = _reg_scan_below(vec_get(kws, i), v, out);
+            if (why != 0) { return why; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Every ParamHeader of `tool_def` into `out`. Returns why one is not allowed, or 0.
+# The property schemas must already have passed registry_check_tool_def's checks.
+fn _reg_scan_tool(tool_def, out) {
+    var props = schema_properties(tool_def_input_schema(tool_def));
+    if (props == 0) { return 0; }
+    var i = 0;
+    while (i < vec_len(props)) {
+        var pair = vec_get(props, i);
+        var path = _reg_path_with(vec_new(), schema_prop_key(pair));
+        var why = _reg_scan_headers(schema_prop_value(pair), path, 1, out);
+        if (why != 0) { return why; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Why `tool_def` cannot be registered, as a message, or 0 when it can (3.4.8).
 #
 # - The name follows the MCP tools spec's guidance. Every consumer's names
@@ -222,6 +427,7 @@ fn _reg_subschema_ok(raw) {
 #   as the type, and tools/list emitted the Str header as garbage bytes.
 # - Each property schema is valid JSON (an object or a boolean), and each
 #   property and each required entry has a name.
+# - Each `x-mcp-header` keeps the rules of MCP 2026-07-28.
 #
 # Public, so a consumer can check a definition before it registers one.
 fn registry_check_tool_def(tool_def) {
@@ -257,7 +463,7 @@ fn registry_check_tool_def(tool_def) {
             j = j + 1;
         }
     }
-    return 0;
+    return _reg_scan_tool(tool_def, vec_new());
 }
 
 # One ERROR line for a refused registration. The name is logged only when
@@ -295,20 +501,15 @@ fn _reg_warn_kw(tool, key, kw) {
 fn _reg_warn_unenforced(tool_def) {
     var props = schema_properties(tool_def_input_schema(tool_def));
     if (props == 0) { return 0; }
+    var kws = _reg_words("anyOf oneOf allOf not $ref pattern minLength maxLength minItems maxItems const ");
     var i = 0;
     while (i < vec_len(props)) {
         var pair = vec_get(props, i);
         var v = schema_prop_value(pair);
-        var kws = "anyOf oneOf allOf not $ref pattern minLength maxLength minItems maxItems const ";
-        var start = 0;
         var k = 0;
-        while (load8(kws + k) != 0) {
-            if (load8(kws + k) == 32) {
-                var kw = alloc_via(bote_req_alloc(), k - start + 1);
-                memcpy(kw, kws + start, k - start);
-                store8(kw + k - start, 0);
-                if (jsonx_has(v, kw) == 1) { _reg_warn_kw(tool_def_name(tool_def), schema_prop_key(pair), kw); }
-                start = k + 1;
+        while (k < vec_len(kws)) {
+            if (jsonx_has(v, vec_get(kws, k)) == 1) {
+                _reg_warn_kw(tool_def_name(tool_def), schema_prop_key(pair), vec_get(kws, k));
             }
             k = k + 1;
         }
@@ -331,6 +532,9 @@ fn registry_register(r, tool_def) {
     if (tool_def_compiled(tool_def) == 0) {
         tool_def_with_compiled(tool_def, compiled_compile(tool_def_input_schema(tool_def)));
     }
+    var headers = vec_new();
+    _reg_scan_tool(tool_def, headers);
+    if (vec_len(headers) > 0) { store64(tool_def + 64, headers); }
     _reg_warn_unenforced(tool_def);
     var name = tool_def_name(tool_def);
     var entries = registry_entries(r);

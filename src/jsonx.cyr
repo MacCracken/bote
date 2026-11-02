@@ -235,6 +235,39 @@ fn _jx_scan(buf, len, keys, n, pos) {
     return 0;
 }
 
+# Every member of the object `obj`, for code that cannot name the keys it wants: a
+# schema's `properties`, read at registration. A vec on the heap of key, raw value,
+# key, raw value, in order. Each key is what it decodes to, as _jx_scan matches
+# one, so a name read here is one a message can reach. Empty for anything else.
+fn _jx_members(obj) {
+    var out = vec_new();
+    if (obj == 0) { return out; }
+    var len = strlen(obj);
+    var i = _jx_skip_ws(obj, len, 0);
+    if (i >= len || load8(obj + i) != 123) { return out; }
+    i = i + 1;
+    while (i < len) {
+        i = _jx_skip_ws(obj, len, i);
+        if (i >= len || load8(obj + i) != 34) { return out; }
+        var ke = _jx_skip_string(obj, len, i);
+        var kl = ke - i - 2;
+        var key = alloc(kl + 1);
+        _jx_unescape_into(obj + i + 1, kl, key);
+        i = _jx_skip_ws(obj, len, ke);
+        if (i >= len || load8(obj + i) != 58) { return out; }
+        i = _jx_skip_ws(obj, len, i + 1);
+        var ve = _jx_skip_value(obj, len, i);
+        var val = alloc(ve - i + 1);
+        memcpy(val, obj + i, ve - i);
+        store8(val + ve - i, 0);
+        vec_push(out, key);
+        vec_push(out, val);
+        i = _jx_skip_ws(obj, len, ve);
+        if (i < len && load8(obj + i) == 44) { i = i + 1; }
+    }
+    return out;
+}
+
 # Find a key inside a flat JSON object (one level). Returns index of the
 # value's first byte (after `:` and whitespace), or 0 - 1 if not found.
 fn _jx_find_value_pos(buf, len, key) {

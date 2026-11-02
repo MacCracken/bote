@@ -79,21 +79,27 @@ var _b_era_legacy = "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/
 var _b_era_legacy_at = 0;
 var _b_era_modern = "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: svc_echo\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}},\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}}";
 var _b_era_modern_at = 0;
+var _b_era_params = "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: svc_route\r\nMcp-Param-Region: us-west1\r\nMcp-Param-Count: 42\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}},\"name\":\"svc_route\",\"arguments\":{\"region\":\"us-west1\",\"n\":42}}}";
+var _b_era_params_at = 0;
 var _b_result_dispatcher = 0;
+var _b_param_dispatcher = 0;
 
 # ================================================================
 # Benchmark callbacks (no-arg functions, called by bench_run)
 # ================================================================
 
 # What an HTTP POST pays to learn its era: a legacy request with a version header,
-# and a modern tools/call with every header checked.
-fn _b_era(raw, body) {
+# a modern tools/call with every header checked, and one with two `Mcp-Param` headers.
+fn _b_era(d, raw, body) {
     bote_req_begin();
+    var hc[40];
     var out[8];
-    return bote_http_era(0 - 1, "bench", raw, strlen(raw), body, 0, &out);
+    bote_http_ctx(&hc, 0 - 1, "bench", raw, strlen(raw), 0);
+    return bote_http_era(&hc, body, 0, d, &out);
 }
-fn b_http_era_legacy() { return _b_era(_b_era_legacy, _b_era_legacy + _b_era_legacy_at); }
-fn b_http_era_modern() { return _b_era(_b_era_modern, _b_era_modern + _b_era_modern_at); }
+fn b_http_era_legacy() { return _b_era(_b_dispatcher, _b_era_legacy, _b_era_legacy + _b_era_legacy_at); }
+fn b_http_era_modern() { return _b_era(_b_dispatcher, _b_era_modern, _b_era_modern + _b_era_modern_at); }
+fn b_http_era_params() { return _b_era(_b_param_dispatcher, _b_era_params, _b_era_params + _b_era_params_at); }
 
 fn b_dispatch_initialize() {
     return dispatcher_dispatch(_b_dispatcher, _b_init_req, 0);
@@ -188,6 +194,14 @@ fn _bench_setup() {
 
     _b_era_legacy_at = strstr(_b_era_legacy, "\r\n\r\n") + 4;
     _b_era_modern_at = strstr(_b_era_modern, "\r\n\r\n") + 4;
+    _b_era_params_at = strstr(_b_era_params, "\r\n\r\n") + 4;
+    # On its own dispatcher: one more tool would move `dispatch_tools_list`.
+    var rp = vec_new();
+    vec_push(rp, schema_prop_new("region", "{\"type\":\"string\",\"x-mcp-header\":\"Region\"}"));
+    vec_push(rp, schema_prop_new("n", "{\"type\":\"integer\",\"x-mcp-header\":\"Count\"}"));
+    var prg = tool_registry_new();
+    registry_register(prg, tool_def_new("svc_route", "route", schema_new("object", rp, vec_new())));
+    _b_param_dispatcher = dispatcher_new(prg);
     _b_init_req = req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}");
     _b_list_req = req_new("2", "tools/list");
     _b_call_req = req_with_params(req_new("3", "tools/call"),
@@ -305,6 +319,9 @@ fn main() {
     var b18 = bench_new("http_era_modern");
     bench_run(b18, &b_http_era_modern, 10000);
     vec_push(benches, b18);
+    var b19 = bench_new("http_era_params");
+    bench_run(b19, &b_http_era_params, 10000);
+    vec_push(benches, b19);
 
     bench_report_all(benches);
     return 0;

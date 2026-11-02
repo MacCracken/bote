@@ -848,6 +848,19 @@ fn main() {
 
     # The router tolerates no params at all, and reads `_meta` as what the key decodes to.
     _expect(dispatcher_dispatch(md, req_with_params(req_new("1", "tools/list"), 0), 0) != 0, "M73 a request whose params were never set is answered");
+    # An `x-mcp-header` means nothing off HTTP: the tool is listed as written and called
+    # with no header to compare.
+    var hdr_props = vec_new();
+    vec_push(hdr_props, schema_prop_new("region", "{\"type\":\"string\",\"x-mcp-header\":\"Region\"}"));
+    var hdr_reg = tool_registry_new();
+    registry_register(hdr_reg, tool_def_new("test_hdr", "Header", schema_new("object", hdr_props, vec_new())));
+    var hdr_d = dispatcher_new(hdr_reg);
+    dispatcher_handle(hdr_d, "test_hdr", &h_echo);
+    _send(hdr_d, _m(1, "tools/list", ""));
+    _expect(strstr(_last, "\"x-mcp-header\":\"Region\"") >= 0, "M76 tools/list carries x-mcp-header as written");
+    var hdr_call = _expect_result(hdr_d, _m(2, "tools/call", ",\"name\":\"test_hdr\",\"arguments\":{\"region\":\"us\"}"), "M77 a call needs no header where there are none");
+    _expect(_is_modern(_result(hdr_call)), "M78 ...and is a modern call");
+
     var esc_key = _expect_result(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"\\u005fmeta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}", "M74 an escaped _meta key");
     _expect(_is_modern(_result(esc_key)), "M75 ...selects this revision, as the key it decodes to");
 

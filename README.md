@@ -195,7 +195,11 @@ header is taken as `2025-03-26`, as the spec allows, unless `require_protocol` i
 
 `2026-07-28` is served beside them in one process, on every transport. A request selects it
 in `params._meta`, and on HTTP in `MCP-Protocol-Version` too, and the two must agree. See
-[docs/spec-compliance.md](docs/spec-compliance.md#mcp-2026-07-28-stateless-path).
+[docs/spec-compliance.md](docs/spec-compliance.md#mcp-2026-07-28-stateless-path). A tool can
+have an argument mirrored in an `Mcp-Param-{Name}` header by putting `x-mcp-header` on its
+property in the schema; registration checks the annotation, and HTTP checks the header against
+the body. Do not mark a secret that way: every intermediary sees the header. No third-party
+client has run against this revision yet.
 
 ### Built-in tools (registered by default)
 
@@ -279,18 +283,18 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 2158 total across sixteen files (+ a core-only drift smoke)
+### Tests — 2928 total across sixteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 2158 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 2928 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 668 — core protocol/dispatch/codec/schema/session/transports
-cyrius test tests/conformance.tcyr        # 203 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
+cyrius test tests/bote.tcyr               # 740 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/conformance.tcyr        # 206 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 55 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 56 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 203 — host registry + SSRF guard (IPv4 + IPv6)
-cyrius test tests/bote_http_era.tcyr      # 517 — MCP 2026-07-28 on HTTP, on the real handlers
+cyrius test tests/bote_http_era.tcyr      # 1212 — MCP 2026-07-28 on HTTP, on the real handlers
 cyrius test tests/bote_jwt.tcyr           # 59 — JWT HS256 verify + exact alg + exp enforcement
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation

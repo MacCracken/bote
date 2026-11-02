@@ -31,8 +31,12 @@ The primary security-relevant surface areas are:
   threaded dispatch (roadmap 3.7.x) is the answer to that one.
 - **Browsers** — since **3.4.15** every HTTP-family transport refuses a present
   `Origin` that is not on `BOTE_ALLOWED_ORIGINS` with 403, before anything else
-  runs, and with no list set every present `Origin` is refused. No `Origin` passes,
-  because a command-line client sends none. Through 3.4.14 the transports checked
+  runs, and with no list set every present `Origin` is refused, except since **3.5.2**
+  the server's own loopback address: `http://` plus the request's `Host`, when that
+  `Host` is `localhost`, `127.0.0.1` or `[::1]`. Nothing on bote's port serves a page,
+  and a rebinding page's `Origin` carries the attacker's name, so that one cannot be a
+  website. Another local port is still refused. No `Origin` passes, because a
+  command-line client sends none. Through 3.4.14 the transports checked
   only when a list was configured, the binary offered no way to configure one, and
   `bote bridge` answered `Access-Control-Allow-Origin: *` with its file tools
   registered, so any website the operator visited could read and write under
@@ -41,8 +45,12 @@ The primary security-relevant surface areas are:
   without reading the body, so since **3.5.1** bote refuses a request whose headers
   disagree with its body (`400` + `-32020`), after decoding the Base64 sentinel. What
   a header claimed is what runs. Sessions play no part on this path, and the bearer
-  and Origin checks come first, as on the legacy path. `Mcp-Param-{Name}` is not
-  checked yet (roadmap 3.5.2); no built-in tool declares one.
+  and Origin checks come first, as on the legacy path. Since **3.5.2** that covers
+  `Mcp-Param-{Name}` too, a repeated field is refused, because a proxy that reads the
+  last line would act on a value bote never compared, and `bote bridge` holds a modern
+  request to the same rules. A tool's author should not mark a secret with
+  `x-mcp-header`: the value goes out in a header, visible to every intermediary. bote
+  logs no header value, and a refusal names the header and not its value.
 - **Memory** — `alloc` never frees, so what a request leaves on the heap stays for
   the life of the process. Since **3.4.15** everything bote allocates to answer a
   message goes on a request arena that the next message rewinds, including

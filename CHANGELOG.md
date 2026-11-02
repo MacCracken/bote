@@ -18,12 +18,134 @@ have per release.
 
 _(empty)_
 
+## [3.5.2] — 2026-11-01 · `Mcp-Param` headers, and what the official SDK showed bote had wrong
+
+`Mcp-Param-{Name}` closes the last transport gap in MCP 2026-07-28, and `bote bridge` now holds a modern request to the same
+rules as the other two HTTP servers. The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+**No third-party client has run against bote yet.** The official packages, `@modelcontextprotocol/client` and `server` 2.4.0 and
+`conformance` 0.2.0-alpha.12, were read as text and not executed. The suite's server scenarios were replayed in 109 checks by
+a script of bote's own, over real sockets on `http`, `streamable`, `bridge` and stdio. That found two things no test of bote's
+own had, both under Fixed. It is evidence about those clauses, not a run of the suite.
+
+### Fixed
+
+- **A JSON-RPC error on a `500` was unreadable to the official client.** 3.5.1 sent `-32603` as `500` and every `-32602` as `400`,
+  reasoning that the spec gives them no status and `400` meets "a request missing any required field" on any reading. That
+  clause is about `_meta`, in `basic/index`, and the official client takes a JSON-RPC error out of a `200` or a `400` and
+  turns anything else into a generic HTTP failure, so a handler's internal error reached it with the error gone. A `5xx` is
+  also what a proxy retries. Now `-32602` is `400` only for `_meta`, which is checked before dispatch, and every other
+  `-32602` and `-32603` is in-band on a `200`, as the reference server does.
+- **bote refused its own loopback Origin**, which the conformance suite's required `dns-rebinding-protection` scenario sends and
+  expects to pass. With no list set, an Origin that is `http://` plus the request's `Host`, on `localhost`, `127.0.0.1` or
+  `[::1]`, now passes. Nothing on bote's port serves a page, and a rebinding page's Origin carries the attacker's name. Another
+  local port is still refused, and a list, once set, is the whole policy.
+- **`bote bridge` served a modern request with no header checks.** It runs `bote_http_era` now, with CORS on every reply, modern
+  or refused. Its legacy contract is its own and stays: a failed call is an `isError` envelope and a notification is `204`.
+  One legacy change comes with it: an `MCP-Protocol-Version` bote does not speak is now `400` + `-32022` here, as on the
+  other two. The bridge used to ignore that header.
+- **A property name written with an escape was not enforced in a nested schema.** `_compile_object_body` kept
+  `"c\u006et"` as those bytes, while the validator matches keys as they decode, so the rule on `cnt` was never applied.
+
+### Security
+
+- **A header field on two lines is refused** (`-32020`), for `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and `Mcp-Param-*`.
+  bote read the first line, and a proxy that reads the last would act on a value bote never compared. RFC 9110 §5.3 combines the
+  lines into one value, which no body value matches.
+- `Mcp-Param` refusals name the header and not its value, and neither value is logged.
+
+### Added
+
+- **`Mcp-Param-{Name}`.** A tool marks a property with `x-mcp-header` in its schema, and a modern `tools/call` is held to it:
+
+  | Body | Header | Answer |
+  |---|---|---|
+  | A value | Equal, once decoded | Served |
+  | A value | Missing | `400`, `-32020` |
+  | A value | Different, malformed, on two lines, or Base64 that does not decode | `400`, `-32020` |
+  | `null` or absent | Absent | Served |
+  | `null` or absent | Present | `400`, `-32020` |
+  | An object or an array | Either | `400`, `-32020` |
+  | An integer past ±(2^53 − 1) | Either | `400`, `-32020` |
+
+  Strings are compared decoded, and a `\u0000` matches nothing, since no header can say it. Integers are compared by value, so
+  `42.0` is `42`, and a header that is not a JSON number is a mismatch. Booleans are `true` and `false`. A string where an
+  integer belongs, or a fraction, passes this check when the header mirrors it and is then the tool's input error, which the
+  model can correct. A header the tool does not declare is ignored, and the legacy path asks for none.
+
+  Two rows go past the reference server, which ignores a header with no body value and lets an object through to validation.
+  The spec says a header must match the body and that a value in the body needs its header, and no conforming client meets
+  either refusal.
+- **`registry_check_tool_def` refuses a bad `x-mcp-header`**, because a client must drop such a tool: an empty or non-token name,
+  a type other than string, integer or boolean (`number` included), a repeat ignoring case, or anywhere but a chain of
+  `properties` keys. The walk reads only keywords that hold a subschema, so a property named `x-mcp-header`, or a `default`
+  holding the word, is not an annotation. `tool_def_param_headers`, `param_header_field` and `param_header_path` read the result.
+- `ToolDef` gains a tail field, `param_headers` at `+64`, 64 → 72 B, set at registration. Appended, as the 2.0 shape allows.
+- `_jx_members`, the one walk over an object's unknown keys, which `_compile_object_body` now uses in place of its own.
+- `bote_origin_self`, `bote_http_origin_ok`, and `bote_http_ctx`.
+
+### Breaking
+
+These reach only code that calls the HTTP functions 3.5.1 added, or a tool with a bad annotation. The handler ABI is untouched.
+
+- `bote_http_era(hc, body, require, dispatcher, req_out)`, `bote_http_check_version(hc, hv, require, body)` and
+  `bote_http_serve_modern(hc, req, dispatcher, claims)` take a context in place of the socket, the transport's name and the
+  request, and `bote_http_send_accepted(cfd, extra)` takes response headers. To migrate, build the context once in the handler:
+
+  ```
+  var hc[40];
+  bote_http_ctx(&hc, cfd, "http", buf, n, 0);
+  ```
+- A tool that declares a bad `x-mcp-header` no longer registers, and `registry_register` says why. Fix the annotation or remove
+  it. No conforming HTTP client could have listed that tool.
+
+### Changed
+
+- `_he_name_value_a` is `_he_field_value_a`, and `_he_header_ok` is `_he_field_ok`.
+- The default stays 2025-11-25. A default that no real client has exercised would be a claim bote cannot back.
+
+### Tests
+
+- 2,928 assertions, from 2,158. `tests/bote_http_era.tcyr` has 1,212, from 517: every clause of the spec's value table, its
+  Base64 examples and the conformance suite's Base64 cases, on all three HTTP transports, with the heap rows. `tests/bote.tcyr`
+  has 740, from 668, and `tests/conformance.tcyr` 206, from 203.
+- `scripts/transport-smoke.sh` runs a modern request over every transport, `unix` and a real WebSocket frame included.
+- `fuzz/http_era.fcyr` sweeps a request with a header of each kind.
+- 71 mutants, all killed, on `src/http_era.cyr`, `registry.cyr`, `session.cyr`, `bridge.cyr` and `jsonx.cyr`. One survivor was a
+  real find: a tool lookup with a null name crashes only when a tool has landed in slot 0 of the map, because the hash is
+  seeded per process, so the bug that crashed this patch's first test run passed three runs of four. The test now fills that slot.
+
+### Performance
+
+No regression on a path that existed. Interleaved A/B, 15 alternating rounds, pinned to one core, 3.5.1 against this tree,
+medians in ns:
+
+| Bench | 3.5.1 | 3.5.2 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 4,050 | 4,095 | +1.1% |
+| `dispatch_tools_call` | 2,149 | 2,202 | +2.5% |
+| `dispatch_tools_list` | 1,784 | 1,820 | +2.0% |
+| `dispatch_initialize` | 1,804 | 1,790 | −0.8% |
+| `http_era_legacy` | 2,501 | 2,501 | 0.0% |
+| `http_era_modern` | 9,952 | 11,413 | +14.7% |
+| `http_era_params`, new, two `Mcp-Param` headers | | 19,461 | |
+
+The `+14.7%`, 1.5 µs, is the three scans for a repeated field, on the modern path only. A first version cost `+33%`, and two
+pieces of that were waste: a capabilities check at the edge that the dispatcher repeats, and a tool name read twice. Rows whose code did not change moved
+between −6.2% and +4.3%, in both directions, which is this binary's layout and not a cost.
+
+Stdio is byte-identical to 3.5.1 over 200,000 messages, and legacy HTTP on 50 of 50 cases, with only the version string
+aligned.
+
 ## [3.5.1] — 2026-11-01 · MCP 2026-07-28 on HTTP, and `bote streamable` no longer turns away a client's first request
 
 `bote http` and `bote streamable` now speak the current revision. A POST that names `2026-07-28` has its headers checked
 against its body and is answered with the status each outcome calls for, and nothing else on the endpoint changes for it:
 a legacy client beside it keeps its sessions and its `GET` stream. The handler ABI and the stated minimum cyrius (6.7.13)
 are unchanged. `Mcp-Param-{Name}` headers are the last transport gap, roadmap 3.5.2.
+
+> **Corrected at 3.5.2:** the `-32602` and `-32603` rows below were wrong. Only a `_meta` failure is `400`; the rest are
+> in-band on a `200`, because the official client cannot read a JSON-RPC error out of a `500`. See that entry.
 
 Working on that path showed a legacy defect that matters more than the new feature: see Fixed.
 

@@ -341,51 +341,11 @@ fn parse_property(raw_json) {
 # a fresh CompiledSchema.
 fn _compile_object_body(raw_json) {
     var c = compiled_new();
-    var props_raw = jsonx_get_raw(raw_json, "properties");
-    if (props_raw != 0) {
-        # Parse {"key1": <prop1>, "key2": <prop2>, ...}
-        var len = strlen(props_raw);
-        var i = _cdc_skip_ws(props_raw, len, 0);
-        if (i < len) {
-            if (load8(props_raw + i) == 123) {
-                i = i + 1;
-                while (i < len) {
-                    i = _cdc_skip_ws(props_raw, len, i);
-                    if (i >= len) { i = len; }
-                    else {
-                        if (load8(props_raw + i) == 125) { i = len; }
-                        else {
-                            if (load8(props_raw + i) != 34) { i = len; }
-                            else {
-                                var ks = i + 1;
-                                var ke = _jx_skip_string(props_raw, len, i);
-                                var key_len = ke - ks - 1;
-                                var key = alloc(key_len + 1);
-                                memcpy(key, props_raw + ks, key_len);
-                                store8(key + key_len, 0);
-                                i = _cdc_skip_ws(props_raw, len, ke);
-                                if (i < len) {
-                                    if (load8(props_raw + i) == 58) {
-                                        i = _cdc_skip_ws(props_raw, len, i + 1);
-                                        var vs = i;
-                                        var ve = _jx_skip_value(props_raw, len, i);
-                                        var vlen = ve - vs;
-                                        var val = alloc(vlen + 1);
-                                        memcpy(val, props_raw + vs, vlen);
-                                        store8(val + vlen, 0);
-                                        compiled_add_property(c, key, parse_property(val));
-                                        i = _cdc_skip_ws(props_raw, len, ve);
-                                        if (i < len) {
-                                            if (load8(props_raw + i) == 44) { i = i + 1; }
-                                        }
-                                    } else { i = len; }
-                                } else { i = len; }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    var members = _jx_members(jsonx_get_raw(raw_json, "properties"));
+    var mi = 0;
+    while (mi < vec_len(members)) {
+        compiled_add_property(c, vec_get(members, mi), parse_property(vec_get(members, mi + 1)));
+        mi = mi + 2;
     }
     var req_raw = jsonx_get_raw(raw_json, "required");
     if (req_raw != 0) {

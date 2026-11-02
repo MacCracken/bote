@@ -4,8 +4,8 @@
 > current version is in [`VERSION`](../../VERSION), pins are in [`cyrius.cyml`](../../cyrius.cyml),
 > and test and benchmark counts are in [`CLAUDE.md`](../../CLAUDE.md)'s testing table.
 >
-> **Spec**: bote's default is MCP 2025-11-25. **2026-07-28** is served beside it on every transport,
-> Streamable HTTP included; `Mcp-Param` headers are the last transport gap.
+> **Spec**: bote's default is MCP 2025-11-25. **2026-07-28** is served beside it on every transport.
+> No third-party client has run against it yet.
 > [spec-compliance.md](../spec-compliance.md) · [SECURITY.md](../../SECURITY.md) ·
 > [2026-11-01 closeout audit](../audit/2026-11-01-closeout.md)
 
@@ -25,14 +25,14 @@ One binary carries every transport, on x86_64, aarch64 and agnos, all CI-gated.
 **The gap that orders everything below:** MCP 2026-07-28 is a breaking revision, and bote speaks it, with
 gaps. Since 3.5.0 a request carrying `_meta` `io.modelcontextprotocol/protocolVersion` takes the stateless
 path, with `server/discover` and the modern result shape, and an `initialize` takes the legacy path, in one
-process. Since 3.5.1 that holds on HTTP too: `bote http` and `bote streamable` check `MCP-Protocol-Version`,
-`Mcp-Method` and `Mcp-Name` against the body. What is left is below.
+process. Since 3.5.1 that holds on HTTP too, with every header checked against the body, and since 3.5.2 on
+`bote bridge` and for `Mcp-Param-{Name}`. What is left is below.
 
 ---
 
 ## Next patch
 
-**3.5.2 — `Mcp-Param` headers, conformance, the default.** See below. A defect found in 3.5.1 lands ahead of it.
+**3.5.3 — a third-party client.** See below. A defect found in 3.5.2 lands ahead of it.
 
 ## 3.5.x — MCP 2026-07-28, dual-era
 
@@ -41,16 +41,17 @@ The largest open item, and the first. The revision removes `initialize`, `Mcp-Se
 protocol becomes stateless: each request carries its own version and capabilities. **Large: small bites,
 each verified before the next.**
 
-1. **`Mcp-Param-{Name}` (3.5.2).** A tool whose `inputSchema` puts `x-mcp-header` on a property has that
-   argument mirrored in a header, and a server MUST compare the two, with the Base64 sentinel decoded and
-   integers compared numerically, and refuse a mismatch as `400` + `-32020`. An embedder can already write
-   the annotation in a property's raw schema, and bote would advertise it and not check it. Registration
-   warns about such keywords, so at the least it should warn about this one. Read `server/tools` first.
-2. **Conformance and the default (3.5.2).** Run the 2026-07-28 clauses over every transport, and run a
-   third-party client against bote, which nothing has yet: every check so far is against the spec's text.
-   Keep the legacy clauses passing on the same binary, then decide whether the modern revision becomes
-   the documented default.
-3. **Client capabilities.** `-32021` belongs to a request that needs a capability the client did not
+1. **A third-party client (3.5.3).** Nothing but bote's own tests has spoken to it. `3.5.2` read the official
+   TypeScript SDK and `@modelcontextprotocol/conformance` as text and replayed the suite's server checks in
+   109 assertions of bote's own, and that found two real gaps, so running the real thing is worth more than
+   anything else left here. It needs a fixture: the suite's scenarios call tools by name
+   (`test_simple_text` and the like), and one needs a tool with `x-mcp-header`, which no built-in tool has.
+2. **What the suite's required list asks for that bote lacks.** Measured by its `2026-07-28` list, bote needs
+   `InputRequiredResult` (14 scenarios, 3.8.x), `tools-call-with-progress` and `server-sse-multiple-streams`
+   (3.7.x).
+3. **The default.** It stays 2025-11-25. Every check so far is bote's reading of the spec, so a default
+   that a real client has not exercised would be a claim bote cannot back. Revisit once item 1 has run.
+4. **Client capabilities.** `-32021` belongs to a request that needs a capability the client did not
    declare. No request bote serves needs one today, so bote requires the object and reads nothing from it.
    The first feature that needs one adds the check.
 
@@ -106,7 +107,6 @@ Not planned, because the current spec removes or deprecates them: the held-open 
   since 3.4.15, warns at registration about the keywords it advertises and does not enforce: `anyOf`,
   `oneOf`, `allOf`, `not`, `$ref`, `pattern`, the length and item bounds, `const`, type arrays and
   non-string enums. Enforce them, with the resource bounds the spec asks for on `$ref` and composition.
-- **`x-mcp-header`**, optional for a server.
 - **What a valid tool call still leaves on the heap.** Since 3.4.15 a request costs bote nothing that
   outlives it, except `args` and whatever a handler allocates, because the 2.0 ABI lets a handler keep
   both. bote's own handlers need not: give them the request arena, and bound the binary. The ABI change
@@ -138,8 +138,7 @@ Not planned, because the current spec removes or deprecates them: the held-open 
   the archive to a sink, gate the tool on claims, or stop registering it by default.
 - **WebSocket subprotocol and compression.** WebSocket is not an MCP transport, so nothing requires
   these. Both would also need a seam in `lib/ws_server.cyr`.
-- **The default protocol version.** Item 2 of 3.5.x changes it. Whether it changes in that minor or
-  after a release of soak is a call for then.
+- **The default protocol version.** Item 3 of 3.5.x. 2025-11-25 until a third-party client has run.
 
 ## Housekeeping — rides any patch
 
@@ -165,6 +164,8 @@ Not tasks. Things that have bitten once and are checked, not assumed:
   toolchain's `ESYSXLAT` rows before bote.
 - **Benchmark rows that make a syscall move with the host kernel, and every row moves with host load.**
   Compare only within one boot, with an interleaved A/B.
+- **A null key to a stdlib map crashes on some runs only.** The hash is seeded per process and a null key looks in
+  slot 0, so a missing guard passes most test runs. CLAUDE.md has the rule.
 - **libro-growth heisenbug (v1.2.1 era).** Not reproduced on any 2.x or 3.x tree, and
   `bote_core_only_smoke.tcyr` still exits inline because of it.
 
@@ -205,6 +206,10 @@ No open blockers. To file, all found by the 2026-11-01 audit or earlier, and non
 - **`lib/bayan.cyr` `bayan_base64_decode`** has no arena form, so a decode of a client's bytes stays on the
   heap for good. `src/http_era.cyr` carries a small decoder of its own for that reason.
 - **`lib/str.cyr` `str_to_int`** skips non-digit bytes and wraps, though it documents "0 on invalid".
+- **`lib/hashmap.cyr` `map_get(m, 0)`** crashes when slot 0 is occupied and returns 0 when it is not, which the
+  seeded hash turns into a crash on some runs. It should answer the same on every run.
+- **sandhi — obsolete line folding.** A header continued on the next line is read as ending at the first, where
+  RFC 9112 §5.2 says refuse it or join it. A proxy that joins it would see another value from the one bote compared.
 - **`lib/sakshi.cyr`** drops the trailing newline when a line fills its 256-byte buffer, gluing two records.
   bote caps its text below that.
 - **`memcpy` is a byte loop**, about 20 instructions a byte. A word loop halves a `tools/list`.

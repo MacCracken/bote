@@ -52,6 +52,7 @@ include "src/auth.cyr"
 include "src/conn.cyr"
 include "src/http_era.cyr"
 include "src/transport_http.cyr"
+include "src/bridge.cyr"
 include "src/transport_streamable.cyr"
 
 fn h_ok(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
@@ -76,11 +77,30 @@ fn _mk_d() {
     vec_push(req, "n");
     var sch = schema_new("object", props, req);
     registry_register(reg, tool_def_with_compiled(tool_def_new("t_int", "Int", sch), compiled_compile(sch)));
+    var pp = vec_new();
+    vec_push(pp, schema_prop_new("region", "{\"type\":\"string\",\"x-mcp-header\":\"Region\"}"));
+    vec_push(pp, schema_prop_new("n", "{\"type\":\"integer\",\"x-mcp-header\":\"Count\"}"));
+    vec_push(pp, schema_prop_new("flag", "{\"type\":\"boolean\",\"x-mcp-header\":\"Flag\"}"));
+    vec_push(pp, schema_prop_new("a", "{\"type\":\"object\",\"properties\":{\"b\":{\"type\":\"string\",\"x-mcp-header\":\"Deep\"}}}"));
+    registry_register(reg, tool_def_new("t_param", "Param", schema_new("object", pp, vec_new())));
+    # A map's hash is seeded per process. A null key looks in slot 0 and crashes only
+    # if a key sits there, about one run in four with this many tools, so a missing
+    # guard passes three runs of four. Fill the slot, and every run is that run.
+    var zi = 0;
+    while (zi < 5000 && load64(load64(registry_entries(reg)) + 16) == 0) {
+        var zb = str_builder_new();
+        str_builder_add_cstr(zb, "z");
+        str_builder_add_int(zb, zi);
+        registry_register(reg, tool_def_new(str_data(str_builder_build(zb)), "Z", schema_new("object", 0, vec_new())));
+        zi = zi + 1;
+    }
     var d = dispatcher_new(reg);
     dispatcher_handle(d, "t_echo", &h_ok);
+    dispatcher_handle(d, "t_param", &h_ok);
     dispatcher_handle(d, "t_claims", &h_claims);
     dispatcher_handle(d, "t_int", &h_ok);
     dispatcher_register_prompt(d, prompt_def_new("p_one", "One", vec_new()), &h_prompt);
+    dispatcher_register_prompt(d, prompt_def_new("t_param", "Shares a tool's name", vec_new()), &h_prompt);
     dispatcher_register_resource(d, resource_def_new("res://a", "a", "A", "text/plain"), &h_res);
     dispatcher_register_resource(d, resource_def_new("res://\xC3\xA9", "e", "E", "text/plain"), &h_res);
     dispatcher_register_resource(d, resource_def_new("res://bad", "bad", "Bad", "text/plain"), &h_array);
@@ -173,17 +193,24 @@ var _head = 0;
 var _body = 0;
 var _http_cfg = 0;
 var _strm_cfg = 0;
+var _brg_cfg = 0;
 
 fn _run(kind, raw) {
     var n = strlen(raw);
     memcpy(_rbuf, raw, n);
     store8(_rbuf + n, 0);
+    # The bridge's endpoint is "/".
+    if (kind == 2) {
+        var mp = strstr(_rbuf, "/mcp ");
+        memcpy(_rbuf + mp + 1, "   ", 3);
+    }
     var sp[16];
     sys_socketpair(1, 1, 0, &sp);
     var sa = load32(&sp);
     var sb = load32(&sp + 4);
     if (kind == 0) { _http_handle(_http_cfg, sa, _rbuf, n); }
-    else { _strm_handle(_strm_cfg, sa, _rbuf, n); }
+    elif (kind == 1) { _strm_handle(_strm_cfg, sa, _rbuf, n); }
+    else { _bridge_handle(_brg_cfg, sa, _rbuf, n); }
     sys_close(sa);
     var got = 0;
     var r = sys_read(sb, _rcv, 262144);
@@ -219,7 +246,8 @@ fn _code() {
 
 fn _nm(kind, name) {
     if (kind == 0) { return _cat3("http: ", name, ""); }
-    return _cat3("streamable: ", name, "");
+    if (kind == 1) { return _cat3("streamable: ", name, ""); }
+    return _cat3("bridge: ", name, "");
 }
 
 # `raw` gets `status`, and the JSON-RPC error `code`, or none when it is "".
@@ -244,6 +272,132 @@ fn _heap_per(kind, raw) {
 }
 
 fn _ok_tool() { return _mb("tools/call", ",\"name\":\"t_echo\""); }
+
+# `raw` with the harness's own Host line gone, for a request that sends its own.
+fn _ohost(raw) {
+    var at = strstr(raw, "Host: x\r\n");
+    var sb = str_builder_new();
+    var head = alloc(at + 1);
+    memcpy(head, raw, at);
+    store8(head + at, 0);
+    str_builder_add_cstr(sb, head);
+    str_builder_add_cstr(sb, raw + at + 9);
+    return str_data(str_builder_build(sb));
+}
+
+fn _pc_legacy() {
+    return "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"t_param\",\"arguments\":{\"region\":\"us\"}}}";
+}
+
+# A tools/call of t_param with arguments `args`, sending the header lines `hdrs`.
+fn _pc(hdrs, args) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, ",\"name\":\"t_param\",\"arguments\":");
+    str_builder_add_cstr(sb, args);
+    return _raw("POST", _cat3(_mh("tools/call", "t_param"), hdrs, ""), _mb("tools/call", str_data(str_builder_build(sb))));
+}
+
+fn _params(k) {
+    _t(k, _raw("POST", _mh("tools/list", 0), _mb("tools/list", "")), 200, "", "tools/list");
+    assert(_has(_body, "\"x-mcp-header\":\"Region\""), _nm(k, "...carries the annotation as written"));
+
+    # The spec's table of who sends what.
+    _t(k, _pc("Mcp-Param-Region: us-west1\r\n", "{\"region\":\"us-west1\"}"), 200, "", "a value and its header");
+    assert(_has(_body, "\"resultType\":\"complete\""), _nm(k, "...reaches the tool"));
+    _t(k, _pc("", "{}"), 200, "", "no value, no header");
+    _t(k, _pc("", "{\"region\":null}"), 200, "", "a null, no header");
+    _t(k, _raw("POST", _mh("tools/call", "t_param"), _mb("tools/call", ",\"name\":\"t_param\"")), 200, "", "no arguments at all");
+    _t(k, _pc("", "{\"region\":\"us\"}"), 400, "-32020", "a value and no header");
+    assert(_has(_body, "\"id\":7") && _has(_body, "Mcp-Param-Region"), _nm(k, "...names the header, with the id"));
+    _t(k, _pc("", "{\"n\":1}"), 400, "-32020", "an integer and no header");
+    _t(k, _pc("", "{\"flag\":false}"), 400, "-32020", "a boolean and no header");
+    _t(k, _pc("", "{\"region\":\"\"}"), 400, "-32020", "an empty string is a value");
+    _t(k, _pc("Mcp-Param-Region: x\r\n", "{}"), 400, "-32020", "a header with no value");
+    _t(k, _pc("Mcp-Param-Region: x\r\n", "{\"region\":null}"), 400, "-32020", "a header over a null");
+    _t(k, _pc("Mcp-Param-Region: eu\r\n", "{\"region\":\"us\"}"), 400, "-32020", "a header holding another value");
+    assert(_has(_body, "\"us\"") == 0 && _has(_body, "'eu'") == 0, _nm(k, "...and neither value in the reply"));
+
+    # Header names ignore case; values do not.
+    _t(k, _pc("mcp-param-REGION: us\r\n", "{\"region\":\"us\"}"), 200, "", "the header name in any case");
+    _t(k, _pc("Mcp-Param-Region: US\r\n", "{\"region\":\"us\"}"), 400, "-32020", "the value in another case");
+    _t(k, _pc("Mcp-Param-Region:   us \t\r\n", "{\"region\":\"us\"}"), 200, "", "whitespace around a value");
+
+    # The Value Encoding examples, and what the sentinel leaves literal.
+    _t(k, _pc("Mcp-Param-Region: =?base64?SGVsbG8sIOS4lueVjA==?=\r\n", "{\"region\":\"Hello, \\u4e16\\u754c\"}"), 200, "", "non-ASCII in Base64");
+    _t(k, _pc("Mcp-Param-Region: =?base64?IHBhZGRlZCA=?=\r\n", "{\"region\":\" padded \"}"), 200, "", "spaces at the ends in Base64");
+    _t(k, _pc("Mcp-Param-Region: =?base64?bGluZTEKbGluZTI=?=\r\n", "{\"region\":\"line1\\nline2\"}"), 200, "", "a newline in Base64");
+    _t(k, _pc("Mcp-Param-Region: =?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?=\r\n", "{\"region\":\"=?base64?literal?=\"}"), 200, "", "a value that looks like the sentinel");
+    _t(k, _pc("Mcp-Param-Region: =?base64??=\r\n", "{\"region\":\"\"}"), 200, "", "an empty string in Base64");
+    _t(k, _pc("Mcp-Param-Region:\r\n", "{\"region\":\"\"}"), 200, "", "an empty string as an empty header");
+    _t(k, _pc("Mcp-Param-Region: =?base64?SGVsbG8?=\r\n", "{\"region\":\"Hello\"}"), 400, "-32020", "Base64 with its padding missing");
+    _t(k, _pc("Mcp-Param-Region: =?base64?SGVs!!!bG8=?=\r\n", "{\"region\":\"Hello\"}"), 400, "-32020", "Base64 with characters outside the alphabet");
+    _t(k, _pc("Mcp-Param-Region: SGVsbG8=\r\n", "{\"region\":\"SGVsbG8=\"}"), 200, "", "no markers, a literal");
+    _t(k, _pc("Mcp-Param-Region: =?base64?SGVsbG8=\r\n", "{\"region\":\"=?base64?SGVsbG8=\"}"), 200, "", "no closing marker, a literal");
+    _t(k, _pc("Mcp-Param-Region: =?base64?SGVsbG8=?=\r\n", "{\"region\":\"Bye\"}"), 400, "-32020", "Base64 holding another value");
+    _t(k, _pc("Mcp-Param-Region: a\x01b\r\n", "{\"region\":\"a\\u0001b\"}"), 400, "-32020", "a control byte in the header");
+    _t(k, _pc("Mcp-Param-Region: \xC3\xA9\r\n", "{\"region\":\"\xC3\xA9\"}"), 400, "-32020", "raw UTF-8 in the header");
+    _t(k, _pc("Mcp-Param-Region: a\\u0000b\r\n", "{\"region\":\"a\\u0000b\"}"), 400, "-32020", "a NUL the header spells as its escape");
+    _t(k, _pc("Mcp-Param-Region: a\r\n", "{\"region\":\"a\\u0000b\"}"), 400, "-32020", "a NUL, with the text before it in the header");
+    _t(k, _pc("Mcp-Param-Region: =?base64?!!!!?=\r\n", "{\"region\":\"=?base64?!!!!?=\"}"), 400, "-32020", "a sentinel that does not decode, even when the body spells it the same");
+
+    # Integers and booleans.
+    _t(k, _pc("Mcp-Param-Count: 42\r\n", "{\"n\":42}"), 200, "", "an integer");
+    _t(k, _pc("Mcp-Param-Count: -7\r\n", "{\"n\":-7}"), 200, "", "a negative integer");
+    _t(k, _pc("Mcp-Param-Count: 42.0\r\n", "{\"n\":42}"), 200, "", "42.0 and 42 are equal");
+    _t(k, _pc("Mcp-Param-Count: 42\r\n", "{\"n\":42.0}"), 200, "", "42 and 42.0 are equal");
+    _t(k, _pc("Mcp-Param-Count: 43\r\n", "{\"n\":42}"), 400, "-32020", "another integer");
+    _t(k, _pc("Mcp-Param-Count: 9007199254740992\r\n", "{\"n\":9007199254740992}"), 400, "-32020", "past the safe range");
+    _t(k, _pc("Mcp-Param-Flag: true\r\n", "{\"flag\":true}"), 200, "", "a boolean");
+    _t(k, _pc("Mcp-Param-Flag: false\r\n", "{\"flag\":false}"), 200, "", "the other boolean");
+    _t(k, _pc("Mcp-Param-Flag: True\r\n", "{\"flag\":true}"), 400, "-32020", "a boolean spelled otherwise");
+
+    # A value of the wrong type that the header still mirrors is the tool's input
+    # error, which the model can correct. One with no text to mirror cannot pass.
+    _t(k, _pc("Mcp-Param-Count: 42\r\n", "{\"n\":\"42\"}"), 200, "", "a string where an integer belongs");
+    assert(_has(_body, "\"isError\":true"), _nm(k, "...is an input error"));
+    _t(k, _pc("Mcp-Param-Count: 1.5\r\n", "{\"n\":1.5}"), 200, "", "a fraction where an integer belongs");
+    assert(_has(_body, "\"isError\":true"), _nm(k, "...is an input error"));
+    _t(k, _pc("", "{\"region\":{\"x\":1}}"), 400, "-32020", "an object where a string belongs");
+    _t(k, _pc("Mcp-Param-Region: x\r\n", "{\"region\":[1]}"), 400, "-32020", "an array where a string belongs");
+
+    # A nested property, and each way of it not being there.
+    _t(k, _pc("Mcp-Param-Deep: x\r\n", "{\"a\":{\"b\":\"x\"}}"), 200, "", "a nested value");
+    _t(k, _pc("", "{\"a\":{\"b\":\"x\"}}"), 400, "-32020", "a nested value and no header");
+    _t(k, _pc("", "{\"a\":{}}"), 200, "", "the leaf absent");
+    _t(k, _pc("", "{\"a\":{\"b\":null}}"), 200, "", "the leaf null");
+    _t(k, _pc("", "{\"a\":null}"), 200, "", "the parent null");
+    _t(k, _pc("", "{\"a\":5}"), 200, "", "the parent no object");
+    assert(_has(_body, "\"isError\":true"), _nm(k, "...is an input error"));
+
+    # All of them at once, and the body read as the validator and a handler read it.
+    _t(k, _pc("Mcp-Param-Region: us\r\nMcp-Param-Count: 1\r\nMcp-Param-Flag: true\r\nMcp-Param-Deep: x\r\n", "{\"region\":\"us\",\"n\":1,\"flag\":true,\"a\":{\"b\":\"x\"}}"), 200, "", "every header");
+    _t(k, _pc("Mcp-Param-Region: us\r\nMcp-Param-Count: 1\r\nMcp-Param-Flag: false\r\nMcp-Param-Deep: x\r\n", "{\"region\":\"us\",\"n\":1,\"flag\":true,\"a\":{\"b\":\"x\"}}"), 400, "-32020", "one of them wrong");
+    _t(k, _pc("Mcp-Param-Region: us\r\n", "{\"reg\\u0069on\":\"us\"}"), 200, "", "an escaped key is the same key");
+    _t(k, _pc("", "{\"reg\\u0069on\":\"us\"}"), 400, "-32020", "...and needs its header");
+    _t(k, _pc("Mcp-Param-Region: us\r\n", "{\"region\":\"us\",\"region\":\"eu\"}"), 200, "", "a repeated key: the first, as everything here reads it");
+
+    # A field on two lines combines into a value that matches nothing.
+    _t(k, _pc("Mcp-Param-Region: us\r\nMcp-Param-Region: us\r\n", "{\"region\":\"us\"}"), 400, "-32020", "Mcp-Param on two lines");
+    _t(k, _pc("Mcp-Param-Region: us\r\nmcp-param-region: eu\r\n", "{\"region\":\"us\"}"), 400, "-32020", "Mcp-Param on two lines that differ");
+    _t(k, _raw("POST", _cat3(_mh("tools/list", 0), "mcp-method: tools/list\r\n", ""), _mb("tools/list", "")), 400, "-32020", "Mcp-Method on two lines");
+    _t(k, _raw("POST", _cat3(_mh("tools/call", "t_echo"), "Mcp-Name: t_other\r\n", ""), _ok_tool()), 400, "-32020", "Mcp-Name on two lines");
+    _t(k, _raw("POST", _cat3(_mh("tools/list", 0), _V, ""), _mb("tools/list", "")), 400, "-32020", "MCP-Protocol-Version on two lines");
+
+    # A header nothing declares is not bote's to judge.
+    _t(k, _pc("Mcp-Param-Other: x\r\n", "{}"), 200, "", "a header t_param does not declare");
+    _t(k, _raw("POST", _cat3(_mh("tools/call", "t_echo"), "Mcp-Param-Region: x\r\n", ""), _ok_tool()), 200, "", "a header on a tool with none");
+    _t(k, _raw("POST", _cat3(_mh("prompts/get", "p_one"), "Mcp-Param-Region: x\r\n", ""), _mb("prompts/get", ",\"name\":\"p_one\"")), 200, "", "a header on another method");
+    _t(k, _raw("POST", _cat3(_mh("prompts/get", "t_param"), "Mcp-Param-Region: x\r\n", ""), _mb("prompts/get", ",\"name\":\"t_param\"")), 200, "", "a prompt named like a tool with headers");
+    _t(k, _raw("POST", _mh("tools/call", "t_none"), _mb("tools/call", ",\"name\":\"t_none\",\"arguments\":{\"region\":\"x\"}")), 200, "-32602", "an unknown tool is the dispatcher's");
+
+    # Refused, a request keeps nothing.
+    var x = _rep("x", 60000);
+    assert_eq(_heap_per(k, _pc(_cat3("Mcp-Param-Region: ", x, "\r\n"), "{\"region\":\"us\"}")), 0, _nm(k, "a 60 KB Mcp-Param leaves no heap"));
+    assert_eq(_heap_per(k, _pc("", "{\"region\":\"us\"}")), 0, _nm(k, "a missing Mcp-Param leaves no heap"));
+    assert_eq(_heap_per(k, _pc("Mcp-Param-Region: eu\r\n", "{\"region\":\"us\"}")), 0, _nm(k, "a mismatch leaves no heap"));
+    assert_eq(_heap_per(k, _pc("Mcp-Param-Region: =?base64?!!!!?=\r\n", "{\"region\":\"us\"}")), 0, _nm(k, "bad Base64 leaves no heap"));
+    return 0;
+}
 
 fn _clauses(k) {
     # ---- what a modern client sends ----
@@ -300,16 +454,16 @@ fn _clauses(k) {
     _t(k, _raw("POST", _mh("resources/read", "res://b"), _mb("resources/read", ",\"uri\":\"res://a\"")), 400, "-32020", "Mcp-Name names another uri");
     _t(k, _raw("POST", _mh("tools/call", "t_\xC3\xA9"), _ok_tool()), 400, "-32020", "a raw non-ASCII Mcp-Name");
     _t(k, _raw("POST", _mh("tools/call", "t_\xC3\xA9"), _mb("tools/call", ",\"name\":\"t_\\u00e9\"")), 400, "-32020", "...even when the body spells it the same");
-    _t(k, _raw("POST", _mh("tools/call", "t_echo"), _mb("tools/call", "")), 400, "-32602", "Mcp-Name with no name in the body");
+    _t(k, _raw("POST", _mh("tools/call", "t_echo"), _mb("tools/call", "")), 200, "-32602", "Mcp-Name with no name in the body");
 
     # ---- JSON-RPC errors and their status ----
     _t(k, _raw("POST", _mh("no/such", 0), _mb("no/such", "")), 404, "-32601", "an unknown method");
     _t(k, _raw("POST", _mh("ping", 0), _mb("ping", "")), 404, "-32601", "ping is gone");
     _t(k, _raw("POST", _mh("initialize", 0), _mb("initialize", "")), 404, "-32601", "initialize is gone");
-    _t(k, _raw("POST", _mh("tools/call", "t_none"), _mb("tools/call", ",\"name\":\"t_none\"")), 400, "-32602", "an unknown tool");
-    _t(k, _raw("POST", _mh("resources/read", "res://no"), _mb("resources/read", ",\"uri\":\"res://no\"")), 400, "-32602", "a missing resource");
-    _t(k, _raw("POST", _mh("tools/list", 0), _mb("tools/list", ",\"cursor\":\"x\"")), 400, "-32602", "an invalid cursor");
-    _t(k, _raw("POST", _mh("resources/read", "res://bad"), _mb("resources/read", ",\"uri\":\"res://bad\"")), 500, "-32603", "a result that is no object");
+    _t(k, _raw("POST", _mh("tools/call", "t_none"), _mb("tools/call", ",\"name\":\"t_none\"")), 200, "-32602", "an unknown tool");
+    _t(k, _raw("POST", _mh("resources/read", "res://no"), _mb("resources/read", ",\"uri\":\"res://no\"")), 200, "-32602", "a missing resource");
+    _t(k, _raw("POST", _mh("tools/list", 0), _mb("tools/list", ",\"cursor\":\"x\"")), 200, "-32602", "an invalid cursor");
+    _t(k, _raw("POST", _mh("resources/read", "res://bad"), _mb("resources/read", ",\"uri\":\"res://bad\"")), 200, "-32603", "a result that is no object");
     _t(k, _raw("POST", _mh("tools/call", "t_int"), _mb("tools/call", ",\"name\":\"t_int\",\"arguments\":{\"n\":\"x\"}")), 200, "", "a schema violation is a result");
     assert(_has(_body, "\"isError\":true"), _nm(k, "...with isError"));
 
@@ -387,25 +541,67 @@ fn main() {
     assert_eq(_he_b64_decode_a(a, "Q=Q=", 4), 0, "b64: padding in the middle");
     assert_eq(_he_b64_decode_a(a, "AA==", 4), 0, "b64: a NUL");
     assert_eq(_he_b64_decode_a(a, "_-_-", 4), 0, "b64: the URL alphabet");
-    assert(streq(_he_name_value_a(a, "plain"), "plain") == 1, "name: plain");
-    assert(streq(_he_name_value_a(a, "=?base64?QUJD?="), "ABC") == 1, "name: sentinel");
-    assert(streq(_he_name_value_a(a, "=?base64??="), "") == 1, "name: an empty sentinel");
-    assert(streq(_he_name_value_a(a, "=?base64?="), "=?base64?=") == 1, "name: markers that overlap are no sentinel");
-    assert(streq(_he_name_value_a(a, "=?BASE64?QUJD?="), "=?BASE64?QUJD?=") == 1, "name: upper case is no sentinel");
-    assert(streq(_he_name_value_a(a, "=?base64?QUJD"), "=?base64?QUJD") == 1, "name: no closing marker");
-    assert_eq(_he_name_value_a(a, "=?base64?!?="), 0, "name: a sentinel that does not decode");
-    assert_eq(_he_header_ok("a b\tc~"), 1, "header: visible ASCII, space and tab");
-    assert_eq(_he_header_ok("a\x01b"), 0, "header: a control byte");
-    assert_eq(_he_header_ok("a\x7Fb"), 0, "header: DEL");
-    assert_eq(_he_header_ok("\xC3\xA9"), 0, "header: non-ASCII");
+    assert(streq(_he_field_value_a(a, "plain"), "plain") == 1, "name: plain");
+    assert(streq(_he_field_value_a(a, "=?base64?QUJD?="), "ABC") == 1, "name: sentinel");
+    assert(streq(_he_field_value_a(a, "=?base64??="), "") == 1, "name: an empty sentinel");
+    assert(streq(_he_field_value_a(a, "=?base64?="), "=?base64?=") == 1, "name: markers that overlap are no sentinel");
+    assert(streq(_he_field_value_a(a, "=?BASE64?QUJD?="), "=?BASE64?QUJD?=") == 1, "name: upper case is no sentinel");
+    assert(streq(_he_field_value_a(a, "=?base64?QUJD"), "=?base64?QUJD") == 1, "name: no closing marker");
+    assert_eq(_he_field_value_a(a, "=?base64?!?="), 0, "name: a sentinel that does not decode");
+    var hc[40];
+    bote_http_ctx(&hc, 0, "t", "", 0, 0);
+    assert_eq(_he_field_ok(&hc, "X", "a b\tc~"), 1, "header: visible ASCII, space and tab");
+    assert_eq(_he_field_ok(&hc, "X", "a\x01b"), 0, "header: a control byte");
+    assert_eq(_he_field_ok(&hc, "X", "a\x7Fb"), 0, "header: DEL");
+    assert_eq(_he_field_ok(&hc, "X", "\xC3\xA9"), 0, "header: non-ASCII");
+    var twice = "POST / HTTP/1.1\r\nMcp-Name: a\r\nHost: x\r\nMCP-NAME: a\r\nMcp-Named: b\r\n\r\nMcp-Name: c\r\nMcp-Method: d\r\nMcp-Method: e\r\n";
+    bote_http_ctx(&hc, 0, "t", twice, strlen(twice), 0);
+    assert_eq(_he_repeated(&hc, "Mcp-Name"), 1, "repeated: two lines, in any case");
+    assert_eq(_he_repeated(&hc, "Host"), 0, "repeated: one line");
+    assert_eq(_he_repeated(&hc, "Mcp-Named"), 0, "repeated: a longer name is another field");
+    assert_eq(_he_repeated(&hc, "Mcp-Method"), 0, "repeated: past the headers is the body");
+    var longer = "POST / HTTP/1.1\r\nMcp-Name: a\r\nMcp-Name-Extra: b\r\n\r\n";
+    bote_http_ctx(&hc, 0, "t", longer, strlen(longer), 0);
+    assert_eq(_he_repeated(&hc, "Mcp-Name"), 0, "repeated: a name that starts the same is another field");
+    var line1 = "Mcp-Name x\r\nMcp-Name: a\r\n\r\n";
+    bote_http_ctx(&hc, 0, "t", line1, strlen(line1), 0);
+    assert_eq(_he_repeated(&hc, "Mcp-Name"), 0, "repeated: the request line is no header");
+    assert_eq(_he_param_matches(bote_req_begin(), "us", "\"us\""), 1, "param: a string");
+    assert_eq(_he_param_matches(bote_req_alloc(), "us", "\"eu\""), 0, "param: another string");
+    assert_eq(_he_param_matches(bote_req_alloc(), "42", "42"), 1, "param: an integer");
+    assert_eq(_he_param_matches(bote_req_alloc(), "42.0", "42"), 1, "param: an integer, compared by value");
+    assert_eq(_he_param_matches(bote_req_alloc(), "42", "4.2e1"), 1, "param: ...on either side");
+    assert_eq(_he_param_matches(bote_req_alloc(), "-0", "0"), 1, "param: -0 is 0");
+    assert_eq(_he_param_matches(bote_req_alloc(), "43", "42"), 0, "param: another integer");
+    assert_eq(_he_param_matches(bote_req_alloc(), "42x", "42"), 0, "param: not all of the header is a number");
+    assert_eq(_he_param_matches(bote_req_alloc(), "042", "42"), 0, "param: not a JSON number");
+    assert_eq(_he_param_matches(bote_req_alloc(), "+42", "42"), 0, "param: a plus sign");
+    assert_eq(_he_param_matches(bote_req_alloc(), "", "42"), 0, "param: an empty header for a number");
+    assert_eq(_he_param_matches(bote_req_alloc(), "42.5", "42"), 0, "param: a header with a fraction");
+    assert_eq(_he_param_matches(bote_req_alloc(), "9007199254740991", "9007199254740991"), 1, "param: the largest safe integer");
+    assert_eq(_he_param_matches(bote_req_alloc(), "-9007199254740991", "-9007199254740991"), 1, "param: the smallest");
+    assert_eq(_he_param_matches(bote_req_alloc(), "9007199254740992", "9007199254740992"), 0, "param: one past the largest");
+    assert_eq(_he_param_matches(bote_req_alloc(), "-9007199254740992", "-9007199254740992"), 0, "param: one past the smallest");
+    assert_eq(_he_param_matches(bote_req_alloc(), "1.5", "1.5"), 1, "param: a fraction is compared as text");
+    assert_eq(_he_param_matches(bote_req_alloc(), "1.7", "1.5"), 0, "param: not by what it truncates to");
+    assert_eq(_he_param_matches(bote_req_alloc(), "true", "true"), 1, "param: true");
+    assert_eq(_he_param_matches(bote_req_alloc(), "false", "false"), 1, "param: false");
+    assert_eq(_he_param_matches(bote_req_alloc(), "TRUE", "true"), 0, "param: values are case-sensitive");
+    assert_eq(_he_param_matches(bote_req_alloc(), "false", "true"), 0, "param: the other boolean");
+    assert_eq(_he_param_matches(bote_req_alloc(), "{}", "{}"), 0, "param: an object has no header form");
+    assert_eq(_he_param_matches(bote_req_alloc(), "[]", "[]"), 0, "param: nor does an array");
+    assert_eq(_he_param_matches(bote_req_alloc(), "a\\u0000b", "\"a\\u0000b\""), 0, "param: a NUL no header can say");
+    assert_eq(_he_param_matches(bote_req_alloc(), "a", "\"a\\u0000b\""), 0, "param: nor is it the text before the NUL");
+    assert_eq(_he_param_matches(bote_req_alloc(), "", "\"\""), 1, "param: the empty string");
+    assert_eq(_he_param_matches(bote_req_alloc(), "a\nb", "\"a\\nb\""), 1, "param: a string compared decoded");
     assert_eq(_he_status_for(0 - 32601), 404, "status: -32601");
-    assert_eq(_he_status_for(0 - 32602), 400, "status: -32602");
+    assert_eq(_he_status_for(0 - 32602), 200, "status: a -32602 past the _meta check");
     assert_eq(_he_status_for(0 - 32600), 400, "status: -32600");
     assert_eq(_he_status_for(0 - 32700), 400, "status: -32700");
     assert_eq(_he_status_for(0 - 32020), 400, "status: -32020");
     assert_eq(_he_status_for(0 - 32021), 400, "status: -32021");
     assert_eq(_he_status_for(0 - 32022), 400, "status: -32022");
-    assert_eq(_he_status_for(0 - 32603), 500, "status: -32603");
+    assert_eq(_he_status_for(0 - 32603), 200, "status: -32603");
     assert_eq(_he_status_for(0 - 32000), 200, "status: what the spec leaves open");
     assert_eq(bote_protocol_known("2026-07-28"), 1, "known: the modern revision");
     assert_eq(bote_protocol_known("2025-11-25"), 1, "known: a legacy revision");
@@ -425,8 +621,57 @@ fn main() {
     streamable_config_with_session_store(_strm_cfg, session_store_default());
     store64(_strm_cfg + 56, d);
     _strm_init();
+    var brg_origins = vec_new();
+    vec_push(brg_origins, "http://localhost");
+    _brg_cfg = bridge_config_new("127.0.0.1", 0);
+    bridge_config_with_dispatcher(_brg_cfg, d);
+    bridge_config_with_origins(_brg_cfg, brg_origins);
     _clauses(0);
     _clauses(1);
+    _params(0);
+    _params(1);
+    _params(2);
+
+    # The modern path holds the bridge to the same rules, CORS headers on every reply.
+    var cors = "Origin: http://localhost\r\n";
+    _t(2, _raw("POST", _cat3(_mh("tools/list", 0), cors, ""), _mb("tools/list", "")), 200, "", "tools/list");
+    assert(_has(_head, "Access-Control-Allow-Origin"), "bridge: ...with CORS");
+    _t(2, _raw("POST", _cat3(_V, cors, ""), _mb("tools/list", "")), 400, "-32020", "no Mcp-Method");
+    assert(_has(_head, "Access-Control-Allow-Origin"), "bridge: a refusal with CORS");
+    _t(2, _raw("POST", _cat3(_mh("no/such", 0), cors, ""), _mb("no/such", "")), 404, "-32601", "an unknown method");
+    assert(_has(_head, "Access-Control-Allow-Origin"), "bridge: ...with CORS");
+    _t(2, _raw("POST", _cat3(_V, cors, ""), "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/x\"}"), 202, "", "a notification");
+    assert(_has(_head, "Access-Control-Allow-Origin"), "bridge: ...with CORS");
+    _t(2, _raw("POST", _mh("tools/call", "t_none"), _mb("tools/call", ",\"name\":\"t_none\"")), 200, "-32602", "an unknown tool is an error here, not the legacy envelope");
+    # Its legacy contract is its own, and stays.
+    _t(2, _raw("POST", "", "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"t_none\"}}"), 200, "", "a legacy unknown tool keeps the bridge's envelope");
+    assert(_has(_body, "\"isError\":true"), "bridge: ...isError");
+    _t(2, _raw("POST", "", "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/x\"}"), 204, "", "a legacy notification keeps its 204");
+    _t(2, _raw("POST", "MCP-Protocol-Version: 2025-11-25\r\n", _pc_legacy()), 200, "", "a legacy call of a tool with headers needs none");
+    http_config_with_session_store(_http_cfg, 0);
+    streamable_config_with_session_store(_strm_cfg, 0);
+    _t(0, _raw("POST", "MCP-Protocol-Version: 2025-11-25\r\n", _pc_legacy()), 200, "", "a legacy call of a tool with headers needs none");
+    _t(1, _raw("POST", "MCP-Protocol-Version: 2025-11-25\r\n", _pc_legacy()), 200, "", "a legacy call of a tool with headers needs none");
+    assert(_has(_body, "isError") == 0, "streamable: ...and runs it");
+    http_config_with_session_store(_http_cfg, session_store_default());
+    streamable_config_with_session_store(_strm_cfg, session_store_default());
+
+    # An Origin. The rebinding pair is refused and the server's own loopback address
+    # is not, with no list set. `Host` here is the harness's `x`, so each line names one.
+    var own = "Host: localhost:8390\r\nOrigin: http://localhost:8390\r\n";
+    var evil = "Host: evil.example:8390\r\nOrigin: http://evil.example:8390\r\n";
+    bridge_config_with_origins(_brg_cfg, 0);
+    var kk = 0;
+    while (kk < 3) {
+        _run(kk, _ohost(_raw("POST", _cat3(_mh("tools/list", 0), own, ""), _mb("tools/list", ""))));
+        assert_eq(_status, 200, _nm(kk, "the server's own loopback Origin"));
+        _run(kk, _ohost(_raw("POST", _cat3(_mh("tools/list", 0), evil, ""), _mb("tools/list", ""))));
+        assert_eq(_status, 403, _nm(kk, "a rebinding page's Origin"));
+        kk = kk + 1;
+    }
+    bridge_config_with_origins(_brg_cfg, brg_origins);
+    _run(2, _ohost(_raw("POST", _cat3(_mh("tools/list", 0), own, ""), _mb("tools/list", ""))));
+    assert_eq(_status, 403, "bridge: a list is the whole policy");
 
     # GET and DELETE. `bote http` serves POST alone, in either era.
     _t(1, _raw("GET", _V, ""), 405, "", "GET naming this revision");

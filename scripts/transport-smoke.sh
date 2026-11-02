@@ -68,22 +68,26 @@ r=$(curl -s "${H[@]}" -H "MCP-Session-Id: $sid" -d "$LIST" http://127.0.0.1:1839
 echo "$r" | grep -q '"name":"bote_echo"' || err "streamable tools/list lacks bote_echo: $r"
 echo "$r" | grep -q '"name":"fs_write"' && err "streamable tools/list gained fs_write (tool-set parity broken): $r"
 
-# MCP 2026-07-28 over HTTP (3.5.1), on the two servers that just served a legacy
-# client. A client of 2025-11-25 has no version to send on `initialize`, either.
+# MCP 2026-07-28 on every HTTP server, each of which just served a legacy client.
+# A client of 2025-11-25 has no version to send on `initialize`, either.
 MD='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
 DISC="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{$MD}}"
 CALL="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{$MD,\"name\":\"bote_echo\",\"arguments\":{\"msg\":\"hi\"}}}"
 MV=(-H 'Content-Type: application/json' -H 'MCP-Protocol-Version: 2026-07-28')
-for p in 18390 18392; do
-  r=$(curl -s -w ' HTTP%{http_code}' "${MV[@]}" -H 'Mcp-Method: server/discover' -d "$DISC" "http://127.0.0.1:$p/mcp")
+NOTOOL="{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{$MD,\"name\":\"no_such_tool\"}}"
+for m in "18390 /mcp" "18391 /" "18392 /mcp"; do
+  read -r p path <<< "$m"
+  r=$(curl -s -w ' HTTP%{http_code}' "${MV[@]}" -H 'Mcp-Method: server/discover' -d "$DISC" "http://127.0.0.1:$p$path")
   echo "$r" | grep -q '"supportedVersions":\["2026-07-28".* HTTP200$' || err "$p modern server/discover: $r"
-  r=$(curl -s -w ' HTTP%{http_code}' "${MV[@]}" -H 'Mcp-Method: tools/call' -H 'Mcp-Name: bote_echo' -d "$CALL" "http://127.0.0.1:$p/mcp")
+  r=$(curl -s -w ' HTTP%{http_code}' "${MV[@]}" -H 'Mcp-Method: tools/call' -H 'Mcp-Name: bote_echo' -d "$CALL" "http://127.0.0.1:$p$path")
   echo "$r" | grep -q '"resultType":"complete".* HTTP200$' || err "$p modern tools/call: $r"
-  r=$(curl -s -w ' HTTP%{http_code}' "${MV[@]}" -H 'Mcp-Method: tools/call' -H 'Mcp-Name: other' -d "$CALL" "http://127.0.0.1:$p/mcp")
+  r=$(curl -s -w ' HTTP%{http_code}' "${MV[@]}" -H 'Mcp-Method: tools/call' -H 'Mcp-Name: other' -d "$CALL" "http://127.0.0.1:$p$path")
   echo "$r" | grep -q '"code":-32020.* HTTP400$' || err "$p Mcp-Name mismatch: $r"
-  r=$(curl -s -w ' HTTP%{http_code}' -H 'Content-Type: application/json' -d "$DISC" "http://127.0.0.1:$p/mcp")
+  r=$(curl -s -w ' HTTP%{http_code}' "${MV[@]}" -H 'Mcp-Method: tools/call' -H 'Mcp-Name: no_such_tool' -d "$NOTOOL" "http://127.0.0.1:$p$path")
+  echo "$r" | grep -q '"code":-32602.* HTTP200$' || err "$p an unknown tool, not in-band: $r"
+  r=$(curl -s -w ' HTTP%{http_code}' -H 'Content-Type: application/json' -d "$DISC" "http://127.0.0.1:$p$path")
   echo "$r" | grep -q '"code":-32020.* HTTP400$' || err "$p modern body with no version header: $r"
-  r=$(curl -s -D - -o /dev/null -H 'Content-Type: application/json' -d "$INIT" "http://127.0.0.1:$p/mcp")
+  r=$(curl -s -D - -o /dev/null -H 'Content-Type: application/json' -d "$INIT" "http://127.0.0.1:$p$path")
   echo "$r" | sed -n 1p | grep -q ' 200 ' || err "$p initialize with no version header: $r"
 done
 c=$(curl -s -o /dev/null -w '%{http_code}' -H 'MCP-Protocol-Version: 2026-07-28' http://127.0.0.1:18392/mcp)
@@ -115,6 +119,33 @@ while b"\n" not in b:
     b+=c
 print(b.decode().strip())' "$sock" "$INIT")
 echo "$r" | grep -q '"protocolVersion"' || err "unix initialize: $r"
+r=$(python3 -I -c 'import socket,sys
+s=socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])
+s.sendall(sys.argv[2].encode()+b"\n"); b=b""
+while b"\n" not in b:
+    c=s.recv(4096)
+    if not c: break
+    b+=c
+print(b.decode().strip())' "$sock" "$DISC")
+echo "$r" | grep -q '"supportedVersions":\["2026-07-28"' || err "unix modern server/discover: $r"
+
+# ws: a modern request in a real frame.
+r=$(python3 -I -c 'import base64,os,socket,struct,sys
+s=socket.create_connection(("127.0.0.1",18393),3); s.settimeout(3)
+k=base64.b64encode(os.urandom(16)).decode()
+s.sendall(("GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n\r\n"%k).encode())
+b=b""
+while b"\r\n\r\n" not in b: b+=s.recv(4096)
+b=b.split(b"\r\n\r\n",1)[1]
+p=sys.argv[1].encode(); m=os.urandom(4)
+h=b"\x81"+(bytes([128|len(p)]) if len(p)<126 else bytes([254])+struct.pack(">H",len(p)))
+s.sendall(h+m+bytes(c^m[i%4] for i,c in enumerate(p)))
+while len(b)<4: b+=s.recv(4096)
+n=b[1]&127; o=2
+if n==126: n=struct.unpack(">H",b[2:4])[0]; o=4
+while len(b)<o+n: b+=s.recv(4096)
+print(b[o:o+n].decode())' "$DISC")
+echo "$r" | grep -q '"supportedVersions":\["2026-07-28"' || err "ws modern server/discover: $r"
 
 # Every server above is still up, so a second one on its port has to fail. These
 # logs are .held, not .err: the check below fails the run on 'transport failed'.
@@ -130,10 +161,15 @@ done
 
 # Origin (3.4.15): MCP says a present, invalid Origin gets 403. No list is set
 # here, so every website is refused, and a client that sends no Origin is not.
+# The server's own loopback address is no website: nothing on this port serves a page.
 for m in "http 18390 /mcp" "bridge 18391 /" "streamable 18392 /mcp"; do
   read -r mode port path <<< "$m"
   c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H 'Origin: https://evil.example' -d "$INIT" "http://127.0.0.1:$port$path")
   [ "$c" = "403" ] || err "$mode answered a hostile Origin with $c, not 403"
+  c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H "Origin: http://127.0.0.1:$port" -d "$INIT" "http://127.0.0.1:$port$path")
+  [ "$c" = "200" ] || err "$mode answered its own Origin with $c, not 200"
+  c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H 'Origin: http://127.0.0.1:1' -d "$INIT" "http://127.0.0.1:$port$path")
+  [ "$c" = "403" ] || err "$mode answered another local port with $c, not 403"
 done
 c=$(curl -s -o /dev/null -w '%{http_code}' -X OPTIONS -H 'Origin: https://evil.example' http://127.0.0.1:18391/)
 [ "$c" = "403" ] || err "bridge answered a hostile preflight with $c, not 403"

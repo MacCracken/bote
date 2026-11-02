@@ -10,8 +10,6 @@
 # Every refusal here has a JSON-RPC error in its body. That is how a client tells
 # a modern server from a legacy one: a 400 without a recognized error sends it
 # back to `initialize`.
-#
-# `Mcp-Param-{Name}` is not checked yet, roadmap 3.5.2.
 
 var BOTE_RPC_HEADER_MISMATCH = 0 - 32020;
 var BOTE_HTTP_ACCEPTED = 202;
@@ -19,6 +17,30 @@ var BOTE_HTTP_ACCEPTED = 202;
 var BOTE_HTTP_LEGACY = 0;
 var BOTE_HTTP_MODERN = 1;
 var BOTE_HTTP_REFUSED = 2;
+
+# The largest integer an `x-mcp-header` value may be: 2^53 - 1.
+var BOTE_SAFE_INT = 9007199254740991;
+
+# What every reply here needs. On the caller's stack, 40 bytes:
+#   +0  cfd
+#   +8  transport  name, for the log
+#   +16 buf        the request as read
+#   +24 n          its length
+#   +32 extra      response headers, or 0
+fn bote_http_ctx(hc, cfd, transport, buf, n, extra) {
+    store64(hc, cfd);
+    store64(hc + 8, transport);
+    store64(hc + 16, buf);
+    store64(hc + 24, n);
+    store64(hc + 32, extra);
+    return hc;
+}
+
+fn _he_cfd(hc) { return load64(hc); }
+fn _he_transport(hc) { return load64(hc + 8); }
+fn _he_buf(hc) { return load64(hc + 16); }
+fn _he_n(hc) { return load64(hc + 24); }
+fn _he_extra(hc) { return load64(hc + 32); }
 
 # ================================================================
 # Refusing with a JSON-RPC error in the body
@@ -31,22 +53,22 @@ fn _he_status_text(status) {
     return "Internal Server Error";
 }
 
-fn _he_refuse_json(cfd, level, transport, status, reason, json) {
-    bote_http_log_refusal(level, transport, status, reason);
-    sandhi_server_send_response_a(bote_req_alloc(), cfd, status, _he_status_text(status),
-      "application/json", json, strlen(json), 0);
+fn _he_refuse_json(hc, level, status, reason, json) {
+    bote_http_log_refusal(level, _he_transport(hc), status, reason);
+    sandhi_server_send_response_a(bote_req_alloc(), _he_cfd(hc), status, _he_status_text(status),
+      "application/json", json, strlen(json), _he_extra(hc));
     return BOTE_HTTP_REFUSED;
 }
 
-fn _he_refuse(cfd, level, transport, status, reason, id, code, msg) {
+fn _he_refuse(hc, level, status, reason, id, code, msg) {
     var a = bote_req_alloc();
-    return _he_refuse_json(cfd, level, transport, status, reason,
+    return _he_refuse_json(hc, level, status, reason,
       codec_serialize_response_a(a, resp_error_a(a, id, code, msg)));
 }
 
 # 400 + -32020: what every header failure is.
-fn _he_refuse_header(cfd, transport, reason, id, msg) {
-    return _he_refuse(cfd, SK_WARN, transport, HTTP_BAD_REQUEST, reason, id, BOTE_RPC_HEADER_MISMATCH, msg);
+fn _he_refuse_header(hc, reason, id, msg) {
+    return _he_refuse(hc, SK_WARN, HTTP_BAD_REQUEST, reason, id, BOTE_RPC_HEADER_MISMATCH, msg);
 }
 
 # "Header mismatch: Mcp-Name header value 'foo' does not match body value 'bar'",
@@ -88,8 +110,31 @@ fn _he_header_a(a, buf, n, name) {
     return v;
 }
 
-# 1 when `v` holds only what a field value may: visible ASCII, space and tab.
-fn _he_header_ok(v) {
+# 1 when the header `name` is on more than one line. Lines of one field combine into
+# one comma-separated value (RFC 9110 §5.3), which no body value matches, and a proxy
+# that reads the last line would otherwise act on one bote never compared.
+fn _he_repeated(hc, name) {
+    var buf = _he_buf(hc);
+    var n = _he_n(hc);
+    var nlen = strlen(name);
+    var seen = 0;
+    var i = 0;
+    while (i < n) {
+        # Past the line ending, so the request line is never read as a header.
+        while (i < n && load8(buf + i) != 10) { i = i + 1; }
+        i = i + 1;
+        if (i + nlen >= n || load8(buf + i) == 13 || load8(buf + i) == 10) { return 0; }
+        if (load8(buf + i + nlen) == 58 && _hsv_iceq(buf + i, name, nlen) == 1) {
+            seen = seen + 1;
+            if (seen > 1) { return 1; }
+        }
+    }
+    return 0;
+}
+
+# 1 when the value `v` of the header `name` can be read: on one line, and holding
+# only what a field value may, visible ASCII, space and tab.
+fn _he_field_ok(hc, name, v) {
     var i = 0;
     var c = load8(v);
     while (c != 0) {
@@ -97,6 +142,7 @@ fn _he_header_ok(v) {
         i = i + 1;
         c = load8(v + i);
     }
+    if (_he_repeated(hc, name) == 1) { return 0; }
     return 1;
 }
 
@@ -145,10 +191,10 @@ fn _he_b64_decode_a(a, p, n) {
     return out;
 }
 
-# What `Mcp-Name` says: the value as sent, or a `=?base64?…?=` sentinel decoded.
-# The markers are case-sensitive, so anything else is a plain value. 0 when a
-# sentinel does not decode.
-fn _he_name_value_a(a, v) {
+# What `Mcp-Name` or an `Mcp-Param` header says: the value as sent, or a
+# `=?base64?…?=` sentinel decoded. The markers are case-sensitive, so anything else
+# is a plain value. 0 when a sentinel does not decode.
+fn _he_field_value_a(a, v) {
     var n = strlen(v);
     if (n < 11 || memeq(v, "=?base64?", 9) == 0 || memeq(v + n - 2, "?=", 2) == 0) { return v; }
     return _he_b64_decode_a(a, v + 9, n - 11);
@@ -170,14 +216,14 @@ fn _he_name_key(method) {
 # BOTE_HTTP_REFUSED, or returns 0. With no header: a client of 2025-03-26 or earlier
 # never sends one, and bote serves those revisions, so it passes unless `require`.
 # `body` is read only for a refusal's id: "" when a request has none.
-fn bote_http_check_version(cfd, transport, hv, require, body) {
+fn bote_http_check_version(hc, hv, require, body) {
     var a = bote_req_alloc();
     if (hv == 0) {
         if (require == 0) { return 0; }
-        return _he_refuse_header(cfd, transport, "protocol_version_missing", _he_id_a(a, body), "missing required header: MCP-Protocol-Version");
+        return _he_refuse_header(hc, "protocol_version_missing", _he_id_a(a, body), "missing required header: MCP-Protocol-Version");
     }
     if (bote_protocol_known(hv) == 1) { return 0; }
-    return _he_refuse_json(cfd, SK_DEBUG, transport, HTTP_BAD_REQUEST, "protocol_version",
+    return _he_refuse_json(hc, SK_DEBUG, HTTP_BAD_REQUEST, "protocol_version",
       codec_serialize_response_a(a, _dsp_unsupported_version(a, _he_id_a(a, body), hv)));
 }
 
@@ -204,23 +250,118 @@ fn _he_batch_is_modern(a, body) {
 # The modern path
 # ================================================================
 
+# 1 when the header text `hv` says what the argument `raw` holds, its raw JSON. A
+# string is compared decoded and an integer by value, so `42.0` is `42`. A NUL is
+# something no header can say, an integer outside the safe range is not allowed one,
+# and an object or an array has no text to compare.
+fn _he_param_matches(a, hv, raw) {
+    var c = load8(raw);
+    if (c == 34) {
+        var n = strlen(raw) - 2;
+        var out = alloc_via(a, n + 1);
+        if (_jx_unescape_into(raw + 1, n, out) != strlen(out)) { return 0; }
+        return streq(hv, out);
+    }
+    if (c == 123 || c == 91) { return 0; }
+    if (c == 116 || c == 102) { return streq(hv, raw); }
+    var bv[8];
+    if (_sch_num_parse(raw, &bv) != 2) { return streq(hv, raw); }
+    if (load64(&bv) > BOTE_SAFE_INT || load64(&bv) < 0 - BOTE_SAFE_INT) { return 0; }
+    var hlen = strlen(hv);
+    if (_jx_valid_number(hv, hlen, 0) != hlen) { return 0; }
+    var nv[8];
+    if (_sch_num_parse(hv, &nv) != 2 || load64(&nv) != load64(&bv)) { return 0; }
+    return 1;
+}
+
+# What `args` holds at `path`, as raw JSON, or 0 when nothing is there. A `null` is
+# nothing, as the spec has it: a client sends no header for one.
+fn _he_arg_at_a(a, args, path) {
+    var v = args;
+    var i = 0;
+    while (i < vec_len(path)) {
+        v = jsonx_get_raw_a(a, v, vec_get(path, i));
+        if (v == 0) { return 0; }
+        i = i + 1;
+    }
+    if (streq(v, "null") == 1) { return 0; }
+    return v;
+}
+
+# "Mcp-Param-Region does not match the body", and the like. Neither side's value
+# goes in: an argument is the caller's, and this text can reach a log downstream.
+fn _he_param_msg_a(a, field, tail) {
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, "Header mismatch: ");
+    str_builder_add_cstr_a(a, sb, field);
+    str_builder_add_cstr_a(a, sb, tail);
+    return str_data(str_builder_build_a(a, sb));
+}
+
+# One ParamHeader `p` of a tools/call. 0, or BOTE_HTTP_REFUSED once refused. A header
+# with no value in the body refuses too: a conforming client never sends one, and
+# what it says matches nothing bote would run.
+fn _he_check_param(hc, id, args, p) {
+    var a = bote_req_alloc();
+    var field = param_header_field(p);
+    var raw = _he_arg_at_a(a, args, param_header_path(p));
+    var hv = _he_header_a(a, _he_buf(hc), _he_n(hc), field);
+    if (hv == 0) {
+        if (raw == 0) { return 0; }
+        return _he_refuse_header(hc, "param_header_missing", id, _he_param_msg_a(a, field, " is missing and the body has its value"));
+    }
+    if (_he_field_ok(hc, field, hv) == 0) {
+        return _he_refuse_header(hc, "param_header_invalid", id, _he_param_msg_a(a, field, " is malformed"));
+    }
+    var v = _he_field_value_a(a, hv);
+    if (v == 0) {
+        return _he_refuse_header(hc, "param_header_invalid", id, _he_param_msg_a(a, field, " is not valid Base64"));
+    }
+    if (raw == 0) {
+        return _he_refuse_header(hc, "param_header_mismatch", id, _he_param_msg_a(a, field, " has no value in the body"));
+    }
+    if (_he_param_matches(a, v, raw) == 0) {
+        return _he_refuse_header(hc, "param_header_mismatch", id, _he_param_msg_a(a, field, " does not match the body"));
+    }
+    return 0;
+}
+
+# The `Mcp-Param` headers of the tools/call `req` of the tool `name`, which must not be
+# 0: a map's hash is seeded, so a null key crashes only on the runs where a tool has
+# landed in slot 0. An unknown tool declares none, and is the dispatcher's to refuse.
+fn _he_check_params(hc, req, name, dispatcher) {
+    var tool = registry_get(dispatcher_registry(dispatcher), name);
+    if (tool == 0) { return 0; }
+    var decls = tool_def_param_headers(tool);
+    if (decls == 0) { return 0; }
+    var args = jsonx_get_raw_a(bote_req_alloc(), req_params(req), "arguments");
+    var i = 0;
+    while (i < vec_len(decls)) {
+        if (_he_check_param(hc, req_id(req), args, vec_get(decls, i)) != 0) { return BOTE_HTTP_REFUSED; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # The checks on a request that said it is modern. BOTE_HTTP_MODERN with *req_out
 # set, or BOTE_HTTP_REFUSED.
-fn _he_admit_modern(cfd, transport, buf, n, body, bv, req_out) {
+fn _he_admit_modern(hc, body, bv, dispatcher, req_out) {
     var a = bote_req_alloc();
+    var buf = _he_buf(hc);
+    var n = _he_n(hc);
     var len = strlen(body);
     var first = _cdc_skip_ws(body, len, 0);
     if (first >= len || jsonx_valid(body, len) == 0) {
-        return _he_refuse_json(cfd, SK_DEBUG, transport, HTTP_BAD_REQUEST, "parse_error", _cdc_parse_error_a(a, "invalid JSON"));
+        return _he_refuse_json(hc, SK_DEBUG, HTTP_BAD_REQUEST, "parse_error", _cdc_parse_error_a(a, "invalid JSON"));
     }
     if (load8(body + first) != 123) {
-        return _he_refuse_json(cfd, SK_DEBUG, transport, HTTP_BAD_REQUEST, "not_one_message",
+        return _he_refuse_json(hc, SK_DEBUG, HTTP_BAD_REQUEST, "not_one_message",
           _cdc_invalid_request_a(a, "a POST carries one message"));
     }
     var err_slot[8];
     var req = _cdc_admit_a(a, body, &err_slot);
     if (req == 0) {
-        return _he_refuse_json(cfd, SK_DEBUG, transport, HTTP_BAD_REQUEST, "invalid_request", load64(&err_slot));
+        return _he_refuse_json(hc, SK_DEBUG, HTTP_BAD_REQUEST, "invalid_request", load64(&err_slot));
     }
     # This revision defines no header requirements for a notification.
     if (req_is_notification(req) == 1) {
@@ -231,72 +372,83 @@ fn _he_admit_modern(cfd, transport, buf, n, body, bv, req_out) {
     var id = req_id(req);
     var method = req_method(req);
     if (bv == 0) {
-        return _he_refuse(cfd, SK_DEBUG, transport, HTTP_BAD_REQUEST, "meta_missing", id, 0 - 32602,
+        return _he_refuse(hc, SK_DEBUG, HTTP_BAD_REQUEST, "meta_missing", id, 0 - 32602,
           "_meta needs a string io.modelcontextprotocol/protocolVersion");
+    }
+    if (_he_repeated(hc, "MCP-Protocol-Version") == 1) {
+        return _he_refuse_header(hc, "version_header_invalid", id, "malformed header: MCP-Protocol-Version");
     }
 
     var hm = _he_header_a(a, buf, n, "Mcp-Method");
-    if (hm == 0) { return _he_refuse_header(cfd, transport, "method_header_missing", id, "missing required header: Mcp-Method"); }
-    if (_he_header_ok(hm) == 0) { return _he_refuse_header(cfd, transport, "method_header_invalid", id, "invalid characters in header: Mcp-Method"); }
+    if (hm == 0) { return _he_refuse_header(hc, "method_header_missing", id, "missing required header: Mcp-Method"); }
+    if (_he_field_ok(hc, "Mcp-Method", hm) == 0) { return _he_refuse_header(hc, "method_header_invalid", id, "malformed header: Mcp-Method"); }
     if (streq(hm, method) == 0) {
-        return _he_refuse_header(cfd, transport, "method_header_mismatch", id, _he_mismatch_msg_a(a, "Mcp-Method", hm, method));
+        return _he_refuse_header(hc, "method_header_mismatch", id, _he_mismatch_msg_a(a, "Mcp-Method", hm, method));
     }
 
     var key = _he_name_key(method);
+    var bn = 0;
     if (key != 0) {
         var hn = _he_header_a(a, buf, n, "Mcp-Name");
-        if (hn == 0) { return _he_refuse_header(cfd, transport, "name_header_missing", id, "missing required header: Mcp-Name"); }
-        if (_he_header_ok(hn) == 0) { return _he_refuse_header(cfd, transport, "name_header_invalid", id, "invalid characters in header: Mcp-Name"); }
-        var nv = _he_name_value_a(a, hn);
-        if (nv == 0) { return _he_refuse_header(cfd, transport, "name_header_invalid", id, "Mcp-Name is not valid Base64"); }
+        if (hn == 0) { return _he_refuse_header(hc, "name_header_missing", id, "missing required header: Mcp-Name"); }
+        if (_he_field_ok(hc, "Mcp-Name", hn) == 0) { return _he_refuse_header(hc, "name_header_invalid", id, "malformed header: Mcp-Name"); }
+        var nv = _he_field_value_a(a, hn);
+        if (nv == 0) { return _he_refuse_header(hc, "name_header_invalid", id, "Mcp-Name is not valid Base64"); }
         # A body with no such field is the dispatcher's -32602.
-        var bn = jsonx_get_str_dec_a(a, req_params(req), key);
+        bn = jsonx_get_str_dec_a(a, req_params(req), key);
         if (bn != 0 && streq(nv, bn) == 0) {
-            return _he_refuse_header(cfd, transport, "name_header_mismatch", id, _he_mismatch_msg_a(a, "Mcp-Name", nv, bn));
+            return _he_refuse_header(hc, "name_header_mismatch", id, _he_mismatch_msg_a(a, "Mcp-Name", nv, bn));
         }
     }
 
     # A request that named this revision named one with no `initialize`. The
     # dispatcher takes an `initialize` as legacy; here the header settles it.
     if (streq(method, "initialize") == 1) {
-        return _he_refuse(cfd, SK_DEBUG, transport, HTTP_NOT_FOUND, "method", id, 0 - 32601, "method not found: initialize");
+        return _he_refuse(hc, SK_DEBUG, HTTP_NOT_FOUND, "method", id, 0 - 32601, "method not found: initialize");
+    }
+    if (bn != 0 && streq(method, "tools/call") == 1 && _he_check_params(hc, req, bn, dispatcher) != 0) {
+        return BOTE_HTTP_REFUSED;
     }
     store64(req_out, req);
     return BOTE_HTTP_MODERN;
 }
 
-# The status a JSON-RPC error goes out with on the modern path. The spec sets 404
-# for -32601 and 400 for -32020, -32021, -32022 and a -32602 for a missing required
-# field. 400 for every -32602 meets that on any reading of "required field", and a
-# client takes a 400 carrying a recognized error as a modern server's answer.
+# The status a JSON-RPC error from the dispatcher goes out with. The spec sets 404 for
+# -32601 and 400 for -32020, -32021 and -32022. What it leaves open stays in-band on a
+# 200: a client reads a JSON-RPC error out of a 200 or a 400 and not out of a 500, and a
+# 5xx is what a proxy retries. A -32602 is a 400 only for a `_meta` field, which
+# bote_http_serve_modern picks out.
 fn _he_status_for(code) {
     if (code == 0 - 32601) { return HTTP_NOT_FOUND; }
-    if (code == 0 - 32603) { return HTTP_INTERNAL; }
-    if (code == 0 - 32602 || code == 0 - 32600 || code == 0 - 32700) { return HTTP_BAD_REQUEST; }
+    if (code == 0 - 32600 || code == 0 - 32700) { return HTTP_BAD_REQUEST; }
     if (code == BOTE_RPC_HEADER_MISMATCH || code == 0 - 32021 || code == 0 - 32022) { return HTTP_BAD_REQUEST; }
     return HTTP_OK;
 }
 
 # 202 with no body: what a notification gets, in either era.
-fn bote_http_send_accepted(cfd) {
-    sandhi_server_send_response_a(bote_req_alloc(), cfd, BOTE_HTTP_ACCEPTED, "Accepted", "text/plain", "", 0, 0);
+fn bote_http_send_accepted(cfd, extra) {
+    sandhi_server_send_response_a(bote_req_alloc(), cfd, BOTE_HTTP_ACCEPTED, "Accepted", "text/plain", "", 0, extra);
     return 0;
 }
 
 # Answer a request bote_http_era admitted. Sessions play no part: this revision
 # has none, so `Mcp-Session-Id` and `Last-Event-ID` are ignored and none is minted.
-fn bote_http_serve_modern(cfd, req, dispatcher, claims) {
+fn bote_http_serve_modern(hc, req, dispatcher, claims) {
     var a = bote_req_alloc();
     var dbg = bote_log_enabled(SK_DEBUG);
     var t0 = 0;
     if (dbg == 1) { t0 = clock_now_ns(); }
     var resp = dispatcher_dispatch_a(a, dispatcher, req, claims);
     if (dbg == 1) { _cdc_log_request_a(a, req, resp, t0); }
-    if (resp == 0) { return bote_http_send_accepted(cfd); }
+    if (resp == 0) { return bote_http_send_accepted(_he_cfd(hc), _he_extra(hc)); }
     var status = HTTP_OK;
-    if (resp_error_obj(resp) != 0) { status = _he_status_for(rpc_err_code(resp_error_obj(resp))); }
+    var err = resp_error_obj(resp);
+    if (err != 0) {
+        status = _he_status_for(rpc_err_code(err));
+        if (streq(rpc_err_message(err), DSP_CAPS_MISSING) == 1) { status = HTTP_BAD_REQUEST; }
+    }
     var json = codec_serialize_response_a(a, resp);
-    sandhi_server_send_response_a(a, cfd, status, _he_status_text(status), "application/json", json, strlen(json), 0);
+    sandhi_server_send_response_a(a, _he_cfd(hc), status, _he_status_text(status), "application/json", json, strlen(json), _he_extra(hc));
     return 0;
 }
 
@@ -306,17 +458,17 @@ fn bote_http_serve_modern(cfd, req, dispatcher, claims) {
 
 # BOTE_HTTP_LEGACY, BOTE_HTTP_MODERN with *req_out set, or BOTE_HTTP_REFUSED once
 # the refusal is sent. `require` is the transport's require_protocol.
-fn bote_http_era(cfd, transport, buf, n, body, require, req_out) {
+fn bote_http_era(hc, body, require, dispatcher, req_out) {
     var a = bote_req_alloc();
     store64(req_out, 0);
-    var hv = _he_header_a(a, buf, n, "MCP-Protocol-Version");
+    var hv = _he_header_a(a, _he_buf(hc), _he_n(hc), "MCP-Protocol-Version");
     var bv = _he_body_version_a(a, body);
     var modern_body = 0;
     if (bv != 0) { modern_body = _mcp_is_modern(bv); }
     var len = strlen(body);
     var first = _cdc_skip_ws(body, len, 0);
     if (first < len && load8(body + first) == 91 && jsonx_valid(body, len) == 1 && _he_batch_is_modern(a, body) == 1) {
-        return _he_refuse_json(cfd, SK_DEBUG, transport, HTTP_BAD_REQUEST, "not_one_message",
+        return _he_refuse_json(hc, SK_DEBUG, HTTP_BAD_REQUEST, "not_one_message",
           _cdc_invalid_request_a(a, "a POST carries one message"));
     }
 
@@ -328,12 +480,12 @@ fn bote_http_era(cfd, transport, buf, n, body, require, req_out) {
         var bm = jsonx_get_str_dec_a(a, body, "method");
         if (bm != 0 && streq(bm, "initialize") == 1) { require = 0; }
     }
-    if (bote_http_check_version(cfd, transport, hv, require, body) != 0) { return BOTE_HTTP_REFUSED; }
+    if (bote_http_check_version(hc, hv, require, body) != 0) { return BOTE_HTTP_REFUSED; }
     if (hv == 0) { return BOTE_HTTP_LEGACY; }
     if (bv != 0 && streq(hv, bv) == 0) {
-        return _he_refuse_header(cfd, transport, "version_header_mismatch", _he_id_a(a, body),
+        return _he_refuse_header(hc, "version_header_mismatch", _he_id_a(a, body),
           _he_mismatch_msg_a(a, "MCP-Protocol-Version", hv, bv));
     }
     if (_mcp_is_modern(hv) == 0) { return BOTE_HTTP_LEGACY; }
-    return _he_admit_modern(cfd, transport, buf, n, body, bv, req_out);
+    return _he_admit_modern(hc, body, bv, dispatcher, req_out);
 }

@@ -1,5 +1,5 @@
-# Fuzz: bote_http_era (3.5.1) reads a client's raw headers and body before anything
-# else has judged them, so a crash is a remote crash, and a byte kept is a slow one.
+# Fuzz: bote_http_era reads a client's raw headers and body before anything else has
+# judged them, so a crash is a remote crash, and a byte kept is a slow one.
 # Each property has its own exit code:
 #
 #   10  _he_b64_decode_a agrees with bayan_base64_decode on every substitution of
@@ -58,6 +58,25 @@ alloc_init();
 sakshi_set_level(SK_ERROR);
 
 var _buf = alloc(8192);
+
+fn _h(args, claims) { return "{\"content\":[]}"; }
+
+var _fzd = 0;
+
+# A tool with a header of each kind, so that the sweep reaches every comparison.
+fn _fz_dispatcher() {
+    if (_fzd != 0) { return _fzd; }
+    var pp = vec_new();
+    vec_push(pp, schema_prop_new("region", "{\"type\":\"string\",\"x-mcp-header\":\"Region\"}"));
+    vec_push(pp, schema_prop_new("n", "{\"type\":\"integer\",\"x-mcp-header\":\"Count\"}"));
+    vec_push(pp, schema_prop_new("flag", "{\"type\":\"boolean\",\"x-mcp-header\":\"Flag\"}"));
+    vec_push(pp, schema_prop_new("a", "{\"type\":\"object\",\"properties\":{\"b\":{\"type\":\"string\",\"x-mcp-header\":\"Deep\"}}}"));
+    var reg = tool_registry_new();
+    registry_register(reg, tool_def_new("p", "Param", schema_new("object", pp, vec_new())));
+    _fzd = dispatcher_new(reg);
+    dispatcher_handle(_fzd, "p", &_h);
+    return _fzd;
+}
 
 # 1 when the bayan pair at `d` holds a NUL.
 fn _has_nul(d) {
@@ -137,6 +156,7 @@ fn _modern(method, extra) {
 
 var seeds = vec_new();
 vec_push(seeds, _seed("MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: t\r\n", _modern("tools/call", ",\"name\":\"t\",\"arguments\":{\"a\":1}")));
+vec_push(seeds, _seed("MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: p\r\nMcp-Param-Region: us\r\nMcp-Param-Count: 42\r\nMcp-Param-Flag: true\r\nMcp-Param-Deep: =?base64?eA==?=\r\n", _modern("tools/call", ",\"name\":\"p\",\"arguments\":{\"region\":\"us\",\"n\":42,\"flag\":true,\"a\":{\"b\":\"x\"}}")));
 vec_push(seeds, _seed("MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: resources/read\r\nMcp-Name: =?base64?cmVzOi8vYQ==?=\r\n", _modern("resources/read", ",\"uri\":\"res://a\"")));
 vec_push(seeds, _seed("MCP-Protocol-Version: 2026-07-28\r\n", "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/x\"}"));
 vec_push(seeds, _seed("MCP-Protocol-Version: 2025-11-25\r\nMCP-Session-Id: abc\r\n", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"));
@@ -162,7 +182,9 @@ fn _sweep(require) {
                 if (be >= 0) { body = _buf + be + 4; }
                 bote_req_begin();
                 var out[8];
-                var era = bote_http_era(0 - 1, "fuzz", _buf, n, body, require, &out);
+                var hc[40];
+                bote_http_ctx(&hc, 0 - 1, "fuzz", _buf, n, 0);
+                var era = bote_http_era(&hc, body, require, _fz_dispatcher(), &out);
                 if (era != BOTE_HTTP_LEGACY && era != BOTE_HTTP_MODERN && era != BOTE_HTTP_REFUSED) { sys_exit(20); }
                 if (era == BOTE_HTTP_MODERN && load64(&out) == 0) { sys_exit(20); }
                 bi = bi + 1;

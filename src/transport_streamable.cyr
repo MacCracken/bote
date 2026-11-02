@@ -289,7 +289,7 @@ fn _strm_init() {
 
 fn _strm_check_origin(cfd, buf, blen, config) {
     var origin = sandhi_server_find_header_a(bote_req_alloc(), buf, blen, "Origin");
-    if (bote_origin_ok(origin, streamable_config_allowed_origins(config)) == 1) { return 0; }
+    if (bote_http_origin_ok(origin, streamable_config_allowed_origins(config), buf, blen) == 1) { return 0; }
     bote_http_refuse(cfd, SK_WARN, "streamable", HTTP_FORBIDDEN, "Forbidden", "origin");
     return HTTP_FORBIDDEN;
 }
@@ -391,11 +391,13 @@ fn _strm_handle_post(cfd, buf, n, config) {
         return 0;
     }
 
+    var hc[40];
     var mreq[8];
-    var era = bote_http_era(cfd, "streamable", buf, n, body, streamable_config_require_protocol(config), &mreq);
+    bote_http_ctx(&hc, cfd, "streamable", buf, n, 0);
+    var era = bote_http_era(&hc, body, streamable_config_require_protocol(config), streamable_config_dispatcher(config), &mreq);
     if (era == BOTE_HTTP_REFUSED) { return 0; }
     if (era == BOTE_HTTP_MODERN) {
-        return bote_http_serve_modern(cfd, load64(&mreq), streamable_config_dispatcher(config), load64(&claims_slot));
+        return bote_http_serve_modern(&hc, load64(&mreq), streamable_config_dispatcher(config), load64(&claims_slot));
     }
 
     var rpc_method = _strm_peek_method(body);
@@ -421,7 +423,7 @@ fn _strm_handle_post(cfd, buf, n, config) {
         str_builder_add_cstr(sb, "\r\n");
         extra = str_data(str_builder_build_a(bote_req_alloc(), sb));
     }
-    if (resp == 0) { return bote_http_send_accepted(cfd); }
+    if (resp == 0) { return bote_http_send_accepted(cfd, 0); }
     # Piggyback: when the client accepts SSE and its session has pending
     # notifications, answer with text/event-stream — the JSON-RPC response
     # (id-less frame) followed by the drained notifications — so a client that
@@ -501,7 +503,9 @@ fn _strm_handle_get(cfd, buf, n, config) {
         bote_http_refuse_method(cfd, "streamable", "Allow: POST\r\n");
         return 0;
     }
-    if (bote_http_check_version(cfd, "streamable", gv, streamable_config_require_protocol(config), "") != 0) { return 0; }
+    var hc[40];
+    bote_http_ctx(&hc, cfd, "streamable", buf, n, 0);
+    if (bote_http_check_version(&hc, gv, streamable_config_require_protocol(config), "") != 0) { return 0; }
     if (_strm_check_session(cfd, buf, n, config, "") != 0) { return 0; }
 
     # Resolve the drain source: the per-session outbound buffer when a

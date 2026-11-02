@@ -237,7 +237,7 @@ fn _bridge_handle(config, cfd, buf, n) {
     var origin = sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Origin");
     # Before everything, the preflight included: an Origin the operator did not
     # allow never reaches a tool.
-    if (bote_origin_ok(origin, allowed_origins) == 0) {
+    if (bote_http_origin_ok(origin, allowed_origins, buf, n) == 0) {
         bote_http_refuse(cfd, SK_WARN, "bridge", HTTP_FORBIDDEN, "Forbidden", "origin");
         return 0;
     }
@@ -306,6 +306,17 @@ fn _bridge_handle(config, cfd, buf, n) {
     if (strlen(body) != clen) {
         bote_http_refuse(cfd, SK_WARN, "bridge", HTTP_BAD_REQUEST, "Bad Request", "nul_in_body");
         return 0;
+    }
+
+    # The modern revision has the same rules here as on any HTTP endpoint. What the
+    # bridge does differently below is its own contract with legacy callers.
+    var hc[40];
+    var mreq[8];
+    bote_http_ctx(&hc, cfd, "bridge", buf, n, cors);
+    var era = bote_http_era(&hc, body, 0, dispatcher, &mreq);
+    if (era == BOTE_HTTP_REFUSED) { return 0; }
+    if (era == BOTE_HTTP_MODERN) {
+        return bote_http_serve_modern(&hc, load64(&mreq), dispatcher, load64(&claims_slot));
     }
 
     var resp = bridge_process_message_a(a, body, dispatcher, load64(&claims_slot));

@@ -311,6 +311,13 @@ fn _held_port(out_fd) {
     return 0;
 }
 
+# Why a tool with the one property schema `raw` cannot register, or 0.
+fn _hdr_why(raw) {
+    var p = vec_new();
+    vec_push(p, schema_prop_new("a", raw));
+    return registry_check_tool_def(tool_def_new("t", "x", schema_new("object", p, vec_new())));
+}
+
 fn main() {
     alloc_init();
     fl_init();
@@ -478,6 +485,79 @@ fn main() {
     assert(registry_validate_params(fbreg, "scan", "{\"x\":\"\\\"path\\\":1\"}") != 0, "fallback: a key spelled inside a string is not the field");
     assert_eq(registry_validate_params(fbreg, "scan", "{\"path\":\"/a\",\"path\":\"/b\"}"), 0, "fallback: a repeated key is still present");
     assert_eq(registry_validate_params(reg2, "scan", "{\"path\":\"/a\",\"path\":\"/b\"}"), 0, "compiled path: the same repeated key passes, so the two paths agree");
+
+    # ---------------- _jx_members and x-mcp-header at registration ----------------
+    var jm = _jx_members(" { \"a\" : 1 , \"b\\u0063\" : {\"x\":[1,{\"y\":2}]} , \"\":null } ");
+    assert_eq(vec_len(jm), 6, "members: a key and a value each");
+    assert(streq(vec_get(jm, 0), "a") == 1 && streq(vec_get(jm, 1), "1") == 1, "members: in order, the value raw");
+    assert(streq(vec_get(jm, 2), "bc") == 1, "members: a key as it decodes");
+    assert(streq(vec_get(jm, 3), "{\"x\":[1,{\"y\":2}]}") == 1, "members: a nested value whole");
+    assert(strlen(vec_get(jm, 4)) == 0 && streq(vec_get(jm, 5), "null") == 1, "members: an empty key");
+    assert_eq(vec_len(_jx_members("{}")), 0, "members: none");
+    assert_eq(vec_len(_jx_members("[1,2]")), 0, "members: an array has none");
+    assert_eq(vec_len(_jx_members(0)), 0, "members: nothing");
+    # A key is the same key in a schema as in a message.
+    var escp = vec_new();
+    vec_push(escp, schema_prop_new("o", "{\"type\":\"object\",\"properties\":{\"c\\u006et\":{\"type\":\"integer\"}}}"));
+    var esccomp = compiled_compile(schema_new("object", escp, vec_new()));
+    assert(vec_len(compiled_validate(esccomp, "{\"o\":{\"cnt\":\"x\"}}")) > 0, "compile: a nested property named with an escape is enforced");
+
+    assert_eq(_hdr_why("{\"type\":\"string\",\"x-mcp-header\":\"Region\"}"), 0, "x-mcp-header: on a string");
+    assert_eq(_hdr_why("{\"type\":\"integer\",\"x-mcp-header\":\"Region\"}"), 0, "x-mcp-header: on an integer");
+    assert_eq(_hdr_why("{\"type\":\"boolean\",\"x-mcp-header\":\"Region\"}"), 0, "x-mcp-header: on a boolean");
+    assert_eq(_hdr_why("{\"type\":\"string\",\"x-mcp-header\":\"!#$%&'*+-.^_`|~09azAZ\"}"), 0, "x-mcp-header: every tchar");
+    assert_eq(_hdr_why("{\"type\":\"object\",\"properties\":{\"b\":{\"type\":\"object\",\"properties\":{\"c\":{\"type\":\"string\",\"x-mcp-header\":\"Deep\"}}}}}"), 0, "x-mcp-header: nested through properties");
+    assert(_hdr_why("{\"type\":\"string\",\"x-mcp-header\":\"\"}") != 0, "x-mcp-header refused: empty");
+    assert(_hdr_why("{\"type\":\"string\",\"x-mcp-header\":5}") != 0, "x-mcp-header refused: not a string");
+    assert(_hdr_why("{\"type\":\"string\",\"x-mcp-header\":\"A B\"}") != 0, "x-mcp-header refused: a space");
+    assert(_hdr_why("{\"type\":\"string\",\"x-mcp-header\":\"A:B\"}") != 0, "x-mcp-header refused: a delimiter");
+    assert(_hdr_why("{\"type\":\"string\",\"x-mcp-header\":\"A\\r\\nB: c\"}") != 0, "x-mcp-header refused: CR and LF");
+    assert(_hdr_why("{\"type\":\"string\",\"x-mcp-header\":\"\\u00e9\"}") != 0, "x-mcp-header refused: non-ASCII");
+    assert(_hdr_why("{\"type\":\"number\",\"x-mcp-header\":\"N\"}") != 0, "x-mcp-header refused: type number");
+    assert(_hdr_why("{\"type\":\"object\",\"x-mcp-header\":\"N\"}") != 0, "x-mcp-header refused: an object");
+    assert(_hdr_why("{\"type\":\"array\",\"x-mcp-header\":\"N\"}") != 0, "x-mcp-header refused: an array");
+    assert(_hdr_why("{\"x-mcp-header\":\"N\"}") != 0, "x-mcp-header refused: no type");
+    assert(_hdr_why("{\"type\":[\"string\",\"null\"],\"x-mcp-header\":\"N\"}") != 0, "x-mcp-header refused: a type array");
+    var hp_u = _hdr_why("{\"type\":\"object\",\"properties\":{\"b\":{\"type\":\"string\",\"x-mcp-header\":\"Dup\"},\"c\":{\"type\":\"string\",\"x-mcp-header\":\"dUP\"}}}");
+    assert(hp_u != 0, "x-mcp-header refused: the same name in another case");
+    assert(_hdr_why("{\"type\":\"array\",\"items\":{\"type\":\"string\",\"x-mcp-header\":\"N\"}}") != 0, "x-mcp-header refused: under items");
+    assert(_hdr_why("{\"type\":\"array\",\"prefixItems\":[{\"type\":\"string\",\"x-mcp-header\":\"N\"}]}") != 0, "x-mcp-header refused: under prefixItems");
+    assert(_hdr_why("{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\",\"x-mcp-header\":\"N\"}}") != 0, "x-mcp-header refused: under additionalProperties");
+    assert(_hdr_why("{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"string\",\"x-mcp-header\":\"N\"}]}") != 0, "x-mcp-header refused: under anyOf");
+    assert(_hdr_why("{\"oneOf\":[{\"type\":\"string\",\"x-mcp-header\":\"N\"}]}") != 0, "x-mcp-header refused: under oneOf");
+    assert(_hdr_why("{\"allOf\":[{\"type\":\"string\",\"x-mcp-header\":\"N\"}]}") != 0, "x-mcp-header refused: under allOf");
+    assert(_hdr_why("{\"not\":{\"type\":\"string\",\"x-mcp-header\":\"N\"}}") != 0, "x-mcp-header refused: under not");
+    assert(_hdr_why("{\"if\":{\"type\":\"string\",\"x-mcp-header\":\"N\"}}") != 0, "x-mcp-header refused: under if");
+    assert(_hdr_why("{\"then\":{\"type\":\"string\",\"x-mcp-header\":\"N\"}}") != 0, "x-mcp-header refused: under then");
+    assert(_hdr_why("{\"else\":{\"type\":\"string\",\"x-mcp-header\":\"N\"}}") != 0, "x-mcp-header refused: under else");
+    assert(_hdr_why("{\"$defs\":{\"s\":{\"type\":\"string\",\"x-mcp-header\":\"N\"}}}") != 0, "x-mcp-header refused: under $defs");
+    assert(_hdr_why("{\"definitions\":{\"s\":{\"type\":\"string\",\"x-mcp-header\":\"N\"}}}") != 0, "x-mcp-header refused: under definitions");
+    assert(_hdr_why("{\"patternProperties\":{\"^a\":{\"type\":\"string\",\"x-mcp-header\":\"N\"}}}") != 0, "x-mcp-header refused: under patternProperties");
+    assert(_hdr_why("{\"dependentSchemas\":{\"a\":{\"type\":\"string\",\"x-mcp-header\":\"N\"}}}") != 0, "x-mcp-header refused: under dependentSchemas");
+    assert(_hdr_why("{\"type\":\"object\",\"properties\":{\"b\":{\"anyOf\":[{\"properties\":{\"c\":{\"type\":\"string\",\"x-mcp-header\":\"N\"}}}]}}}") != 0, "x-mcp-header refused: properties below a composition");
+    assert_eq(_hdr_why("{\"type\":\"object\",\"properties\":{\"x-mcp-header\":{\"type\":\"array\"}}}"), 0, "x-mcp-header: a property with that name is no annotation");
+    assert_eq(_hdr_why("{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"x-mcp-header\":{\"type\":\"array\"}}}}"), 0, "x-mcp-header: ...nor under items");
+    assert_eq(_hdr_why("{\"type\":\"string\",\"default\":{\"x-mcp-header\":\"N\"},\"examples\":[{\"x-mcp-header\":\"N\"}]}"), 0, "x-mcp-header: data holding the word is no annotation");
+    assert(_hdr_why("{\"type\":\"string\",\"x-mcp\\u002dheader\":\"A B\"}") != 0, "x-mcp-header refused: the key spelled with an escape is the same key");
+    var hreg = tool_registry_new();
+    var hbadp = vec_new();
+    vec_push(hbadp, schema_prop_new("n", "{\"type\":\"number\",\"x-mcp-header\":\"N\"}"));
+    assert(registry_register(hreg, tool_def_new("h_bad", "x", schema_new("object", hbadp, vec_new()))) != 0, "x-mcp-header: register refuses what the check refuses");
+    assert_eq(registry_contains(hreg, "h_bad"), 0, "x-mcp-header: ...and registers nothing");
+    var hgp = vec_new();
+    vec_push(hgp, schema_prop_new("o", "{\"type\":\"object\",\"properties\":{\"r\":{\"type\":\"string\",\"x-mcp-header\":\"Reg\"}}}"));
+    vec_push(hgp, schema_prop_new("s", "{\"type\":\"integer\",\"x-mcp-header\":\"Num\"}"));
+    var hgt = tool_def_new("h_good", "x", schema_new("object", hgp, vec_new()));
+    assert_eq(tool_def_param_headers(hgt), 0, "x-mcp-header: nothing read before registration");
+    assert_eq(registry_register(hreg, hgt), 0, "x-mcp-header: registered");
+    var hgd = tool_def_param_headers(hgt);
+    assert_eq(vec_len(hgd), 2, "x-mcp-header: both read");
+    assert(streq(param_header_field(vec_get(hgd, 0)), "Mcp-Param-Reg") == 1, "x-mcp-header: the header name");
+    assert_eq(vec_len(param_header_path(vec_get(hgd, 0))), 2, "x-mcp-header: the path, for a nested property");
+    assert(streq(vec_get(param_header_path(vec_get(hgd, 0)), 1), "r") == 1, "x-mcp-header: ...ending at the leaf");
+    assert(streq(param_header_field(vec_get(hgd, 1)), "Mcp-Param-Num") == 1, "x-mcp-header: the second");
+    registry_register(hreg, tool_def_new("h_none", "x", schema_new("object", 0, vec_new())));
+    assert_eq(tool_def_param_headers(registry_get(hreg, "h_none")), 0, "x-mcp-header: a tool with none has no list");
 
     # ---------------- registry: registration checks and compile (3.4.8) ----------------
     var rreg = tool_registry_new();
@@ -1749,6 +1829,23 @@ fn main() {
     assert_eq(bote_origin_ok("null", cors_b), 0, "origin: a sandboxed iframe's `null` -> refused");
     assert_eq(bote_origin_ok("http://localhost:8080", cors_b), 1, "origin: on the list -> passes");
     assert_eq(bote_origin_ok("http://anything", cors_a), 1, "origin: `*` -> passes");
+    assert_eq(bote_origin_self("http://localhost:8390", "localhost:8390", 0), 1, "origin self: localhost, its own Host");
+    assert_eq(bote_origin_self("http://127.0.0.1:8390", "127.0.0.1:8390", 0), 1, "origin self: 127.0.0.1");
+    assert_eq(bote_origin_self("http://[::1]:8390", "[::1]:8390", 0), 1, "origin self: [::1]");
+    assert_eq(bote_origin_self("http://localhost", "localhost", 0), 1, "origin self: no port");
+    assert_eq(bote_origin_self("https://localhost:8390", "localhost:8390", 0), 1, "origin self: https");
+    assert_eq(bote_origin_self("http://localhost:8390", "localhost:8390", vec_new()), 1, "origin self: an empty list is no list");
+    assert_eq(bote_origin_self("http://localhost:3000", "localhost:8390", 0), 0, "origin self: another port on this machine");
+    assert_eq(bote_origin_self("http://evil.example:8390", "evil.example:8390", 0), 0, "origin self: a rebinding page, whose Host is its own name");
+    assert_eq(bote_origin_self("http://evil.example", "localhost:8390", 0), 0, "origin self: another name");
+    assert_eq(bote_origin_self("http://localhost.evil.example", "localhost.evil.example", 0), 0, "origin self: a name that starts like localhost");
+    assert_eq(bote_origin_self("http://127.0.0.10", "127.0.0.10", 0), 0, "origin self: an address that starts like loopback");
+    assert_eq(bote_origin_self("http://localhost:8390", "localhost:8390", cors_b), 0, "origin self: a list is the whole policy");
+    assert_eq(bote_origin_self("http://localhost:8390", 0, 0), 0, "origin self: no Host");
+    assert_eq(bote_origin_self(0, "localhost:8390", 0), 0, "origin self: no Origin");
+    assert_eq(bote_origin_self("ftp://localhost:8390", "localhost:8390", 0), 0, "origin self: another scheme");
+    assert_eq(bote_origin_self("localhost:8390", "localhost:8390", 0), 0, "origin self: no scheme");
+    assert_eq(bote_origin_self("http://", "localhost:8390", 0), 0, "origin self: a scheme alone");
     assert_eq(bote_origin_ok(0, cors_b), 1, "origin: none, a list -> passes");
     var oh_before = alloc_used();
     bote_origin_ok("http://evil.example", cors_b);
