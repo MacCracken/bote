@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.5.2"; }
+fn _bote_server_version() { return "3.5.3"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -277,6 +277,24 @@ fn dispatcher_register_resource(d, resource_def, handler_fp) {
     return 0;
 }
 
+# Register a resource template + its read handler. Stands up the registry the way
+# dispatcher_register_resource does. Returns 0, or a BoteError saying why not, with
+# nothing registered.
+fn dispatcher_register_resource_template(d, template, handler_fp) {
+    if (template == 0 || resource_template_name(template) == 0) {
+        return bote_err_new(BOTE_ERR_INVALID_PARAMS, "", "a resource template needs a name");
+    }
+    var why = resource_template_check(resource_template_uri(template));
+    if (why != 0) { return bote_err_new(BOTE_ERR_INVALID_PARAMS, resource_template_name(template), why); }
+    var rreg = dispatcher_resources(d);
+    if (rreg == 0) {
+        rreg = resource_registry_new();
+        dispatcher_set_resources(d, rreg);
+    }
+    resource_registry_register_template(rreg, template, handler_fp);
+    return 0;
+}
+
 # ================================================================
 # JSON helpers — escape, build literals
 # ================================================================
@@ -471,15 +489,31 @@ fn _build_initialize_result_a(a, d, params_cstr) {
 
 # Build the prompts/list response result body.
 fn _build_prompts_list_result(a, preg) {
-    var sb = str_builder_new_a(a);
-    _sb_grow_a(a, sb, 4096);
-    str_builder_add_cstr(sb, "{\"prompts\":[");
-    var lst = prompt_registry_list(preg);
-    var n = vec_len(lst);
+    var names = prompt_registry_names(preg);
+    var n = vec_len(names);
+    var room = 32;
     var i = 0;
     while (i < n) {
+        var c = prompt_registry_get(preg, vec_get(names, i));
+        room = room + 64 + _dsp_room(prompt_def_name(c)) + _dsp_room(prompt_def_description(c));
+        var cargs = prompt_def_arguments(c);
+        if (cargs != 0) {
+            var ci = 0;
+            while (ci < vec_len(cargs)) {
+                var carg = vec_get(cargs, ci);
+                room = room + 64 + _dsp_room(prompt_arg_name(carg)) + _dsp_room(prompt_arg_description(carg));
+                ci = ci + 1;
+            }
+        }
+        i = i + 1;
+    }
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, room);
+    str_builder_add_cstr(sb, "{\"prompts\":[");
+    i = 0;
+    while (i < n) {
         if (i > 0) { str_builder_add_cstr(sb, ","); }
-        var p = vec_get(lst, i);
+        var p = prompt_registry_get(preg, vec_get(names, i));
         str_builder_add_cstr(sb, "{");
         _json_emit_str_field(sb, "name", prompt_def_name(p));
         var pd = prompt_def_description(p);
@@ -494,15 +528,15 @@ fn _build_prompts_list_result(a, preg) {
             var ai = 0;
             while (ai < na) {
                 if (ai > 0) { str_builder_add_cstr(sb, ","); }
-                var a = vec_get(pargs, ai);
+                var parg = vec_get(pargs, ai);
                 str_builder_add_cstr(sb, "{");
-                _json_emit_str_field(sb, "name", prompt_arg_name(a));
-                var ad = prompt_arg_description(a);
+                _json_emit_str_field(sb, "name", prompt_arg_name(parg));
+                var ad = prompt_arg_description(parg);
                 if (ad != 0) {
                     str_builder_add_cstr(sb, ",");
                     _json_emit_str_field(sb, "description", ad);
                 }
-                if (prompt_arg_required(a) == 1) {
+                if (prompt_arg_required(parg) == 1) {
                     str_builder_add_cstr(sb, ",\"required\":true");
                 }
                 str_builder_add_cstr(sb, "}");
@@ -535,7 +569,7 @@ fn _tool_matches_profile(t, profile) {
 # estimate costs one growth on the heap, nothing worse.
 fn _dsp_room(cstr) {
     if (cstr == 0) { return 0; }
-    return 2 * strlen(cstr);
+    return 6 * strlen(cstr);
 }
 
 fn _dsp_tool_list_room(t) {
@@ -858,15 +892,23 @@ fn _prompt_missing_required(pdef, args_obj) {
 
 # Build the resources/list response result body.
 fn _build_resources_list_result(a, rreg) {
-    var sb = str_builder_new_a(a);
-    _sb_grow_a(a, sb, 4096);
-    str_builder_add_cstr(sb, "{\"resources\":[");
-    var lst = resource_registry_list(rreg);
-    var n = vec_len(lst);
+    var uris = resource_registry_uris(rreg);
+    var n = vec_len(uris);
+    var room = 32;
     var i = 0;
     while (i < n) {
+        var c = resource_registry_get(rreg, vec_get(uris, i));
+        room = room + 64 + _dsp_room(resource_def_uri(c)) + _dsp_room(resource_def_name(c));
+        room = room + _dsp_room(resource_def_description(c)) + _dsp_room(resource_def_mime_type(c));
+        i = i + 1;
+    }
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, room);
+    str_builder_add_cstr(sb, "{\"resources\":[");
+    i = 0;
+    while (i < n) {
         if (i > 0) { str_builder_add_cstr(sb, ","); }
-        var r = vec_get(lst, i);
+        var r = resource_registry_get(rreg, vec_get(uris, i));
         str_builder_add_cstr(sb, "{");
         _json_emit_str_field(sb, "uri", resource_def_uri(r));
         str_builder_add_cstr(sb, ",");
@@ -880,6 +922,46 @@ fn _build_resources_list_result(a, rreg) {
         if (rm != 0) {
             str_builder_add_cstr(sb, ",");
             _json_emit_str_field(sb, "mimeType", rm);
+        }
+        str_builder_add_cstr(sb, "}");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return str_data(str_builder_build_a(a, sb));
+}
+
+# Build the resources/templates/list response result body.
+fn _build_resource_templates_result(a, rreg) {
+    var ts = resource_registry_templates(rreg);
+    var n = vec_len(ts);
+    var room = 32;
+    var i = 0;
+    while (i < n) {
+        var c = vec_get(ts, i);
+        room = room + 64 + _dsp_room(resource_template_uri(c)) + _dsp_room(resource_template_name(c));
+        room = room + _dsp_room(resource_template_description(c)) + _dsp_room(resource_template_mime_type(c));
+        i = i + 1;
+    }
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, room);
+    str_builder_add_cstr(sb, "{\"resourceTemplates\":[");
+    i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        var t = vec_get(ts, i);
+        str_builder_add_cstr(sb, "{");
+        _json_emit_str_field(sb, "uriTemplate", resource_template_uri(t));
+        str_builder_add_cstr(sb, ",");
+        _json_emit_str_field(sb, "name", resource_template_name(t));
+        var td = resource_template_description(t);
+        if (td != 0) {
+            str_builder_add_cstr(sb, ",");
+            _json_emit_str_field(sb, "description", td);
+        }
+        var tm = resource_template_mime_type(t);
+        if (tm != 0) {
+            str_builder_add_cstr(sb, ",");
+            _json_emit_str_field(sb, "mimeType", tm);
         }
         str_builder_add_cstr(sb, "}");
         i = i + 1;
@@ -1284,6 +1366,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
             return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(re)), str_data(bote_err_format_a(a, re)));
         }
         var rhandler = resource_registry_handler(dispatcher_resources(d), ruri);
+        if (rhandler == 0) { rhandler = resource_registry_template_handler(dispatcher_resources(d), ruri); }
         if (rhandler == 0) {
             # -32002 with the URI in `data`, as the MCP resources spec has
             # it. It was -32602 through 3.4.4.
@@ -1302,15 +1385,13 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
         return _dsp_checked_result(a, id, rresult);
     }
 
-    # resources/templates/list (3.4.1). bote has no resource-template
-    # registry (RFC 6570 URI templates), so the honest answer is an empty
-    # list. It used to be -32601, which some clients send whenever
-    # `resources` is advertised and read as a server failure rather than "no
-    # templates". Gated like the other resources/* methods, and refuses a
+    # resources/templates/list. An empty list when none is registered: this used to
+    # be -32601, which some clients send whenever `resources` is advertised and read
+    # as a server failure. Gated like the other resources/* methods, and refuses a
     # pagination `cursor` like the other list methods.
     if (streq(method, "resources/templates/list") == 1 && dispatcher_resources(d) != 0) {
         if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal_a(a, id); }
-        return resp_success_a(a, id, "{\"resourceTemplates\":[]}");
+        return resp_success_a(a, id, _build_resource_templates_result(a, dispatcher_resources(d)));
     }
 
     # completion/complete only when a completion handler is set. The handler

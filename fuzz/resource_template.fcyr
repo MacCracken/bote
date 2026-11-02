@@ -1,0 +1,131 @@
+# Fuzz: resources/read hands a client's URI to every template that has not matched,
+# so the matcher runs on bytes nobody has judged. Each property has its own exit code:
+#
+#   10  a URI a template matches is what that template expands to with the values read
+#       from it, byte for byte: nothing is matched that the template does not say;
+#   20  resource_template_check accepts or refuses every substituted template, and one
+#       it accepts is safe to match;
+#   30  matching leaves nothing on the heap.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/tagged.cyr"
+include "lib/sakshi.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/resources.cyr"
+
+alloc_init();
+sakshi_set_level(SK_ERROR);
+
+var _buf = alloc(4096);
+var _sub = "\x01/?#{}%.-_ a0Z\xC3\xFF";
+
+# `tpl` with each `{name}` replaced by what `uri` gives it.
+fn _expand(tpl, uri) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (load8(tpl + i) != 0) {
+        var c = load8(tpl + i);
+        if (c == 123) {
+            var e = i + 1;
+            while (load8(tpl + e) != 125) { e = e + 1; }
+            var name = alloc(e - i);
+            memcpy(name, tpl + i + 1, e - i - 1);
+            store8(name + e - i - 1, 0);
+            var v = resource_template_var_a(default_alloc(), tpl, uri, name);
+            if (v == 0) { sys_exit(10); }
+            str_builder_add_cstr(sb, v);
+            i = e + 1;
+        } else {
+            str_builder_add_byte(sb, c);
+            i = i + 1;
+        }
+    }
+    return str_data(str_builder_build(sb));
+}
+
+fn _one(tpl, uri) {
+    if (resource_template_matches(tpl, uri) == 1 && streq(_expand(tpl, uri), uri) == 0) { sys_exit(10); }
+    return 0;
+}
+
+# Every byte of `uri` replaced by every byte of _sub.
+fn _sweep_uri(tpl, uri) {
+    var n = strlen(uri);
+    var i = 0;
+    while (i < n) {
+        var si = 0;
+        while (si < strlen(_sub)) {
+            memcpy(_buf, uri, n);
+            store8(_buf + n, 0);
+            store8(_buf + i, load8(_sub + si));
+            _one(tpl, _buf);
+            si = si + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Every byte of `tpl` replaced the same way, each result judged and, if accepted, used.
+fn _sweep_tpl(tpl, uri) {
+    var n = strlen(tpl);
+    var t = alloc(n + 1);
+    var i = 0;
+    while (i < n) {
+        var si = 0;
+        while (si < strlen(_sub)) {
+            memcpy(t, tpl, n);
+            store8(t + n, 0);
+            store8(t + i, load8(_sub + si));
+            var why = resource_template_check(t);
+            if (why == 0) { _one(t, uri); }
+            si = si + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+var tpls = vec_new();
+var uris = vec_new();
+vec_push(tpls, "test://template/{id}/data");      vec_push(uris, "test://template/123/data");
+vec_push(tpls, "repo://{owner}/{repo}/issues/{n}"); vec_push(uris, "repo://agnos/bote/issues/42");
+vec_push(tpls, "a://{x}.json");                   vec_push(uris, "a://b.c.json");
+vec_push(tpls, "a://b?q={q}#{f}");                vec_push(uris, "a://b?q=1#2");
+vec_push(tpls, "{a}/{b}");                        vec_push(uris, "1/2");
+
+var ti = 0;
+while (ti < vec_len(tpls)) {
+    if (resource_template_check(vec_get(tpls, ti)) != 0) { sys_exit(20); }
+    if (resource_template_matches(vec_get(tpls, ti), vec_get(uris, ti)) != 1) { sys_exit(10); }
+    _sweep_uri(vec_get(tpls, ti), vec_get(uris, ti));
+    _sweep_tpl(vec_get(tpls, ti), vec_get(uris, ti));
+    ti = ti + 1;
+}
+
+# A long URI, the shape that would be quadratic with two values to a segment.
+var ln = alloc(60010);
+memcpy(ln, "a://", 4);
+memset(ln + 4, 46, 60000);
+store8(ln + 60004, 0);
+var before = alloc_used();
+var hi = 0;
+while (hi < 5) {
+    if (resource_template_matches("a://{x}.json", ln) != 0) { sys_exit(10); }
+    if (resource_template_matches("{a}/{b}", ln) != 0) { sys_exit(10); }
+    hi = hi + 1;
+}
+if (alloc_used() != before) { sys_exit(30); }
+
+sys_exit(0);

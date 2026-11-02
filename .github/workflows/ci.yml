@@ -204,6 +204,17 @@ jobs:
           CYRIUS_STATS=1 cyrius build src/main.cyr build/bote 2>&1 | tee build/build.log
           echo "bote: $(wc -c < build/bote) bytes"
 
+      - name: Conformance fixture builds
+        # tests/fixtures/conformance_server.cyr is run by hand, through scripts/conformance.sh,
+        # because that fetches the suite from npm. Building it here keeps it from rotting.
+        run: |
+          out=$(cyrius build tests/fixtures/conformance_server.cyr build/conformance-server 2>&1)
+          echo "$out" | tail -1
+          if echo "$out" | grep -q 'undefined function'; then
+            echo "$out" | grep 'undefined function'
+            exit 1
+          fi
+
       - name: Verify ELF
         run: xxd -l 4 build/bote | grep -q "7f45 4c46"
 

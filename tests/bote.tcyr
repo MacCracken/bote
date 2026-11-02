@@ -311,6 +311,42 @@ fn _held_port(out_fd) {
     return 0;
 }
 
+fn _rt_h(uri, claims) { return "{\"contents\":[{\"uri\":\"x\",\"text\":\"from the template\"}]}"; }
+fn _rt_h2(uri, claims) { return "{\"contents\":[{\"uri\":\"x\",\"text\":\"from the second\"}]}"; }
+fn _rt_exact(uri, claims) { return "{\"contents\":[{\"uri\":\"x\",\"text\":\"from the resource\"}]}"; }
+fn _rt_prompt(args, claims) { return "{\"messages\":[]}"; }
+
+fn _rt_ok(t, u) { return resource_template_matches(t, u); }
+
+fn _rt_var(t, u, n) { return resource_template_var_a(default_alloc(), t, u, n); }
+
+fn _cat3(a, b, c) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    str_builder_add_cstr(sb, c);
+    return str_data(str_builder_build(sb));
+}
+
+fn _ra_int(n) {
+    var sb = str_builder_new();
+    str_builder_add_int(sb, n);
+    return str_data(str_builder_build(sb));
+}
+
+fn _ra_long_uri(prefix, n) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"");
+    str_builder_add_cstr(sb, prefix);
+    var i = 0;
+    while (i < n) {
+        str_builder_add_cstr(sb, "x");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "\"}}");
+    return str_data(str_builder_build(sb));
+}
+
 # Why a tool with the one property schema `raw` cannot register, or 0.
 fn _hdr_why(raw) {
     var p = vec_new();
@@ -485,6 +521,134 @@ fn main() {
     assert(registry_validate_params(fbreg, "scan", "{\"x\":\"\\\"path\\\":1\"}") != 0, "fallback: a key spelled inside a string is not the field");
     assert_eq(registry_validate_params(fbreg, "scan", "{\"path\":\"/a\",\"path\":\"/b\"}"), 0, "fallback: a repeated key is still present");
     assert_eq(registry_validate_params(reg2, "scan", "{\"path\":\"/a\",\"path\":\"/b\"}"), 0, "compiled path: the same repeated key passes, so the two paths agree");
+
+    # ---------------- resources: templates ----------------
+    assert_eq(resource_template_check("test://template/{id}/data"), 0, "template: one expression");
+    assert_eq(resource_template_check("repo://{owner}/{repo}/issues/{n}"), 0, "template: one a segment");
+    assert_eq(resource_template_check("file:///{path}"), 0, "template: the spec's example");
+    assert_eq(resource_template_check("a://{x_1}.json"), 0, "template: text beside an expression");
+    assert_eq(resource_template_check("a://b?q={q}#{f}"), 0, "template: a query and a fragment are segments");
+    assert(resource_template_check(0) != 0, "template refused: none");
+    assert(resource_template_check("a://b") != 0, "template refused: no expression");
+    assert(resource_template_check("a://{x") != 0, "template refused: unclosed");
+    assert(resource_template_check("a://x}") != 0, "template refused: a stray close");
+    assert(resource_template_check("a://{x}/y}") != 0, "template refused: a stray close beside a good expression");
+    assert(resource_template_check("a://{}") != 0, "template refused: no name");
+    assert(resource_template_check("a://{+x}") != 0, "template refused: a level 2 operator");
+    assert(resource_template_check("a://{#x}") != 0, "template refused: the fragment operator");
+    assert(resource_template_check("a://{?x}") != 0, "template refused: a query operator");
+    assert(resource_template_check("a://{x,y}") != 0, "template refused: two names");
+    assert(resource_template_check("a://{x*}") != 0, "template refused: explode");
+    assert(resource_template_check("a://{x:3}") != 0, "template refused: a prefix");
+    assert(resource_template_check("a://{x}{y}") != 0, "template refused: two in a segment");
+    assert(resource_template_check("a://{x}-{y}") != 0, "template refused: two in a segment, text between");
+    assert(resource_template_check("a://{x}/{x}") != 0, "template refused: a name twice");
+    assert_eq(resource_template_check("a://{x}/{xy}/{yx}"), 0, "template: names that share letters are not repeats");
+    assert_eq(resource_template_check("a://{xy}/{x}"), 0, "template: nor is a name that starts a longer one");
+
+    assert_eq(_rt_ok("t://a/{id}/b", "t://a/123/b"), 1, "match: the value");
+    assert_eq(_rt_ok("t://a/{id}/b", "t://a/x.y-z%2F/b"), 1, "match: dots and percent-encoding are a value");
+    assert_eq(_rt_ok("t://a/{id}/b", "t://a//b"), 0, "match: an empty value is none");
+    assert_eq(_rt_ok("t://a/{id}/b", "t://a/1/2/b"), 0, "match: a value holds no slash");
+    assert_eq(_rt_ok("t://a/{id}/b", "t://a/1?x/b"), 0, "match: nor a question mark");
+    assert_eq(_rt_ok("t://a/{id}/b", "t://a/1#x/b"), 0, "match: nor a hash");
+    assert_eq(_rt_ok("t://a/{id}/b", "t://a/1/b/c"), 0, "match: text past the end");
+    assert_eq(_rt_ok("t://a/{id}/b", "t://a/1/"), 0, "match: the end missing");
+    assert_eq(_rt_ok("t://a/{id}/b", "t://a/1"), 0, "match: more of the end missing");
+    assert_eq(_rt_ok("t://a/{id}/b", "t://x/1/b"), 0, "match: other text");
+    assert_eq(_rt_ok("t://a/{id}/b", ""), 0, "match: nothing");
+    assert_eq(_rt_ok("t://{id}", "t://1"), 1, "match: an expression last");
+    assert_eq(_rt_ok("t://{id}", "t://"), 0, "match: ...with no value");
+    assert_eq(_rt_ok("t://{id}.json", "t://a.b.json"), 1, "match: the value keeps its dots ahead of a suffix");
+    assert_eq(_rt_ok("t://{id}.json", "t://.json"), 0, "match: a suffix with no value");
+    assert_eq(_rt_ok("t://{id}.json", "t://a.jso"), 0, "match: a suffix cut short");
+    assert_eq(_rt_ok("t://{a}/{b}", "t://1/2"), 1, "match: two");
+    assert_eq(_rt_ok("t://{a}/{b}", "t://1"), 0, "match: one of two");
+    assert_eq(_rt_ok("t://{a}/{b}", "t://1/"), 0, "match: the second empty");
+    assert_eq(resource_template_matches(0, "t://1"), 0, "match: no template");
+    assert_eq(resource_template_matches("t://{a}", 0), 0, "match: no URI");
+
+    assert(streq(_rt_var("t://a/{id}/b", "t://a/123/b", "id"), "123") == 1, "var: the value");
+    assert(streq(_rt_var("t://{a}/{b}", "t://1/2", "a"), "1") == 1, "var: the first");
+    assert(streq(_rt_var("t://{a}/{b}", "t://1/2", "b"), "2") == 1, "var: the second");
+    assert(streq(_rt_var("t://{id}.json", "t://a.b.json", "id"), "a.b") == 1, "var: ahead of a suffix");
+    assert(streq(_rt_var("t://{id}/x", "t://a%2Fb/x", "id"), "a%2Fb") == 1, "var: as sent, not decoded");
+    assert_eq(_rt_var("t://a/{id}/b", "t://a/123/b", "nope"), 0, "var: no such expression");
+    assert_eq(_rt_var("t://a/{idx}/b", "t://a/123/b", "id"), 0, "var: a name that only starts the same");
+    assert_eq(_rt_var("t://a/{id}/b", "t://a/123/b", "idx"), 0, "var: a name longer than the expression");
+    assert_eq(_rt_var("t://a/{id}/b", "t://a/1/2/b", "id"), 0, "var: no match");
+    assert_eq(_rt_var(0, "t://1", "id"), 0, "var: no template");
+    assert_eq(_rt_var("t://{id}", 0, "id"), 0, "var: no URI");
+    assert_eq(_rt_var("t://{id}", "t://1", 0), 0, "var: no name");
+
+    var rtd = dispatcher_new(tool_registry_new());
+    assert(dispatcher_register_resource_template(rtd, resource_template_new("t://{x}{y}", "bad", 0, 0), &_rt_h) != 0, "template: a bad one is refused");
+    assert_eq(dispatcher_resources(rtd), 0, "template: ...and nothing stood up");
+    assert(dispatcher_register_resource_template(rtd, resource_template_new("t://{x}", 0, 0, 0), &_rt_h) != 0, "template: a name is required");
+    assert(dispatcher_register_resource_template(rtd, 0, &_rt_h) != 0, "template: none at all");
+    assert_eq(dispatcher_register_resource_template(rtd, resource_template_new("t://a/{id}", "first", "The first", "text/plain"), &_rt_h), 0, "template: registered");
+    assert(dispatcher_resources(rtd) != 0, "template: that alone stands up the registry");
+    dispatcher_register_resource_template(rtd, resource_template_new("t://{any}/1", "second", 0, 0), &_rt_h2);
+    dispatcher_register_resource(rtd, resource_def_new("t://a/exact", "exact", 0, "text/plain"), &_rt_exact);
+    var rtreg = dispatcher_resources(rtd);
+    assert_eq(vec_len(resource_registry_templates(rtreg)), 2, "template: two kept");
+    assert_eq(resource_registry_template_handler(rtreg, "t://a/1"), &_rt_h, "template: the handler for a URI");
+    assert_eq(resource_registry_template_handler(rtreg, "t://b/1"), &_rt_h2, "template: another");
+    assert_eq(resource_registry_template_handler(rtreg, "x://nope"), 0, "template: none");
+    dispatcher_register_resource_template(rtd, resource_template_new("t://z/{id}/q", "third", 0, 0), &_rt_h);
+    dispatcher_register_resource_template(rtd, resource_template_new("t://z/{id}/q", "third again", 0, 0), &_rt_h2);
+    assert_eq(vec_len(resource_registry_templates(rtreg)), 3, "template: the same uriTemplate replaces");
+    assert_eq(resource_registry_template_handler(rtreg, "t://z/1/q"), &_rt_h2, "template: ...with its handler");
+    var rtl = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/templates/list\"}", rtd, 0);
+    assert(strstr(rtl, "\"uriTemplate\":\"t://a/{id}\",\"name\":\"first\",\"description\":\"The first\",\"mimeType\":\"text/plain\"") >= 0, "template: listed");
+    assert(strstr(rtl, "\"uriTemplate\":\"t://{any}/1\",\"name\":\"second\"}") >= 0, "template: optional fields left out");
+    assert(strstr(rtl, "t://a/exact") < 0, "template: a resource is not one");
+    var rtr = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/list\"}", rtd, 0);
+    assert(strstr(rtr, "t://a/exact") >= 0 && strstr(rtr, "{id}") < 0, "template: resources/list holds no template");
+    var rtx = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"t://a/exact\"}}", rtd, 0);
+    assert(strstr(rtx, "from the resource") >= 0, "template: an exact resource wins");
+    var rtv = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"t://a/9\"}}", rtd, 0);
+    assert(strstr(rtv, "from the template") >= 0, "template: a URI it matches goes to its handler");
+
+    # A list leaves nothing behind, whatever its length (3.5.3). The rows before this one
+    # held short lists, which fit a fixed 4 KB, and missed that a longer one did not.
+    var bigd = dispatcher_new(tool_registry_new());
+    var bi = 0;
+    while (bi < 200) {
+        var bsb = str_builder_new();
+        str_builder_add_cstr(bsb, "res://a-rather-long-resource-uri-for-a-list-of-them/");
+        str_builder_add_int(bsb, bi);
+        var bu = str_data(str_builder_build(bsb));
+        var bargs = vec_new();
+        vec_push(bargs, prompt_arg_new(bu, bu, 1));
+        dispatcher_register_resource(bigd, resource_def_new(bu, bu, bu, "text/plain"), &_rt_h);
+        dispatcher_register_prompt(bigd, prompt_def_new(bu, bu, bargs), &_rt_prompt);
+        var bt = _cat3(bu, "/{id}", "");
+        dispatcher_register_resource_template(bigd, resource_template_new(bt, bu, bu, "text/plain"), &_rt_h);
+        bi = bi + 1;
+    }
+    assert_eq(_ra_heap_per_msg("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/list\"}", bigd, 20), 0, "heap: 200 resources");
+    assert_eq(_ra_heap_per_msg("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/list\"}", bigd, 20), 0, "heap: 200 prompts");
+    assert_eq(_ra_heap_per_msg("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/templates/list\"}", bigd, 20), 0, "heap: 200 templates");
+    var ctld = dispatcher_new(tool_registry_new());
+    var ctl = "\x01\x02\x03\x04\x05\x06\x07\x08\x01\x02\x03\x04\x05\x06\x07\x08\x01\x02\x03\x04\x05\x06\x07\x08\x01\x02\x03\x04\x05\x06\x07\x08";
+    var cti = 0;
+    while (cti < 200) {
+        dispatcher_register_resource(ctld, resource_def_new(_cat3("res://", _ra_int(cti), ctl), ctl, ctl, ctl), &_rt_h);
+        cti = cti + 1;
+    }
+    assert_eq(_ra_heap_per_msg("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/list\"}", ctld, 20), 0, "heap: a list that escapes to six times its size");
+    var argd = dispatcher_new(tool_registry_new());
+    var pctl = vec_new();
+    var pi = 0;
+    while (pi < 200) {
+        vec_push(pctl, prompt_arg_new(_cat3("a", _ra_int(pi), ""), ctl, 0));
+        pi = pi + 1;
+    }
+    dispatcher_register_prompt(argd, prompt_def_new("one_prompt", 0, pctl), &_rt_prompt);
+    assert_eq(_ra_heap_per_msg("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/list\"}", argd, 20), 0, "heap: a prompt whose size is all in its arguments");
+    var miss = _ra_long_uri("t://no/", 60000);
+    assert_eq(_ra_heap_per_msg(miss, rtd, 20), 0, "heap: a 60 KB URI no template matches");
 
     # ---------------- _jx_members and x-mcp-header at registration ----------------
     var jm = _jx_members(" { \"a\" : 1 , \"b\\u0063\" : {\"x\":[1,{\"y\":2}]} , \"\":null } ");

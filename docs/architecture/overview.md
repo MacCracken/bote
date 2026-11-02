@@ -177,8 +177,8 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
   authentication bypasses).
 
 tests/
-├── bote.tcyr                  — 740 core assertions
-├── conformance.tcyr           — 206 (JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28, by spec clause, via codec_process_message)
+├── bote.tcyr                  — 819 core assertions
+├── conformance.tcyr           — 215 (JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28, by spec clause, via codec_process_message)
 ├── bote_auth.tcyr             — 55 (bearer + allowlist + JWT + PKCE validators; 401 log lines)
 ├── bote_content.tcyr          — 25 (content blocks + annotations)
 ├── bote_fs_tools.tcyr         — 56 (fs_tools; refused-path log lines; control bytes read back as valid JSON)
@@ -202,6 +202,8 @@ fuzz/
 ├── codec_process.fcyr
 ├── jsonx_extract.fcyr
 ├── jsonx_valid.fcyr          — RFC 8259 syntax check: corpus, prefixes, byte substitutions
+├── http_era.fcyr             — Base64 against bayan's, every substituted request gets one of three answers, no heap
+├── resource_template.fcyr    — what a template matches re-expands to the same URI, byte for byte
 ├── ssrf_ipv6.fcyr            — host.cyr's IPv6 parser against cyrius's, plus ssrf_check on mutated URLs
 └── schema_validate.fcyr
 
@@ -435,12 +437,13 @@ standing rules are in CLAUDE.md under Key Principles.
 
 | Artifact | Count | Where |
 |---|---|---|
-| Core unit tests | 740 | `tests/bote.tcyr` |
-| Protocol conformance | 206 | `tests/conformance.tcyr` — by spec clause, through `codec_process_message` (3.4.5) |
+| Core unit tests | 819 | `tests/bote.tcyr` |
+| Protocol conformance | 215 | `tests/conformance.tcyr` — by spec clause, through `codec_process_message` (3.4.5) |
 | Module tests | 1982 | `tests/bote_auth.tcyr` (55) + `bote_content.tcyr` (25) + `bote_fs_tools.tcyr` (56) + `bote_host.tcyr` (203) + `bote_http_era.tcyr` (1212) + `bote_jwt.tcyr` (59) + `bote_libro_tools.tcyr` (73) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (76) + `bote_web_tools.tcyr` (66) + `bote_ws.tcyr` (24) |
-| **Total assertions** | **2928** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
-| Benchmarks | 19 | `tests/bote.bcyr` |
-| Fuzz harnesses | 7 | `fuzz/*.fcyr` |
+| **Total assertions** | **3016** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
+| Benchmarks | 20 | `tests/bote.bcyr` |
+| Third-party conformance | 25 of 37, 21 of 30 | `scripts/conformance.sh`: the official suite's required lists for 2026-07-28 and 2025-11-25, and 140 checks of the official client. By hand, because it installs from npm |
+| Fuzz harnesses | 8 | `fuzz/*.fcyr` |
 
 All hot paths sub-10 µs on x86_64 (`AMD Ryzen 7 5800H`). Side-by-side
 with the Rust v0.92.0 baseline in

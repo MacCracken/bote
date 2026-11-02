@@ -14,6 +14,9 @@
 #   {"contents":[{"uri":"...","mimeType":"...","text":"..."}]}
 # (MCP ResourceContents — bare uri/mimeType/text|blob, NOT a content block).
 #
+# A URI no resource has goes to the first ResourceTemplate it matches, whose
+# handler has the same ABI. An exact resource always wins.
+#
 # subscribe / listChanged are intentionally out until a server→client push
 # path exists (they need the notification channel that is not yet wired).
 #
@@ -45,25 +48,169 @@ fn resource_def_description(r) { return load64(r + 16); }
 fn resource_def_mime_type(r) { return load64(r + 24); }
 
 # ================================================================
+# ResourceTemplate — a family of resources behind one URI template
+# ================================================================
+#
+# Layout (40 bytes):
+#   +0  uri_template cstr, literal text and `{name}` expressions
+#   +8  name         cstr
+#   +16 description  cstr or 0
+#   +24 mime_type    cstr or 0
+#   +32 handler      fn ptr, set at registration
+#
+# RFC 6570 level 1: a `{name}` stands for one non-empty value holding none of
+# `/`, `?` or `#`, which that level percent-encodes. The operators of the higher
+# levels are refused, not read as text. Two expressions in one path segment are
+# refused too: one value per segment keeps a match linear in the URI, which a client
+# writes, where two could make it quadratic. A handler gets the URI as sent, reads
+# the value with resource_template_var_a and owns its percent-decoding.
+
+fn resource_template_new(uri_template, name, description, mime_type) {
+    var t = alloc(40);
+    store64(t, uri_template);
+    store64(t + 8, name);
+    store64(t + 16, description);
+    store64(t + 24, mime_type);
+    store64(t + 32, 0);
+    return t;
+}
+
+fn resource_template_uri(t) { return load64(t); }
+fn resource_template_name(t) { return load64(t + 8); }
+fn resource_template_description(t) { return load64(t + 16); }
+fn resource_template_mime_type(t) { return load64(t + 24); }
+fn resource_template_handler(t) { return load64(t + 32); }
+
+fn _rt_delim(c) {
+    if (c == 47 || c == 63 || c == 35) { return 1; }
+    return 0;
+}
+
+fn _rt_name_char(c) {
+    if (c >= 48 && c <= 57) { return 1; }
+    if (c >= 65 && c <= 90) { return 1; }
+    if (c >= 97 && c <= 122) { return 1; }
+    if (c == 95) { return 1; }
+    return 0;
+}
+
+# 1 when the expression at tpl[i], whose name is n bytes, repeats one ahead of it.
+fn _rt_repeated(tpl, i, n) {
+    var k = 0;
+    while (k < i) {
+        if (load8(tpl + k) == 123 && load8(tpl + k + n + 1) == 125 && memeq(tpl + k + 1, tpl + i + 1, n) == 1) { return 1; }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# Why `tpl` cannot be a template, as a message, or 0 when it can. `}` closes what
+# `{` opened, a name is letters, digits and `_`, and there is one expression at least,
+# at most one in a segment, and one of a name: RFC 6570 gives a repeat the same value,
+# and a match would have to compare them.
+fn resource_template_check(tpl) {
+    if (tpl == 0) { return "a template needs a uriTemplate"; }
+    var i = 0;
+    var total = 0;
+    var seg = 0;
+    while (load8(tpl + i) != 0) {
+        var c = load8(tpl + i);
+        if (c == 125) { return "a template has a `}` with no `{`"; }
+        if (_rt_delim(c) == 1) { seg = 0; }
+        if (c == 123) {
+            seg = seg + 1;
+            total = total + 1;
+            if (seg > 1) { return "a template segment holds one expression at most"; }
+            var n = i + 1;
+            while (_rt_name_char(load8(tpl + n)) == 1) { n = n + 1; }
+            if (n == i + 1 || load8(tpl + n) != 125) {
+                return "a template expression must be `{name}`: bote serves RFC 6570 level 1";
+            }
+            if (_rt_repeated(tpl, i, n - i - 1) == 1) { return "a template names an expression once"; }
+            i = n;
+        }
+        i = i + 1;
+    }
+    if (total == 0) { return "a template has no expression: register it as a resource"; }
+    return 0;
+}
+
+# Match tpl[t...] against uri[u...]. With `want` set, the value of that expression
+# goes to out, as an offset into uri and a length. Literal bytes are walked here, and
+# only an expression recurses, once for each it holds, which is fixed by the template.
+fn _rt_match(tpl, t, uri, u, want, out) {
+    while (1 == 1) {
+        var c = load8(tpl + t);
+        if (c == 123) {
+            var close = t + 1;
+            while (load8(tpl + close) != 125) { close = close + 1; }
+            var end = u;
+            while (load8(uri + end) != 0 && _rt_delim(load8(uri + end)) == 0) { end = end + 1; }
+            # The longest value that leaves the rest of the template matching.
+            while (end > u) {
+                if (_rt_match(tpl, close + 1, uri, end, want, out) == 1) {
+                    if (want != 0 && strlen(want) == close - t - 1 && memeq(want, tpl + t + 1, close - t - 1) == 1) {
+                        store64(out, u);
+                        store64(out + 8, end - u);
+                    }
+                    return 1;
+                }
+                end = end - 1;
+            }
+            return 0;
+        }
+        if (c != load8(uri + u)) { return 0; }
+        if (c == 0) { return 1; }
+        t = t + 1;
+        u = u + 1;
+    }
+    return 0;
+}
+
+# 1 when `uri` is what the valid template `tpl` expands to, for some values.
+fn resource_template_matches(tpl, uri) {
+    if (tpl == 0 || uri == 0) { return 0; }
+    return _rt_match(tpl, 0, uri, 0, 0, 0);
+}
+
+# The value `uri` gives the expression `name` of `tpl`, as sent, on `a`. 0 when the
+# URI does not match or the template has no such expression.
+fn resource_template_var_a(a, tpl, uri, name) {
+    if (tpl == 0 || uri == 0 || name == 0) { return 0; }
+    var span[16];
+    store64(&span, 0 - 1);
+    store64(&span + 8, 0);
+    if (_rt_match(tpl, 0, uri, 0, name, &span) == 0 || load64(&span) < 0) { return 0; }
+    var n = load64(&span + 8);
+    var out = alloc_via(a, n + 1);
+    memcpy(out, uri + load64(&span), n);
+    store8(out + n, 0);
+    return out;
+}
+
+# ================================================================
 # ResourceRegistry
 # ================================================================
 #
-# Layout (24 bytes):
-#   +0  entries  hashmap: uri_cstr -> ResourceDef ptr
-#   +8  uris     vec of uri_cstr (insertion order, for list())
-#   +16 handlers hashmap: uri_cstr -> handler fn ptr
+# Layout (32 bytes):
+#   +0  entries   hashmap: uri_cstr -> ResourceDef ptr
+#   +8  uris      vec of uri_cstr (insertion order, for list())
+#   +16 handlers  hashmap: uri_cstr -> handler fn ptr
+#   +24 templates vec of ResourceTemplate (insertion order)
 
 fn resource_registry_new() {
-    var r = alloc(24);
+    var r = alloc(32);
     store64(r, map_new());
     store64(r + 8, vec_new());
     store64(r + 16, map_new());
+    store64(r + 24, vec_new());
     return r;
 }
 
 fn resource_registry_entries(r) { return load64(r); }
 fn resource_registry_uris(r) { return load64(r + 8); }
 fn resource_registry_handlers(r) { return load64(r + 16); }
+fn resource_registry_templates(r) { return load64(r + 24); }
 
 # Register (or replace) a resource + its read handler. Returns 0.
 fn resource_registry_register(r, resource_def, handler_fp) {
@@ -89,6 +236,34 @@ fn resource_registry_contains(r, uri) {
 fn resource_registry_handler(r, uri) {
     if (map_has(resource_registry_handlers(r), uri) == 0) { return 0; }
     return map_get(resource_registry_handlers(r), uri);
+}
+
+# Register (or replace, by uriTemplate) a template + its read handler. Returns 0.
+fn resource_registry_register_template(r, template, handler_fp) {
+    store64(template + 32, handler_fp);
+    var ts = resource_registry_templates(r);
+    var i = 0;
+    while (i < vec_len(ts)) {
+        if (streq(resource_template_uri(vec_get(ts, i)), resource_template_uri(template)) == 1) {
+            vec_set(ts, i, template);
+            return 0;
+        }
+        i = i + 1;
+    }
+    vec_push(ts, template);
+    return 0;
+}
+
+# Read-handler fn ptr of the first template `uri` matches, or 0.
+fn resource_registry_template_handler(r, uri) {
+    var ts = resource_registry_templates(r);
+    var i = 0;
+    while (i < vec_len(ts)) {
+        var t = vec_get(ts, i);
+        if (resource_template_matches(resource_template_uri(t), uri) == 1) { return resource_template_handler(t); }
+        i = i + 1;
+    }
+    return 0;
 }
 
 fn resource_registry_len(r) {

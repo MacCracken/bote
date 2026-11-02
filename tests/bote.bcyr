@@ -99,6 +99,9 @@ fn _b_era(d, raw, body) {
 }
 fn b_http_era_legacy() { return _b_era(_b_dispatcher, _b_era_legacy, _b_era_legacy + _b_era_legacy_at); }
 fn b_http_era_modern() { return _b_era(_b_dispatcher, _b_era_modern, _b_era_modern + _b_era_modern_at); }
+fn b_resource_template_match() {
+    return resource_template_matches("repo://{owner}/{name}/issues/{n}", "repo://agnos/bote/issues/42");
+}
 fn b_http_era_params() { return _b_era(_b_param_dispatcher, _b_era_params, _b_era_params + _b_era_params_at); }
 
 fn b_dispatch_initialize() {
@@ -322,6 +325,9 @@ fn main() {
     var b19 = bench_new("http_era_params");
     bench_run(b19, &b_http_era_params, 10000);
     vec_push(benches, b19);
+    var b20 = bench_new("resource_template_match");
+    bench_run(b20, &b_resource_template_match, 10000);
+    vec_push(benches, b20);
 
     bench_report_all(benches);
     return 0;

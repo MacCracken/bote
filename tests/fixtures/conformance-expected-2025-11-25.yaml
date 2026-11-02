@@ -1,0 +1,19 @@
+# What bote is known to fail of the 2025-11-25 requirement set of
+# @modelcontextprotocol/conformance. scripts/conformance.sh fails on anything else that
+# fails, and on anything here that passes. Each entry is a feature bote lacks.
+server:
+  # A server-to-client request needs a handler that can wait on the client. That revision's
+  # way of doing it is not planned: 2026-07-28 replaces it with InputRequiredResult.
+  - elicitation-sep1034-defaults
+  - elicitation-sep1330-enums
+  - tools-call-elicitation
+  - tools-call-sampling
+  # Optional capabilities bote does not advertise, removed from 2026-07-28.
+  - logging-set-level
+  - resources-subscribe
+  - resources-unsubscribe
+  - tools-call-with-logging
+  # Progress needs a stream on the response. Roadmap 3.7.x.
+  - tools-call-with-progress
+  # Not scored. inputSchema cannot carry root keywords. Roadmap 3.8.x.
+  - json-schema-2020-12

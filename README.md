@@ -198,8 +198,12 @@ in `params._meta`, and on HTTP in `MCP-Protocol-Version` too, and the two must a
 [docs/spec-compliance.md](docs/spec-compliance.md#mcp-2026-07-28-stateless-path). A tool can
 have an argument mirrored in an `Mcp-Param-{Name}` header by putting `x-mcp-header` on its
 property in the schema; registration checks the annotation, and HTTP checks the header against
-the body. Do not mark a secret that way: every intermediary sees the header. No third-party
-client has run against this revision yet.
+the body. Do not mark a secret that way: every intermediary sees the header.
+
+The official MCP client works against bote on `http`, `streamable`, `bridge` and stdio, and the
+official conformance suite passes 25 of the 37 scenarios 2026-07-28 requires and 21 of the 30
+2025-11-25 requires. What fails is features bote lacks, listed with the reason in
+`tests/fixtures/conformance-expected-<revision>.yaml`. `./scripts/conformance.sh` reruns it all.
 
 ### Built-in tools (registered by default)
 
@@ -283,13 +287,13 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 2928 total across sixteen files (+ a core-only drift smoke)
+### Tests — 3016 total across sixteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 2928 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 3016 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 740 — core protocol/dispatch/codec/schema/session/transports
-cyrius test tests/conformance.tcyr        # 206 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
+cyrius test tests/bote.tcyr               # 819 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/conformance.tcyr        # 215 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 55 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 56 — fs_write / fs_read / fs_mkdir
@@ -353,7 +357,9 @@ each block was taken under, is [`benches/history.log`](benches/history.log).
 cyrius fuzz fuzz/codec_parse.fcyr
 cyrius fuzz fuzz/codec_process.fcyr
 cyrius fuzz fuzz/jsonx_extract.fcyr
+cyrius fuzz fuzz/http_era.fcyr
 cyrius fuzz fuzz/jsonx_valid.fcyr
+cyrius fuzz fuzz/resource_template.fcyr
 cyrius fuzz fuzz/schema_validate.fcyr
 cyrius fuzz fuzz/ssrf_ipv6.fcyr
 # 1 passed, 0 failed each

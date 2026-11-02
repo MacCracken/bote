@@ -55,7 +55,9 @@ The primary security-relevant surface areas are:
   the life of the process. Since **3.4.15** everything bote allocates to answer a
   message goes on a request arena that the next message rewinds, including
   refusals before and after auth, so an unauthenticated client cannot grow the
-  heap with a refused request. That was only true for short values until **3.5.1**:
+  heap with a refused request. Until **3.5.3**, `resources/list` and `prompts/list` were an
+  exception past 4 KB of list: 200 entries kept up to 128,792 B per request, for any
+  client. That was only true for short values until **3.5.1**:
   through 3.4.15 a long `id`, method, name, URI or cursor retained 61 to 577 KB per
   refused request, and through 3.5.0 a long `MCP-Protocol-Version` retained 84 KB.
   A valid tool, prompt, resource or completion call still leaves

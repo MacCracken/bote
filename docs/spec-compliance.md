@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.5.2 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.5.3 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
 > ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not. Every other table here is against 2025-11-25.
 
@@ -74,7 +74,8 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | An `x-mcp-header` that breaks the rules makes the tool invalid | ✅ (3.5.2) registration refuses it, since a client would drop the tool: an empty or non-token name, a type other than string, integer or boolean, a repeat ignoring case, or anywhere but a chain of `properties` keys |
 | Integers mirrored in a header stay in the safe range | ✅ (3.5.2) a value past ±(2^53 − 1) is refused with `-32020`, even with its header |
 | `-32021` for a missing client capability | ⏳ no request bote serves needs one yet; capabilities are required and not otherwise read |
-| A third-party client | ❌ none has run against bote. The official SDK's source and the conformance suite's server scenarios have been read and replayed in 109 checks over real sockets on `http`, `streamable`, `bridge` and stdio, which is not the same thing |
+| A third-party client | ✅ (3.5.3) `@modelcontextprotocol/client` 2.4.0 connects and uses every capability bote has, 140 checks on `http`, `streamable` and stdio in both eras and `bridge` in the modern one. `./scripts/conformance.sh` repeats it |
+| `@modelcontextprotocol/conformance`, by its frozen requirement list | ⏳ (3.5.3) **25 of 37** on 2026-07-28, **21 of 30** on 2025-11-25, the same on `http` and `streamable`. What fails is a feature bote lacks: `InputRequiredResult`, progress, sampling and elicitation, logging, subscriptions. `tests/fixtures/conformance-expected-<revision>.yaml` lists each, and why |
 | `subscriptions/listen` and the rest of its notifications | ⏳ roadmap 3.7.x |
 
 ---
@@ -99,7 +100,7 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | `tools/call` result is always a CallToolResult | `dispatch::_dsp_coerce_result` | ✅ (3.4.5; 3.4.8) — a handler that returns nothing or invalid JSON is a failed call (`isError: true`); bare JSON arrives as a text block, one content block is lifted into `content`, and a CallToolResult passes through. A result carrying `isError` is audited and published as a failure. Through 3.4.7 bare JSON went out as the result, so bote's own libro tools answered `{"ok":true}` |
 | `prompts/list` + `prompts/get` (capability advertised iff a `PromptRegistry` is present) | `dispatch` + `prompts` | ✅ — an unknown name, a missing required argument and non-object `arguments` are `-32602` (the last two since 3.4.5) |
 | `resources/list` + `resources/read` (capability advertised iff a `ResourceRegistry` is present) | `dispatch` + `resources` | ✅ — an unserved URI is `-32002` with `data.uri`, as in the resources spec's example (3.4.5; was `-32602`) |
-| `resources/templates/list` (optional in the spec) | `dispatch` | ✅ (3.4.1) — answers `{"resourceTemplates":[]}` whenever resources are advertised (gated like `resources/list`; no registry → `-32601`). It answered `-32601` until 3.4.1, which some clients read as a failure rather than "no templates". bote has no URI-template registry (RFC 6570); the empty list is the honest reply. A `cursor` is `-32602` since 3.4.5, as on the other list methods |
+| `resources/templates/list` and reading through a template (optional in the spec) | `dispatch` + `resources` | ✅ (3.5.3) `dispatcher_register_resource_template`. RFC 6570 level 1: `{name}` is one non-empty value with no `/`, `?` or `#`, one to a segment. An exact resource wins, and the handler owns percent-decoding. Gated like `resources/*`, and an empty list with none registered |
 | `resources/subscribe` / `unsubscribe` + `notifications/resources/updated`; `resources` `listChanged` | — | ⏳ not implemented and not advertised — wait on real-time push (roadmap 3.5.x) |
 | `completion/complete` (capability advertised iff a completion handler is set) | `dispatch` (`dispatcher_set_completion`) | ✅ |
 | `notifications/tools/list_changed` + `notifications/prompts/list_changed` (buffered per session, drained on the client's next streamable `GET`; `listChanged` advertised only by a transport with a drain path) | `dispatch` (`dispatcher_set_notifications`) + `transport_streamable` (`strm_notify_sink`) | ✅ streamable (polled) |

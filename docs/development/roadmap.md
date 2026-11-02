@@ -4,8 +4,8 @@
 > current version is in [`VERSION`](../../VERSION), pins are in [`cyrius.cyml`](../../cyrius.cyml),
 > and test and benchmark counts are in [`CLAUDE.md`](../../CLAUDE.md)'s testing table.
 >
-> **Spec**: bote's default is MCP 2025-11-25. **2026-07-28** is served beside it on every transport.
-> No third-party client has run against it yet.
+> **Spec**: bote's default is MCP 2025-11-25. **2026-07-28** is served beside it on every transport. The
+> official client works on both, and the official suite passes 25 of the 37 scenarios 2026-07-28 requires.
 > [spec-compliance.md](../spec-compliance.md) · [SECURITY.md](../../SECURITY.md) ·
 > [2026-11-01 closeout audit](../audit/2026-11-01-closeout.md)
 
@@ -17,45 +17,43 @@ ordinary work: reproduce it in bote and fix it.
 
 The 2.0 handler ABI (`fn h(args, claims) → result_cstr`) and the six transports are stable across the
 2.x → 3.x line, and patch releases add capabilities, not shape changes. The protocol surface is
-`initialize`, `tools/*`, `prompts/*`, `resources/list` + `read`, `completion/complete`, `ping`, and a
+`initialize`, `tools/*`, `prompts/*`, `resources/*` with templates, `completion/complete`, `ping`, and a
 polled push of `tools` / `prompts` `list_changed`. Four revisions are accepted through `initialize`,
 2024-11-05 through 2025-11-25, and every path is asserted by spec clause in `tests/conformance.tcyr`.
 One binary carries every transport, on x86_64, aarch64 and agnos, all CI-gated.
 
-**The gap that orders everything below:** MCP 2026-07-28 is a breaking revision, and bote speaks it, with
-gaps. Since 3.5.0 a request carrying `_meta` `io.modelcontextprotocol/protocolVersion` takes the stateless
-path, with `server/discover` and the modern result shape, and an `initialize` takes the legacy path, in one
-process. Since 3.5.1 that holds on HTTP too, with every header checked against the body, and since 3.5.2 on
-`bote bridge` and for `Mcp-Param-{Name}`. What is left is below.
+**The gap that orders everything below:** bote speaks MCP 2026-07-28 and has been measured doing it. Since
+3.5.3 `scripts/conformance.sh` runs the official suite and client against it, and what fails on the
+revision's required list is features bote lacks. Each has a place below.
 
 ---
 
 ## Next patch
 
-**3.5.3 — a third-party client.** See below. A defect found in 3.5.2 lands ahead of it.
+**3.6.0 — Protected Resource Metadata.** The first item of 3.6.x. A defect found in 3.5.3 lands ahead of it.
 
 ## 3.5.x — MCP 2026-07-28, dual-era
 
-The largest open item, and the first. The revision removes `initialize`, `Mcp-Session-Id`, `ping`,
-`logging/setLevel`, `resources/subscribe`, the Streamable HTTP `GET` stream and `Last-Event-ID`. The
-protocol becomes stateless: each request carries its own version and capabilities. **Large: small bites,
-each verified before the next.**
+Done, with two decisions left standing:
 
-1. **A third-party client (3.5.3).** Nothing but bote's own tests has spoken to it. `3.5.2` read the official
-   TypeScript SDK and `@modelcontextprotocol/conformance` as text and replayed the suite's server checks in
-   109 assertions of bote's own, and that found two real gaps, so running the real thing is worth more than
-   anything else left here. It needs a fixture: the suite's scenarios call tools by name
-   (`test_simple_text` and the like), and one needs a tool with `x-mcp-header`, which no built-in tool has.
-2. **What the suite's required list asks for that bote lacks.** Measured by its `2026-07-28` list, bote needs
-   `InputRequiredResult` (14 scenarios, 3.8.x), `tools-call-with-progress` and `server-sse-multiple-streams`
-   (3.7.x).
-3. **The default.** It stays 2025-11-25. Every check so far is bote's reading of the spec, so a default
-   that a real client has not exercised would be a claim bote cannot back. Revisit once item 1 has run.
-4. **Client capabilities.** `-32021` belongs to a request that needs a capability the client did not
-   declare. No request bote serves needs one today, so bote requires the object and reads nothing from it.
-   The first feature that needs one adds the check.
+- **The default stays 2025-11-25.** A client that wants 2026-07-28 already gets it, so the default decides nothing on the
+  wire, and bote should not name a revision whose required list it does not pass. Revisit when `InputRequiredResult` lands.
+- **Client capabilities.** `-32021` belongs to a request that needs a capability the client did not declare. No request
+  bote serves needs one today, so bote requires the object and reads nothing from it. `InputRequiredResult` is the first
+  feature that will, and adds the check.
 
-Nothing here touches the handler ABI. The legacy path stays until a 4.0 removes it.
+The legacy path stays until a 4.0 removes it. Nothing here touches the handler ABI.
+
+**What the suite's required lists still ask for**, in the order the work below reaches it:
+
+| Scenarios | Revision | Needs | Where |
+|---|---|---|---|
+| `tools-call-with-progress` | both | a stream on the response | 3.7.x |
+| 10 `input-required-*`, and 3 checks of `server-stateless` | 2026-07-28 | `InputRequiredResult`, and `-32021` | 3.8.x |
+| `logging-set-level`, `tools-call-with-logging`, `resources-subscribe`, `resources-unsubscribe` | 2025-11-25 | optional, and removed from 2026-07-28 | not planned |
+| `tools-call-sampling`, `tools-call-elicitation`, 2 `elicitation-*` | 2025-11-25 | a server-to-client request, which 2026-07-28 replaces | not planned |
+
+Run `./scripts/conformance.sh` at any release that touches the protocol. It needs npm, so it is not in CI.
 
 ## 3.6.x — Authorization on HTTP
 
@@ -102,7 +100,11 @@ Not planned, because the current spec removes or deprecates them: the held-open 
 - **`title` and `icons`** on tools, prompts and resources, and `instructions` from the server. Check their
   status against the 2026-07-28 schema first.
 - **Multi round-trip requests.** `InputRequiredResult` is how a server now asks a client for input. It
-  needs an additive handler entry beside the 2.0 ABI.
+  needs an additive handler entry beside the 2.0 ABI, which sees `arguments` and not `inputResponses`.
+  This is 10 of the 12 scenarios bote fails on the 2026-07-28 list.
+- **Root keywords in `inputSchema`.** `ToolSchema` is type, properties and required, so a tool cannot say
+  `$schema`, `$defs`, `allOf`, or the `additionalProperties: false` the spec recommends for a tool with no
+  parameters. The suite's unscored `json-schema-2020-12` checks exactly that.
 - **JSON Schema coverage.** The 2026-07-28 revision allows any 2020-12 keyword. bote validates a subset and,
   since 3.4.15, warns at registration about the keywords it advertises and does not enforce: `anyOf`,
   `oneOf`, `allOf`, `not`, `$ref`, `pattern`, the length and item bounds, `const`, type arrays and
@@ -138,7 +140,6 @@ Not planned, because the current spec removes or deprecates them: the held-open 
   the archive to a sink, gate the tool on claims, or stop registering it by default.
 - **WebSocket subprotocol and compression.** WebSocket is not an MCP transport, so nothing requires
   these. Both would also need a seam in `lib/ws_server.cyr`.
-- **The default protocol version.** Item 3 of 3.5.x. 2025-11-25 until a third-party client has run.
 
 ## Housekeeping — rides any patch
 

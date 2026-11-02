@@ -18,6 +18,84 @@ have per release.
 
 _(empty)_
 
+## [3.5.3] — 2026-11-01 · The official MCP client and conformance suite have run against bote
+
+Until this release, every claim about MCP conformance here was bote's own reading of the spec. Now the official
+`@modelcontextprotocol/client` 2.4.0 has spoken to bote, and `@modelcontextprotocol/conformance` 0.2.0-alpha.12 has measured
+it. The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+**The official client works.** It connects, negotiates and uses every capability bote has, in 140 checks, on `bote http`,
+`bote streamable` and stdio in both eras, and on `bote bridge` in the modern one. In auto mode it settles on `2026-07-28` by
+itself. It mirrors `Mcp-Param` headers for each encoding the spec has, Base64 included, and bote accepts them all.
+
+**The suite, by its frozen requirement lists:**
+
+| Revision | Required scenarios passing | What fails |
+|---|---|---|
+| 2026-07-28 | 25 of 37 | `InputRequiredResult` (10), progress (1), `server-stateless` (1: three of its 30 checks need tools bote cannot back) |
+| 2025-11-25 | 21 of 30 | Sampling and elicitation (4), logging (2), resource subscriptions (2), progress (1) |
+
+Passing means no failed check. Two of the 25 carry a warning, both for `InputRequiredResult`, and the baseline lists them. The
+results match on `http` and `streamable`. Nothing that fails is a defect in what bote does: each is a feature bote lacks,
+and `tests/fixtures/conformance-expected-<revision>.yaml` says which. Two scenarios the list leaves unscored also pass in
+full: `http-header-validation`, 14 of 14, and `http-custom-header-server-validation`, 10 of 10, which is the suite's own proof of
+3.5.1's headers and 3.5.2's `Mcp-Param` work. The plain binary passes 105 checks before any fixture, and its other failures
+were tools the suite calls by name.
+
+### Security
+
+- **`resources/list` and `prompts/list` grew the heap on every request**, once a list was past 4 KB. Each built its reply with a
+  fixed 4 KB of arena room, and a builder past its room grows on the heap, which never frees: with 200 entries, 128,792 B per
+  `resources/list` and 62,232 B per `prompts/list`, for any client, so calling either in a loop runs the server out of memory.
+  Both also built a vector of the entries on the heap, per request, at any length. They now size the reply first and read the
+  registry directly: 0 B. 3.4.15's rows missed it because their lists were short; they now hold 200 long entries. `_dsp_room`
+  goes from `2 × strlen` to `6 × strlen`, the most escaping can reach, and a list that escapes to its full six times has a row.
+  Found by reading the code while adding the template list, not by the suite.
+
+### Added
+
+- **Resource templates**, the one gap on both required lists that was a small feature and not a large one.
+  `dispatcher_register_resource_template(d, resource_template_new(uri_template, name, description, mime_type), &handler)`, with
+  the resource handler ABI. `resources/templates/list` lists them, and `resources/read` tries an exact resource first and then
+  each template in order. The handler reads a value with `resource_template_var_a(a, template, uri, name)`, as sent, and owns its
+  percent-decoding. A template is RFC 6570 level 1: a `{name}` is one non-empty value with no `/`, `?` or `#`.
+  `resource_template_check` refuses anything else rather than reading an operator as text, and refuses two expressions in a
+  segment, which would make a match quadratic in a URI a client writes, and a name used twice, where a match would have to
+  compare the values. A template with an unknown value falls through to the usual not-found error.
+- **`scripts/conformance.sh`** runs the pinned suite and client against `tests/fixtures/conformance_server.cyr`, a dispatcher that
+  adds the names the suite calls and nothing else. It is not a CI step, because it installs third-party code from npm, and
+  CI now builds the fixture so that it cannot rot. It fails on a failure the baseline does not list and on a listed one that
+  now passes.
+- `fuzz/resource_template.fcyr`: what a template matches re-expands to the same URI, byte for byte. It found the repeated name.
+- Benchmark `resource_template_match`.
+
+### Changed
+
+- The default stays 2025-11-25. bote passes 25 of the 37 scenarios 2026-07-28 requires, and the rest are real features. A client
+  that wants that revision already gets it, so the default decides nothing on the wire.
+
+### Tests
+
+- 3,016 assertions, from 2,928. `tests/bote.tcyr` has 819, from 740, and `tests/conformance.tcyr` 215, from 206. All of them also
+  pass under `qemu-aarch64`.
+- 40 mutants, all killed, on `src/resources.cyr` and `src/dispatch.cyr`. Putting the 4 KB back fails at 124,800 B per message.
+
+### Performance
+
+No regression. Interleaved A/B, 15 alternating rounds, pinned to one core, 3.5.2 against this tree, medians in ns:
+
+| Bench | 3.5.2 | 3.5.3 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 4,048 | 3,943 | −2.6% |
+| `dispatch_tools_call` | 2,163 | 2,094 | −3.2% |
+| `dispatch_tools_list` | 1,800 | 1,643 | −8.7% |
+| `http_era_legacy` | 2,466 | 2,433 | −1.3% |
+| `http_era_modern` | 11,230 | 11,276 | +0.4% |
+| `resource_template_match`, new | | 166 | |
+
+These rows' code did not change, apart from `_dsp_room`, and other unchanged rows moved up to +6.3%. That is this binary's layout,
+not a win.
+
 ## [3.5.2] — 2026-11-01 · `Mcp-Param` headers, and what the official SDK showed bote had wrong
 
 `Mcp-Param-{Name}` closes the last transport gap in MCP 2026-07-28, and `bote bridge` now holds a modern request to the same

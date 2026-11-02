@@ -861,6 +861,19 @@ fn main() {
     var hdr_call = _expect_result(hdr_d, _m(2, "tools/call", ",\"name\":\"test_hdr\",\"arguments\":{\"region\":\"us\"}"), "M77 a call needs no header where there are none");
     _expect(_is_modern(_result(hdr_call)), "M78 ...and is a modern call");
 
+    # Resource templates, on both paths.
+    var tpl_d = dispatcher_new(tool_registry_new());
+    dispatcher_register_resource_template(tpl_d, resource_template_new("test://item/{id}/data", "item", "An item", "application/json"), &h_resource);
+    var tl = _expect_result(tpl_d, _m(1, "resources/templates/list", ""), "M79 resources/templates/list");
+    _expect(_str_is(_get(bayan_json_v_arr_get(_get(_result(tl), "resourceTemplates"), 0), "uriTemplate"), "test://item/{id}/data"), "M80 ...holds uriTemplate");
+    _expect(_is_modern(_result(tl)), "M81 ...is a modern result");
+    _expect(strstr(_last, "\"ttlMs\":") >= 0, "M82 ...with the cache hints");
+    _expect_result(tpl_d, _m(2, "resources/read", ",\"uri\":\"test://item/7/data\""), "M83 a URI the template matches is read");
+    _expect_code(tpl_d, _m(3, "resources/read", ",\"uri\":\"test://item/7/8/data\""), 0 - 32602, "M84 one it does not is not found");
+    _expect_result(tpl_d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/templates/list\"}", "M85 the legacy path lists it");
+    _expect_result(tpl_d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"test://item/7/data\"}}", "M86 and reads through it");
+    _expect_code(tpl_d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"test://item//data\"}}", 0 - 32002, "M87 with its own not-found");
+
     var esc_key = _expect_result(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"\\u005fmeta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}", "M74 an escaped _meta key");
     _expect(_is_modern(_result(esc_key)), "M75 ...selects this revision, as the key it decodes to");
 
