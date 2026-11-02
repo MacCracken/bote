@@ -338,6 +338,63 @@ vec JV_JWK_PRIVATE_RSA | python3 -I -c 'import sys; print("{\"keys\":["+sys.stdi
 rc=0; BOTE_JWKS_FILE="$L/jwks-private.json" BOTE_RESOURCE_URL=https://mcp.example.com/mcp BOTE_AUTH_SERVERS=https://as.example.com timeout 5 $B http 18388 2> "$L/jwks-private.held" || rc=$?
 [ "$rc" -eq 2 ] || err "a JWK Set holding a private key: rc=$rc, not 2"
 grep -q '\[ERROR\] BOTE_JWKS_FILE refused' "$L/jwks-private.held" || err "no reason for the refused set: $(cat "$L/jwks-private.held")"
+# Keys from a jwks_uri (3.6.6): fetched at startup, asked again for a key the set does not
+# hold, refreshed so that a key that left the set stops passing, and kept while the key
+# server is down. Over http to loopback, then over https with BOTE_JWKS_CA.
+jk="$PWD/$L/jwksrv"; mkdir -p "$jk"
+vec JV_JWKS > "$jk/full.json"
+vec JV_JWK_EC | python3 -I -c 'import sys; print("{\"keys\":["+sys.stdin.read().strip()+"]}")' > "$jk/ec.json"
+cp "$jk/ec.json" "$jk/jwks.json"
+python3 -I -m http.server 18382 --bind 127.0.0.1 --directory "$jk" > /dev/null 2>&1 & jkpid=$!; pids+=($jkpid)
+wait_port 18382 || err "jwks url: the loopback key server did not start"
+JENV=(BOTE_RESOURCE_URL=https://mcp.example.com/mcp BOTE_AUTH_SERVERS=https://as.example.com)
+jcode() { curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H "Authorization: Bearer $(vec "$1")" -d "$INIT" "http://127.0.0.1:$2/mcp"; }
+env "${JENV[@]}" BOTE_LOG=debug BOTE_JWKS_URL=http://127.0.0.1:18382/jwks.json BOTE_JWKS_REFRESH=1 $B http 18383 > /dev/null 2> "$L/jwksurl.err" & pids+=($!)
+wait_port 18383 || err "jwks url: nothing listening on 18383: $(cat "$L/jwksurl.err")"
+grep -q 'jwt keys from a jwks_uri host=127.0.0.1 keys=1 refresh_s=1' "$L/jwksurl.err" || err "jwks url: no startup line: $(cat "$L/jwksurl.err")"
+c=$(jcode JV_ES_NO_KID 18383); [ "$c" = "200" ] || err "jwks url: a token on the one key answered $c, not 200"
+c=$(jcode JV_RS_GOOD 18383); [ "$c" = "401" ] || err "jwks url: an RS256 token on a set with no RS256 key answered $c, not 401"
+cp "$jk/full.json" "$jk/jwks.json"; sleep 1.2
+c=$(jcode JV_RS_GOOD 18383); [ "$c" = "200" ] || err "jwks url: once the set held r1, its token answered $c, not 200"
+grep -q 'jwks keys changed keys=6' "$L/jwksurl.err" || err "jwks url: no line for the new set"
+cp "$jk/ec.json" "$jk/jwks.json"; sleep 1.2
+c=$(jcode JV_RS_GOOD 18383); [ "$c" = "401" ] || err "jwks url: once r1 left the set, its remembered token answered $c, not 401"
+kill "$jkpid" 2>/dev/null; wait "$jkpid" 2>/dev/null; sleep 1.2
+c=$(jcode JV_ES_NO_KID 18383); [ "$c" = "200" ] || err "jwks url: with the key server down, a token on the set it had answered $c, not 200"
+grep -q 'jwks refresh failed; keeping the keys it has reason="could not connect' "$L/jwksurl.err" || err "jwks url: no WARN for the server that is down: $(tail -3 "$L/jwksurl.err")"
+grep -q 'eyJ\|AQAB' "$L/jwksurl.err" && err "jwks url: a token or a key reached the log"
+rc=0; env "${JENV[@]}" BOTE_JWKS_URL=http://example.com/jwks.json timeout 5 $B http 18388 2> "$L/jwksurl-http.held" || rc=$?
+[ "$rc" -eq 2 ] && grep -q 'BOTE_JWKS_URL refused reason="an http:// jwks_uri must name a loopback address' "$L/jwksurl-http.held" \
+  || err "jwks url: http to a non-loopback host: rc=$rc $(cat "$L/jwksurl-http.held")"
+rc=0; env "${JENV[@]}" BOTE_JWKS_URL=http://127.0.0.1:1/jwks.json timeout 10 $B http 18388 2> "$L/jwksurl-down.held" || rc=$?
+[ "$rc" -eq 2 ] && grep -q 'BOTE_JWKS_URL: the first fetch failed' "$L/jwksurl-down.held" \
+  || err "jwks url: a key server that is down at startup: rc=$rc $(cat "$L/jwksurl-down.held")"
+rc=0; env "${JENV[@]}" BOTE_JWKS_URL=http://127.0.0.1:18382/jwks.json BOTE_JWKS_FILE="$L/jwks.json" timeout 5 $B http 18388 2> "$L/jwksurl-both.held" || rc=$?
+[ "$rc" -eq 2 ] && grep -q 'verifies with one of them' "$L/jwksurl-both.held" || err "jwks url: a URL and a file: rc=$rc"
+if command -v openssl > /dev/null; then
+  jt="$jk/tls"; mkdir -p "$jt"
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$jt/ca.key" -out "$jt/ca.pem" -days 2 -subj "/CN=bote smoke CA" 2> /dev/null
+  openssl req -newkey rsa:2048 -nodes -keyout "$jt/srv.key" -out "$jt/srv.csr" -subj "/CN=localhost" 2> /dev/null
+  printf 'subjectAltName=DNS:localhost\n' > "$jt/ext.cnf"
+  openssl x509 -req -in "$jt/srv.csr" -CA "$jt/ca.pem" -CAkey "$jt/ca.key" -CAcreateserial -out "$jt/srv.pem" -days 2 -extfile "$jt/ext.cnf" 2> /dev/null
+  python3 -I -c 'import http.server,ssl,sys,os
+os.chdir(sys.argv[1])
+class Q(http.server.SimpleHTTPRequestHandler):
+    def log_message(self,*a): pass
+s=http.server.HTTPServer(("127.0.0.1",18389),Q)
+c=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); c.load_cert_chain(sys.argv[2],sys.argv[3])
+s.socket=c.wrap_socket(s.socket,server_side=True)
+s.serve_forever()' "$jk" "$jt/srv.pem" "$jt/srv.key" > /dev/null 2>&1 & pids+=($!)
+  wait_port 18389 || err "jwks tls: the key server did not start"
+  env "${JENV[@]}" BOTE_JWKS_URL=https://localhost:18389/full.json BOTE_JWKS_CA="$jt/ca.pem" $B http 18379 > /dev/null 2> "$L/jwkstls.err" & pids+=($!)
+  wait_port 18379 || err "jwks tls: nothing listening on 18379: $(cat "$L/jwkstls.err")"
+  c=$(jcode JV_RS_GOOD 18379); [ "$c" = "200" ] || err "jwks tls: an RS256 token on keys fetched over TLS answered $c, not 200"
+  rc=0; env "${JENV[@]}" BOTE_JWKS_URL=https://localhost:18389/full.json timeout 10 $B http 18388 2> "$L/jwkstls-noca.held" || rc=$?
+  [ "$rc" -eq 2 ] && grep -q 'TLS to the jwks_uri failed' "$L/jwkstls-noca.held" \
+    || err "jwks tls: a private CA without BOTE_JWKS_CA: rc=$rc $(cat "$L/jwkstls-noca.held")"
+else
+  echo "jwks tls: no openssl, skipped"
+fi
 
 # A session exists once initialize has succeeded (3.4.15): a refused one gets none.
 h=$(curl -s -D - -o /dev/null "${H[@]}" -d '{"method":"initialize"' http://127.0.0.1:18392/mcp)

@@ -295,10 +295,13 @@ fn _jwt_time_claim(payload, plen, key) {
 # something the operator cannot see in the logs, and the size of that grace would be an
 # invisible security parameter. Consumers that need skew tolerance should fix their
 # clocks or wrap this validator.
-fn _jwt_window_ok(exp, nbf) {
+fn _jwt_window_ok(exp, nbf) { return _jwt_window_at(exp, nbf, 0 - 1); }
+
+# _jwt_window_ok on a clock reading the caller already took, or -1 to take one here.
+fn _jwt_window_at(exp, nbf, now) {
     # A clock read is a syscall, and a token with neither claim needs none.
     if (exp == 0 - 1 && nbf == 0 - 1) { return 1; }
-    var now = _jwt_now();
+    if (now == 0 - 1) { now = _jwt_now(); }
     if (now == 0) { return 1; }
     if (exp != 0 - 1 && exp <= now) { return 0; }
     if (nbf != 0 - 1 && now < nbf) { return 0; }
@@ -322,8 +325,10 @@ fn _jwt_key_pub(k) { return load64(k + 16); }
 fn _jwt_key_len(k) { return load64(k + 24); }
 fn _jwt_key_exp(k) { return load64(k + 32); }
 
-fn _jwt_key_new(alg, kid, material, len, exp) {
-    var k = alloc(40);
+# A key's parts on `a`: a set is read on the request arena, and only the keys it holds
+# are kept, by _jwt_key_keep, once they are known to differ from the ones in use.
+fn _jwt_key_new_a(a, alg, kid, material, len, exp) {
+    var k = alloc_via(a, 40);
     store64(k, alg);
     store64(k + 8, kid);
     store64(k + 16, material);
@@ -332,11 +337,56 @@ fn _jwt_key_new(alg, kid, material, len, exp) {
     return k;
 }
 
-# The base64url member `name` of `jwk`, decoded on the heap, or 0.
-fn _jwk_bytes(jwk, name, len_out) {
-    var v = jsonx_get_str_dec_a(default_alloc(), jwk, name);
+# A copy of the key `k` on the heap, its parts with it: it outlives the message.
+fn _jwt_key_keep(k) {
+    var len = _jwt_key_len(k);
+    var material = alloc(len);
+    memcpy(material, _jwt_key_pub(k), len);
+    var e = 0;
+    if (_jwt_key_exp(k) != 0) {
+        e = alloc(3);
+        memcpy(e, _jwt_key_exp(k), 3);
+    }
+    var kid = 0;
+    if (_jwt_key_kid(k) != 0) {
+        var kl = strlen(_jwt_key_kid(k));
+        kid = alloc(kl + 1);
+        memcpy(kid, _jwt_key_kid(k), kl + 1);
+    }
+    return _jwt_key_new_a(default_alloc(), _jwt_key_alg(k), kid, material, len, e);
+}
+
+# 1 when the keys `k` and `j` verify the same tokens: the same algorithm, kid and
+# material. A kid that differs is another key, because it decides which tokens pick it.
+# Every RSA key holds e = 65537 (_jwk_rsa_key_a), so the exponent decides nothing here, and
+# the length decides the algorithm: a modulus is 256 to 512 bytes, a P-256 key 64.
+fn _jwt_key_same(k, j) {
+    if (_jwt_key_len(k) != _jwt_key_len(j)) { return 0; }
+    if (memeq(_jwt_key_pub(k), _jwt_key_pub(j), _jwt_key_len(k)) == 0) { return 0; }
+    var kk = _jwt_key_kid(k);
+    var jk = _jwt_key_kid(j);
+    if ((kk == 0 && jk != 0) || (kk != 0 && jk == 0)) { return 0; }
+    if (kk != 0 && streq(kk, jk) == 0) { return 0; }
+    return 1;
+}
+
+# 1 when the two vecs of keys hold the same keys in the same order. A set that only moved
+# its keys around reads as changed, which costs one copy of it and is right either way.
+fn _jwt_keys_same(old, fresh) {
+    if (old == 0 || vec_len(old) != vec_len(fresh)) { return 0; }
+    var i = 0;
+    while (i < vec_len(old)) {
+        if (_jwt_key_same(vec_get(old, i), vec_get(fresh, i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# The base64url member `name` of `jwk`, decoded on `a`, or 0.
+fn _jwk_bytes_a(a, jwk, name, len_out) {
+    var v = jsonx_get_str_dec_a(a, jwk, name);
     if (v == 0) { return 0; }
-    return _jwt_b64u_a(default_alloc(), v, strlen(v), len_out);
+    return _jwt_b64u_a(a, v, strlen(v), len_out);
 }
 
 # 1 when `jwk` holds what must never be in a file of public keys: a private exponent or
@@ -350,18 +400,18 @@ fn _jwk_is_private(jwk) {
 # An RSA modulus and exponent bote will use: 2048 bits at the least, minimal, odd, and
 # e = 65537. A small `e` is what signature forgeries against lax verifiers need, and
 # nothing issues one.
-fn _jwk_rsa_key(jwk, kid) {
+fn _jwk_rsa_key_a(a, jwk, kid) {
     var nl[8];
     var el[8];
-    var n = _jwk_bytes(jwk, "n", &nl);
-    var e = _jwk_bytes(jwk, "e", &el);
+    var n = _jwk_bytes_a(a, jwk, "n", &nl);
+    var e = _jwk_bytes_a(a, jwk, "e", &el);
     if (n == 0 || e == 0) { return 0; }
     var len = load64(&nl);
     if (len < BOTE_JWT_RSA_MIN || len > BOTE_JWT_RSA_MAX) { return 0; }
     if (load8(n) < 128 && (len == BOTE_JWT_RSA_MIN || load8(n) == 0)) { return 0; }
     if ((load8(n + len - 1) & 1) == 0) { return 0; }
     if (load64(&el) != 3 || load8(e) != 1 || load8(e + 1) != 0 || load8(e + 2) != 1) { return 0; }
-    return _jwt_key_new(BOTE_JWT_RS256, kid, n, len, e);
+    return _jwt_key_new_a(a, BOTE_JWT_RS256, kid, n, len, e);
 }
 
 # 1 when the 64 bytes Qx || Qy are a point on P-256. sigil asks on every verify too, and
@@ -375,63 +425,63 @@ fn _jwt_on_curve(q) {
     return pt_is_on_curve(&x, &y);
 }
 
-fn _jwk_ec_key(jwk, kid) {
-    var crv = jsonx_get_str_dec_a(default_alloc(), jwk, "crv");
+fn _jwk_ec_key_a(a, jwk, kid) {
+    var crv = jsonx_get_str_dec_a(a, jwk, "crv");
     if (crv == 0 || streq(crv, "P-256") == 0) { return 0; }
     var xl[8];
     var yl[8];
-    var x = _jwk_bytes(jwk, "x", &xl);
-    var y = _jwk_bytes(jwk, "y", &yl);
+    var x = _jwk_bytes_a(a, jwk, "x", &xl);
+    var y = _jwk_bytes_a(a, jwk, "y", &yl);
     if (x == 0 || y == 0 || load64(&xl) != 32 || load64(&yl) != 32) { return 0; }
-    var q = alloc(64);
+    var q = alloc_via(a, 64);
     memcpy(q, x, 32);
     memcpy(q + 32, y, 32);
     if (_jwt_on_curve(q) == 0) { return 0; }
-    return _jwt_key_new(BOTE_JWT_ES256, kid, q, 64, 0);
+    return _jwt_key_new_a(a, BOTE_JWT_ES256, kid, q, 64, 0);
 }
 
-# The JwtKey `jwk` makes, or 0 when bote cannot use it: a real set also holds keys for
-# encryption and for algorithms bote does not verify, and those are not an error.
-fn _jwk_key(jwk) {
-    var a = default_alloc();
+# The JwtKey `jwk` makes, on `a`, or 0 when bote cannot use it: a real set also holds keys
+# for encryption and for algorithms bote does not verify, and those are not an error.
+fn _jwk_key_a(a, jwk) {
     var usage = jsonx_get_str_dec_a(a, jwk, "use");
     if (usage != 0 && streq(usage, "sig") == 0) { return 0; }
     var kty = jsonx_get_str_dec_a(a, jwk, "kty");
     if (kty == 0) { return 0; }
     var alg = jsonx_get_str_dec_a(a, jwk, "alg");
     var kid = jsonx_get_str_dec_a(a, jwk, "kid");
-    if (streq(kty, "RSA") == 1 && (alg == 0 || streq(alg, "RS256") == 1)) { return _jwk_rsa_key(jwk, kid); }
-    if (streq(kty, "EC") == 1 && (alg == 0 || streq(alg, "ES256") == 1)) { return _jwk_ec_key(jwk, kid); }
+    if (streq(kty, "RSA") == 1 && (alg == 0 || streq(alg, "RS256") == 1)) { return _jwk_rsa_key_a(a, jwk, kid); }
+    if (streq(kty, "EC") == 1 && (alg == 0 || streq(alg, "ES256") == 1)) { return _jwk_ec_key_a(a, jwk, kid); }
     return 0;
 }
 
-# 1 when `json` is valid JSON and its `keys` member an array. The elements then.
-fn _jwks_elements(json) {
+# 1 when `json` is valid JSON and its `keys` member an array. The elements then, on `a`.
+fn _jwks_elements_a(a, json) {
     if (json == 0 || jsonx_valid(json, strlen(json)) == 0 || jsonx_is_object(json) == 0) { return 0; }
-    var keys = jsonx_get_raw(json, "keys");
+    var keys = jsonx_get_raw_a(a, json, "keys");
     if (keys == 0 || load8(keys) != 91) { return 0; }
-    var out = vec_new();
+    var out = vec_new_a(a);
     var len = strlen(keys);
     var i = _jx_skip_ws(keys, len, 1);
     while (i < len && load8(keys + i) != 93) {
-        vec_push(out, _jx_raw_at_a(default_alloc(), keys, len, i));
+        vec_push_a(a, out, _jx_raw_at_a(a, keys, len, i));
         i = _jx_array_next(keys, len, i);
     }
     return out;
 }
 
 # Why a JWK Set cannot be loaded, as a message, or 0 when it can. Public, so a caller can
-# say why before it builds one.
+# say why before it builds one. Read on the request arena: it keeps nothing.
 fn jwt_jwks_check(json) {
-    var elems = _jwks_elements(json);
+    var a = bote_req_alloc();
+    var elems = _jwks_elements_a(a, json);
     if (elems == 0) { return "a JWK Set is a JSON object with a `keys` array"; }
-    var kids = vec_new();
+    var kids = vec_new_a(a);
     var usable = 0;
     var i = 0;
     while (i < vec_len(elems)) {
         var jwk = vec_get(elems, i);
         if (_jwk_is_private(jwk) == 1) { return "a JWK Set must hold public keys only, and this one holds a private key"; }
-        var k = _jwk_key(jwk);
+        var k = _jwk_key_a(a, jwk);
         if (k != 0) {
             usable = usable + 1;
             if (_jwt_key_kid(k) != 0) {
@@ -440,7 +490,7 @@ fn jwt_jwks_check(json) {
                     if (streq(vec_get(kids, j), _jwt_key_kid(k)) == 1) { return "two keys in a JWK Set share a kid"; }
                     j = j + 1;
                 }
-                vec_push(kids, _jwt_key_kid(k));
+                vec_push_a(a, kids, _jwt_key_kid(k));
             }
         }
         i = i + 1;
@@ -540,6 +590,11 @@ fn _jwt_payload_a(a, token, s, plen_out) {
     if (_jx_find_value_pos(header, hlen, "crit") != 0 - 1) { return 0; }
     if (keys != 0) {
         var k = _jwt_key_pick(a, header, hlen, keys);
+        # A key the set does not hold may be one the authorization server has just
+        # published: ask its key source, as often as the cooldown allows, and pick again.
+        if (k == 0 && _jwt_refetch_for_kid(s, header, hlen) == 1) {
+            k = _jwt_key_pick(a, header, hlen, jwt_secret_keys(s));
+        }
         if (k == 0) { return 0; }
         if (_jwt_pk_ok(a, token, dot2, tlen, k) == 0) { return 0; }
     } else {
@@ -569,8 +624,8 @@ fn _jwt_payload_a(a, token, s, plen_out) {
 
 # Verify an HS256 JWT. Returns 1 on valid, 0 otherwise.
 fn jwt_verify_hs256(token, key, key_len) {
-    var s[72];
-    memset(&s, 0, 72);
+    var s[120];    # BOTE_JWT_SECRET_BYTES
+    memset(&s, 0, 120);
     store64(&s, key);
     store64(&s + 8, key_len);
     var plen[8];
@@ -647,10 +702,143 @@ fn _jwt_cache_find(s, digest) {
 }
 
 # ================================================================
+# Keys from a source (3.6.6)
+# ================================================================
+#
+# An authorization server publishes its keys at its `jwks_uri` and rotates them there. A
+# handle with a key source asks it for the set: when it is first configured
+# (jwt_secret_refresh), when the keys it holds are `every` seconds old, and when a token
+# names a key it does not hold, the moment a new one comes into use. Never more often than
+# the cooldown, BOTE_JWKS_COOLDOWN or `every` if that is shorter, so a client sending kids
+# no server issued gets one fetch a cooldown. A source that fails is asked again after the
+# cooldown, then twice that, up to `every`, and meanwhile the keys it gave last are used:
+# an authorization server that is down does not take the resource server with it. A clock
+# that goes back opens the gate; an unknown one (0) asks nothing on a timer.
+#
+# A source is fn (ctx, why_out) → the set's text, or 0 with a reason written through
+# why_out. bote_jwks_fetch (src/jwks.cyr) fetches a jwks_uri; a test gives a fake.
+
+var BOTE_JWKS_REFRESH_DEFAULT = 600;
+var BOTE_JWKS_COOLDOWN = 60;
+
+# Refresh `s` from the source `fp` with `ctx`, every `every` seconds, or 600 for 0 or less.
+# It holds no keys until jwt_secret_refresh first succeeds. Returns `s`.
+fn jwt_secret_with_key_source(s, fp, ctx, every) {
+    if (every <= 0) { every = BOTE_JWKS_REFRESH_DEFAULT; }
+    store64(s + 72, fp);
+    store64(s + 80, ctx);
+    store64(s + 88, every);
+    store64(s + 96, 0);
+    store64(s + 104, 0);
+    store64(s + 112, 0);
+    return s;
+}
+
+fn jwt_secret_key_source(s) { return load64(s + 72); }
+fn jwt_secret_refresh_every(s) { return load64(s + 88); }
+fn jwt_secret_fetched_at(s) { return load64(s + 96); }
+fn jwt_secret_fetch_failures(s) { return load64(s + 112); }
+
+fn _jwt_cooldown(s) {
+    var every = load64(s + 88);
+    if (every < BOTE_JWKS_COOLDOWN) { return every; }
+    return BOTE_JWKS_COOLDOWN;
+}
+
+# How long after the last ask the next may come: the cooldown, and after failures twice
+# that for each one past the first, up to `every`.
+fn _jwt_backoff(s) {
+    var b = _jwt_cooldown(s);
+    var every = load64(s + 88);
+    var f = load64(s + 112);
+    var i = 1;
+    while (i < f && b < every) {
+        b = b * 2;
+        i = i + 1;
+    }
+    if (b > every && every > _jwt_cooldown(s)) { b = every; }
+    return b;
+}
+
+# 1 when the source may be asked at `now`.
+fn _jwt_gate_open(s, now) {
+    var tried = load64(s + 104);
+    if (tried == 0 || now < tried) { return 1; }
+    if (now - tried >= _jwt_backoff(s)) { return 1; }
+    return 0;
+}
+
+# 1 when the keys are due a refresh at `now`: old, or never fetched, and the gate open. For
+# a handle with a source; an unknown clock is never due.
+fn _jwt_refresh_due(s, now) {
+    if (now == 0) { return 0; }
+    if (_jwt_gate_open(s, now) == 0) { return 0; }
+    var fetched = load64(s + 96);
+    if (fetched == 0 || now < fetched) { return 1; }
+    if (now - fetched >= load64(s + 88)) { return 1; }
+    return 0;
+}
+
+# Ask the source now, at `now`: 0 when its set was taken, or why not. Says so in the log:
+# INFO for a set that changed, DEBUG for one that did not, WARN for a failure, which keeps
+# the keys it had. Neither a key nor the set is logged.
+fn _jwt_refresh_at(s, now) {
+    store64(s + 104, now);
+    var why[8];
+    store64(&why, 0);
+    var body = fncall2(load64(s + 72), load64(s + 80), &why);
+    var reason = load64(&why);
+    if (body == 0 && reason == 0) { reason = "the key source gave nothing"; }
+    var changed[8];
+    store64(&changed, 0);
+    if (body != 0) { reason = _jwt_set_jwks(s, body, &changed); }
+    if (reason != 0) {
+        store64(s + 112, load64(s + 112) + 1);
+        var wl[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&wl, SK_WARN, "jwks refresh failed; keeping the keys it has");
+        bote_log_str(&wl, "reason", reason);
+        bote_log_int(&wl, "failures", load64(s + 112));
+        bote_log_int(&wl, "retry_s", _jwt_backoff(s));
+        bote_log_emit(&wl);
+        return reason;
+    }
+    store64(s + 96, now);
+    store64(s + 112, 0);
+    var kl[BOTE_LOG_LINE_BYTES];
+    if (load64(&changed) == 1) {
+        bote_log_line(&kl, SK_INFO, "jwks keys changed");
+    } else {
+        bote_log_line(&kl, SK_DEBUG, "jwks keys unchanged");
+    }
+    bote_log_int(&kl, "keys", vec_len(jwt_secret_keys(s)));
+    bote_log_emit(&kl);
+    return 0;
+}
+
+# Ask the source now, whatever the gate: 0 when its set was taken, or why not. What a
+# binary calls at startup, and an embedder on a schedule of its own.
+fn jwt_secret_refresh(s) {
+    if (load64(s + 72) == 0) { return "the handle has no key source"; }
+    return _jwt_refresh_at(s, _jwt_now());
+}
+
+# A token's header named an RS256 or ES256 key the set does not hold: ask the source, when
+# the gate allows. 1 when it gave a set, which is then worth a second pick.
+fn _jwt_refetch_for_kid(s, header, hlen) {
+    if (load64(s + 72) == 0) { return 0; }
+    if (_jwt_str_field_eq(header, hlen, "alg", "RS256") == 0 && _jwt_str_field_eq(header, hlen, "alg", "ES256") == 0) { return 0; }
+    var now = _jwt_now();
+    if (now == 0 || _jwt_gate_open(s, now) == 0) { return 0; }
+    bote_log(SK_DEBUG, "jwks asked again for a key it does not hold");
+    if (_jwt_refresh_at(s, now) != 0) { return 0; }
+    return 1;
+}
+
+# ================================================================
 # Validator adapter — plugs into auth_bearer_check via the existing
 # fn-pointer + ctx surface (1.9.0).
 #
-# ctx is a JwtSecret handle (72 bytes):
+# ctx is a JwtSecret handle (BOTE_JWT_SECRET_BYTES, 120):
 #   +0  secret    cstr, for HS256, or 0
 #   +8  length
 #   +16 audience  cstr or 0: this server's resource identifier
@@ -660,13 +848,21 @@ fn _jwt_cache_find(s, digest) {
 #   +48 table     those slots, or 0 until the first token is stored
 #   +56 hits      tokens judged from the table
 #   +64 misses    tokens verified in full while it was on
+#   +72 source    fn (ctx, why_out) → a JWK Set's text, or 0 with a reason; or 0
+#   +80 source_ctx
+#   +88 every     seconds between refreshes from the source
+#   +96 fetched   when the source last gave a set that was taken, 0 for never
+#   +104 tried    when the source was last asked, 0 for never
+#   +112 failures asked since then without a set taken
 # jwt_secret_new(secret_cstr) builds one for HS256, and jwt_secret_from_jwks(json) one for
 # public keys. A handle holds one or the other, and that is what decides what it verifies.
 # ================================================================
 
+var BOTE_JWT_SECRET_BYTES = 120;
+
 fn jwt_secret_new(key) {
-    var s = alloc(72);
-    memset(s, 0, 72);
+    var s = alloc(BOTE_JWT_SECRET_BYTES);
+    memset(s, 0, BOTE_JWT_SECRET_BYTES);
     store64(s, key);
     if (key != 0) { store64(s + 8, strlen(key)); }
     store64(s + 40, BOTE_JWT_CACHE_DEFAULT);
@@ -676,15 +872,45 @@ fn jwt_secret_new(key) {
 # A JwtSecret for the public keys in the JWK Set `json`, or 0 when jwt_jwks_check refuses
 # it. A key bote cannot use is left out, with a WARN naming it.
 fn jwt_secret_from_jwks(json) {
-    if (jwt_jwks_check(json) != 0) { return 0; }
-    var keys = vec_new();
-    var elems = _jwks_elements(json);
+    var s = jwt_secret_new(0);
+    if (jwt_secret_set_jwks(s, json) != 0) { return 0; }
+    return s;
+}
+
+# Give `s` the public keys of the JWK Set `json` (3.6.6): 0, or why not, with the keys it
+# had kept. The set is read on the request arena and compared with the keys in use, and
+# only a set that differs is kept, on the heap, which forgets every token judged under the
+# old one: a key that left the set must not go on passing tokens from the cache. A handle
+# with an HS256 secret takes no keys.
+fn jwt_secret_set_jwks(s, json) {
+    var changed[8];
+    return _jwt_set_jwks(s, json, &changed);
+}
+
+fn _jwt_set_jwks(s, json, changed_out) {
+    store64(changed_out, 0);
+    if (jwt_secret_data(s) != 0) { return "a handle holds an HS256 secret or public keys, never both"; }
+    var why = jwt_jwks_check(json);
+    if (why != 0) { return why; }
+    var a = bote_req_alloc();
+    var elems = _jwks_elements_a(a, json);
+    var fresh = vec_new_a(a);
     var i = 0;
     while (i < vec_len(elems)) {
-        var k = _jwk_key(vec_get(elems, i));
-        if (k != 0) {
-            vec_push(keys, k);
-        } else {
+        var k = _jwk_key_a(a, vec_get(elems, i));
+        if (k != 0) { vec_push_a(a, fresh, k); }
+        i = i + 1;
+    }
+    if (_jwt_keys_same(jwt_secret_keys(s), fresh) == 1) { return 0; }
+    var kept = vec_new();
+    i = 0;
+    while (i < vec_len(fresh)) {
+        vec_push(kept, _jwt_key_keep(vec_get(fresh, i)));
+        i = i + 1;
+    }
+    i = 0;
+    while (i < vec_len(elems)) {
+        if (_jwk_key_a(a, vec_get(elems, i)) == 0) {
             var ln[BOTE_LOG_LINE_BYTES];
             bote_log_line(&ln, SK_WARN, "jwks key skipped");
             bote_log_int(&ln, "index", i);
@@ -692,9 +918,10 @@ fn jwt_secret_from_jwks(json) {
         }
         i = i + 1;
     }
-    var s = jwt_secret_new(0);
-    store64(s + 32, keys);
-    return s;
+    store64(s + 32, kept);
+    _jwt_cache_clear(s);
+    store64(changed_out, 1);
+    return 0;
 }
 
 # Each changes what a token is judged by, so each forgets what was judged before.
@@ -729,6 +956,13 @@ fn _jwt_for_us(a, payload, plen, s) {
 # Validator with the bearer-middleware signature: (token, ctx) → claims | 0
 fn auth_validator_jwt(token, jwt_secret) {
     if (jwt_secret == 0 || token == 0) { return 0; }
+    # A handle with a key source reads the clock once here, for its refresh and for a
+    # remembered token's window.
+    var now = 0 - 1;
+    if (load64(jwt_secret + 72) != 0) {
+        now = _jwt_now();
+        if (_jwt_refresh_due(jwt_secret, now) == 1) { _jwt_refresh_at(jwt_secret, now); }
+    }
     var digest[32];
     var cached = load64(jwt_secret + 40) > 0;
     if (cached == 1) {
@@ -736,7 +970,7 @@ fn auth_validator_jwt(token, jwt_secret) {
         var e = _jwt_cache_find(jwt_secret, &digest);
         if (e != 0) {
             store64(jwt_secret + 56, load64(jwt_secret + 56) + 1);
-            if (_jwt_window_ok(load64(e + 32), load64(e + 40)) == 0) { return 0; }
+            if (_jwt_window_at(load64(e + 32), load64(e + 40), now) == 0) { return 0; }
             bote_log(SK_TRACE, "jwt verified from the cache");
             return token;
         }

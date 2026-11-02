@@ -1,0 +1,167 @@
+# bote::jwks — a JWK Set fetched from an authorization server's `jwks_uri` (3.6.6).
+#
+# bote_jwks_fetch is a key source for a JwtSecret (jwt_secret_with_key_source, src/jwt.cyr),
+# which decides when to ask. Each ask is one GET, made in a child (src/fetch.cyr): sandhi
+# keeps about 175 KB on the heap for every https:// request, and the child takes it away.
+#
+# The URL is the operator's, not a client's, so the SSRF guard, which would refuse an
+# authorization server on the operator's own network, is not applied. What is: https://,
+# with the system's trust roots or BOTE_JWKS_CA's, or http:// to a loopback address, which
+# no one on a network can answer for; no userinfo; no redirect followed; at most
+# BOTE_JWKS_MAX bytes back; and BOTE_JWKS_TIMEOUT_MS for all of it, the DNS lookup
+# included, after which the child is killed. The name is resolved by the stdlib's
+# net_resolve_ipv4, which has a deadline of its own, through sandhi's resolve hook, unless
+# an embedder has a hook installed, which then decides. IPv4 only.
+#
+# JwksSource (16 B): +0 url, +8 trust store path or 0, both kept on the heap.
+
+var BOTE_JWKS_TIMEOUT_MS = 5000;
+
+# 1 when `host` is a loopback name or address: an IPv4 literal in 127.0.0.0/8, or
+# `localhost` or a name under it, which net_resolve_ipv4 answers 127.0.0.1 for without
+# asking anyone (RFC 6761).
+fn _jwks_loopback(host) {
+    if (streq(host, "localhost") == 1) { return 1; }
+    var n = strlen(host);
+    if (n > 10 && streq(host + n - 10, ".localhost") == 1) { return 1; }
+    var v4 = net_parse_ipv4(host);
+    if (v4 == 0 - 1) { return 0; }
+    if ((v4 & 255) == 127) { return 1; }
+    return 0;
+}
+
+# Why `url`, with the trust store `ca` or 0, cannot be fetched, as a message, or 0.
+fn bote_jwks_url_check(url, ca) {
+    if (url == 0) { return "a jwks_uri is an http:// or https:// URL"; }
+    # sandhi's parser refuses an empty host as well as another scheme.
+    var u = sandhi_url_parse_a(bote_req_alloc(), url);
+    if (u == 0) { return "a jwks_uri is an http:// or https:// URL with a host"; }
+    var host = sandhi_url_host(u);
+    # sandhi has no userinfo; a `@` before the path would be read as part of the host.
+    var i = 0;
+    if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) { i = 8; } else { i = 7; }
+    while (load8(url + i) != 0 && load8(url + i) != 47 && load8(url + i) != 63 && load8(url + i) != 35) {
+        if (load8(url + i) == 64) { return "a jwks_uri carries no userinfo"; }
+        i = i + 1;
+    }
+    var j = 0;
+    while (load8(host + j) != 0) {
+        if (load8(host + j) == 58) { return "a jwks_uri names its host or an IPv4 address: bote fetches it over IPv4"; }
+        j = j + 1;
+    }
+    if (sandhi_url_scheme(u) == SANDHI_URL_HTTPS) { return 0; }
+    if (ca != 0) { return "BOTE_JWKS_CA is for an https:// jwks_uri"; }
+    if (_jwks_loopback(host) == 0) { return "an http:// jwks_uri must name a loopback address: anywhere else, https://"; }
+    return 0;
+}
+
+# A source for `url` and the trust store `ca` or 0, or 0 when bote_jwks_url_check refuses.
+fn bote_jwks_source_new(url, ca) {
+    if (bote_jwks_url_check(url, ca) != 0) { return 0; }
+    var src = alloc(16);
+    var ul = strlen(url);
+    var u = alloc(ul + 1);
+    memcpy(u, url, ul + 1);
+    store64(src, u);
+    store64(src + 8, 0);
+    if (ca != 0) {
+        var cl = strlen(ca);
+        var c = alloc(cl + 1);
+        memcpy(c, ca, cl + 1);
+        store64(src + 8, c);
+    }
+    return src;
+}
+
+fn bote_jwks_source_url(src) { return load64(src); }
+
+# The resolve hook the child installs: an IPv4 address from net_resolve_ipv4, which gives
+# up on DNS in two tries of 2 s, and none for IPv6.
+fn _jwks_resolve(ctx, host, family) {
+    if (family != SANDHI_RESOLVE_V4) { return 0; }
+    return net_resolve_ipv4(host);
+}
+
+# The child: the GET, and a record of sandhi's error kind, the status and the body.
+fn _jwks_child(src, rec) {
+    var a = bote_req_alloc();
+    var hooked = 0;
+    if (_sandhi_client_resolver_fn == 0) {
+        sandhi_client_set_resolver(&_jwks_resolve, 0);
+        hooked = 1;
+    }
+    var h = sandhi_headers_new();
+    sandhi_headers_set(h, "Accept", "application/jwk-set+json, application/json");
+    sandhi_headers_set(h, "User-Agent", "bote-jwks/1.0 (AGNOS)");
+    var o = sandhi_http_options_new_a(a);
+    sandhi_http_options_connect_ms(o, BOTE_JWKS_TIMEOUT_MS);
+    sandhi_http_options_read_ms(o, BOTE_JWKS_TIMEOUT_MS);
+    sandhi_http_options_write_ms(o, BOTE_JWKS_TIMEOUT_MS);
+    sandhi_http_options_total_ms(o, BOTE_JWKS_TIMEOUT_MS);
+    sandhi_http_options_max_response_bytes(o, BOTE_JWKS_MAX);
+    if (load64(src + 8) != 0) {
+        sandhi_http_options_tls_policy(o, sandhi_tls_policy_new_trust_store_a(a, load64(src + 8)));
+    }
+    var r = sandhi_http_get_opts_a(a, load64(src), h, o);
+    if (hooked == 1) { sandhi_client_clear_resolver(); }
+    bote_fetch_put_int(rec, sandhi_http_err_kind(r));
+    bote_fetch_put_int(rec, sandhi_http_status(r));
+    if (r == 0 || sandhi_http_err_kind(r) != SANDHI_OK) { return bote_fetch_put_str(rec, 0); }
+    return bote_fetch_put_bytes(rec, sandhi_http_body(r), sandhi_http_body_len(r));
+}
+
+# Why sandhi's error kind `kind` failed a fetch.
+fn _jwks_kind_reason(kind) {
+    if (kind == SANDHI_ERR_CONNECT) { return "could not connect to the jwks_uri"; }
+    if (kind == SANDHI_ERR_TLS) { return "TLS to the jwks_uri failed: an untrusted or wrong certificate"; }
+    if (kind == SANDHI_ERR_TIMEOUT) { return "the jwks_uri did not answer in time"; }
+    if (kind == SANDHI_ERR_DISCOVERY) { return "the jwks_uri's host has no IPv4 address"; }
+    if (kind == SANDHI_ERR_PROTOCOL) { return "the jwks_uri gave no HTTP reply bote can read, or one over BOTE_JWKS_MAX"; }
+    return "the request to the jwks_uri failed";
+}
+
+# "the jwks_uri answered HTTP <status>", on the request arena.
+fn _jwks_status_reason(status) {
+    var lead = "the jwks_uri answered HTTP ";
+    var ll = strlen(lead);
+    var out = alloc_via(bote_req_alloc(), ll + 24);
+    memcpy(out, lead, ll);
+    var digits[24];
+    var n = 0;
+    var v = status;
+    if (v < 0) { v = 0; }
+    while (n == 0 || v > 0) {
+        store8(&digits + n, 48 + v % 10);
+        v = v / 10;
+        n = n + 1;
+    }
+    var i = 0;
+    while (i < n) {
+        store8(out + ll + i, load8(&digits + n - 1 - i));
+        i = i + 1;
+    }
+    store8(out + ll + n, 0);
+    return out;
+}
+
+# The key source: the JWK Set at the source's URL, on the request arena, or 0 with why
+# written through `why_out`. A reply other than 200, or a body holding a NUL, is refused.
+fn bote_jwks_fetch(src, why_out) {
+    var cur[24];
+    if (bote_fetch_in_child(&_jwks_child, src, BOTE_JWKS_MAX + 64, BOTE_JWKS_TIMEOUT_MS, &cur) == 0) {
+        if (streq(bote_fetch_why(), "deadline") == 1) {
+            store64(why_out, "the jwks_uri did not answer in time");
+        } else {
+            store64(why_out, "the request to the jwks_uri did not finish");
+        }
+        return 0;
+    }
+    var kind = bote_fetch_int(&cur);
+    var status = bote_fetch_int(&cur);
+    var bl[8];
+    var body = bote_fetch_str(&cur, &bl);
+    if (kind != SANDHI_OK) { store64(why_out, _jwks_kind_reason(kind)); return 0; }
+    if (status != 200) { store64(why_out, _jwks_status_reason(status)); return 0; }
+    if (body == 0 || strlen(body) != load64(&bl)) { store64(why_out, "the jwks_uri's reply holds a NUL"); return 0; }
+    return body;
+}

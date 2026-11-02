@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.6.5"; }
+fn _bote_server_version() { return "3.6.6"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -247,13 +247,21 @@ fn dispatcher_deregister_tool(d, name) {
     return 0;
 }
 
+# Why a prompt, resource or template with a required scope that is no RFC 6749
+# scope-token is not registered: the scope would go out in a 403's header (3.6.6).
+var DSP_SCOPE_NOT_TOKEN = "a required scope must be a non-empty token with no space, quote or backslash";
+
 # Register an MCP prompt + its generator handler. Lazily stands up the
 # dispatcher's PromptRegistry on first call — which is also what flips the
 # `prompts` capability on at initialize (see _build_capabilities). Prompt
-# names are freeform (no project_tool underscore convention). Returns 0.
+# names are freeform (no project_tool underscore convention). Returns 0, or a
+# BoteError with nothing registered.
 fn dispatcher_register_prompt(d, prompt_def, handler_fp) {
     if (prompt_def == 0 || prompt_def_name(prompt_def) == 0) {
         return bote_err_new(BOTE_ERR_INVALID_PARAMS, "", "prompt definition has no name");
+    }
+    if (bote_scope_list_ok(prompt_def_required_scopes(prompt_def)) == 0) {
+        return bote_err_new(BOTE_ERR_INVALID_PARAMS, prompt_def_name(prompt_def), DSP_SCOPE_NOT_TOKEN);
     }
     var preg = dispatcher_prompts(d);
     if (preg == 0) {
@@ -276,10 +284,13 @@ fn dispatcher_register_prompt(d, prompt_def, handler_fp) {
 # Register an MCP resource + its read handler. Lazily stands up the
 # dispatcher's ResourceRegistry on first call — which is also what flips the
 # `resources` capability on at initialize (see _build_capabilities).
-# Returns 0.
+# Returns 0, or a BoteError with nothing registered.
 fn dispatcher_register_resource(d, resource_def, handler_fp) {
     if (resource_def == 0 || resource_def_uri(resource_def) == 0) {
         return bote_err_new(BOTE_ERR_INVALID_PARAMS, "", "resource definition has no uri");
+    }
+    if (bote_scope_list_ok(resource_def_required_scopes(resource_def)) == 0) {
+        return bote_err_new(BOTE_ERR_INVALID_PARAMS, resource_def_uri(resource_def), DSP_SCOPE_NOT_TOKEN);
     }
     var rreg = dispatcher_resources(d);
     if (rreg == 0) {
@@ -299,6 +310,9 @@ fn dispatcher_register_resource_template(d, template, handler_fp) {
     }
     var why = resource_template_check(resource_template_uri(template));
     if (why != 0) { return bote_err_new(BOTE_ERR_INVALID_PARAMS, resource_template_name(template), why); }
+    if (bote_scope_list_ok(resource_template_required_scopes(template)) == 0) {
+        return bote_err_new(BOTE_ERR_INVALID_PARAMS, resource_template_name(template), DSP_SCOPE_NOT_TOKEN);
+    }
     var rreg = dispatcher_resources(d);
     if (rreg == 0) {
         rreg = resource_registry_new();
@@ -1105,15 +1119,11 @@ fn _dsp_modern_response(a, d, method, resp) {
 # Outside the JSON-RPC reserved range, as MCP asks of a code it does not define.
 var BOTE_RPC_INSUFFICIENT_SCOPE = 0 - 31403;
 
-# The scopes the tool `name` requires, when `claims` does not hold them all, or 0 when
-# it may run. With no token in play there is nothing to compare: claims are 0 on stdio,
-# which takes its credentials from the environment, and with no validator set. A
-# tool that requires a scope with nothing to read it is refused, not waved through.
-fn dispatcher_scopes_missing(d, name, claims) {
-    if (claims == 0) { return 0; }
-    var t = registry_get(dispatcher_registry(d), name);
-    if (t == 0) { return 0; }
-    var req = tool_def_required_scopes(t);
+# `req`, a vec of scopes, when `claims` does not hold them all, or 0. Each caller has
+# returned for claims of 0 first: with no token in play there is nothing to compare, as
+# on stdio, which takes its credentials from the environment, and with no validator set.
+# A scope required with nothing to read it is refused, not waved through.
+fn _dsp_scopes_lacking(d, req, claims) {
     if (req == 0 || vec_len(req) == 0) { return 0; }
     var fp = load64(d + 88);
     if (fp == 0) { return req; }
@@ -1123,6 +1133,56 @@ fn dispatcher_scopes_missing(d, name, claims) {
         i = i + 1;
     }
     return 0;
+}
+
+# The scopes the tool `name` requires, when `claims` does not hold them all, or 0 when
+# it may run, or no such tool is registered.
+fn dispatcher_scopes_missing(d, name, claims) {
+    if (claims == 0) { return 0; }
+    var t = registry_get(dispatcher_registry(d), name);
+    if (t == 0) { return 0; }
+    return _dsp_scopes_lacking(d, tool_def_required_scopes(t), claims);
+}
+
+# The same for the prompt `name` (3.6.6).
+fn dispatcher_prompt_scopes_missing(d, name, claims) {
+    if (claims == 0 || name == 0 || dispatcher_prompts(d) == 0) { return 0; }
+    if (prompt_registry_contains(dispatcher_prompts(d), name) == 0) { return 0; }
+    return _dsp_scopes_lacking(d, prompt_def_required_scopes(prompt_registry_get(dispatcher_prompts(d), name)), claims);
+}
+
+# The same for reading `uri`, judged by what would serve it, as resources/read finds that:
+# the resource registered at that URI, else the first template it matches (3.6.6).
+fn dispatcher_resource_scopes_missing(d, uri, claims) {
+    if (claims == 0 || uri == 0 || dispatcher_resources(d) == 0) { return 0; }
+    var r = dispatcher_resources(d);
+    if (resource_registry_contains(r, uri) == 1) {
+        return _dsp_scopes_lacking(d, resource_def_required_scopes(resource_registry_get(r, uri)), claims);
+    }
+    var t = resource_registry_template_for(r, uri);
+    if (t == 0) { return 0; }
+    return _dsp_scopes_lacking(d, resource_template_required_scopes(t), claims);
+}
+
+# The same for a completion/complete's `ref`, on `a` (3.6.6): a completion offers what a
+# prompt's arguments or a template's variables may be, which is the prompt's or the
+# template's to grant. ref/prompt names a prompt; ref/resource names a template by its
+# uriTemplate, or a URI, judged as resources/read would.
+fn dispatcher_completion_scopes_missing_a(a, d, params, claims) {
+    if (claims == 0 || params == 0) { return 0; }
+    var ref = jsonx_get_raw_a(a, params, "ref");
+    if (ref == 0) { return 0; }
+    var kind = jsonx_get_str_dec_a(a, ref, "type");
+    if (kind == 0) { return 0; }
+    if (streq(kind, "ref/prompt") == 1) {
+        return dispatcher_prompt_scopes_missing(d, jsonx_get_str_dec_a(a, ref, "name"), claims);
+    }
+    if (streq(kind, "ref/resource") == 0) { return 0; }
+    var uri = jsonx_get_str_dec_a(a, ref, "uri");
+    if (uri == 0 || dispatcher_resources(d) == 0) { return 0; }
+    var t = resource_registry_template_named(dispatcher_resources(d), uri);
+    if (t != 0) { return _dsp_scopes_lacking(d, resource_template_required_scopes(t), claims); }
+    return dispatcher_resource_scopes_missing(d, uri, claims);
 }
 
 # Named, because HTTP sends this one -32602 as a 400.
@@ -1343,7 +1403,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
     # seconds would swamp the chain.
     #
     # bote answers pings; it does not originate them. Server→client pings
-    # need the push path that real-time streaming brings (roadmap 3.5.x).
+    # need the push path that real-time streaming brings (roadmap 3.7.x).
     if (streq(method, "ping") == 1) {
         return resp_success_a(a, id, "{}");
     }
@@ -1372,6 +1432,10 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
         var phandler = prompt_registry_handler(dispatcher_prompts(d), pname);
         if (phandler == 0) {
             return resp_error_a(a, id, 0 - 32602, _dsp_named_msg_a(a, "prompt not found: ", pname, 0));
+        }
+        # As for a tool: a token that may not get this prompt learns nothing past its name.
+        if (dispatcher_prompt_scopes_missing(d, pname, claims) != 0) {
+            return resp_error_a(a, id, BOTE_RPC_INSUFFICIENT_SCOPE, _dsp_named_msg_a(a, "insufficient scope for prompt: ", pname, 0));
         }
         var pargs = jsonx_get_raw_a(a, params, "arguments");
         if (pargs == 0) { pargs = "{}"; }
@@ -1424,6 +1488,9 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
             return resp_error_data_a(a, id, BOTE_RPC_RESOURCE_NOT_FOUND,
               _dsp_named_msg_a(a, "resource not found: ", ruri, 0), str_data(str_builder_build_a(a, rdb)));
         }
+        if (dispatcher_resource_scopes_missing(d, ruri, claims) != 0) {
+            return resp_error_a(a, id, BOTE_RPC_INSUFFICIENT_SCOPE, _dsp_named_msg_a(a, "insufficient scope for resource: ", ruri, 0));
+        }
         # Past every refusal: a handler may keep what it is handed.
         ruri = _slice_cstr(default_alloc(), ruri, 0, strlen(ruri));
         var rresult = fncall2(rhandler, ruri, bote_req_claims_kept(claims));
@@ -1446,6 +1513,9 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
     if (streq(method, "completion/complete") == 1 && dispatcher_completion(d) != 0) {
         if (jsonx_is_object(params) == 0) {
             return resp_error_a(a, id, 0 - 32602, "completion/complete params must be an object");
+        }
+        if (dispatcher_completion_scopes_missing_a(a, d, params, claims) != 0) {
+            return resp_error_a(a, id, BOTE_RPC_INSUFFICIENT_SCOPE, "insufficient scope for completion: the prompt or resource it names");
         }
         var cparams = _slice_cstr(default_alloc(), params, 0, strlen(params));
         var cresult = fncall2(dispatcher_completion(d), cparams, bote_req_claims_kept(claims));

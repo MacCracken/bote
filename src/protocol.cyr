@@ -101,6 +101,17 @@ fn bote_scope_token_ok(s) {
     return 1;
 }
 
+# 1 when every entry of the vec `scopes` is a scope-token; 0 for none is 1.
+fn bote_scope_list_ok(scopes) {
+    if (scopes == 0) { return 1; }
+    var i = 0;
+    while (i < vec_len(scopes)) {
+        if (bote_scope_token_ok(vec_get(scopes, i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 # The token an accepted request presented, on the arena, and its copy on the heap once
 # a handler has been handed one. A refused call must keep nothing, so that copy waits.
 var _bote_req_token = 0;

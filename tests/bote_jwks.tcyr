@@ -1,0 +1,249 @@
+# bote_jwks.tcyr — src/jwks.cyr (3.6.6): a JWK Set fetched from a jwks_uri.
+#
+# The URL rules, then real fetches from a child to a loopback server this test forks: a set,
+# a status that is not 200, a NUL in the body, a server that never answers, and a token
+# verified end to end on keys fetched through bote_jwks_fetch, with what each leaves on the
+# heap. Run: cyrius test tests/bote_jwks.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/assert.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/jwt.cyr"
+include "src/fetch.cyr"
+include "src/jwks.cyr"
+include "tests/fixtures/jwt_vectors.cyr"
+
+#ifndef CYRIUS_TARGET_AGNOS
+# ---- a loopback server, in a process of its own ----------------------------
+var _srv_port = 0;
+
+# Serve `count` connections with the reply `reply` (0: accept and say nothing), on a free
+# port of 18700-18799, in a child. The port is in _srv_port; returns the server's pid.
+fn _serve(reply, rlen, count) {
+    var p = 18700;
+    var lfd = 0 - 1;
+    while (p < 18800 && lfd < 0) {
+        var st, sfd = tcp_socket();
+        if (is_err_result(st) == 1) { return 0; }
+        var bt, bv = sock_bind(sfd, 0x0100007F, p);
+        if (is_err_result(bt) == 0) { lfd = sfd; } else { sock_close(sfd); p = p + 1; }
+    }
+    if (lfd < 0) { return 0; }
+    sock_listen(lfd, 16);
+    _srv_port = p;
+    var pid = sys_fork();
+    if (pid != 0) {
+        sock_close(lfd);
+        return pid;
+    }
+    var buf[2048];
+    var i = 0;
+    while (i < count) {
+        var at, cfd = sock_accept(lfd);
+        if (is_err_result(at) == 0) {
+            var rt, rn = sock_recv(cfd, &buf, 2048);
+            if (reply != 0) {
+                sock_send_all(cfd, reply, rlen);
+                sock_close(cfd);
+            } else {
+                sleep_ms(30000);
+            }
+        }
+        i = i + 1;
+    }
+    sys_exit(0);
+    return 0;
+}
+
+fn _stop(pid) {
+    var st[8];
+    sys_kill(pid, SIGKILL);
+    sys_waitpid(pid, &st, 0);
+    return 0;
+}
+
+# An HTTP reply with `status` and `body` of `blen` bytes; its length in _reply_len.
+var _reply_len = 0;
+fn _reply(status, body, blen) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "HTTP/1.1 ");
+    str_builder_add_cstr(sb, status);
+    str_builder_add_cstr(sb, "\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ");
+    str_builder_add_int(sb, blen);
+    str_builder_add_cstr(sb, "\r\n\r\n");
+    var head = str_data(str_builder_build(sb));
+    var hl = strlen(head);
+    var out = alloc(hl + blen + 1);
+    memcpy(out, head, hl);
+    memcpy(out + hl, body, blen);
+    store8(out + hl + blen, 0);
+    _reply_len = hl + blen;
+    return out;
+}
+
+fn _url(path) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "http://127.0.0.1:");
+    str_builder_add_int(sb, _srv_port);
+    str_builder_add_cstr(sb, path);
+    return str_data(str_builder_build(sb));
+}
+#endif
+
+fn main() {
+    alloc_init();
+    fl_init();
+
+    # ---------------- what a jwks_uri may be ----------------
+    assert_eq(bote_jwks_url_check("https://as.example.com/.well-known/jwks.json", 0), 0, "url: https");
+    assert_eq(bote_jwks_url_check("https://as.example.com:8443/keys", "/etc/ca.pem"), 0, "url: https with a trust store");
+    assert_eq(bote_jwks_url_check("https://10.0.0.5/keys", 0), 0, "url: https to a private address, the operator's own network");
+    assert_eq(bote_jwks_url_check("http://127.0.0.1:9000/keys", 0), 0, "url: http to 127.0.0.1");
+    assert_eq(bote_jwks_url_check("http://127.8.9.10/keys", 0), 0, "url: http to anywhere in 127/8");
+    assert_eq(bote_jwks_url_check("http://localhost:9000/keys", 0), 0, "url: http to localhost");
+    assert_eq(bote_jwks_url_check("http://as.localhost/keys", 0), 0, "url: http to a name under localhost");
+    assert(bote_jwks_url_check("http://as.example.com/keys", 0) != 0, "url: http anywhere else is refused");
+    assert(bote_jwks_url_check("http://10.0.0.5/keys", 0) != 0, "url: ...a private address too");
+    assert(bote_jwks_url_check("http://128.0.0.1/keys", 0) != 0, "url: ...and the address after 127/8");
+    assert(bote_jwks_url_check("http://notlocalhost/keys", 0) != 0, "url: ...and a name that only ends like localhost");
+    assert(bote_jwks_url_check("http://127.0.0.1/keys", "/etc/ca.pem") != 0, "url: a trust store with http");
+    assert(bote_jwks_url_check("ftp://as.example.com/keys", 0) != 0, "url: another scheme");
+    assert(bote_jwks_url_check("as.example.com/keys", 0) != 0, "url: no scheme");
+    assert(bote_jwks_url_check(0, 0) != 0, "url: none");
+    assert(bote_jwks_url_check("https://user:pw@as.example.com/keys", 0) != 0, "url: userinfo");
+    assert(bote_jwks_url_check("http://127.0.0.1@evil.example/keys", 0) != 0, "url: userinfo that looks like loopback");
+    assert(bote_jwks_url_check("https://user@as.example.com/keys", 0) != 0, "url: a user alone, which sandhi would read as the host");
+    assert(bote_jwks_url_check("https://:443/keys", 0) != 0, "url: a port and no host");
+    assert_eq(bote_jwks_url_check("https://as.example.com/keys?x=a@b", 0), 0, "url: an @ past the host is the path's");
+    assert(bote_jwks_url_check("https://[::1]/keys", 0) != 0, "url: an IPv6 literal");
+    assert(bote_jwks_url_check("https:///keys", 0) != 0, "url: no host");
+    assert_eq(bote_jwks_source_new("http://as.example.com/keys", 0), 0, "source: a refused URL makes none");
+    # A source keeps its own copy: a URL on the request arena is gone with the next message.
+    var sa = bote_req_begin();
+    var su = alloc_via(sa, 64);
+    memcpy(su, "https://as.example.com/keys", 28);
+    var sc = alloc_via(sa, 64);
+    memcpy(sc, "/etc/ca.pem", 12);
+    var ssrc = bote_jwks_source_new(su, sc);
+    memset(su, 120, 27);
+    memset(sc, 120, 11);
+    assert(streq(bote_jwks_source_url(ssrc), "https://as.example.com/keys") == 1, "source: its URL is its own copy");
+    assert(streq(load64(ssrc + 8), "/etc/ca.pem") == 1, "source: ...and its trust store's path");
+    var src0 = bote_jwks_source_new("https://as.example.com/keys", "/etc/ca.pem");
+    assert(src0 != 0 && streq(bote_jwks_source_url(src0), "https://as.example.com/keys") == 1, "source: keeps its URL");
+    assert_eq(_jwks_kind_reason(SANDHI_ERR_TLS) != _jwks_kind_reason(SANDHI_ERR_CONNECT), 1, "reason: a TLS failure says so");
+    assert(streq(_jwks_status_reason(404), "the jwks_uri answered HTTP 404") == 1, "reason: the status, written out");
+    assert(streq(_jwks_status_reason(0), "the jwks_uri answered HTTP 0") == 1, "reason: ...0 too");
+
+    #ifndef CYRIUS_TARGET_AGNOS
+    # ---------------- a real fetch, from a child ----------------
+    var why[8];
+    var set_reply = _reply("200 OK", JV_JWKS, strlen(JV_JWKS));
+    var set_len = _reply_len;
+    var spid = _serve(set_reply, set_len, 30);
+    assert(spid > 0, "fetch: a loopback server");
+    var src = bote_jwks_source_new(_url("/jwks.json"), 0);
+    bote_req_begin();
+    var body = bote_jwks_fetch(src, &why);
+    assert(body != 0 && streq(body, JV_JWKS) == 1, "fetch: the set, as served");
+    # A handle on that source verifies a token on the keys it fetched.
+    var s = jwt_secret_new(0);
+    jwt_secret_with_audience(s, JV_AUD);
+    jwt_secret_with_key_source(s, &bote_jwks_fetch, src, 600);
+    assert_eq(jwt_secret_refresh(s), 0, "end to end: the first refresh");
+    assert_eq(vec_len(jwt_secret_keys(s)), 6, "end to end: ...six keys");
+    bote_req_begin();
+    assert(auth_validator_jwt(JV_RS_GOOD, s) != 0, "end to end: an RS256 token verifies");
+    bote_req_begin();
+    assert(auth_validator_jwt(JV_ES_GOOD, s) != 0, "end to end: ...and an ES256 one");
+    # What a fetch keeps here: nothing, and nothing for a refresh of the same set.
+    bote_req_begin();
+    bote_jwks_fetch(src, &why);
+    var used = alloc_used();
+    var i = 0;
+    while (i < 10) {
+        bote_req_begin();
+        bote_jwks_fetch(src, &why);
+        jwt_secret_refresh(s);
+        i = i + 1;
+    }
+    assert_eq(alloc_used() - used, 0, "fetch heap: ten fetches and ten refreshes of the same set keep nothing");
+    assert_eq(_sandhi_client_resolver_fn, 0, "fetch: the resolve hook is the child's alone");
+    _stop(spid);
+
+    # A status that is not 200.
+    var nf = _reply("404 Not Found", "{}", 2);
+    var npid = _serve(nf, _reply_len, 2);
+    var nsrc = bote_jwks_source_new(_url("/nope"), 0);
+    bote_req_begin();
+    assert_eq(bote_jwks_fetch(nsrc, &why), 0, "status: a 404 gives no set");
+    assert(streq(load64(&why), "the jwks_uri answered HTTP 404") == 1, "status: ...and says what it answered");
+    _stop(npid);
+    # A body with a NUL in it.
+    var nb = alloc(16);
+    memcpy(nb, "{\"keys\":[]}", 11);
+    store8(nb + 4, 0);
+    var zpid = _serve(_reply("200 OK", nb, 11), _reply_len, 2);
+    var zsrc = bote_jwks_source_new(_url("/zero"), 0);
+    bote_req_begin();
+    assert_eq(bote_jwks_fetch(zsrc, &why), 0, "nul: a body holding a NUL gives no set");
+    assert(strstr(load64(&why), "NUL") >= 0, "nul: ...and says so");
+    _stop(zpid);
+    # A server that never answers: the child is ended at the deadline.
+    var hpid = _serve(0, 0, 2);
+    var hsrc = bote_jwks_source_new(_url("/hang"), 0);
+    var was = BOTE_JWKS_TIMEOUT_MS;
+    BOTE_JWKS_TIMEOUT_MS = 300;
+    var t0 = clock_now_ms();
+    bote_req_begin();
+    assert_eq(bote_jwks_fetch(hsrc, &why), 0, "hang: a server that never answers gives no set");
+    var took = clock_now_ms() - t0;
+    assert(took < 3000, "hang: ...by the deadline");
+    assert(strstr(load64(&why), "in time") >= 0, "hang: ...and says it did not answer in time");
+    BOTE_JWKS_TIMEOUT_MS = was;
+    _stop(hpid);
+    # Nobody listening: a connect that fails.
+    var dsrc = bote_jwks_source_new("http://127.0.0.1:1/keys", 0);
+    bote_req_begin();
+    assert_eq(bote_jwks_fetch(dsrc, &why), 0, "down: nobody listening gives no set");
+    assert(streq(load64(&why), "could not connect to the jwks_uri") == 1, "down: ...and says it could not connect");
+    # The handle keeps its keys through all of it.
+    jwt_secret_with_key_source(s, &bote_jwks_fetch, dsrc, 600);
+    store64(s + 96, 1);
+    bote_req_begin();
+    assert(jwt_secret_refresh(s) != 0, "end to end: a refresh from a server that is down fails");
+    assert_eq(vec_len(jwt_secret_keys(s)), 6, "end to end: ...and the six keys stay");
+    bote_req_begin();
+    assert(auth_validator_jwt(JV_RS_GOOD, s) != 0, "end to end: ...and still verify");
+    #endif
+
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit(rc);

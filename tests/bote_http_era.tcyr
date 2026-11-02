@@ -66,6 +66,9 @@ fn h_claims(args, claims) {
     _seen_claims = claims;
     return "{\"content\":[]}";
 }
+fn h_pclaims(args, claims) { _seen_claims = claims; return "{\"messages\":[]}"; }
+fn h_rclaims(uri, claims) { _seen_claims = claims; return "{\"contents\":[]}"; }
+fn h_cclaims(params, claims) { _seen_claims = claims; return "{\"completion\":{\"values\":[]}}"; }
 fn _allow(token, ctx) { return "the-claims"; }
 fn _deny(token, ctx) { return 0; }
 # Validators and a scope check for 3.6.3: the token is the list of what it holds.
@@ -140,6 +143,11 @@ fn _mk_d() {
     dispatcher_register_resource(d, resource_def_new("res://a", "a", "A", "text/plain"), &h_res);
     dispatcher_register_resource(d, resource_def_new("res://\xC3\xA9", "e", "E", "text/plain"), &h_res);
     dispatcher_register_resource(d, resource_def_new("res://bad", "bad", "Bad", "text/plain"), &h_array);
+    # 3.6.6: a prompt, a resource and a template that ask for the same two scopes as t_scoped.
+    dispatcher_register_prompt(d, prompt_def_with_required_scopes(prompt_def_new("p_scoped", "Scoped", vec_new()), two), &h_pclaims);
+    dispatcher_register_resource(d, resource_def_with_required_scopes(resource_def_new("res://scoped", "s", "S", "text/plain"), two), &h_rclaims);
+    dispatcher_register_resource_template(d, resource_template_with_required_scopes(resource_template_new("res://t/{id}", "t", "T", "text/plain"), two), &h_rclaims);
+    dispatcher_set_completion(d, &h_cclaims);
     return d;
 }
 
@@ -422,6 +430,11 @@ fn _d_of(k) {
 
 fn _ah(tok) { return _cat3("Authorization: Bearer ", tok, "\r\n"); }
 
+# A legacy request for `method` with `params`.
+fn _sp_body(method, params) {
+    return _cat3(_cat3("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"", method, "\",\"params\":"), params, "}");
+}
+
 # A modern tools/call of `tool` with the token `tok`, and `extra` beside its name.
 fn _mc_x(tool, tok, extra) {
     return _raw("POST", _cat3(_mh("tools/call", tool), _ah(tok), ""), _mb("tools/call", _cat3(",\"name\":\"", tool, _cat3("\"", extra, ""))));
@@ -510,6 +523,37 @@ fn _scopes(k, prm) {
     assert_eq(_seen_claims, 0, _nm(k, "scope: ...and the refused one did not"));
     _run(k, _raw("POST", _ah("files:read,files:write"), batch));
     assert(_seen_claims != 0, _nm(k, "scope: a batch with the scopes runs"));
+
+    # 3.6.6: a prompt, a resource, a template, and a completion that names one of them.
+    _t403(k, _raw("POST", _ah("files:read"), _sp_body("prompts/get", "{\"name\":\"p_scoped\"}")), "scope: a prompt");
+    assert(_has(_head, _CH403), _nm(k, "scope: a prompt's challenge, every scope in it"));
+    _t403(k, _raw("POST", _cat3(_mh("prompts/get", "p_scoped"), _ah("files:read"), ""), _mb("prompts/get", ",\"name\":\"p_scoped\"")), "scope: a prompt, modern");
+    _t403(k, _raw("POST", _ah("files:write"), _sp_body("resources/read", "{\"uri\":\"res://scoped\"}")), "scope: a resource");
+    _t403(k, _raw("POST", _cat3(_mh("resources/read", "res://scoped"), _ah("files:write"), ""), _mb("resources/read", ",\"uri\":\"res://scoped\"")), "scope: a resource, modern");
+    _t403(k, _raw("POST", _ah("nothing"), _sp_body("resources/read", "{\"uri\":\"res://t/77\"}")), "scope: a URI a template serves");
+    _t403(k, _raw("POST", _ah("nothing"), _sp_body("completion/complete", "{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"p_scoped\"},\"argument\":{\"name\":\"a\",\"value\":\"b\"}}")), "scope: completing a prompt's argument");
+    _t403(k, _raw("POST", _ah("nothing"), _sp_body("completion/complete", "{\"ref\":{\"type\":\"ref/resource\",\"uri\":\"res://t/{id}\"},\"argument\":{\"name\":\"id\",\"value\":\"b\"}}")), "scope: completing a template's variable");
+    _seen_claims = 0;
+    _t(k, _raw("POST", _ah("files:read,files:write"), _sp_body("prompts/get", "{\"name\":\"p_scoped\"}")), 200, "", "scope: a prompt, held");
+    assert(_seen_claims != 0, _nm(k, "scope: ...and its handler ran"));
+    _t(k, _raw("POST", _ah("files:read,files:write"), _sp_body("resources/read", "{\"uri\":\"res://t/77\"}")), 200, "", "scope: a template's URI, held");
+    _t(k, _raw("POST", _ah("nothing"), _sp_body("prompts/get", "{\"name\":\"p_one\"}")), 200, "", "scope: a prompt that asks for none");
+    _t(k, _raw("POST", _ah("nothing"), _sp_body("resources/read", "{\"uri\":\"res://a\"}")), 200, "", "scope: a resource that asks for none");
+    _t(k, _raw("POST", _ah("nothing"), _sp_body("completion/complete", "{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"p_one\"},\"argument\":{\"name\":\"a\",\"value\":\"b\"}}")), 200, "", "scope: completing an open prompt");
+    assert_eq(_st(k, _raw("POST", _ah("nothing"), _sp_body("prompts/get", "{\"name\":\"p_nope\"}"))) == 403, 0, _nm(k, "scope: an unknown prompt is the dispatcher's"));
+    assert_eq(_st(k, _raw("POST", _ah("nothing"), _sp_body("resources/read", "{\"uri\":\"res://none\"}"))) == 403, 0, _nm(k, "scope: an unknown resource is the dispatcher's"));
+    _seen_claims = 0;
+    var pbatch = _cat3("[", _sp_body("prompts/get", "{\"name\":\"p_scoped\"}"), _cat3(",", _sp_body("resources/read", "{\"uri\":\"res://t/1\"}"), "]"));
+    _run(k, _raw("POST", _ah("nothing"), pbatch));
+    assert(_status == 200 && _has(_body, "insufficient scope for prompt: p_scoped") && _has(_body, "insufficient scope for resource: res://t/1"), _nm(k, "scope: a batch refuses each element"));
+    assert_eq(_seen_claims, 0, _nm(k, "scope: ...and runs neither"));
+    assert_eq(_st(k, _raw("POST", _ah("nothing"), _sp_body("prompts/get", "{\"title\":\"p_scoped\"}"))) == 403, 0, _nm(k, "scope: a prompts/get with no name is the dispatcher's"));
+    assert_eq(_st(k, _raw("POST", _ah("nothing"), _sp_body("resources/read", "{\"url\":\"res://scoped\"}"))) == 403, 0, _nm(k, "scope: a resources/read with no uri is the dispatcher's"));
+    dispatcher_set_completion(d, 0);
+    assert_eq(_st(k, _raw("POST", _ah("nothing"), _sp_body("completion/complete", "{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"p_scoped\"},\"argument\":{\"name\":\"a\",\"value\":\"b\"}}"))) == 403, 0, _nm(k, "scope: with no completion handler, a completion is the dispatcher's"));
+    dispatcher_set_completion(d, &h_cclaims);
+    assert_eq(_heap_per(k, _raw("POST", _ah(_cat3("nothing", _rep("x", 60000), "")), _sp_body("prompts/get", "{\"name\":\"p_scoped\"}"))), 0, _nm(k, "scope heap: a prompt's 403 with a 60 KB token"));
+    assert_eq(_heap_per(k, _raw("POST", _ah("nothing"), _sp_body("resources/read", _cat3("{\"uri\":\"res://t/", _rep("x", 60000), "\"}")))), 0, _nm(k, "scope heap: a template's 403 with a 60 KB URI"));
 
     # A refused call is a call: the trail sees it, on the gate's path too.
     dispatcher_set_audit(d, audit_sink_new(&_aud, 0));

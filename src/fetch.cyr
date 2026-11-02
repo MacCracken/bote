@@ -25,9 +25,12 @@
 var _bote_fetch_why = 0;
 fn bote_fetch_why() { return _bote_fetch_why; }
 
+# On the request arena: a child's own copy of it, which goes with the child, and on agnos
+# this process's, which the next message rewinds.
 fn _bf_rec_new() {
-    var r = alloc(24);
-    store64(r, alloc(4096));
+    var a = bote_req_alloc();
+    var r = alloc_via(a, 24);
+    store64(r, alloc_via(a, 4096));
     store64(r + 8, 0);
     store64(r + 16, 4096);
     return r;
@@ -39,7 +42,7 @@ fn _bf_room(r, n) {
     var cap = load64(r + 16);
     if (len + n <= cap) { return 0; }
     while (cap < len + n) { cap = cap * 2; }
-    var d = alloc(cap);
+    var d = alloc_via(bote_req_alloc(), cap);
     memcpy(d, load64(r), len);
     store64(r, d);
     store64(r + 16, cap);
@@ -121,6 +124,9 @@ fn _bf_poll_in(fd, ms) {
     return r;
 }
 
+# 1 when a read stopped at the end of the pipe: the child has closed it, by exiting.
+var _bf_eof = 0;
+
 # Read exactly `n` bytes into `p` by the deadline `end` (clock_now_ms), or 0 for none.
 # 1, or 0 with the reason set.
 fn _bf_read_all(fd, p, n, end) {
@@ -136,16 +142,20 @@ fn _bf_read_all(fd, p, n, end) {
         if (pr < 0) { _bote_fetch_why = "poll"; return 0; }
         var r = sys_read(fd, p + got, n - got);
         if (r == 0 - 4) { r = 0; }
-        elif (r <= 0) { _bote_fetch_why = "short reply"; return 0; }
+        elif (r == 0) { _bote_fetch_why = "short reply"; _bf_eof = 1; return 0; }
+        elif (r < 0) { _bote_fetch_why = "short reply"; return 0; }
         got = got + r;
     }
     return 1;
 }
 
-# The child's side: run `fp(ctx, record)`, send the record, exit. Never returns.
-fn _bf_child(fp, ctx, wr) {
+# The child's side: run `fp(ctx, record)`, send the record, exit. Never returns. `ppid`
+# is the parent's pid from before the fork: one that died before the prctl took is a
+# parent the signal will never come from, so the child goes at once.
+fn _bf_child(fp, ctx, wr, ppid) {
     #ifdef CYRIUS_TARGET_LINUX
     sys_prctl(1, SIGKILL, 0, 0, 0);    # PR_SET_PDEATHSIG: it ends with this process
+    if (sys_getppid() != ppid) { sys_exit(0); }
     #endif
     var r = _bf_rec_new();
     fncall2(fp, ctx, r);
@@ -179,6 +189,7 @@ fn bote_fetch_in_child(fp, ctx, cap, deadline_ms, cur) {
     if (sys_pipe(&fds) < 0) { _bote_fetch_why = "pipe"; return 0; }
     var rd = load32(&fds);
     var wr = load32(&fds + 4);
+    var ppid = sys_getpid();
     var pid = sys_fork();
     if (pid < 0) {
         sys_close(rd);
@@ -188,9 +199,10 @@ fn bote_fetch_in_child(fp, ctx, cap, deadline_ms, cur) {
     }
     if (pid == 0) {
         sys_close(rd);
-        _bf_child(fp, ctx, wr);
+        _bf_child(fp, ctx, wr, ppid);
     }
     sys_close(wr);
+    _bf_eof = 0;
     var end = 0;
     if (deadline_ms > 0) { end = clock_now_ms() + deadline_ms; }
     var ok = 0;
@@ -212,7 +224,9 @@ fn bote_fetch_in_child(fp, ctx, cap, deadline_ms, cur) {
         }
     }
     sys_close(rd);
-    if (ok == 0) { sys_kill(pid, SIGKILL); }
+    # A child that closed the pipe has exited: it is not signalled, because with SIGCHLD
+    # ignored it may be reaped already and its pid someone else's.
+    if (ok == 0 && _bf_eof == 0) { sys_kill(pid, SIGKILL); }
     var st[8];
     var w = sys_waitpid(pid, &st, 0);
     while (w == 0 - 4) { w = sys_waitpid(pid, &st, 0); }

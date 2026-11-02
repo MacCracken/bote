@@ -49,7 +49,7 @@ apps don't each reimplement the same protocol.
 | **Typed MCP content blocks** — text / image / audio / resource / resource_link / blob | ✅ |
 | **`HostRegistry` + SSRF guard** — IPv4 + IPv6 blocklists for loopback, private, link-local, cloud-metadata | ✅ |
 | **Audit / events sinks** — fn-pointer + ctx adapters, libro + majra wired | ✅ |
-| **Streaming primitives** — `ProgressUpdate`, `CancellationToken`, progress notifications | data layer ✅ / threaded dispatch ⏳ (roadmap 3.5.x) |
+| **Streaming primitives** — `ProgressUpdate`, `CancellationToken`, progress notifications | data layer ✅ / threaded dispatch ⏳ (roadmap 3.7.x) |
 | **OAuth 2.1 substrate** — bearer (RFC 6750), Protected Resource Metadata (RFC 9728), JWT access tokens, HS256, RS256 and ES256, with audience, issuer, `exp` and `nbf` checks (RFC 8707, RFC 7519), PKCE-S256 helpers | ✅ |
 | **Sandbox runner** — fn-pointer + ctx adapter (kavach-shaped), noop default | ✅ in `dist/bote.cyr` (3.3.13); not in the core bundle |
 
@@ -142,8 +142,22 @@ BOTE_AUTH_SERVERS="https://auth.example.com" ./build/bote http 8390
 
 A token's `kid` picks the key, and with no `kid` there must be exactly one key of its `alg`. Keys
 bote cannot use are skipped with a WARN. A set with a private key in it, or with nothing usable, stops
-the server, and so does giving it `BOTE_JWKS_FILE` and `BOTE_JWT_SECRET` together. Keys are read at
-startup, so rotating them means a restart with the new set in place.
+the server, and so does giving it `BOTE_JWKS_FILE` and `BOTE_JWT_SECRET` together. A file is read at
+startup, so rotating it means a restart.
+
+Or let bote fetch the set from the authorization server's `jwks_uri`, and follow its rotations:
+
+```sh
+BOTE_JWKS_URL="https://auth.example.com/.well-known/jwks.json" BOTE_RESOURCE_URL="https://mcp.example.com/mcp" BOTE_AUTH_SERVERS="https://auth.example.com" ./build/bote http 8390
+# BOTE_JWKS_REFRESH=600   seconds between refreshes
+# BOTE_JWKS_CA=/etc/bote/as-ca.pem   trust roots for a private CA, in place of the system's
+```
+
+The set is fetched at startup, and bote does not start if that fails. After that it is fetched again
+every `BOTE_JWKS_REFRESH` seconds, and as soon as a token names a key the set does not hold, but never more
+often than once a minute. If the authorization server is down, the last set keeps serving, and bote asks
+again less often until it answers. A key that leaves the set stops passing tokens at the next refresh,
+remembered ones included. The URL must be `https://`, or `http://` to a loopback address.
 
 A signature check is the slowest thing a request does. ES256 costs about 10.5 ms and RS256 about 1.3 ms,
 for a forged token as much as a good one, on one thread. Put a rate limit ahead of a server that
@@ -159,7 +173,7 @@ BOTE_JWT_CACHE=4096   # tokens remembered, a power of two up to 65536; 0 turns i
 ```
 
 To ask for a scope before a tool runs, name it. Only a JWT says what it grants, so this needs one of
-the two verifiers above:
+the verifiers above:
 
 ```sh
 BOTE_TOOL_SCOPES="fs_write=files:write,web_fetch=net:read net:write" \
@@ -177,7 +191,9 @@ own. A call inside a batch, or on a WebSocket, has no status of its own and gets
 
 A name no tool has stops the server, because a typo must not leave a tool open, and so do scopes with no JWT
 verifier. stdio and the Unix socket take no token, so scopes change nothing there, and bote logs a WARN.
-Scopes cover `tools/call`. Prompts and resources are not gated yet.
+`BOTE_TOOL_SCOPES` covers tools. An embedder declares scopes on a prompt, a resource or a resource template
+with `prompt_def_with_required_scopes` and its siblings, and `prompts/get`, `resources/read` and a completion
+for them are held to the same rules.
 
 ### Browsers
 
@@ -195,7 +211,8 @@ Every transport serves one client at a time, so each connection gets a **send de
 a client that stops reading for `BOTE_SEND_TIMEOUT_MS` (default 30000) is dropped instead of
 wedging the server. The Unix transport's receive deadline, `BOTE_UNIX_IDLE_MS`, is **off** by
 default, because a Unix client may legitimately keep its connection quiet between requests; set it
-to reap idle peers. `BOTE_WS_IDLE_MS` is the same for WebSocket. `BOTE_WEB_TIMEOUT_MS` (default 15000)
+to reap idle peers. `BOTE_WS_IDLE_MS` is the same for WebSocket, where a connection's token is also judged again at
+most once a second, and one that has expired ends the connection. `BOTE_WEB_TIMEOUT_MS` (default 15000)
 bounds an outbound `web_fetch` or `web_search`, since every client waits on it; each is made in a child
 process, which is killed at that deadline, DNS lookup included. All take milliseconds, and `0` disables.
 
@@ -348,6 +365,7 @@ src/libro_tools.cyr        Five built-in MCP tools over a libro chain
 src/fs_tools.cyr           fs_write / fs_read / fs_mkdir (BOTE_FS_ROOT-confined)
 src/web_tools.cyr          web_fetch / web_search (SearXNG)
 src/fetch.cyr              An outbound request made in a child, with a deadline
+src/jwks.cyr               A JWK Set fetched from a jwks_uri
 src/transport_stdio.cyr    Line-oriented JSON-RPC over stdin/stdout
 src/transport_http.cyr     HTTP/1.1 server with middleware
 src/transport_unix.cyr     AF_UNIX line-oriented transport
@@ -361,7 +379,7 @@ src/main_common.cyr        Entry helpers (dispatcher, mode selection, env bearer
 Dependencies rehydrate into `lib/` (gitignored) via `cyrius deps`.
 Cross-project deps **libro and majra** are git-pinned via
 `[deps.<name>]` in `cyrius.cyml`. Two consumer bundles ship in `dist/`:
-`bote.cyr` (full, 36 modules) and `bote-core.cyr` (core 13,
+`bote.cyr` (full, 37 modules) and `bote-core.cyr` (core 13,
 transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md). Both state
 **cyrius ≥ 6.7.13** on the `# Minimum cyrius:` line near the top of each (`bote-core.cyr` alone still builds from 6.7.2);
 a repo that copies the core bundle rather than pinning it must also declare
@@ -371,28 +389,29 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 4014 total across seventeen files (+ a core-only drift smoke)
+### Tests — 4404 total across eighteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 4014 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 4404 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 876 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/bote.tcyr               # 947 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/conformance.tcyr        # 218 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 91 — bearer + allowlist + JWT + PKCE validators, the head check
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
-cyrius test tests/bote_fetch.tcyr         # 59 — a request made in a child: the record, the cap, the deadline, a real GET
+cyrius test tests/bote_fetch.tcyr         # 60 — a request made in a child: the record, the cap, the deadline, a real GET
 cyrius test tests/bote_fs_tools.tcyr      # 56 — fs_write / fs_read / fs_mkdir
-cyrius test tests/bote_host.tcyr          # 203 — host registry + SSRF guard (IPv4 + IPv6)
-cyrius test tests/bote_http_era.tcyr      # 1671 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
-cyrius test tests/bote_jwt.tcyr           # 376 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified
+cyrius test tests/bote_host.tcyr          # 207 — host registry + SSRF guard (IPv4 + IPv6)
+cyrius test tests/bote_http_era.tcyr      # 1833 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
+cyrius test tests/bote_jwks.tcyr          # 49 — a jwks_uri: what it may be, and real fetches from a child
+cyrius test tests/bote_jwt.tcyr           # 454 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals
 cyrius test tests/bote_transport_unix.tcyr # 76 — Unix transport: sockaddr, accept-error policy, backoff, deadlines, closed-peer write
-cyrius test tests/bote_web_tools.tcyr     # 84 — web_fetch / web_search + the SSRF guard (URL and resolved address) + their records
-cyrius test tests/bote_ws.tcyr            # 73 — WebSocket config + wire-up + the send-deadline drop + scopes per frame + what an upgrade and a connection keep
+cyrius test tests/bote_web_tools.tcyr     # 88 — web_fetch / web_search + the SSRF guard (URL and resolved address) + their records
+cyrius test tests/bote_ws.tcyr            # 94 — WebSocket config + wire-up + the send-deadline drop + scopes per frame + what an upgrade and a connection keep
 cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dist/bote-core.cyr
 ```
 

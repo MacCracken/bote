@@ -125,6 +125,10 @@ async function oauth(mode, alg) {
         res.end(JSON.stringify({ issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`,
           response_types_supported: ['code'], grant_types_supported: ['client_credentials'],
           token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'] }));
+      } else if (req.url === '/jwks') {
+        // Its jwks_uri, which bote fetches for RS256 (3.6.6).
+        res.setHeader('Content-Type', 'application/jwk-set+json');
+        res.end(JSON.stringify({ keys: [signers[alg].jwk] }));
       } else if (req.url === '/token') {
         // RFC 8707: the audience of the token is the resource the client asked for, and
         // it holds the scope the client asked for: a step-up has to ask.
@@ -140,7 +144,10 @@ async function oauth(mode, alg) {
   });
   await new Promise(r => as.listen(asPort, '127.0.0.1', r));
   const args = ['auth', String(port), String(asPort)];
-  if (alg !== 'HS256') {
+  // RS256's keys come from the authorization server's jwks_uri, ES256's from a file.
+  if (alg === 'RS256') {
+    args.push(`${issuer}/jwks`);
+  } else if (alg !== 'HS256') {
     const file = `jwks-${alg}.json`;
     writeFileSync(file, JSON.stringify({ keys: [signers[alg].jwk] }));
     args.push(file);

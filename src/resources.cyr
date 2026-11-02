@@ -27,18 +27,20 @@
 # ResourceDef — resource metadata (surfaced in resources/list)
 # ================================================================
 #
-# Layout (32 bytes):
-#   +0  uri         cstr
-#   +8  name        cstr
-#   +16 description cstr or 0
-#   +24 mime_type   cstr or 0
+# Layout (40 bytes):
+#   +0  uri             cstr
+#   +8  name            cstr
+#   +16 description     cstr or 0
+#   +24 mime_type       cstr or 0
+#   +32 required_scopes vec of cstr or 0: all of them, for a token to read this resource
 
 fn resource_def_new(uri, name, description, mime_type) {
-    var r = alloc(32);
+    var r = alloc(40);
     store64(r, uri);
     store64(r + 8, name);
     store64(r + 16, description);
     store64(r + 24, mime_type);
+    store64(r + 32, 0);
     return r;
 }
 
@@ -46,17 +48,24 @@ fn resource_def_uri(r) { return load64(r); }
 fn resource_def_name(r) { return load64(r + 8); }
 fn resource_def_description(r) { return load64(r + 16); }
 fn resource_def_mime_type(r) { return load64(r + 24); }
+fn resource_def_required_scopes(r) { return load64(r + 32); }
+
+# What a token must hold to read this resource: a vec of RFC 6749 scope-tokens, all of
+# them. Returns `r`.
+fn resource_def_with_required_scopes(r, scopes) { store64(r + 32, scopes); return r; }
 
 # ================================================================
 # ResourceTemplate — a family of resources behind one URI template
 # ================================================================
 #
-# Layout (40 bytes):
-#   +0  uri_template cstr, literal text and `{name}` expressions
-#   +8  name         cstr
-#   +16 description  cstr or 0
-#   +24 mime_type    cstr or 0
-#   +32 handler      fn ptr, set at registration
+# Layout (48 bytes):
+#   +0  uri_template    cstr, literal text and `{name}` expressions
+#   +8  name            cstr
+#   +16 description     cstr or 0
+#   +24 mime_type       cstr or 0
+#   +32 handler         fn ptr, set at registration
+#   +40 required_scopes vec of cstr or 0: all of them, to read a URI it serves or complete
+#                       its variables
 #
 # RFC 6570 level 1: a `{name}` stands for one non-empty value holding none of
 # `/`, `?` or `#`, which that level percent-encodes. The operators of the higher
@@ -66,12 +75,13 @@ fn resource_def_mime_type(r) { return load64(r + 24); }
 # the value with resource_template_var_a and owns its percent-decoding.
 
 fn resource_template_new(uri_template, name, description, mime_type) {
-    var t = alloc(40);
+    var t = alloc(48);
     store64(t, uri_template);
     store64(t + 8, name);
     store64(t + 16, description);
     store64(t + 24, mime_type);
     store64(t + 32, 0);
+    store64(t + 40, 0);
     return t;
 }
 
@@ -80,6 +90,11 @@ fn resource_template_name(t) { return load64(t + 8); }
 fn resource_template_description(t) { return load64(t + 16); }
 fn resource_template_mime_type(t) { return load64(t + 24); }
 fn resource_template_handler(t) { return load64(t + 32); }
+fn resource_template_required_scopes(t) { return load64(t + 40); }
+
+# What a token must hold to read a URI this template serves, or to complete its
+# variables: a vec of RFC 6749 scope-tokens, all of them. Returns `t`.
+fn resource_template_with_required_scopes(t, scopes) { store64(t + 40, scopes); return t; }
 
 fn _rt_delim(c) {
     if (c == 47 || c == 63 || c == 35) { return 1; }
@@ -212,8 +227,10 @@ fn resource_registry_uris(r) { return load64(r + 8); }
 fn resource_registry_handlers(r) { return load64(r + 16); }
 fn resource_registry_templates(r) { return load64(r + 24); }
 
-# Register (or replace) a resource + its read handler. Returns 0.
+# Register (or replace) a resource + its read handler. Returns 0, or -1 with nothing
+# registered when a required scope is no scope-token: it would go out in a 403's header.
 fn resource_registry_register(r, resource_def, handler_fp) {
+    if (bote_scope_list_ok(resource_def_required_scopes(resource_def)) == 0) { return 0 - 1; }
     var uri = resource_def_uri(resource_def);
     var entries = resource_registry_entries(r);
     if (map_has(entries, uri) == 0) {
@@ -238,8 +255,10 @@ fn resource_registry_handler(r, uri) {
     return map_get(resource_registry_handlers(r), uri);
 }
 
-# Register (or replace, by uriTemplate) a template + its read handler. Returns 0.
+# Register (or replace, by uriTemplate) a template + its read handler. Returns 0, or -1
+# with nothing registered when a required scope is no scope-token.
 fn resource_registry_register_template(r, template, handler_fp) {
+    if (bote_scope_list_ok(resource_template_required_scopes(template)) == 0) { return 0 - 1; }
     store64(template + 32, handler_fp);
     var ts = resource_registry_templates(r);
     var i = 0;
@@ -254,16 +273,34 @@ fn resource_registry_register_template(r, template, handler_fp) {
     return 0;
 }
 
-# Read-handler fn ptr of the first template `uri` matches, or 0.
-fn resource_registry_template_handler(r, uri) {
+# The first template `uri` matches, which is the one that serves it, or 0.
+fn resource_registry_template_for(r, uri) {
     var ts = resource_registry_templates(r);
     var i = 0;
     while (i < vec_len(ts)) {
         var t = vec_get(ts, i);
-        if (resource_template_matches(resource_template_uri(t), uri) == 1) { return resource_template_handler(t); }
+        if (resource_template_matches(resource_template_uri(t), uri) == 1) { return t; }
         i = i + 1;
     }
     return 0;
+}
+
+# The template whose uriTemplate is `tpl` exactly, or 0: what a completion names.
+fn resource_registry_template_named(r, tpl) {
+    var ts = resource_registry_templates(r);
+    var i = 0;
+    while (i < vec_len(ts)) {
+        if (streq(resource_template_uri(vec_get(ts, i)), tpl) == 1) { return vec_get(ts, i); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Read-handler fn ptr of the first template `uri` matches, or 0.
+fn resource_registry_template_handler(r, uri) {
+    var t = resource_registry_template_for(r, uri);
+    if (t == 0) { return 0; }
+    return resource_template_handler(t);
 }
 
 fn resource_registry_len(r) {

@@ -41,22 +41,29 @@ fn prompt_arg_required(a) { return load64(a + 16); }
 # PromptDef — prompt metadata
 # ================================================================
 #
-# Layout (24 bytes):
-#   +0  name        cstr
-#   +8  description cstr or 0
-#   +16 arguments   vec of PromptArgument ptrs or 0
+# Layout (32 bytes):
+#   +0  name            cstr
+#   +8  description     cstr or 0
+#   +16 arguments       vec of PromptArgument ptrs or 0
+#   +24 required_scopes vec of cstr or 0: all of them, for a token to get this prompt
 
 fn prompt_def_new(name, description, arguments) {
-    var p = alloc(24);
+    var p = alloc(32);
     store64(p, name);
     store64(p + 8, description);
     store64(p + 16, arguments);
+    store64(p + 24, 0);
     return p;
 }
 
 fn prompt_def_name(p) { return load64(p); }
 fn prompt_def_description(p) { return load64(p + 8); }
 fn prompt_def_arguments(p) { return load64(p + 16); }
+fn prompt_def_required_scopes(p) { return load64(p + 24); }
+
+# What a token must hold to get this prompt, or to complete its arguments: a vec of
+# RFC 6749 scope-tokens, all of them. Returns `p`.
+fn prompt_def_with_required_scopes(p, scopes) { store64(p + 24, scopes); return p; }
 
 # ================================================================
 # PromptRegistry
@@ -79,8 +86,10 @@ fn prompt_registry_entries(r) { return load64(r); }
 fn prompt_registry_names(r) { return load64(r + 8); }
 fn prompt_registry_handlers(r) { return load64(r + 16); }
 
-# Register (or replace) a prompt + its generator handler. Returns 0.
+# Register (or replace) a prompt + its generator handler. Returns 0, or -1 with nothing
+# registered when a required scope is no scope-token: it would go out in a 403's header.
 fn prompt_registry_register(r, prompt_def, handler_fp) {
+    if (bote_scope_list_ok(prompt_def_required_scopes(prompt_def)) == 0) { return 0 - 1; }
     var name = prompt_def_name(prompt_def);
     var entries = prompt_registry_entries(r);
     if (map_has(entries, name) == 0) {

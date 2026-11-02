@@ -126,6 +126,29 @@ fn _silent_port(out_fd) {
     return 0;
 }
 
+# `a`, `b`, `c` joined.
+fn _wl_args(a, b, c) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    str_builder_add_cstr(sb, c);
+    return str_data(str_builder_build(sb));
+}
+
+# Heap bytes a call of the handler `fp` with `args` keeps, over five after one.
+fn _wl_heap(fp, args) {
+    bote_req_begin();
+    fncall2(fp, args, 0);
+    var before = alloc_used();
+    var i = 0;
+    while (i < 5) {
+        bote_req_begin();
+        fncall2(fp, args, 0);
+        i = i + 1;
+    }
+    return (alloc_used() - before) / 5;
+}
+
 # A cursor over the record `rec`, in the 24 bytes at `cur`.
 fn _wr_cur(rec, cur) {
     store64(cur, load64(rec));
@@ -284,6 +307,22 @@ fn main() {
     _web_get_guarded("http://[2001:db8::2]/");
     assert_eq(sandhi_client_resolver_installed(), 0, "a stale guard hook is not treated as an embedder's (no self-recursion)");
     sandhi_client_clear_resolver();
+
+    # 3.6.6: a call keeps its result and nothing of its URL or query: they were copied to
+    # the heap twice, by the argument read and by the SSRF guard, 120 KB for a 60 KB URL.
+    var wl_pad = alloc(60001);
+    memset(wl_pad, 120, 60000);
+    store8(wl_pad + 60000, 0);
+    var wl_ftp = _wl_args("{\"url\":\"ftp://example.com/", wl_pad, "\"}");
+    var wl_loop = _wl_args("{\"url\":\"http://127.0.0.1/", wl_pad, "\"}");
+    var wl_none = _wl_args("{\"url\":\"http://nowhere.test/", wl_pad, "\"}");
+    var wl_q = _wl_args("{\"query\":\"", wl_pad, "\"}");
+    assert(_wl_heap(&web_fetch_handler, wl_ftp) < 1024, "web_fetch heap: a 60 KB ftp:// URL keeps its result alone");
+    assert(_wl_heap(&web_fetch_handler, wl_loop) < 1024, "web_fetch heap: ...and one the guard refuses");
+    sandhi_client_set_resolver(&_fake_none, 0);
+    assert(_wl_heap(&web_fetch_handler, wl_none) < 1024, "web_fetch heap: ...and one sent to a child that finds no address");
+    sandhi_client_clear_resolver();
+    assert(_wl_heap(&web_search_handler, wl_q) < 1024, "web_search heap: a 60 KB query keeps its result alone");
 
     # ================================================================
     # 3.6.5 — what each tool makes of its child's record

@@ -133,16 +133,69 @@ fn _bote_jwks_load(path) {
     return jwt_secret_from_jwks(json);
 }
 
+# The public keys at the jwks_uri `url`, through `ca` or the system's trust roots, as a
+# JwtSecret that refreshes from it, or 0 once it has said why not. The first fetch must
+# succeed: a server that starts with no keys would refuse every token and say less about
+# why. BOTE_JWKS_REFRESH: the seconds between refreshes, 600 by default.
+fn _bote_jwks_url_load(url, ca) {
+    var why = bote_jwks_url_check(url, ca);
+    if (why != 0) {
+        var ln[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&ln, SK_ERROR, "BOTE_JWKS_URL refused");
+        bote_log_str(&ln, "reason", why);
+        bote_log_emit(&ln);
+        return 0;
+    }
+    if (ca != 0) {
+        var cl[8];
+        if (file_read_whole_max(ca, BOTE_JWKS_MAX, &cl) == 0) {
+            bote_log_error("BOTE_JWKS_CA cannot be read");
+            return 0;
+        }
+    }
+    var every = _bote_env_count("BOTE_JWKS_REFRESH", BOTE_JWKS_REFRESH_DEFAULT);
+    if (every == 0) {
+        bote_log_warn("BOTE_JWKS_REFRESH is 0; keeping the default");
+        every = BOTE_JWKS_REFRESH_DEFAULT;
+    }
+    var s = jwt_secret_new(0);
+    jwt_secret_with_key_source(s, &bote_jwks_fetch, bote_jwks_source_new(url, ca), every);
+    var fail = jwt_secret_refresh(s);
+    var host = sandhi_url_host(sandhi_url_parse_a(bote_req_alloc(), url));
+    if (fail != 0) {
+        var fl[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&fl, SK_ERROR, "BOTE_JWKS_URL: the first fetch failed");
+        bote_log_str(&fl, "reason", fail);
+        bote_log_str(&fl, "host", host);
+        bote_log_emit(&fl);
+        return 0;
+    }
+    var il[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&il, SK_INFO, "jwt keys from a jwks_uri");
+    bote_log_str(&il, "host", host);
+    bote_log_int(&il, "keys", vec_len(jwt_secret_keys(s)));
+    bote_log_int(&il, "refresh_s", every);
+    bote_log_emit(&il);
+    return s;
+}
+
 # BOTE_JWT_SECRET: an HS256 key. BOTE_JWKS_FILE: the path of a JWK Set, for RS256 and ES256.
-# A token must name BOTE_RESOURCE_URL in `aud`, and one of BOTE_AUTH_SERVERS in `iss`, so the
-# first is required: a verifier with no audience of its own cannot do what MCP asks. Returns
-# 1, 0 when neither is set, or -1 when the server should not start. A key is never logged.
+# BOTE_JWKS_URL: an authorization server's jwks_uri, fetched and refreshed (3.6.6). One of
+# the three. A token must name BOTE_RESOURCE_URL in `aud`, and one of BOTE_AUTH_SERVERS in
+# `iss`, so the first is required: a verifier with no audience of its own cannot do what MCP
+# asks. Returns 1, 0 when none is set, or -1 when the server should not start. A key is
+# never logged.
 fn _bote_jwt_from_env(out_fp, out_ctx) {
     var key = getenv("BOTE_JWT_SECRET");
     var jwks = getenv("BOTE_JWKS_FILE");
-    if (key == 0 && jwks == 0) { return 0; }
-    if (key != 0 && jwks != 0) {
-        bote_log_error("BOTE_JWT_SECRET and BOTE_JWKS_FILE are both set: a server verifies with one or the other");
+    var jurl = getenv("BOTE_JWKS_URL");
+    if (key == 0 && jwks == 0 && jurl == 0) { return 0; }
+    var named = 0;
+    if (key != 0) { named = named + 1; }
+    if (jwks != 0) { named = named + 1; }
+    if (jurl != 0) { named = named + 1; }
+    if (named > 1) {
+        bote_log_error("BOTE_JWT_SECRET, BOTE_JWKS_FILE and BOTE_JWKS_URL: a server verifies with one of them");
         return 0 - 1;
     }
     if (load64(out_fp) != 0) {
@@ -155,7 +208,10 @@ fn _bote_jwt_from_env(out_fp, out_ctx) {
         return 0 - 1;
     }
     var s = 0;
-    if (jwks != 0) {
+    if (jurl != 0) {
+        s = _bote_jwks_url_load(jurl, getenv("BOTE_JWKS_CA"));
+        if (s == 0) { return 0 - 1; }
+    } elif (jwks != 0) {
         s = _bote_jwks_load(jwks);
         if (s == 0) { return 0 - 1; }
     } else {
@@ -213,7 +269,7 @@ fn bote_main_scopes_from_env(d, mode, jwt_on) {
         return 0;
     }
     if (jwt_on == 0) {
-        bote_log_error("BOTE_TOOL_SCOPES needs BOTE_JWT_SECRET or BOTE_JWKS_FILE: only a JWT says what it grants");
+        bote_log_error("BOTE_TOOL_SCOPES needs BOTE_JWT_SECRET, BOTE_JWKS_FILE or BOTE_JWKS_URL: only a JWT says what it grants");
         return 0 - 1;
     }
     var rules = jwt_scope_rules_new();

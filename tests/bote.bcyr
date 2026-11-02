@@ -227,6 +227,15 @@ fn b_jwt_cached_es256() {
     return auth_validator_jwt(JV_ES_GOOD, _b_jwks_cached);
 }
 
+# The same token on a handle with a key source (3.6.6): the refresh's gate and the window
+# share one clock read, and the source is not asked.
+var _b_jwks_sourced = 0;
+fn _b_src(ctx, why_out) { return JV_JWKS; }
+fn b_jwt_cached_es256_sourced() {
+    bote_req_begin();
+    return auth_validator_jwt(JV_ES_GOOD, _b_jwks_sourced);
+}
+
 # A forged HS256 token with the cache on: a verify, plus the hash and the lookup.
 fn b_jwt_forged_cache_on() {
     bote_req_begin();
@@ -345,6 +354,11 @@ fn _bench_setup() {
     _b_jwks_cached = jwt_secret_with_audience(jwt_secret_from_jwks(JV_JWKS), JV_AUD);
     auth_validator_jwt(_b_jwt_token, _b_jwt_cached);
     auth_validator_jwt(JV_ES_GOOD, _b_jwks_cached);
+    _b_jwks_sourced = jwt_secret_with_audience(jwt_secret_new(0), JV_AUD);
+    jwt_secret_with_key_source(_b_jwks_sourced, &_b_src, 0, 1000000000);
+    jwt_secret_refresh(_b_jwks_sourced);
+    bote_req_begin();
+    auth_validator_jwt(JV_ES_GOOD, _b_jwks_sourced);
     var fl = strlen(_b_jwt_token);
     _b_jwt_forged = alloc(fl + 1);
     memcpy(_b_jwt_forged, _b_jwt_token, fl + 1);
@@ -499,6 +513,9 @@ fn main() {
     var b32 = bench_new("fetch_in_child_empty");
     bench_run(b32, &b_fetch_in_child_empty, 500);
     vec_push(benches, b32);
+    var b33 = bench_new("jwt_cached_es256_sourced");
+    bench_run(b33, &b_jwt_cached_es256_sourced, 10000);
+    vec_push(benches, b33);
 
     bench_report_all(benches);
     return 0;

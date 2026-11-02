@@ -137,6 +137,43 @@ fn h_sc(args, claims) {
     _sc_runs = _sc_runs + 1;
     return "{\"content\":[]}";
 }
+# 3.6.6: a prompt, a resource and a completion that count their runs.
+var _sp_runs = 0;
+fn h_sp_prompt(args, claims) { _sp_runs = _sp_runs + 1; return "{\"messages\":[]}"; }
+fn h_sp_res(uri, claims) { _sp_runs = _sp_runs + 1; return "{\"contents\":[]}"; }
+fn h_sp_complete(params, claims) { _sp_runs = _sp_runs + 1; return "{\"completion\":{\"values\":[]}}"; }
+
+# `prefix` and `i`, a name for a filler entry.
+fn _sp_zname(prefix, i) {
+    var zb = str_builder_new();
+    str_builder_add_cstr(zb, prefix);
+    str_builder_add_int(zb, i);
+    return str_data(str_builder_build(zb));
+}
+
+# `{"jsonrpc":"2.0","id":1,"method":<method>,"params":<params>}`.
+fn _sp_msg(method, params) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, "\",\"params\":");
+    str_builder_add_cstr(sb, params);
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
+# Heap bytes `msg` leaves per message, through the arena, with `claims`.
+fn _sp_heap(msg, d, claims, n) {
+    codec_process_message_a(bote_req_begin(), msg, d, claims);
+    var before = alloc_used();
+    var i = 0;
+    while (i < n) {
+        codec_process_message_a(bote_req_begin(), msg, d, claims);
+        i = i + 1;
+    }
+    return (alloc_used() - before) / n;
+}
+
 fn _sc_call(d, tool, extra, claims) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"");
@@ -2766,6 +2803,152 @@ fn main() {
     assert_eq(_kc_copied(kc_d, "prompts/get", "{\"name\":\"kc_p\"}"), 1, "kept: a prompt gets a copy");
     assert_eq(_kc_copied(kc_d, "resources/read", "{\"uri\":\"kc://r\"}"), 1, "kept: a resource gets a copy");
     assert_eq(_kc_copied(kc_d, "completion/complete", "{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"kc_p\"},\"argument\":{\"name\":\"a\",\"value\":\"b\"}}"), 1, "kept: a completion gets a copy");
+
+    # ---------------- 3.6.6: scopes on prompts, resources and completions ----------------
+    var sp_two = vec_new();
+    vec_push(sp_two, "p:a");
+    vec_push(sp_two, "p:b");
+    var sp_bad = vec_new();
+    vec_push(sp_bad, "not good");
+    assert_eq(prompt_def_required_scopes(prompt_def_new("sp_x", "x", vec_new())), 0, "prompt scopes: none by default");
+    assert_eq(resource_def_required_scopes(resource_def_new("sp://x", "x", "x", 0)), 0, "resource scopes: none by default");
+    assert_eq(resource_template_required_scopes(resource_template_new("sp://x/{a}", "x", "x", 0)), 0, "template scopes: none by default");
+    var sp_d = dispatcher_new(tool_registry_new());
+    assert(dispatcher_register_prompt(sp_d, prompt_def_with_required_scopes(prompt_def_new("sp_bad", "x", vec_new()), sp_bad), &h_sp_prompt) != 0, "prompt scopes: a bad one is refused");
+    assert_eq(dispatcher_prompts(sp_d), 0, "prompt scopes: ...and nothing is stood up");
+    assert(dispatcher_register_resource(sp_d, resource_def_with_required_scopes(resource_def_new("sp://bad", "b", "B", 0), sp_bad), &h_sp_res) != 0, "resource scopes: a bad one is refused");
+    assert(dispatcher_register_resource_template(sp_d, resource_template_with_required_scopes(resource_template_new("sp://bad/{a}", "b", "B", 0), sp_bad), &h_sp_res) != 0, "template scopes: a bad one is refused");
+    assert_eq(dispatcher_resources(sp_d), 0, "resource scopes: ...and nothing is stood up");
+    var sp_preg = prompt_registry_new();
+    assert_eq(prompt_registry_register(sp_preg, prompt_def_with_required_scopes(prompt_def_new("sp_bad", "x", vec_new()), sp_bad), &h_sp_prompt), 0 - 1, "prompt registry: refuses a bad scope");
+    assert_eq(prompt_registry_contains(sp_preg, "sp_bad"), 0, "prompt registry: ...and holds nothing");
+    var sp_rreg = resource_registry_new();
+    assert_eq(resource_registry_register(sp_rreg, resource_def_with_required_scopes(resource_def_new("sp://bad", "b", "B", 0), sp_bad), &h_sp_res), 0 - 1, "resource registry: refuses a bad scope");
+    assert_eq(resource_registry_register_template(sp_rreg, resource_template_with_required_scopes(resource_template_new("sp://bad/{a}", "b", "B", 0), sp_bad), &h_sp_res), 0 - 1, "resource registry: ...a template's too");
+    assert_eq(resource_registry_contains(sp_rreg, "sp://bad") + vec_len(resource_registry_templates(sp_rreg)), 0, "resource registry: ...and holds neither");
+    var sp_args = vec_new();
+    vec_push(sp_args, prompt_arg_new("who", "w", 1));
+    assert_eq(dispatcher_register_prompt(sp_d, prompt_def_with_required_scopes(prompt_def_new("sp_p", "x", sp_args), sp_two), &h_sp_prompt), 0, "prompt scopes: good ones register");
+    dispatcher_register_prompt(sp_d, prompt_def_new("sp_open", "x", vec_new()), &h_sp_prompt);
+    assert_eq(dispatcher_register_resource(sp_d, resource_def_with_required_scopes(resource_def_new("sp://secret", "s", "S", 0), sp_two), &h_sp_res), 0, "resource scopes: good ones register");
+    dispatcher_register_resource(sp_d, resource_def_new("sp://open", "o", "O", 0), &h_sp_res);
+    dispatcher_register_resource(sp_d, resource_def_new("sp://t/exact", "e", "E", 0), &h_sp_res);
+    assert_eq(dispatcher_register_resource_template(sp_d, resource_template_with_required_scopes(resource_template_new("sp://t/{id}", "t", "T", 0), sp_two), &h_sp_res), 0, "template scopes: good ones register");
+    dispatcher_register_resource_template(sp_d, resource_template_new("sp://o/{id}", "o", "O", 0), &h_sp_res);
+    dispatcher_set_completion(sp_d, &h_sp_complete);
+
+    # A null name or URI must never reach a map, whose hash puts it in slot 0: fill that
+    # slot in both registries, so a missing guard crashes on every run, not one in four.
+    var sp_zi = 0;
+    while (sp_zi < 5000 && load64(load64(prompt_registry_entries(dispatcher_prompts(sp_d))) + 16) == 0) {
+        dispatcher_register_prompt(sp_d, prompt_def_new(_sp_zname("zp", sp_zi), "Z", vec_new()), &h_sp_prompt);
+        sp_zi = sp_zi + 1;
+    }
+    sp_zi = 0;
+    while (sp_zi < 5000 && load64(load64(resource_registry_entries(dispatcher_resources(sp_d))) + 16) == 0) {
+        dispatcher_register_resource(sp_d, resource_def_new(_sp_zname("zr://", sp_zi), "Z", "Z", 0), &h_sp_res);
+        sp_zi = sp_zi + 1;
+    }
+    assert(load64(load64(prompt_registry_entries(dispatcher_prompts(sp_d))) + 16) != 0, "slot 0: filled in the prompts");
+    assert(load64(load64(resource_registry_entries(dispatcher_resources(sp_d))) + 16) != 0, "slot 0: ...and the resources");
+    assert_eq(dispatcher_prompt_scopes_missing(sp_d, "sp_p", "p:a"), sp_two, "prompt missing: no checker is closed");
+    dispatcher_set_scope_check(sp_d, &_sc_has, 0);
+    assert_eq(dispatcher_prompt_scopes_missing(sp_d, "sp_p", 0), 0, "prompt missing: no claims, no check");
+    assert_eq(dispatcher_prompt_scopes_missing(sp_d, 0, "p:a"), 0, "prompt missing: no name");
+    assert_eq(dispatcher_prompt_scopes_missing(sp_d, "sp_nope", "p:a"), 0, "prompt missing: no such prompt");
+    assert_eq(dispatcher_prompt_scopes_missing(sp_d, "sp_open", "x"), 0, "prompt missing: one that asks for none");
+    assert_eq(dispatcher_prompt_scopes_missing(sp_d, "sp_p", "p:a"), sp_two, "prompt missing: one of two");
+    assert_eq(dispatcher_prompt_scopes_missing(sp_d, "sp_p", "p:a p:b"), 0, "prompt missing: both held");
+    assert_eq(dispatcher_resource_scopes_missing(sp_d, "sp://secret", "x"), sp_two, "resource missing: an exact resource");
+    assert_eq(dispatcher_resource_scopes_missing(sp_d, "sp://secret", "p:a p:b"), 0, "resource missing: ...held");
+    assert_eq(dispatcher_resource_scopes_missing(sp_d, "sp://open", "x"), 0, "resource missing: one that asks for none");
+    assert_eq(dispatcher_resource_scopes_missing(sp_d, "sp://t/9", "x"), sp_two, "resource missing: a URI its template serves");
+    assert_eq(dispatcher_resource_scopes_missing(sp_d, "sp://t/exact", "x"), 0, "resource missing: an exact resource is judged, not the template it also matches");
+    assert_eq(dispatcher_resource_scopes_missing(sp_d, "sp://o/9", "x"), 0, "resource missing: an open template");
+    assert_eq(dispatcher_resource_scopes_missing(sp_d, "sp://none", "x"), 0, "resource missing: nothing serves it");
+    assert_eq(dispatcher_resource_scopes_missing(sp_d, 0, "x"), 0, "resource missing: no URI");
+    assert_eq(dispatcher_resource_scopes_missing(sp_d, "sp://secret", 0), 0, "resource missing: no claims");
+    assert_eq(dispatcher_resource_scopes_missing(dispatcher_new(tool_registry_new()), "sp://secret", "x"), 0, "resource missing: no registry");
+    var sp_bare = dispatcher_new(tool_registry_new());
+    dispatcher_set_scope_check(sp_bare, &_sc_has, 0);
+    assert_eq(dispatcher_prompt_scopes_missing(sp_bare, "sp_p", "x"), 0, "prompt missing: no registry");
+    var sp_cba = bote_req_begin();
+    assert_eq(dispatcher_completion_scopes_missing_a(sp_cba, sp_bare, "{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"sp_p\"}}", "x"), 0, "completion missing: no prompts at all");
+    assert_eq(dispatcher_completion_scopes_missing_a(sp_cba, sp_bare, "{\"ref\":{\"type\":\"ref/resource\",\"uri\":\"sp://t/{id}\"}}", "x"), 0, "completion missing: no resources at all");
+    var sp_late = vec_new();
+    vec_push(sp_late, "good");
+    vec_push(sp_late, "not good");
+    assert_eq(bote_scope_list_ok(sp_late), 0, "scope list: a bad one after a good one");
+    assert_eq(bote_scope_list_ok(sp_two), 1, "scope list: two good ones");
+    assert_eq(bote_scope_list_ok(0), 1, "scope list: none");
+    assert_eq(bote_scope_list_ok(vec_new()), 1, "scope list: an empty one");
+    assert(dispatcher_register_prompt(sp_bare, prompt_def_with_required_scopes(prompt_def_new("sp_late", "x", vec_new()), sp_late), &h_sp_prompt) != 0, "prompt scopes: a bad one after a good one is refused");
+
+    _sp_runs = 0;
+    var sp_r = codec_process_message(_sp_msg("prompts/get", "{\"name\":\"sp_p\",\"arguments\":{\"who\":\"me\"}}"), sp_d, "p:a");
+    assert(strstr(sp_r, "\"code\":-31403") >= 0 && strstr(sp_r, "insufficient scope for prompt: sp_p") >= 0, "prompts/get: refused, named");
+    assert_eq(_sp_runs, 0, "prompts/get: no handler");
+    sp_r = codec_process_message(_sp_msg("prompts/get", "{\"name\":\"sp_p\"}"), sp_d, "p:a");
+    assert(strstr(sp_r, "\"code\":-31403") >= 0, "prompts/get: refused ahead of a missing argument");
+    sp_r = codec_process_message(_sp_msg("prompts/get", "{\"name\":\"sp_p\",\"arguments\":5}"), sp_d, "p:a");
+    assert(strstr(sp_r, "\"code\":-31403") >= 0, "prompts/get: ...and of arguments that are no object");
+    sp_r = codec_process_message(_sp_msg("prompts/get", "{\"name\":\"sp_p\",\"arguments\":{\"who\":\"me\"}}"), sp_d, "p:a p:b");
+    assert(strstr(sp_r, "\"result\"") >= 0 && _sp_runs == 1, "prompts/get: held, served");
+    sp_r = codec_process_message(_sp_msg("prompts/get", "{\"name\":\"sp_nope\"}"), sp_d, "p:a");
+    assert(strstr(sp_r, "prompt not found") >= 0, "prompts/get: an unknown prompt is still that");
+    sp_r = codec_process_message(_sp_msg("prompts/get", "{\"name\":\"sp_p\",\"arguments\":{\"who\":\"me\"}}"), sp_d, 0);
+    assert(strstr(sp_r, "\"result\"") >= 0, "prompts/get: no claims, stdio, served");
+    _sp_runs = 0;
+    sp_r = codec_process_message(_sp_msg("resources/read", "{\"uri\":\"sp://secret\"}"), sp_d, "p:b");
+    assert(strstr(sp_r, "\"code\":-31403") >= 0 && strstr(sp_r, "insufficient scope for resource: sp://secret") >= 0, "resources/read: refused, named");
+    sp_r = codec_process_message(_sp_msg("resources/read", "{\"uri\":\"sp://t/42\"}"), sp_d, "p:b");
+    assert(strstr(sp_r, "\"code\":-31403") >= 0, "resources/read: a template's URI refused");
+    assert_eq(_sp_runs, 0, "resources/read: no handler");
+    sp_r = codec_process_message(_sp_msg("resources/read", "{\"uri\":\"sp://t/exact\"}"), sp_d, "x");
+    assert(strstr(sp_r, "\"result\"") >= 0, "resources/read: the exact resource that also matches is served");
+    sp_r = codec_process_message(_sp_msg("resources/read", "{\"uri\":\"sp://t/42\"}"), sp_d, "p:a p:b");
+    assert(strstr(sp_r, "\"result\"") >= 0, "resources/read: held, served");
+    sp_r = codec_process_message(_sp_msg("resources/read", "{\"uri\":\"sp://none\"}"), sp_d, "x");
+    assert(strstr(sp_r, "-32002") >= 0, "resources/read: nothing serves it, -32002 still");
+    _sp_runs = 0;
+    sp_r = codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"sp_p\"},\"argument\":{\"name\":\"who\",\"value\":\"m\"}}"), sp_d, "p:a");
+    assert(strstr(sp_r, "\"code\":-31403") >= 0, "completion: a gated prompt's arguments refused");
+    sp_r = codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"type\":\"ref/resource\",\"uri\":\"sp://t/{id}\"},\"argument\":{\"name\":\"id\",\"value\":\"4\"}}"), sp_d, "p:a");
+    assert(strstr(sp_r, "\"code\":-31403") >= 0, "completion: a gated template, by its uriTemplate, refused");
+    sp_r = codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"type\":\"ref/resource\",\"uri\":\"sp://t/4\"},\"argument\":{\"name\":\"id\",\"value\":\"4\"}}"), sp_d, "p:a");
+    assert(strstr(sp_r, "\"code\":-31403") >= 0, "completion: ...or a URI it serves");
+    sp_r = codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"type\":\"ref/resource\",\"uri\":\"sp://secret\"},\"argument\":{\"name\":\"a\",\"value\":\"b\"}}"), sp_d, "p:a");
+    assert(strstr(sp_r, "\"code\":-31403") >= 0, "completion: ...or a gated resource");
+    assert_eq(_sp_runs, 0, "completion: no handler for any of them");
+    codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"sp_open\"},\"argument\":{\"name\":\"a\",\"value\":\"b\"}}"), sp_d, "x");
+    codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"type\":\"ref/resource\",\"uri\":\"sp://o/{id}\"},\"argument\":{\"name\":\"id\",\"value\":\"b\"}}"), sp_d, "x");
+    codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"sp_p\"},\"argument\":{\"name\":\"who\",\"value\":\"m\"}}"), sp_d, "p:a p:b");
+    codec_process_message(_sp_msg("completion/complete", "{\"argument\":{\"name\":\"a\",\"value\":\"b\"}}"), sp_d, "x");
+    codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"type\":\"ref/other\",\"name\":\"sp_p\"},\"argument\":{\"name\":\"a\",\"value\":\"b\"}}"), sp_d, "x");
+    codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"name\":\"sp_p\"},\"argument\":{\"name\":\"a\",\"value\":\"b\"}}"), sp_d, "x");
+    codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"sp_p\"},\"argument\":{\"name\":\"who\",\"value\":\"m\"}}"), sp_d, 0);
+    codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"type\":\"ref/resource\",\"uri\":\"sp://t/{id}\"},\"argument\":{\"name\":\"id\",\"value\":\"m\"}}"), sp_d, 0);
+    codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"type\":\"ref/other\",\"uri\":\"sp://t/{id}\"},\"argument\":{\"name\":\"id\",\"value\":\"m\"}}"), sp_d, "x");
+    assert_eq(_sp_runs, 9, "completion: open ones, held ones, no ref, another kind of ref even with a gated uri, no kind, and stdio for a prompt and a template are served");
+    # A uriTemplate names its own template, though an earlier one also matches the text.
+    dispatcher_register_resource_template(sp_d, resource_template_new("sp://u/{a}", "ua", "UA", 0), &h_sp_res);
+    dispatcher_register_resource_template(sp_d, resource_template_with_required_scopes(resource_template_new("sp://u/x{b}", "ub", "UB", 0), sp_two), &h_sp_res);
+    sp_r = codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"type\":\"ref/resource\",\"uri\":\"sp://u/x{b}\"},\"argument\":{\"name\":\"b\",\"value\":\"v\"}}"), sp_d, "p:a");
+    assert(strstr(sp_r, "\"code\":-31403") >= 0, "completion: the template a uriTemplate names, not the first that matches it");
+    sp_r = codec_process_message(_sp_msg("resources/read", "{\"uri\":\"sp://u/xy\"}"), sp_d, "p:a");
+    assert(strstr(sp_r, "\"result\"") >= 0, "resources/read: ...while a URI is the first template's to serve");
+    sp_r = codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"type\":\"ref/prompt\"},\"argument\":{\"name\":\"a\",\"value\":\"b\"}}"), sp_d, "p:a");
+    assert(strstr(sp_r, "\"result\"") >= 0, "completion: a prompt ref with no name names nothing gated");
+    sp_r = codec_process_message(_sp_msg("completion/complete", "{\"ref\":{\"type\":\"ref/resource\"},\"argument\":{\"name\":\"a\",\"value\":\"b\"}}"), sp_d, "p:a");
+    assert(strstr(sp_r, "\"result\"") >= 0, "completion: ...nor a resource ref with no URI");
+    # A refusal keeps nothing, with a long value in each field a client writes.
+    var sp_long = _ra_rep("x", 60000);
+    var sp_lid = _cat3("{\"jsonrpc\":\"2.0\",\"id\":\"", sp_long, "\",\"method\":\"prompts/get\",\"params\":{\"name\":\"sp_p\",\"arguments\":{\"who\":\"");
+    assert_eq(_sp_heap(_cat3(sp_lid, sp_long, "\"}}}"), sp_d, "p:a", 20), 0, "prompt refused heap: a long id and argument keep nothing");
+    assert_eq(_sp_heap(_cat3("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"sp://t/", sp_long, "\"}}"), sp_d, "p:a", 20), 0, "resource refused heap: a long URI its template serves keeps nothing");
+    assert_eq(_sp_heap(_cat3("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"sp://secret\",\"pad\":\"", sp_long, "\"}}"), sp_d, "p:a", 20), 0, "resource refused heap: long params keep nothing");
+    assert_eq(_sp_heap(_cat3("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"completion/complete\",\"params\":{\"ref\":{\"type\":\"ref/resource\",\"uri\":\"sp://t/", sp_long, "\"},\"argument\":{\"name\":\"id\",\"value\":\"v\"}}}"), sp_d, "p:a", 20), 0, "completion refused heap: a long ref keeps nothing");
+    assert_eq(_sp_heap(_cat3("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"completion/complete\",\"params\":{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"sp_p\"},\"argument\":{\"name\":\"who\",\"value\":\"", sp_long, "\"}}}"), sp_d, "p:a", 20), 0, "completion refused heap: a long argument keeps nothing");
 
     return assert_summary();
 }

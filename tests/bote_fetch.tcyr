@@ -185,6 +185,24 @@ fn main() {
     gi = 0;
     while (gi < 2000) { if (bote_fetch_int(&c) != gi) { gok = 0; } gi = gi + 1; }
     assert_eq(gok, 1, "record: 16,000 bytes, every int back in order");
+    # 3.6.6: a record is on the request arena, which is what agnos, running the function in
+    # this process, keeps of it: nothing.
+    bote_req_begin();
+    var rh_big = alloc(200001);
+    memset(rh_big, 120, 200000);
+    store8(rh_big + 200000, 0);
+    var rh0 = _bf_rec_new();
+    bote_fetch_put_str(rh0, rh_big);
+    var rh_before = alloc_used();
+    var rh_i = 0;
+    while (rh_i < 5) {
+        bote_req_begin();
+        var rh = _bf_rec_new();
+        bote_fetch_put_str(rh, rh_big);
+        bote_fetch_put_int(rh, 7);
+        rh_i = rh_i + 1;
+    }
+    assert_eq(alloc_used() - rh_before, 0, "record heap: five records of 200 KB keep nothing");
     # The end is the record's length, not the bytes behind it.
     var two = _bf_rec_new();
     bote_fetch_put_int(two, 42);

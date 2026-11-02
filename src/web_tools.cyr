@@ -374,7 +374,7 @@ fn _web_fetch_child(url, rec) {
     if ((status < 200) || (status >= 300)) { return bote_fetch_put_str(rec, 0); }
     var blen = sandhi_http_body_len(r);
     if (blen > WEB_BODY_CAP) { blen = WEB_BODY_CAP; }
-    var out = alloc(WEB_FETCH_CAP + 1);
+    var out = alloc_via(bote_req_alloc(), WEB_FETCH_CAP + 1);
     _web_html_to_text(sandhi_http_body(r), blen, out, WEB_FETCH_CAP);
     return bote_fetch_put_str(rec, out);
 }
@@ -382,15 +382,16 @@ fn _web_fetch_child(url, rec) {
 # ---- web_fetch ------------------------------------------------------------
 # web_fetch {url} -> readable text of the page. http/https only; HTML stripped; capped at WEB_FETCH_CAP.
 fn web_fetch_handler(args, claims) {
-    var url = jsonx_get_str(args, "url");
+    # On the request arena: a refused call, and a long URL, keep none of it (3.6.6).
+    var url = jsonx_get_str_a(bote_req_alloc(), args, "url");
     if (url == 0) { return _web_err("web_fetch: missing 'url'"); }
     if (_web_is_http(url) == 0) { return _web_err("web_fetch: only http:// and https:// URLs are allowed"); }
     # 3.4.0: the SSRF guard SECURITY.md has always promised for outbound
     # requests. web_fetch is bote's one fetch of a CLIENT-supplied URL, and it
     # never called ssrf_check, so a client could read loopback services and
     # the cloud metadata endpoint through it. The guard classifies IP
-    # literals and a hostname blocklist; it does not resolve DNS, so a name
-    # that resolves to a private address still gets through (roadmap 3.6.x).
+    # literals and a hostname blocklist; it does not resolve DNS. What a name
+    # resolves to is judged in the child, by the resolve hook (3.4.4, above).
     # web_search's endpoint is operator-configured (BOTE_SEARXNG_URL, often
     # on localhost) and is deliberately NOT guarded.
     var sc = ssrf_check(url);
@@ -527,7 +528,7 @@ fn _web_search_child(ctx, rec) {
 # web_search {query, count?} -> the top results from the configured SearXNG (title · url · snippet). Sovereign:
 # no third-party key, no silent default — an unconfigured endpoint is reported, not faked.
 fn web_search_handler(args, claims) {
-    var q = jsonx_get_str(args, "query");
+    var q = jsonx_get_str_a(bote_req_alloc(), args, "query");
     if (q == 0) { return _web_err("web_search: missing 'query'"); }
     var base = _web_searxng_base();
     if (base == 0) { return _web_err("web_search: no search backend configured (set BOTE_SEARXNG_URL to a SearXNG instance)"); }

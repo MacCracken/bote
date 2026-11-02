@@ -18,6 +18,7 @@ include "lib/assert.cyr"
 # string / struct skipping — same surface bote uses everywhere else
 # for JSON-ish handling.
 include "src/log.cyr"
+include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/host.cyr"
 # 3.4.7: the cyrius TLS stack's IPv6 literal parser, used here only as an
@@ -470,6 +471,35 @@ fn main() {
     assert_eq(ssrf_check("http://user:pw@example.com/"), SSRF_OK, "authority: a plain userinfo still passes");
     assert_eq(ssrf_check("http://0x7f.0.0.1/"), SSRF_PARSE, "hex: a 0x label is refused");
     assert_eq(ssrf_check("http://a0x1.example.com/"), SSRF_OK, "hex: only at the start of a label");
+
+    # 3.6.6: the copies a check makes of a client's URL are on the request arena.
+    var hl_url = alloc(60100);
+    memcpy(hl_url, "http://example.com/", 19);
+    memset(hl_url + 19, 120, 60000);
+    store8(hl_url + 60019, 0);
+    bote_req_begin();
+    ssrf_check(hl_url);
+    ssrf_host(hl_url);
+    var hl_before = alloc_used();
+    var hl_i = 0;
+    while (hl_i < 10) {
+        bote_req_begin();
+        ssrf_check(hl_url);
+        ssrf_host(hl_url);
+        hl_i = hl_i + 1;
+    }
+    assert_eq(alloc_used() - hl_before, 0, "heap: ten checks of a 60 KB URL, and its host, keep nothing");
+    memcpy(hl_url, "http://", 7);
+    memset(hl_url + 7, 97, 60000);
+    memcpy(hl_url + 60007, ".com/", 6);
+    bote_req_begin();
+    assert_eq(ssrf_check(hl_url), SSRF_OK, "heap: a 60 KB host is judged");
+    ssrf_host(hl_url);
+    var hl_b2 = alloc_used();
+    bote_req_begin();
+    ssrf_check(hl_url);
+    assert(strlen(ssrf_host(hl_url)) == 60004, "heap: ...and named");
+    assert_eq(alloc_used() - hl_b2, 0, "heap: ...and its copies are on the arena");
 
     return assert_summary();
 }

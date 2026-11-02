@@ -276,9 +276,10 @@ fn _ssrf_starts_with(s, prefix) {
 }
 
 # ASCII-lowercase a cstr into a fresh alloc. Caller owns the result.
+# `s` lowercased, on the request arena: a client's URL, judged once a message.
 fn _ssrf_lower(s) {
     var n = strlen(s);
-    var out = alloc(n + 1);
+    var out = alloc_via(bote_req_alloc(), n + 1);
     var i = 0;
     while (i < n) {
         var c = load8(s + i);
@@ -637,7 +638,7 @@ fn ssrf_check(url) {
 
     # Copy out the host as its own NUL-terminated cstr so we can feed
     # it to streq against the string blocklist.
-    var host = alloc(host_len + 1);
+    var host = alloc_via(bote_req_alloc(), host_len + 1);
     memcpy(host, host_ptr, host_len);
     store8(host + host_len, 0);
 
@@ -799,7 +800,7 @@ fn ssrf_host(url) {
     if (_ssrf_extract_host(url, &start_slot, &end_slot) != SSRF_OK) { return 0; }
     var hp = load64(&start_slot);
     var hl = load64(&end_slot) - hp;
-    var host = alloc(hl + 1);
+    var host = alloc_via(bote_req_alloc(), hl + 1);
     memcpy(host, hp, hl);
     store8(host + hl, 0);
     return host;

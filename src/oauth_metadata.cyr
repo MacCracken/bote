@@ -238,24 +238,38 @@ fn bote_prm_route(hc, p, method, path, allowed_origins) {
 # A token that lacks a scope
 # ================================================================
 
-# Answer a tools/call this token may not make with a 403, ahead of the dispatcher, which
-# has no status to send. 1 when it has been answered. A batch is the dispatcher's alone:
-# one message cannot carry two statuses, and that is why the check lives there as well as
-# here. A body that is no JSON is the codec's to refuse, and a notification gets no reply.
+# Answer a request this token may not make with a 403, ahead of the dispatcher, which has
+# no status to send: a tools/call, a prompts/get, a resources/read, or a
+# completion/complete for a prompt or a template the token may not reach (3.6.6). 1 when
+# it has been answered. The scopes come from the dispatcher's own functions, so the two
+# cannot judge one request differently. A batch is the dispatcher's alone: one message
+# cannot carry two statuses, and that is why the check lives there as well as here. A body
+# that is no JSON is the codec's to refuse, and a notification gets no reply.
 fn bote_http_scope_gate(hc, dispatcher, body, claims, p) {
     if (claims == 0) { return 0; }
     if (jsonx_valid(body, strlen(body)) == 0 || jsonx_has(body, "id") == 0) { return 0; }
     var a = bote_req_alloc();
     var method = jsonx_get_str_dec_a(a, body, "method");
-    if (method == 0 || streq(method, "tools/call") == 0) { return 0; }
+    if (method == 0) { return 0; }
     var params = jsonx_get_raw_a(a, body, "params");
-    var name = jsonx_get_str_dec_a(a, params, "name");
-    if (name == 0) { return 0; }
-    var scopes = dispatcher_scopes_missing(dispatcher, name, claims);
+    var scopes = 0;
+    if (streq(method, "tools/call") == 1) {
+        var name = jsonx_get_str_dec_a(a, params, "name");
+        if (name == 0) { return 0; }
+        scopes = dispatcher_scopes_missing(dispatcher, name, claims);
+        if (scopes == 0) { return 0; }
+        var plen = strlen(params);
+        _dsp_record_refusal(dispatcher, name, params, plen, _jx_find_value_pos(params, plen, "caller_id"),
+          _dsp_named_msg_a(a, "insufficient scope for tool: ", name, 0));
+    } elif (streq(method, "prompts/get") == 1) {
+        scopes = dispatcher_prompt_scopes_missing(dispatcher, jsonx_get_str_dec_a(a, params, "name"), claims);
+    } elif (streq(method, "resources/read") == 1) {
+        scopes = dispatcher_resource_scopes_missing(dispatcher, jsonx_get_str_dec_a(a, params, "uri"), claims);
+    } elif (streq(method, "completion/complete") == 1) {
+        if (dispatcher_completion(dispatcher) == 0) { return 0; }
+        scopes = dispatcher_completion_scopes_missing_a(a, dispatcher, params, claims);
+    }
     if (scopes == 0) { return 0; }
-    var plen = strlen(params);
-    _dsp_record_refusal(dispatcher, name, params, plen, _jx_find_value_pos(params, plen, "caller_id"),
-      _dsp_named_msg_a(a, "insufficient scope for tool: ", name, 0));
     bote_http_log_refusal(SK_WARN, _he_transport(hc), HTTP_FORBIDDEN, "insufficient_scope");
     auth_send_insufficient_scope(_he_cfd(hc), scopes, bote_prm_metadata(p), _he_extra(hc));
     return 1;

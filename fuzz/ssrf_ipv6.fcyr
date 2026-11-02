@@ -23,6 +23,7 @@ include "lib/hashmap.cyr"
 include "lib/fnptr.cyr"
 
 include "src/log.cyr"
+include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/host.cyr"
 include "lib/tls_hostid.cyr"

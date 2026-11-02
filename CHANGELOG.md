@@ -18,6 +18,143 @@ have per release.
 
 _(empty)_
 
+## [3.6.6] — 2026-11-02 · Keys from `jwks_uri`
+
+**The rest of 3.6.x, authorization on HTTP.** Three items, each built and mutation-tested before the next:
+
+- **Keys from the authorization server's `jwks_uri`.** `BOTE_JWKS_URL` fetches its JWK Set at startup, again every
+  `BOTE_JWKS_REFRESH` seconds, and as soon as a token names a key the set does not hold, never more often than a 60 s cooldown. While the
+  server is down the last good set serves and the asks back off. A set that changes forgets every remembered token, so a key the
+  server removes stops passing tokens at the next refresh. Each fetch is made in a child (3.6.5), with a 5 s deadline that covers DNS.
+- **Scopes on prompts, resources and resource templates**, enforced on `prompts/get`, `resources/read`, and a `completion/complete` for
+  them, with the same 403 and `-31403` as tools.
+- **A WebSocket connection's token is judged again**, at most once a second, and one that has expired ends the connection with 1008.
+
+**Two defects in 3.6.5 land ahead of them**, from an independent review of that release: `web_fetch` kept its URL on the heap twice per
+call, and on agnos a web call kept its record. See the correction notice in 3.6.5.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Added
+
+- **`src/jwks.cyr`**, in the full bundle, now 37 modules: `bote_jwks_url_check(url, ca)`, `bote_jwks_source_new(url, ca)`, and
+  `bote_jwks_fetch`, a key source. The URL is the operator's, so the SSRF guard does not apply; it must be `https://`, against the
+  system's roots or `BOTE_JWKS_CA`'s, or `http://` to 127.0.0.0/8 or `localhost`, with no userinfo and no IPv6 literal. No redirect is
+  followed, the body is at most `BOTE_JWKS_MAX` (1 MiB), and `BOTE_JWKS_TIMEOUT_MS` (5000) covers all of it. The child resolves the
+  name with the stdlib's `net_resolve_ipv4`, which gives up on DNS after two tries of 2 s, through sandhi's resolve hook, unless an
+  embedder's hook is installed. A failure says why: no connection, TLS, a timeout, no IPv4 address, the status, a NUL in the body.
+- **A key source on a JwtSecret** (`src/jwt.cyr`): `jwt_secret_with_key_source(s, fp, ctx, every)`, `jwt_secret_refresh(s)`,
+  `jwt_secret_set_jwks(s, json)`, and accessors for the refresh interval, the last fetch and the failures. A source is
+  `fn (ctx, why_out) → set or 0`. The cooldown is `BOTE_JWKS_COOLDOWN` (60 s), or the refresh interval if that is shorter, and after a
+  failure the wait doubles, up to the interval. A refresh logs INFO when the set changed, DEBUG when it did not, WARN with the reason
+  when it failed; a token that names an unknown key and causes an ask, DEBUG. No key, set or token is logged.
+- **`BOTE_JWKS_URL`, `BOTE_JWKS_CA` and `BOTE_JWKS_REFRESH`** in the binary. One of `BOTE_JWT_SECRET`, `BOTE_JWKS_FILE` and
+  `BOTE_JWKS_URL`. The first fetch must succeed, or the server does not start: one that started with no keys would refuse every
+  token and say less about why. The startup line names the host, the key count and the interval.
+- **`prompt_def_with_required_scopes`, `resource_def_with_required_scopes` and `resource_template_with_required_scopes`**, with their
+  getters. `dispatcher_prompt_scopes_missing`, `dispatcher_resource_scopes_missing`, which judges a URI by what would serve it, the
+  resource at it, else the first template it matches, and `dispatcher_completion_scopes_missing_a`, which judges a completion by the
+  prompt its `ref/prompt` names, or for `ref/resource` the template written that way, else the resource. `bote_scope_list_ok`.
+  `resource_registry_template_for` and `resource_registry_template_named`.
+- **`BOTE_WS_RECHECK_MS`** (1000): how often a WebSocket connection's token is judged again, by the validator that took it.
+
+### Changed
+
+- **`bote_http_scope_gate`** answers `prompts/get`, `resources/read` and `completion/complete` with the 403 too, from the dispatcher's own
+  functions, so the gate and the dispatcher cannot judge one request differently.
+- Registering a prompt, a resource or a template whose required scope is no scope-token is refused, as a tool's is.
+- The WebSocket transport keeps the token a connection presented, in `_ws_token_buf`, whatever claims the validator returned, so the
+  recheck judges the token and a handler is still handed the claims. The 64 KB bound applies to it either way.
+- **A JWK Set is read on the request arena** (`jwt_jwks_check`, `jwt_secret_from_jwks`), and only the keys it holds are kept. A set
+  that holds the same keys in the same order changes nothing, and keeps nothing.
+- JwtSecret grows to 120 B, PromptDef to 32 B, ResourceDef to 40 B and ResourceTemplate to 48 B, each by appended fields.
+- **The roadmap holds open work only.** The 3.5.x section, finished, is gone: the default revision is an open decision, the
+  `-32021` check rides with `InputRequiredResult` in 3.8.x, and the official suite's remaining failures head "Where bote stands".
+  Items that were waits on upstream moved to Upstream, and every "roadmap 3.5.x" pointer in the docs and two source comments now
+  names 3.7.x, where threaded dispatch is. SECURITY.md supports 3.6.x and 3.5.x.
+
+### Fixed
+
+- **`web_fetch` kept its URL on the heap twice a call, and `web_search` its query once.** The argument was read with `jsonx_get_str`,
+  and the SSRF guard lowercased the URL and copied its host there too (`_ssrf_lower`, `ssrf_check`, `ssrf_host`). A 60 KB URL kept
+  120 KB a call with no network involved, refused or not. They read onto the request arena now.
+- **On agnos a web call kept its record and its text**, 4 KB to 200 KB, because the record and `web_fetch`'s text buffer came from the
+  heap; 3.6.4 had the buffer on the arena. Both are on the arena now, which a forked child has its own copy of.
+- **A child could outlive a parent that died before it set its death signal**, holding the listening socket. It checks its parent
+  after the `prctl` and goes if the parent has.
+- **A child that had closed the pipe was still signalled**, which with SIGCHLD ignored could reach a reused pid. A child that ended
+  its reply is reaped, not killed.
+
+### Security
+
+- **Keys rotate without a restart, and a removed key stops working.** Before, keys came from a file read at startup, so a key the
+  authorization server withdrew kept passing tokens until bote was restarted. With `BOTE_JWKS_URL` it stops at the next refresh,
+  remembered tokens included.
+- **A client can make bote ask the authorization server for its keys**, by sending a token with a `kid` it does not hold, at most once
+  a cooldown: one GET a minute by default. The set is the authorization server's; a client cannot choose where bote fetches it from.
+- **A WebSocket connection lasted as long as the connection**, its token judged once at the upgrade. It now ends within a second of the
+  token's `exp`, or of its key leaving the set.
+- **Scopes reached tools only**, so a prompt or a resource an operator meant to restrict had no way to say so. A completion for a
+  restricted prompt or template is refused too: it would offer that prompt's arguments or that template's values.
+
+### Tests
+
+- 4,404 assertions, from 4,014, on x86_64 and under `qemu-aarch64`.
+  - **`tests/bote_jwks.tcyr`**, new, has 49: what a `jwks_uri` may be, a source's own copy of its URL, and real fetches from a child to a
+    loopback server the test forks. A set, a 404, a NUL, a server that never answers, nobody listening, and a token verified end to end on
+    the fetched keys, with 0 heap bytes for ten fetches and ten refreshes.
+  - **`tests/bote_jwt.tcyr`** has 454, from 376, on the clock seam against a fake source. A set is taken only when it differs (in its
+    kid, its material, its length or its order), and a key that left the set no longer passes a remembered token. The timer, a first
+    fetch at 30 s, the cooldown, a `kid` the set does not hold, an HS256 token that asks nothing, and backoff of 60, 120, 240 and 480 s
+    and then 600 s, none a second early. A refused set, a clock that went back, an unknown clock, the log lines with neither key nor
+    token, one clock read for a remembered token, and 0 heap bytes for a refresh of the same set or a failed one.
+  - **`tests/bote_ws.tcyr`** has 94, from 73. A validator that stops taking a token ends the connection with 1008 at the next frame, and
+    the presented token is what is judged. Once a second, measured from the last judgement. A real JWT expiring under the clock seam, and
+    no heap.
+  - **`tests/bote.tcyr`** has 947, from 876: scopes on prompts, resources and templates, each lookup with slot 0 filled, a completion by
+    its `ref`, and 0 heap bytes for each refusal with a 60 KB value.
+  - **`tests/bote_http_era.tcyr`** has 1,833, from 1,671: the 403 for each on all three transports and both eras, and a batch's `-31403`.
+  - **`bote_host`, `bote_web_tools` and `bote_fetch`** add the heap rows for the 3.6.5 fixes: a 60 KB URL keeps nothing of itself.
+- **100 mutants, 97 killed.**
+  - **The WebSocket recheck:** 12 of 12.
+  - **The scopes:** 31 of 31. The first run left four standing, all test gaps, among them a null name reaching a map, which needs slot 0
+    filled to crash.
+  - **The key source, the fetcher and the 3.6.5 fixes:** 54 of 57. Six more were test gaps, now covered. The other three sat on checks
+    that cannot change an outcome, now gone: `alg` beside a length that already decides it, a no-source check every caller has made,
+    and an empty host that sandhi's parser refuses first.
+  - **Not tested, and why:** the child's parent check and the no-kill on a closed pipe, which only a race or a reused pid shows; the
+    resolve hook, which only a DNS lookup that hangs shows; and `web_fetch`'s text buffer on agnos.
+- **`scripts/transport-smoke.sh`**:
+  - **A `jwks_uri` over loopback http:** keys at startup, a key coming in, one leaving (its remembered token then refused), and the key
+    server going down (the last set still serving).
+  - **Refusals:** a non-loopback http URL, a server down at startup, and a URL beside a file.
+  - **Over https:** keys fetched with `BOTE_JWKS_CA` from a CA the script makes, and refused without it.
+- **The official client** runs its RS256 OAuth flows on keys bote fetched from the mock authorization server's `jwks_uri`: 410 of 410.
+  The suite is where 3.6.5 left it.
+- stdio is byte-identical to 3.6.5 over 200,000 messages, and HTTP over 50 of 50.
+
+### Performance
+
+Interleaved A/B, 15 alternating rounds, pinned to an idle core, 3.6.5 against this tree. Minimums, in ns:
+
+| Bench | 3.6.5 | 3.6.6 | Delta |
+|---|---|---|---|
+| `jwt_validate_audience`, an HS256 verify | 8,927 | 8,399 | −5.9% |
+| `jwt_cached_es256`, a remembered token | 2,599 | 2,657 | +2.2%, ranges overlapping |
+| `jwt_cached_es256_sourced`, new: the same, on a handle with a key source | | 2,733 | |
+| `jwt_es256` | 10,636,000 | 10,596,000 | −0.4% |
+| `http_era_legacy` | 2,510 | 2,497 | −0.5% |
+| `http_era_modern` | 11,665 | 11,277 | −3.3% |
+| `dispatch_tools_call` | 2,233 | 2,178 | −2.5% |
+| `dispatch_tools_call_scoped` | 5,334 | 5,290 | −0.8% |
+
+**A key source costs a remembered token 76 ns**, against the same handle without one: the refresh's check reads the clock the token's
+window reads, once, so a hit makes no second `clock_gettime`. A refresh itself is a fork, about 150 µs, and the GET, once every
+`BOTE_JWKS_REFRESH` seconds. A set that has not changed is parsed on the arena and compared, and keeps nothing.
+
+The rows that moved most are on code this patch did not touch: `jsonx_get_str_flat` −8.2%, `codec_serialize_response` −7.1% and
+`codec_process_message` −6.8% are three of the rows 3.6.5's dead-code control showed move by layout alone, and they have moved back.
+
 ## [3.6.5] — 2026-11-02 · Outbound requests in a child
 
 **The web tools make their requests in a child process.** sandhi's HTTP client gives the TLS stack the global heap, not the arena it
@@ -80,6 +217,12 @@ The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
   more, and `jwt_secret_with_cache` does not reclaim a table it replaces. `_bote_env_count` sat between `_bote_env_ms` and its comment.
 
 ### Security
+
+> ⚠ **Corrected at 3.6.6.** "What a call still keeps is what any handler call keeps, its `args` and its result" was not true. `web_fetch`
+> read its URL onto the heap and the SSRF guard lowercased a second copy there, and `web_search` read its query onto the heap, so a 60 KB
+> URL kept 120 KB a call beside its `args`, with no network involved. And "on agnos the function runs in this process, as it did before"
+> was not as before: the record and `web_fetch`'s text buffer came from the heap, which 3.6.4 had taken from the request arena, so a web
+> call there kept 4 KB to 200 KB. Both are fixed in 3.6.6, with two small races in the child, from an independent review of this release.
 
 - **`web_fetch` and `web_search` over `https://` grew the server for good**, 175 KB a call, for any client allowed to call them. In a
   child, the parent keeps none of it: 0 B per request measured, plain and TLS. What a call still keeps is what any handler call keeps,

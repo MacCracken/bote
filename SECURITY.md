@@ -79,21 +79,39 @@ The primary security-relevant surface areas are:
   credentials to reach. Put a rate limit in front of a server that takes tokens from the internet.
   ES256 also has two spellings of every signature, so a token's text cannot key a revocation list
   there: use `jti`.
+- **Keys from a `jwks_uri`** — since **3.6.6** `BOTE_JWKS_URL` fetches the authorization server's
+  key set: once at startup, which must succeed, again every `BOTE_JWKS_REFRESH` seconds (600), and
+  when a token names a `kid` the set does not hold, never more often than a 60 s cooldown, so a
+  client sending made-up kids gets the server one fetch a minute. While the server is down the last
+  good set keeps serving, and asks back off to the refresh interval. The URL is the operator's, so the
+  SSRF guard, which would refuse an authorization server on the same network, does not apply; what
+  does is `https://`, against the system's roots or `BOTE_JWKS_CA`, or `http://` to a loopback
+  address, which no one on a network can answer for, no userinfo, no redirect, at most 1 MiB, and a
+  5 s deadline for the whole fetch, its DNS lookup included: it is made in a child that is killed at
+  the deadline, which also keeps sandhi's 175 KB per TLS connection off the server's heap. A set that
+  changes forgets every remembered token, so a key the authorization server removes stops passing
+  tokens within one refresh. A plain-http URL to anywhere but loopback would let anyone on the path
+  mint tokens, and is refused.
 - **Tokens already verified** — since **3.6.4** a token that passed is remembered by the SHA-256 of
   its whole text, with its `exp` and `nbf`, and judged again on the clock each time it returns, by
   the same rules: the cache can only answer what the verify would. Changing the audience or the
   issuers forgets everything. A token that failed is never stored, so a forged token costs what it
   did, and the cache gives that time back to legitimate clients only. bote revokes nothing, cache or
   not: a token stays good until its `exp`, so keep access tokens short-lived. `BOTE_JWT_CACHE=0`
-  turns the cache off.
+  turns the cache off. Since **3.6.6** a key set that changes forgets everything too.
 - **WebSocket upgrades** — cyrius's `ws_server_handshake` copies four of the client's headers to the
   heap before it judges them, and through **3.6.3** a refused upgrade with a 60 KB header kept 60 KB,
   with no token needed on `bote ws`. Since **3.6.4** bote judges those headers on its request arena
   first, by the handshake's own rules and with `Connection` at most 256 bytes, so a refused upgrade
   keeps nothing. A completed one keeps about 1.6 KB, all of it the handshake's: a client that can
   connect can still grow the heap by that much a connection, and only an upstream fix ends it.
+  Since **3.6.6** a connection's token is judged again by the validator that took it, at most once a
+  second, so a token that expires, or whose key leaves the set, ends the connection with close code
+  1008 within a second, where it used to last as long as the connection.
 - **Scopes** — since **3.6.3** a tool can require scopes, and a token lacking any of them gets a
-  `403` with `error="insufficient_scope"`. The dispatcher holds the check, and HTTP's 403 is a
+  `403` with `error="insufficient_scope"`. Since **3.6.6** so can a prompt, a resource and a
+  resource template, judged by whatever would serve the request, and a `completion/complete` is held
+  to the scopes of the prompt or template its `ref` names, because what it completes is theirs. The dispatcher holds the check, and HTTP's 403 is a
   courtesy ahead of it: a transport-only check would be walked around by a JSON-RPC batch and would
   miss WebSocket, so a batch element or a frame gets `-31403` from the same code. Fuzzing asserts no
   substitution of a request reaches a scoped tool without its scope. A tool that requires a scope
@@ -177,9 +195,9 @@ The primary security-relevant surface areas are:
 
 | Version | Supported |
 | ------- | --------- |
-| 3.5.x   | Yes (current minor) |
-| 3.4.x   | Yes (prior minor) |
-| < 3.4   | No        |
+| 3.6.x   | Yes (current minor) |
+| 3.5.x   | Yes (prior minor) |
+| < 3.5   | No        |
 
 ## Reporting a Vulnerability
 

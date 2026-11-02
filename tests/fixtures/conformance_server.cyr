@@ -36,6 +36,8 @@ include "src/auth.cyr"
 include "src/jwt.cyr"
 include "src/pkce.cyr"
 include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/jwks.cyr"
 include "src/http_era.cyr"
 include "src/oauth_metadata.cyr"
 include "src/transport_stdio.cyr"
@@ -231,7 +233,12 @@ fn main() {
         vec_push(scopes, "mcp:read");
         var resource = _cat("http://127.0.0.1:", arg, "/mcp");
         var jwt = jwt_secret_new("conformance-fixture-secret-32-bytes!");
-        if (argc() > 4) {
+        if (argc() > 4 && strlen(argv(4)) > 4 && memeq(argv(4), "http", 4) == 1) {
+            # A jwks_uri: the authorization server's keys, fetched (3.6.6).
+            jwt = jwt_secret_new(0);
+            jwt_secret_with_key_source(jwt, &bote_jwks_fetch, bote_jwks_source_new(argv(4), 0), 600);
+            if (jwt_secret_refresh(jwt) != 0) { return 1; }
+        } elif (argc() > 4) {
             var jl[8];
             jwt = jwt_secret_from_jwks(file_read_whole_max(argv(4), BOTE_JWKS_MAX, &jl));
         }

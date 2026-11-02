@@ -181,6 +181,34 @@ fn _ws_upgrade_ok(buf, n) {
 var BOTE_WS_TOKEN_MAX = 65536;
 var _ws_token_buf = 0;
 
+# How often a connection's token is judged again, in milliseconds, by the validator that
+# took it: a frame that arrives this long after the last judgement is held until the token
+# passes again. A token that has expired, or whose key is gone, then ends the connection
+# with 1008 (RFC 6455 7.4.1, policy violation), within this long of it. 0 judges every
+# frame. A verified token is remembered (src/jwt.cyr), so a judgement costs a hash and a
+# lookup, and this bounds what a connection can make the server spend on it.
+var BOTE_WS_RECHECK_MS = 1000;
+
+# A close frame with 1008 and its reason, from the stack: ws_server_send_close puts its
+# payload on the heap.
+fn _ws_send_close_policy(ws) {
+    var cl[32];
+    var reason = "token no longer valid";
+    var rl = strlen(reason);
+    store8(&cl, 1008 >> 8);
+    store8(&cl + 1, 1008 & 255);
+    memcpy(&cl + 2, reason, rl);
+    return ws_server_send_frame(ws, WS_OP_CLOSE, &cl, 2 + rl);
+}
+
+# 1 when it is time to judge the token again: `last` is when it was last judged, by
+# clock_now_ms, and a clock that went back counts as time.
+fn _ws_recheck_due(now, last) {
+    if (now < last) { return 1; }
+    if (now - last >= BOTE_WS_RECHECK_MS) { return 1; }
+    return 0;
+}
+
 # The next data frame as a cstr, in _ws_frame_buf, valid until the next call.
 # 0 when the peer closed, a frame broke a bound, or the socket failed.
 fn _bote_ws_recv(ws) {
@@ -248,19 +276,26 @@ fn _bote_ws_handler(config, cfd, buf, n) {
         return 0;
     }
     # Past every refusal but the handshake's: the token moves off the arena, which each
-    # frame rewinds.
+    # frame rewinds, to be judged again while the connection lasts. When the validator's
+    # claims are the token, they are that copy too.
     var ws_claims = load64(&claims_slot);
     var ws_token = 0;
-    if (ws_claims != 0 && ws_claims == bote_req_token()) {
-        var tl = strlen(ws_claims);
+    var ws_fp = ws_config_bearer_validator(config);
+    var ws_held = 0;
+    if (ws_fp != 0) {
+        var presented = auth_bearer_extract(buf, n);
+        var tl = strlen(presented);
         if (tl >= BOTE_WS_TOKEN_MAX) {
             bote_http_refuse(cfd, SK_WARN, "ws", HTTP_BAD_REQUEST, "Bad Request", "token_size");
             return 0;
         }
         if (_ws_token_buf == 0) { _ws_token_buf = alloc(BOTE_WS_TOKEN_MAX); }
-        memcpy(_ws_token_buf, ws_claims, tl + 1);
-        ws_claims = _ws_token_buf;
-        ws_token = 1;
+        memcpy(_ws_token_buf, presented, tl + 1);
+        ws_held = _ws_token_buf;
+        if (ws_claims != 0 && ws_claims == bote_req_token()) {
+            ws_claims = _ws_token_buf;
+            ws_token = 1;
+        }
     }
 
     var ws = ws_server_handshake(cfd, buf, n);
@@ -307,11 +342,23 @@ fn _bote_ws_handler(config, cfd, buf, n) {
     # socket errors out (ws_server_recv returns 0). The first frame to hand a handler
     # the token makes its one heap copy, and every later frame hands over that one.
     var ws_kept = 0;
+    var ws_judged = clock_now_ms();
     while (1 == 1) {
         a = bote_req_begin();
         if (ws_token == 1) { bote_req_note_token_kept(ws_claims, ws_kept); }
         var msg = _bote_ws_recv(ws);
         if (msg == 0) { return 0; }
+        if (ws_held != 0) {
+            var now = clock_now_ms();
+            if (_ws_recheck_due(now, ws_judged) == 1) {
+                if (fncall2(ws_fp, ws_held, ws_config_bearer_ctx(config)) == 0) {
+                    bote_log_warn("ws token no longer valid; connection closed");
+                    _ws_send_close_policy(ws);
+                    return 0;
+                }
+                ws_judged = now;
+            }
+        }
         var resp = codec_process_message_a(a, msg, ws_config_dispatcher(config), ws_claims);
         if (ws_token == 1) { ws_kept = bote_req_kept(); }
         if (resp != 0) {

@@ -74,6 +74,8 @@ include "src/pkce.cyr"
 include "src/conn.cyr"
 # fetch.cyr — an outbound request made in a child, for the web tools (3.6.5).
 include "src/fetch.cyr"
+# jwks.cyr — a JWK Set fetched from a jwks_uri, through fetch.cyr (3.6.6).
+include "src/jwks.cyr"
 include "src/http_era.cyr"
 include "src/oauth_metadata.cyr"
 include "src/transport_stdio.cyr"

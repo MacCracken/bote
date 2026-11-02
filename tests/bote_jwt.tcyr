@@ -303,6 +303,60 @@ fn _tc_flip(tok, at) {
     return t;
 }
 
+
+# ---- 3.6.6: keys from a source ----------------------------------------------
+# A source that hands back `_ks_doc`, or fails with "down", and counts each ask.
+var _ks_doc = 0;
+var _ks_down = 0;
+var _ks_calls = 0;
+fn _ks_src(ctx, why_out) {
+    _ks_calls = _ks_calls + 1;
+    if (_ks_down == 1) { store64(why_out, "down"); return 0; }
+    return _ks_doc;
+}
+# A source that says nothing about why it failed.
+fn _ks_mute(ctx, why_out) { return 0; }
+
+# A handle for this audience and issuer that refreshes from _ks_src every `every` seconds.
+fn _ks_secret(every) {
+    var s = jwt_secret_new(0);
+    jwt_secret_with_audience(s, JV_AUD);
+    var iss = vec_new();
+    vec_push(iss, JV_ISS);
+    jwt_secret_with_issuers(s, iss);
+    jwt_secret_with_key_source(s, &_ks_src, 0, every);
+    return s;
+}
+
+# Every log line, appended, up to 8 KB.
+var _ks_log = 0;
+var _ks_loglen = 0;
+fn _ks_hook(ts, level, category, msg, msg_len, sixth) {
+    if (_ks_loglen + msg_len + 2 > 8192) { return 0; }
+    memcpy(_ks_log + _ks_loglen, msg, msg_len);
+    _ks_loglen = _ks_loglen + msg_len;
+    store8(_ks_log + _ks_loglen, 10);
+    _ks_loglen = _ks_loglen + 1;
+    store8(_ks_log + _ks_loglen, 0);
+    return 0;
+}
+
+# The set of JV_JWKS's keys, last first: the same keys, moved.
+fn _ks_reversed() {
+    var a = bote_req_alloc();
+    var el = _jwks_elements_a(a, JV_JWKS);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"keys\":[");
+    var i = vec_len(el) - 1;
+    while (i >= 0) {
+        str_builder_add_cstr(sb, vec_get(el, i));
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        i = i - 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return str_data(str_builder_build(sb));
+}
+
 fn main() {
     alloc_init();
 
@@ -1075,6 +1129,245 @@ fn main() {
     assert(strlen(big) > 60000, "cache heap: a token over 60 KB");
     assert_eq(_heap_per(big, cs), 0, "cache heap: its hit");
     assert_eq(_heap_per(_tc_flip(big, strlen(big) - 2), cs), 0, "cache heap: a forgery of it");
+    _bote_jwt_clock = 0;
+
+    # ---------------- 3.6.6: keys from a source ----------------
+    # A set is taken only when it differs, and a set that differs forgets what was judged.
+    var ksx = _jwks_secret();
+    var ks_keys = jwt_secret_keys(ksx);
+    assert_eq(jwt_secret_set_jwks(ksx, JV_JWKS), 0, "set: the same set is taken");
+    assert_eq(jwt_secret_keys(ksx), ks_keys, "set: ...and kept as it was");
+    assert_eq(_taken(JV_RS_GOOD, ksx), 1, "set: a token verifies");
+    var ks_hits = jwt_secret_cache_hits(ksx);
+    jwt_secret_set_jwks(ksx, JV_JWKS);
+    assert_eq(_taken(JV_RS_GOOD, ksx), 1, "set: ...and after the same set again");
+    assert_eq(jwt_secret_cache_hits(ksx), ks_hits + 1, "set: ...from the cache, which the same set leaves alone");
+    assert_eq(jwt_secret_set_jwks(ksx, _ks_reversed()), 0, "set: the same keys moved are taken");
+    assert(jwt_secret_keys(ksx) != ks_keys && vec_len(jwt_secret_keys(ksx)) == vec_len(ks_keys), "set: ...as a change");
+    var ksx_r1 = jwt_secret_keys(ksx);
+    assert_eq(jwt_secret_set_jwks(ksx, _set_of(_cat(_cat("{\"kty\":\"RSA\",\"kid\":\"r9\",", JV_JWK_RSA + 1), ""))), 0, "set: r1's key under another kid is taken");
+    assert(jwt_secret_keys(ksx) != ksx_r1, "set: ...as another key");
+    var ksx_r9 = jwt_secret_keys(ksx);
+    assert_eq(jwt_secret_set_jwks(ksx, _set_of(_cat(_cat("{\"kty\":\"RSA\",\"kid\":\"r8\",", JV_JWK_RSA + 1), ""))), 0, "set: ...and again under a third");
+    var ksx_r8 = jwt_secret_keys(ksx);
+    assert(ksx_r8 != ksx_r9, "set: ...which differs from the second by its kid alone");
+    # The same kid and length, other material: another key.
+    var ksx_n2 = jsonx_get_str(vec_get(_jwks_elements_a(bote_req_alloc(), JV_JWKS), 1), "n");
+    assert_eq(jwt_secret_set_jwks(ksx, _set_of(_cat(_cat("{\"kty\":\"RSA\",\"kid\":\"r8\",\"e\":\"AQAB\",\"n\":\"", ksx_n2), "\"}"))), 0, "set: r2's material under r8");
+    assert(jwt_secret_keys(ksx) != ksx_r8, "set: ...is another key, by its material alone");
+    ksx_r8 = jwt_secret_keys(ksx);
+    # A set that only grew at its end is another set.
+    var ksx_grown = _cat(_cat("{\"keys\":[", vec_get(_jwks_elements_a(bote_req_alloc(), _set_of(_cat(_cat("{\"kty\":\"RSA\",\"kid\":\"r8\",\"e\":\"AQAB\",\"n\":\"", ksx_n2), "\"}"))), 0)), _cat(",", _cat(JV_JWK_EC, "]}")));
+    assert_eq(jwt_secret_set_jwks(ksx, ksx_grown), 0, "set: the same key and one more after it");
+    assert(jwt_secret_keys(ksx) != ksx_r8 && vec_len(jwt_secret_keys(ksx)) == 2, "set: ...is a change, to two keys");
+    ksx_r8 = jwt_secret_keys(ksx);
+    assert_eq(jwt_secret_set_jwks(ksx, _set_of(_cat(_cat("{\"kty\":\"RSA\",\"kid\":\"r8\",\"e\":\"AQAB\",\"n\":\"", ksx_n2), "\"}"))), 0, "set: ...and back to the one");
+    assert(jwt_secret_keys(ksx) != ksx_r8 && vec_len(jwt_secret_keys(ksx)) == 1, "set: ...a change too");
+    assert_eq(jwt_secret_set_jwks(ksx, _set_of(JV_JWK_RSA)), 0, "set: ...and with no kid");
+    assert(jwt_secret_keys(ksx) != ksx_r8, "set: ...which is another key too");
+    assert_eq(jwt_secret_set_jwks(ksx, _set_of(JV_JWK_EC)), 0, "set: another set is taken");
+    assert_eq(vec_len(jwt_secret_keys(ksx)), 1, "set: ...with its one key");
+    var ks_miss = jwt_secret_cache_misses(ksx);
+    assert_eq(_taken(JV_RS_GOOD, ksx), 0, "set: a token whose key left the set is refused, though it was remembered");
+    assert_eq(jwt_secret_cache_misses(ksx), ks_miss + 1, "set: ...verified in full, not judged from the cache");
+    var ks_ec = jwt_secret_keys(ksx);
+    assert(jwt_secret_set_jwks(ksx, "{\"keys\":5}") != 0, "set: a malformed set is refused");
+    assert(jwt_secret_set_jwks(ksx, _set_with_good(JV_JWK_PRIVATE_RSA)) != 0, "set: ...and one holding a private key");
+    assert_eq(jwt_secret_keys(ksx), ks_ec, "set: ...and the keys it had are kept");
+    assert(jwt_secret_set_jwks(jwt_secret_new(_KEY), JV_JWKS) != 0, "set: an HS256 handle takes no keys");
+    var kd = jwt_secret_new(0);
+    jwt_secret_set_jwks(kd, JV_JWKS);
+    bote_req_begin();
+    jwt_secret_set_jwks(kd, JV_JWKS);
+    var kd_used = alloc_used();
+    var kd_i = 0;
+    while (kd_i < 5) {
+        bote_req_begin();
+        jwt_secret_set_jwks(kd, JV_JWKS);
+        jwt_secret_set_jwks(kd, "{\"keys\":[]}");
+        kd_i = kd_i + 1;
+    }
+    assert_eq(alloc_used() - kd_used, 0, "set heap: the same set, and a refused one, keep nothing");
+    bote_req_begin();
+    var kd_b = alloc_used();
+    jwt_secret_set_jwks(kd, _set_of(JV_JWK_EC));
+    jwt_secret_set_jwks(kd, JV_JWKS);
+    assert(alloc_used() - kd_b < 6000, "set heap: a change keeps its keys, under 6 KB for six");
+
+    # The source, on the clock the tests set.
+    _bote_jwt_clock = &_tc_clock;
+    _ks_log = alloc(8200);
+    _ks_loglen = 0;
+    store8(_ks_log, 0);
+    var ks_lvl = sakshi_get_level();
+    sakshi_set_emit_hook(&_ks_hook);
+    sakshi_set_level(SK_DEBUG);
+    _ks_doc = JV_JWKS;
+    _ks_down = 0;
+    _ks_calls = 0;
+    var src = _ks_secret(600);
+    assert_eq(jwt_secret_keys(src), 0, "source: ...none at all");
+    assert(jwt_secret_refresh(jwt_secret_new(0)) != 0, "source: a handle with none cannot refresh");
+    var early = _ks_secret(600);
+    _tc_now = 30;
+    _ks_calls = 0;
+    assert_eq(_taken(JV_RS_GOOD, early), 1, "source: a first fetch is not held back by the cooldown, at 30 s");
+    assert_eq(_ks_calls, 1, "source: ...asked once, early");
+    _ks_calls = 0;
+    _tc_now = 1000;
+    assert_eq(_taken(JV_RS_GOOD, src), 1, "source: the first token fetches the keys and verifies");
+    assert_eq(_ks_calls, 1, "source: ...asked once");
+    assert_eq(jwt_secret_fetched_at(src), 1000, "source: ...and when");
+    assert(strstr(_ks_log, "jwks keys changed keys=6") >= 0, "source log: a change is an INFO line with the count");
+    _tc_now = 1599;
+    _taken(JV_ES_GOOD, src);
+    assert_eq(_ks_calls, 1, "source: not asked again inside its 600 s");
+    _tc_now = 1600;
+    var src_keys = jwt_secret_keys(src);
+    var src_hits = jwt_secret_cache_hits(src);
+    assert_eq(_taken(JV_RS_GOOD, src), 1, "source: at 600 s it is asked again");
+    assert_eq(_ks_calls, 2, "source: ...once");
+    assert_eq(jwt_secret_keys(src), src_keys, "source: the same set is kept as it was");
+    assert_eq(jwt_secret_cache_hits(src), src_hits + 1, "source: ...and the cache with it");
+    assert(strstr(_ks_log, "jwks keys unchanged") >= 0, "source log: an unchanged set is a DEBUG line");
+    _tc_reads = 0;
+    _taken(JV_RS_GOOD, src);
+    assert_eq(_tc_reads, 1, "source: a remembered token reads the clock once, for both checks");
+
+    # A token whose key the set does not hold asks again, past the cooldown.
+    _ks_doc = _set_of(JV_JWK_EC);
+    _ks_calls = 0;
+    var kid = _ks_secret(600);
+    _tc_now = 1000;
+    assert_eq(_taken(JV_RS_GOOD, kid), 0, "kid: a key the set does not hold is refused");
+    assert_eq(_ks_calls, 1, "kid: ...the first fetch only, inside its cooldown");
+    _ks_doc = JV_JWKS;
+    _tc_now = 1059;
+    assert_eq(_taken(JV_RS_GOOD, kid), 0, "kid: still inside the cooldown, refused");
+    assert_eq(_ks_calls, 1, "kid: ...and nothing asked");
+    _tc_now = 1060;
+    assert_eq(_taken(JV_RS_GOOD, kid), 1, "kid: past it, asked, and the new key verifies the token");
+    assert_eq(_ks_calls, 2, "kid: ...asked once");
+    _tc_now = 1061;
+    assert_eq(_taken(JV_RS_UNKNOWN_KID, kid), 0, "kid: a kid no set holds is refused");
+    assert_eq(_ks_calls, 2, "kid: ...without asking inside the cooldown");
+    _tc_now = 1120;
+    _taken(JV_RS_UNKNOWN_KID, kid);
+    assert_eq(_ks_calls, 3, "kid: past it, asked once more");
+    _tc_now = 1200;
+    assert_eq(_taken(JV_HS_WITH_N, kid), 0, "kid: an HS256 token is refused");
+    assert_eq(_ks_calls, 3, "kid: ...and asks nothing, no key could serve it");
+    assert(strstr(_ks_log, "jwks asked again for a key it does not hold") >= 0, "kid log: a DEBUG line");
+
+    # A source that fails is asked after 60 s, then 120, 240, 480, and then every 600,
+    # and meanwhile the keys it gave last serve.
+    _ks_doc = JV_JWKS;
+    _ks_calls = 0;
+    var bo = _ks_secret(600);
+    _tc_now = 1000;
+    _taken(JV_RS_GOOD, bo);
+    _ks_down = 1;
+    _tc_now = 1600;
+    assert_eq(_taken(JV_ES_GOOD, bo), 1, "down: a token verifies on the keys it had");
+    assert_eq(_ks_calls, 2, "down: ...the refresh was tried");
+    assert_eq(jwt_secret_fetch_failures(bo), 1, "down: ...and failed");
+    assert(strstr(_ks_log, "jwks refresh failed; keeping the keys it has reason=down failures=1 retry_s=60") >= 0, "down log: a WARN line, why, and when it tries again");
+    var bo_t = 1600;
+    var bo_gap = 60;
+    var bo_ok = 1;
+    var bo_n = 2;
+    var bo_step = 0;
+    while (bo_step < 5) {
+        _tc_now = bo_t + bo_gap - 1;
+        _taken(JV_RS_GOOD, bo);
+        if (_ks_calls != bo_n) { bo_ok = 0; }
+        _tc_now = bo_t + bo_gap;
+        _taken(JV_RS_GOOD, bo);
+        bo_n = bo_n + 1;
+        if (_ks_calls != bo_n) { bo_ok = 0; }
+        bo_t = bo_t + bo_gap;
+        bo_gap = bo_gap * 2;
+        if (bo_gap > 600) { bo_gap = 600; }
+        bo_step = bo_step + 1;
+    }
+    assert_eq(bo_ok, 1, "down: asked again after 60, 120, 240, 480 and then 600 s, and not a second sooner");
+    assert_eq(jwt_secret_fetch_failures(bo), 6, "down: six failures counted");
+    _ks_down = 0;
+    _tc_now = bo_t + 600;
+    _taken(JV_RS_GOOD, bo);
+    assert_eq(jwt_secret_fetch_failures(bo), 0, "down: back up, the failures are forgotten");
+    assert_eq(jwt_secret_fetched_at(bo), bo_t + 600, "down: ...and the set fetched");
+    # A set the source gives that cannot be taken is a failure too.
+    _ks_doc = _set_with_good(JV_JWK_PRIVATE_RSA);
+    _tc_now = bo_t + 1200;
+    var bo_keys = jwt_secret_keys(bo);
+    assert_eq(_taken(JV_RS_GOOD, bo), 1, "refused set: a token verifies on the keys it had");
+    assert_eq(jwt_secret_fetch_failures(bo), 1, "refused set: ...counted as a failure");
+    assert_eq(jwt_secret_keys(bo), bo_keys, "refused set: ...and the keys kept");
+    # A clock that went back asks at once; one that cannot be read asks nothing.
+    _ks_doc = JV_JWKS;
+    var cb = _ks_secret(600);
+    _ks_calls = 0;
+    _tc_now = 5000;
+    _taken(JV_RS_GOOD, cb);
+    _tc_now = 100;
+    _taken(JV_RS_GOOD, cb);
+    assert_eq(_ks_calls, 2, "clock: one that went back asks again");
+    _tc_now = 0;
+    _taken(JV_RS_GOOD, cb);
+    assert_eq(_ks_calls, 2, "clock: one that cannot be read asks nothing on a timer");
+    assert_eq(jwt_secret_refresh(cb), 0, "clock: ...though an explicit refresh asks");
+    assert_eq(_ks_calls, 3, "clock: ...once");
+    # A source that fails with no reason has one given.
+    var mu = jwt_secret_new(0);
+    jwt_secret_with_key_source(mu, &_ks_mute, 0, 0);
+    assert_eq(jwt_secret_refresh_every(mu), BOTE_JWKS_REFRESH_DEFAULT, "source: 0 seconds is the default, 600");
+    assert(jwt_secret_refresh(mu) != 0, "source: a source that gives nothing fails");
+    # A cooldown is never longer than the refresh.
+    _ks_calls = 0;
+    var shx = _ks_secret(10);
+    _tc_now = 1000;
+    _taken(JV_RS_GOOD, shx);
+    _tc_now = 1010;
+    _taken(JV_RS_GOOD, shx);
+    assert_eq(_ks_calls, 2, "short: a 10 s refresh is asked every 10 s, under the 60 s cooldown");
+    _ks_down = 1;
+    _tc_now = 1020;
+    _taken(JV_RS_GOOD, shx);
+    _tc_now = 1030;
+    _taken(JV_RS_GOOD, shx);
+    _tc_now = 1040;
+    _taken(JV_RS_GOOD, shx);
+    assert_eq(_ks_calls, 5, "short: ...and while down, every 10 s still: backoff stops at the refresh");
+    _ks_down = 0;
+    sakshi_clear_emit_hook();
+    sakshi_set_level(ks_lvl);
+    assert(strstr(_ks_log, "AQAB") < 0 && strstr(_ks_log, "eyJ") < 0, "source log: no key and no token in any line");
+    # Asking keeps nothing but a set that changed.
+    _ks_doc = JV_JWKS;
+    var hp = _ks_secret(1);
+    _tc_now = 1000;
+    _taken(JV_RS_GOOD, hp);
+    _tc_now = 1001;
+    _taken(JV_RS_GOOD, hp);
+    var hp_used = alloc_used();
+    var hp_i = 0;
+    while (hp_i < 10) {
+        _tc_now = 1002 + hp_i;
+        _taken(JV_RS_GOOD, hp);
+        hp_i = hp_i + 1;
+    }
+    assert_eq(alloc_used() - hp_used, 0, "source heap: ten refreshes of the same set keep nothing");
+    _ks_down = 1;
+    hp_used = alloc_used();
+    hp_i = 0;
+    while (hp_i < 10) {
+        _tc_now = 2000 + hp_i * 2;
+        _taken(JV_RS_GOOD, hp);
+        hp_i = hp_i + 1;
+    }
+    assert_eq(alloc_used() - hp_used, 0, "source heap: ten failed ones keep nothing");
+    _ks_down = 0;
     _bote_jwt_clock = 0;
 
     return assert_summary();

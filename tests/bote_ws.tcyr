@@ -49,6 +49,7 @@ include "src/schema.cyr"
 include "src/stream.cyr"
 include "src/session.cyr"
 include "src/auth.cyr"
+include "src/jwt.cyr"
 include "src/conn.cyr"
 include "src/transport_ws.cyr"
 
@@ -227,6 +228,50 @@ fn _wx_session(cfg, tok, frames) {
     sys_close(sb);
     store8(got + n, 0);
     return got;
+}
+
+
+# ---- 3.6.6: the token judged again while connected -------------------------
+# A validator that takes `_wx_left` more tokens and then none, and records each one.
+var _wx_left = 0;
+var _wx_calls = 0;
+var _wx_seen = 0;
+fn _wx_count(token, ctx) {
+    _wx_calls = _wx_calls + 1;
+    _wx_seen = token;
+    if (_wx_left <= 0) { return 0; }
+    _wx_left = _wx_left - 1;
+    return "other-claims";
+}
+
+# A tool that takes 100 ms.
+fn _wx_slow(args, claims) {
+    sleep_ms(100);
+    return "{\"content\":[]}";
+}
+
+# A clock that moves one second on every read, from `_wx_t`.
+var _wx_t = 0;
+fn _wx_clock() {
+    _wx_t = _wx_t + 1;
+    return _wx_t;
+}
+
+# An HS256 JWT for `payload` under `key`.
+fn _wx_mint(payload, key) {
+    var hdr = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base64url_encode(hdr, strlen(hdr)));
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_cstr(sb, base64url_encode(payload, strlen(payload)));
+    var si = str_cstr(str_builder_build(sb));
+    var mac = alloc(32);
+    hmac_sha256(key, strlen(key), si, strlen(si), mac);
+    var sb2 = str_builder_new();
+    str_builder_add_cstr(sb2, si);
+    str_builder_add_cstr(sb2, ".");
+    str_builder_add_cstr(sb2, base64url_encode(mac, 32));
+    return str_cstr(str_builder_build(sb2));
 }
 
 fn main() {
@@ -526,6 +571,95 @@ fn main() {
     _wx_kept = 0;
     _wx_conn(fcfg, _wx_upgrade("token-b", ""), call, 1);
     assert(kept_a != 0 && streq(kept_a, "token-a") == 1 && streq(_wx_kept, "token-b") == 1, "ws: each connection's handlers get its own token, and a kept one outlives it");
+
+    # 3.6.6: the token is judged again while the connection lasts, by the validator that
+    # took it, and one that no longer passes ends the connection with 1008.
+    assert_eq(_ws_recheck_due(5000, 4000), 1, "recheck: a second after the last");
+    assert_eq(_ws_recheck_due(4999, 4000), 0, "recheck: ...and not before it");
+    assert_eq(_ws_recheck_due(3000, 4000), 1, "recheck: a clock that went back");
+    var creg = tool_registry_new();
+    registry_register(creg, tool_def_new("t_free", "F", schema_new("object", 0, vec_new())));
+    var cdisp = dispatcher_new(creg);
+    dispatcher_handle(cdisp, "t_free", &_wx_tool);
+    var ccfg = ws_config_new("/mcp", 0x0100007F, 8393);
+    store64(ccfg + 40, cdisp);
+    ws_config_with_bearer_validator(ccfg, &_wx_count, 0);
+    BOTE_WS_RECHECK_MS = 0;
+    _wx_left = 3;
+    _wx_calls = 0;
+    _wx_runs = 0;
+    _wx_kept = 0;
+    var cut = _wx_conn(ccfg, _wx_upgrade("tok-short", ""), call, 5);
+    assert(_wx_has(cut, "101 Switching") == 1, "recheck: the upgrade passes");
+    assert_eq(_wx_runs, 2, "recheck: two frames pass, and the third is not served");
+    assert_eq(_wx_calls, 4, "recheck: the upgrade and each frame up to the refusal are judged");
+    assert(_wx_has(cut, "token no longer valid") == 1, "recheck: a close frame names why");
+    assert(strstr(cut, "\x03\xF0token no longer valid") >= 0, "recheck: ...with 1008");
+    assert(_wx_seen != 0 && streq(_wx_seen, "tok-short") == 1, "recheck: the presented token is judged, not the claims");
+    assert(_wx_kept != 0 && streq(_wx_kept, "other-claims") == 1, "recheck: a handler is handed the claims");
+    BOTE_WS_RECHECK_MS = 1000;
+    _wx_left = 100;
+    _wx_calls = 0;
+    _wx_runs = 0;
+    _wx_conn(ccfg, _wx_upgrade("tok-many", ""), call, 50);
+    assert_eq(_wx_runs, 50, "recheck: fifty frames inside a second are served");
+    assert_eq(_wx_calls, 1, "recheck: ...and judged once, at the upgrade");
+    BOTE_WS_RECHECK_MS = 0;
+    _wx_left = 100;
+    _wx_calls = 0;
+    _wx_runs = 0;
+    _wx_conn(ccfg, _wx_upgrade("tok-each", ""), call, 4);
+    assert(_wx_runs == 4 && _wx_calls == 5, "recheck: 0 judges every frame");
+    # The interval runs from the last judgement: frames 100 ms apart against 150 ms are
+    # judged at the third and the fifth, not at every one after the first is due.
+    var slreg = tool_registry_new();
+    registry_register(slreg, tool_def_new("t_slow", "S", schema_new("object", 0, vec_new())));
+    var sdsp = dispatcher_new(slreg);
+    dispatcher_handle(sdsp, "t_slow", &_wx_slow);
+    var slcfg = ws_config_new("/mcp", 0x0100007F, 8393);
+    store64(slcfg + 40, sdsp);
+    ws_config_with_bearer_validator(slcfg, &_wx_count, 0);
+    BOTE_WS_RECHECK_MS = 150;
+    _wx_left = 100;
+    _wx_calls = 0;
+    _wx_conn(slcfg, _wx_upgrade("tok-slow", ""), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"t_slow\"}}", 5);
+    assert_eq(_wx_calls, 3, "recheck: from the last judgement, the upgrade and two of five frames 100 ms apart");
+    # No validator: nothing to judge.
+    _wx_runs = 0;
+    var ncfg = ws_config_new("/mcp", 0x0100007F, 8393);
+    store64(ncfg + 40, cdisp);
+    _wx_conn(ncfg, "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n", call, 3);
+    assert_eq(_wx_runs, 3, "recheck: with no validator every frame is served");
+    # A token over the bound is refused whatever the validator returns.
+    _wx_left = 10;
+    var hugec = _wx_conn(ccfg, _wx_upgrade(huge, ""), list, 1);
+    assert(_wx_has(hugec, "HTTP/1.1 400") == 1, "recheck: a 70 KB token is refused before the upgrade, claims or no");
+
+    # A real JWT that expires mid-connection, on a clock that moves a second each read.
+    var jkey = "0123456789abcdef0123456789abcdef";
+    var js = jwt_secret_new(jkey);
+    jwt_secret_with_audience(js, "https://mcp.example.com/mcp");
+    var jtok = _wx_mint("{\"aud\":\"https://mcp.example.com/mcp\",\"exp\":1003}", jkey);
+    var jcfg = ws_config_new("/mcp", 0x0100007F, 8393);
+    store64(jcfg + 40, cdisp);
+    ws_config_with_bearer_validator(jcfg, &auth_validator_jwt, js);
+    _bote_jwt_clock = &_wx_clock;
+    BOTE_WS_RECHECK_MS = 0;
+    _wx_t = 999;
+    _wx_runs = 0;
+    var jcut = _wx_conn(jcfg, _wx_upgrade(jtok, ""), call, 6);
+    assert(_wx_has(jcut, "101 Switching") == 1, "recheck jwt: the upgrade passes at 1000");
+    assert_eq(_wx_runs, 2, "recheck jwt: frames at 1001 and 1002 pass, and at 1003 the token has expired");
+    assert(_wx_has(jcut, "token no longer valid") == 1, "recheck jwt: the connection is closed");
+    assert(jwt_secret_cache_hits(js) >= 2, "recheck jwt: the frames were judged from the cache");
+    # Judging again keeps nothing: ten frames cost what one does.
+    _wx_t = 0;
+    var jlong = _wx_mint("{\"aud\":\"https://mcp.example.com/mcp\",\"exp\":9000000000}", jkey);
+    var jh1 = _wx_heap(jcfg, _wx_upgrade(jlong, ""), list, 1);
+    var jh10 = _wx_heap(jcfg, _wx_upgrade(jlong, ""), list, 10);
+    assert_eq(jh10, jh1, "recheck heap: judging ten frames keeps what one does");
+    _bote_jwt_clock = 0;
+    BOTE_WS_RECHECK_MS = 1000;
     #endif
 
     return assert_summary();
