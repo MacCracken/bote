@@ -1,0 +1,153 @@
+# Fuzz: a bearer token is a client's bytes, read before anything has judged them, so a
+# crash is a remote crash and a byte kept is a slow one. Each property has its own exit:
+#
+#   10  _jwt_b64u_a takes only what the encoder writes, and what it takes decodes as
+#       bayan's does, on every substitution of every encoded text;
+#   20  any byte of a good token, changed to anything else, gets it refused: a token
+#       has one spelling, and a signature covers all of it;
+#   30  nothing a token holds, signed or not, crashes the claim reads;
+#   40  and refusing a token leaves nothing on the heap.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/jwt.cyr"
+
+alloc_init();
+sakshi_set_level(SK_ERROR);
+
+var _KEY = "0123456789abcdef0123456789abcdef";
+var _AUD = "https://mcp.example.com/mcp";
+var _sub = "\x01\t\n \"'\\/:.-_=+,{}[]0AZaz\x7F\xC3\xFF";
+var _buf = alloc(2048);
+
+fn _mint(payload) {
+    var hdr = "{\"alg\":\"HS256\"}";
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base64url_encode(hdr, strlen(hdr)));
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_cstr(sb, base64url_encode(payload, strlen(payload)));
+    var input = str_data(str_builder_build(sb));
+    var mac = alloc(32);
+    hmac_sha256(_KEY, strlen(_KEY), input, strlen(input), mac);
+    var out = str_builder_new();
+    str_builder_add_cstr(out, input);
+    str_builder_add_cstr(out, ".");
+    str_builder_add_cstr(out, base64url_encode(mac, 32));
+    return str_data(str_builder_build(out));
+}
+
+# Ours against bayan's, on `enc` and every substitution of it.
+fn _decode_case(enc) {
+    var n = strlen(enc);
+    var i = 0;
+    while (i <= n) {
+        var si = 0;
+        while (si < strlen(_sub)) {
+            memcpy(_buf, enc, n);
+            store8(_buf + n, 0);
+            if (i < n) { store8(_buf + i, load8(_sub + si)); }
+            var ol[8];
+            var ours = _jwt_b64u_a(bote_req_begin(), _buf, n, &ol);
+            if (ours != 0) {
+                var theirs = base64url_decode(_buf, n);
+                if (theirs == 0 || load64(theirs + 8) != load64(&ol)) { sys_exit(10); }
+                if (memeq(ours, load64(theirs), load64(&ol)) == 0) { sys_exit(10); }
+                var again = base64url_encode(ours, load64(&ol));
+                if (streq(again, _buf) == 0) { sys_exit(10); }
+            }
+            si = si + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+var plain = alloc(64);
+var pl = 0;
+while (pl < 40) {
+    var fi = 0;
+    while (fi < pl) {
+        store8(plain + fi, (fi * 37 + pl * 11) % 256);
+        fi = fi + 1;
+    }
+    _decode_case(base64url_encode(plain, pl));
+    pl = pl + 1;
+}
+
+var s = jwt_secret_with_audience(jwt_secret_new(_KEY), _AUD);
+var iss = vec_new();
+vec_push(iss, "https://as.example.com");
+jwt_secret_with_issuers(s, iss);
+
+var good = _mint("{\"aud\":[\"x\",\"https://mcp.example.com/mcp\"],\"iss\":\"https://as.example.com\",\"exp\":4102444800}");
+if (auth_validator_jwt_hs256(good, s) == 0) { sys_exit(20); }
+
+var gn = strlen(good);
+var mut = alloc(gn + 1);
+var gi = 0;
+while (gi < gn) {
+    var c = 1;
+    while (c < 256) {
+        if (c != load8(good + gi)) {
+            memcpy(mut, good, gn + 1);
+            store8(mut + gi, c);
+            bote_req_begin();
+            if (auth_validator_jwt_hs256(mut, s) != 0) { sys_exit(20); }
+        }
+        c = c + 1;
+    }
+    gi = gi + 1;
+}
+
+# A signed token holding anything: the claim reads run on it.
+var claims = "{\"aud\":[\"a\",{\"b\":[1]},\"https://mcp.example.com/mcp\"],\"iss\":\"https://as.example.com\",\"nbf\":5,\"exp\":4102444800}";
+var cn = strlen(claims);
+var ci = 0;
+while (ci < cn) {
+    var si2 = 0;
+    while (si2 < strlen(_sub)) {
+        memcpy(_buf, claims, cn);
+        store8(_buf + cn, 0);
+        store8(_buf + ci, load8(_sub + si2));
+        var tok = _mint(_buf);
+        bote_req_begin();
+        auth_validator_jwt_hs256(tok, s);
+        si2 = si2 + 1;
+    }
+    ci = ci + 1;
+}
+
+# Refusing costs the heap nothing.
+var before = alloc_used();
+var hi = 0;
+while (hi < 200) {
+    bote_req_begin();
+    auth_validator_jwt_hs256("eyJhbGciOiJIUzI1NiJ9.e30.AAAA", s);
+    memcpy(mut, good, gn + 1);
+    store8(mut + gn - 3, 65);
+    auth_validator_jwt_hs256(mut, s);
+    hi = hi + 1;
+}
+if (alloc_used() != before) { sys_exit(40); }
+
+sys_exit(0);

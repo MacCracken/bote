@@ -50,7 +50,7 @@ apps don't each reimplement the same protocol.
 | **`HostRegistry` + SSRF guard** — IPv4 + IPv6 blocklists for loopback, private, link-local, cloud-metadata | ✅ |
 | **Audit / events sinks** — fn-pointer + ctx adapters, libro + majra wired | ✅ |
 | **Streaming primitives** — `ProgressUpdate`, `CancellationToken`, progress notifications | data layer ✅ / threaded dispatch ⏳ (roadmap 3.5.x) |
-| **OAuth 2.1 substrate** — bearer (RFC 6750), Protected Resource Metadata (RFC 9728), JWT HS256 verifier, PKCE-S256 helpers | ✅ |
+| **OAuth 2.1 substrate** — bearer (RFC 6750), Protected Resource Metadata (RFC 9728), JWT HS256 access tokens with audience, issuer, `exp` and `nbf` checks (RFC 8707, RFC 7519), PKCE-S256 helpers | ✅ |
 | **Sandbox runner** — fn-pointer + ctx adapter (kavach-shaped), noop default | ✅ in `dist/bote.cyr` (3.3.13); not in the core bundle |
 
 ---
@@ -113,6 +113,22 @@ other, so bote never builds it from a request. It must be https, or http on loop
 `http`, `streamable` and `bridge`. Anything that cannot be published stops the server at startup.
 bote is the resource server: it names the authorization servers and issues nothing, and the
 validator is still what decides whether a token is good.
+
+For tokens from an authorization server that signs with HS256, give bote the key instead of a
+token list:
+
+```sh
+BOTE_JWT_SECRET="at-least-32-bytes-of-shared-secret" \
+BOTE_RESOURCE_URL="https://mcp.example.com/mcp" \
+BOTE_AUTH_SERVERS="https://auth.example.com" ./build/bote http 8390
+# A token must be signed with that key, name BOTE_RESOURCE_URL in `aud`, name one of
+# BOTE_AUTH_SERVERS in `iss`, and hold an `exp` still in the future; `nbf` is honoured.
+# Anything else → 401 with error="invalid_token"
+```
+
+A token issued for another server is refused even when its signature is good, which is what MCP
+asks of a resource server. A key under 32 bytes, a key with no `BOTE_RESOURCE_URL`, or a key beside
+`BOTE_BEARER_TOKENS` stops the server at startup. RS256 and ES256 are next on the roadmap.
 
 ### Browsers
 
@@ -305,9 +321,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 3176 total across sixteen files (+ a core-only drift smoke)
+### Tests — 3243 total across sixteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 3176 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 3243 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 819 — core protocol/dispatch/codec/schema/session/transports
@@ -317,7 +333,7 @@ cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 56 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 203 — host registry + SSRF guard (IPv4 + IPv6)
 cyrius test tests/bote_http_era.tcyr      # 1372 — MCP 2026-07-28 on HTTP, on the real handlers
-cyrius test tests/bote_jwt.tcyr           # 59 — JWT HS256 verify + exact alg + exp enforcement
+cyrius test tests/bote_jwt.tcyr           # 126 — JWT HS256 verify + exact alg + exp enforcement
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
@@ -375,6 +391,7 @@ each block was taken under, is [`benches/history.log`](benches/history.log).
 cyrius fuzz fuzz/codec_parse.fcyr
 cyrius fuzz fuzz/codec_process.fcyr
 cyrius fuzz fuzz/jsonx_extract.fcyr
+cyrius fuzz fuzz/jwt.fcyr
 cyrius fuzz fuzz/http_era.fcyr
 cyrius fuzz fuzz/jsonx_valid.fcyr
 cyrius fuzz fuzz/oauth_metadata.fcyr

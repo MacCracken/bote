@@ -30,8 +30,9 @@ revision's required list is features bote lacks. Each has a place below.
 
 ## Next patch
 
-**3.6.1 — audience validation.** Item 3 of 3.6.x goes first: it is a `MUST`, and the `403` is a `SHOULD`. A
-defect found in 3.6.0 lands ahead of it.
+**3.6.2 — RS256 and ES256.** Item 1 of 3.6.x goes first, ahead of the `403`: audience validation is only as
+useful as the tokens bote can verify, and most authorization servers sign asymmetrically. A defect found in
+3.6.1 lands ahead of it.
 
 ## 3.5.x — MCP 2026-07-28, dual-era
 
@@ -58,21 +59,18 @@ Run `./scripts/conformance.sh` at any release that touches the protocol. It need
 
 ## 3.6.x — Authorization on HTTP
 
-bote is a resource server with bearer auth, and the 2026-07-28 authorization spec has requirements it
-does not meet. Each is a `MUST` or `SHOULD` in the spec, and authorization as a whole is optional, so
-this applies when an operator turns auth on.
+bote is a resource server with bearer auth, and 3.6.0 and 3.6.1 meet the 2026-07-28 authorization spec's
+`MUST`s for HS256 tokens: it publishes its metadata and checks a token's audience. What is left is below.
+Authorization as a whole is optional, so this applies when an operator turns auth on.
 
-1. **Audience validation (RFC 8707).** Servers MUST validate that a token was issued for them, and today
-   `jwt.cyr` reads neither `aud` nor `iss`. The resource identifier 3.6.0 configured is the value to compare.
+1. **RS256 and ES256.** An OAuth 2.1 authorization server does not share an HS256 secret with its resource
+   servers, so HS256 alone rarely meets the audience check 3.6.1 built. sigil has the primitives
+   (`rsa_pkcs1v15_verify_sha256`, `ecdsa_p256_verify`), and `_jwt_str_field_eq` already reads `alg` as an
+   exact field, which is the precondition for accepting more than one algorithm. The keys need a home:
+   configured ones first, and fetching `jwks_uri` is a separate step, with the SSRF guard and a cache.
 2. **`403` with `error="insufficient_scope"`** when a token lacks a scope, with `scope` and `resource_metadata`
    in the challenge. A validator's return is opaque to bote, so bote cannot yet see what a token grants, and a
    scope hierarchy is the server's to account for.
-3. **An audit of a real token.** The official client's OAuth flow has only met an allowlist validator, so
-   `scripts/conformance.sh` should run it against `jwt.cyr` once item 1 lands.
-4. **RS256 and ES256.** An OAuth 2.1 authorization server does not share an HS256 secret with its
-   resource servers, so HS256 alone cannot meet item 1 in practice. sigil has the primitives
-   (`rsa_pkcs1v15_verify_sha256`, `ecdsa_p256_verify`), and `_jwt_str_field_eq` already reads `alg` as an
-   exact field, which is the precondition for accepting more than one algorithm.
 
 ## 3.7.x — Threaded dispatch and `subscriptions/listen`
 
@@ -161,8 +159,6 @@ Not tasks. Things that have bitten once and are checked, not assumed:
   stdlib private, check which fold first carries it. `scripts/bundle-min-cyrius.sh` measures the result.
 - **Thin-sigil vs fold version.** Since cyrius 6.6.11 libro's `deps.sigil` selection is not vendored here,
   so the CI step reports "no thin sigil vendored". If it ever finds one, the resolver rule has changed.
-- **The canonical-signature compare is invisible to CI.** On cyrius 6.7.18 the decoder refuses what the
-  `memeq` in `jwt_verify_hs256` would, so only a run on 6.7.13 – 6.7.17 can see it removed.
 - **`qemu-aarch64` `getrandom`.** If the sweep regresses to files exiting 90, suspect the emulator or the
   toolchain's `ESYSXLAT` rows before bote.
 - **Benchmark rows that make a syscall move with the host kernel, and every row moves with host load.**

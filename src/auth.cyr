@@ -17,6 +17,10 @@
 # bote (today) — future releases will pass it down to handlers when
 # request-scoped context lands. Returning 0 means "reject".
 #
+# MCP says a server MUST validate that a token was issued for it, and bote cannot do
+# that for a validator it knows nothing about. auth_validator_jwt_hs256 does, given an
+# audience. Any other validator has to.
+#
 # Why fn pointer + ctx instead of a hardcoded scheme? Real deployments
 # vary: static-list dev servers, JWT verifiers (HS256 / RS256), opaque
 # tokens against a backend lookup, OAuth introspection. The shape lets

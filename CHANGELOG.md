@@ -18,6 +18,81 @@ have per release.
 
 _(empty)_
 
+## [3.6.1] — 2026-11-01 · A token must have been issued for this server
+
+MCP says a server MUST validate that a token was issued for it, and until now bote checked a signature and an expiry. A good
+token meant for another server got in, which is the confused deputy that rule exists to stop. `auth_validator_jwt_hs256` now
+takes an audience, and the binary can use it at last: through 3.6.0 nothing called this verifier.
+
+**The official client ran its whole OAuth flow on real tokens.** The mock authorization server signs HS256 JWTs with `aud` set
+from the `resource` the client asked for, and bote verified them, in both eras. Ten more tokens went in by hand, each of which a
+signature check alone would pass or that must fail for its own reason: another audience, a prefix of this one, no audience,
+another issuer, no issuer, no `exp`, expired, not yet valid, the wrong key, and `alg: none`. All ten got a 401 with
+`error="invalid_token"`, and an array of audiences and an escaped audience were let in.
+
+Only HS256 is verified, so this helps where an authorization server shares a key. Most sign asymmetrically, which is next.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Security
+
+- **A token for another server is refused.** `jwt_secret_with_audience` sets this server's identity. `aud` must name it, as a
+  string or in an array, compared as what the JSON decodes to, so `https:\/\/` matches and a `\u0000` cannot end the comparison.
+  With an audience set, `exp` is required, since a token with none lives forever, and `jwt_secret_with_issuers` limits `iss`.
+- **A token that names an audience is refused by a verifier that has none**, as RFC 7519 §4.1.3 says. This reaches a caller of
+  `auth_validator_jwt_hs256` with no audience set: a token with no `aud` still passes, as it did.
+- **A forged token kept 45,024 B on the heap per request**, with a 60 KB header and no credentials, because the verifier decoded
+  a client's bytes with bayan's heap-only decoder ahead of the signature check. Nothing called it, so this was dormant, and wiring
+  it in would have made it remote. `_jwt_b64u_a` decodes on the request arena, the HMAC goes on the stack, and refusing any
+  token keeps 0 B.
+- **`nbf` is enforced**, by the same rules as `exp`. It was read by nothing.
+
+### Added
+
+- **`BOTE_JWT_SECRET`**: an HS256 key, checked against `BOTE_RESOURCE_URL` and `BOTE_AUTH_SERVERS`. A key under 32 bytes, which RFC 7518
+  §3.2 does not allow, a key with no resource, and a key beside `BOTE_BEARER_TOKENS` each stop the server with exit 2 and the
+  reason. The key is never logged.
+- `jwt_secret_with_audience`, `jwt_secret_with_issuers`, `BOTE_JWT_MIN_KEY`. `JwtSecret` grows from 16 to 32 B.
+- `fuzz/jwt.fcyr`: any byte of a good token, changed to anything, gets it refused. The decoder agrees with bayan's on what it takes
+  and re-encodes to the same text.
+- Benchmark `jwt_validate_audience`.
+
+### Changed
+
+- **`_jwt_b64u_a` takes one spelling** of a segment: no padding, no spare bits. That makes the re-encode-and-compare step 3.4.14 added
+  after the HMAC unnecessary on every toolchain, so it is gone, along with the 48 B it kept for each valid token.
+  `jwt_b64u_decode` is the same decoder, and refuses the padding it used to take.
+- `src/jwt.cyr` no longer includes `lib/bayan.cyr`, and `dist/bote.deps` lists the same leaves in another order.
+- `tests/bote_jwt.tcyr` needs `src/protocol.cyr` ahead of `src/jwt.cyr`, for the request arena, as a consumer of the module does.
+
+### Tests
+
+- 3,243 assertions, from 3,176, on x86_64 and under `qemu-aarch64`. `tests/bote_jwt.tcyr` has 126, from 59.
+- The official client passes 182 checks, from 158.
+- 45 mutants, all killed. One showed that nothing proved a signature with bytes after a correct MAC is refused: remove the length
+  check and that token is accepted. It is refused, and a test now says so.
+- `scripts/transport-smoke.sh` runs a real token, one for another server, and one from another issuer through the binary, and
+  proves each bad configuration stops it, with the key in no log.
+
+### Performance
+
+No regression. No path that existed changed. Interleaved A/B, 15 alternating rounds, pinned to one core, 3.6.0 against this tree. The
+machine was busy with other work, so this compares minimums, in ns, which load cannot lower:
+
+| Bench | 3.6.0 | 3.6.1 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 4,828 | 4,775 | −1.1% |
+| `dispatch_tools_call` | 2,620 | 2,556 | −2.4% |
+| `http_era_legacy` | 2,907 | 2,919 | +0.4% |
+| `http_era_modern` | 13,393 | 13,473 | +0.6% |
+| `auth_bearer_check_set` | 978 | 969 | −0.9% |
+| `jwt_validate_audience`, new | | 10,317 | |
+
+Checking a token costs about 10 µs, nearly all of it the HMAC, and only on a server that asks for one.
+
+Stdio is byte-identical to 3.6.0 over 200,000 messages, and HTTP with no auth configured on 50 of 50 cases, with only the version
+string aligned.
+
 ## [3.6.0] — 2026-11-01 · A client can find out where to get a token
 
 MCP requires a protected server to say which authorization servers issue its tokens, and until now bote could not. A client

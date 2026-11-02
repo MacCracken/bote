@@ -4,6 +4,7 @@
 import { Client, ClientCredentialsProvider, StreamableHTTPClientTransport, extractWWWAuthenticateParams, discoverOAuthProtectedResourceMetadata } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { spawn } from 'node:child_process';
+import { createHmac } from 'node:crypto';
 import { createServer } from 'node:http';
 
 const BIN = process.argv[2];
@@ -74,9 +75,19 @@ async function exercise(label, transport, mode, want) {
   console.log(`${fails === before ? 'ok  ' : 'FAIL'} ${label.padEnd(20)} ${version}`);
 }
 
+const KEY = 'conformance-fixture-secret-32-bytes!';
+
+const b64u = s => Buffer.from(s).toString('base64url');
+
+// A real HS256 access token, signed as the authorization server signs it.
+function jwt(claims, key = KEY, raw = null) {
+  const body = `${b64u(JSON.stringify({ alg: 'HS256', typ: 'at+jwt' }))}.${b64u(raw || JSON.stringify(claims))}`;
+  return `${body}.${createHmac('sha256', key).update(body).digest('base64url')}`;
+}
+
 // The whole of OAuth against a protected bote, through the client's own provider: bote
-// says no, names its metadata, the metadata names an authorization server, and a token
-// from there is let in. The authorization server is the smallest that can answer.
+// says no, names its metadata, the metadata names an authorization server, and a real
+// JWT from there, for this resource, is let in. The server is the smallest that can answer.
 async function oauth(mode) {
   const label = `oauth/${mode}`;
   const before = fails;
@@ -85,6 +96,7 @@ async function oauth(mode) {
   const issuer = `http://127.0.0.1:${asPort}`;
   const resource = `http://127.0.0.1:${port}/mcp`;
   const seen = [];
+  const soon = Math.floor(Date.now() / 1000) + 3600;
   const as = createServer((req, res) => {
     let body = '';
     req.on('data', d => { body += d; });
@@ -96,7 +108,9 @@ async function oauth(mode) {
           response_types_supported: ['code'], grant_types_supported: ['client_credentials'],
           token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'] }));
       } else if (req.url === '/token') {
-        res.end(JSON.stringify({ access_token: 'fixture-token', token_type: 'Bearer', expires_in: 3600 }));
+        // RFC 8707: the audience of the token is the resource the client asked for.
+        const aud = new URLSearchParams(body).get('resource');
+        res.end(JSON.stringify({ access_token: jwt({ iss: issuer, aud, sub: 'fixture', exp: soon }), token_type: 'Bearer', expires_in: 3600 }));
       } else {
         res.statusCode = 404;
         res.end('{}');
@@ -118,6 +132,32 @@ async function oauth(mode) {
   ok(`${label} the document names this resource`, meta && meta.resource === resource, meta);
   ok(`${label} the document names the server`, meta && meta.authorization_servers[0] === issuer, meta);
   ok(`${label} the document names the scope`, meta && meta.scopes_supported[0] === 'mcp:read', meta);
+
+  // Tokens the signature alone would let through. The audience is what stops a token
+  // meant for another server, which is what MCP calls a confused deputy.
+  const good = { iss: issuer, aud: resource, exp: soon };
+  const refused = [['another audience', jwt({ ...good, aud: 'https://other.example.com/mcp' })],
+    ['a prefix of this audience', jwt({ ...good, aud: `http://127.0.0.1:${port}` })],
+    ['no audience', jwt({ iss: issuer, exp: soon })],
+    ['another issuer', jwt({ ...good, iss: 'https://evil.example.com' })],
+    ['no issuer', jwt({ aud: resource, exp: soon })],
+    ['no expiry', jwt({ iss: issuer, aud: resource })],
+    ['an expired token', jwt({ ...good, exp: 1000 })],
+    ['not yet valid', jwt({ ...good, nbf: soon })],
+    ['the wrong key', jwt(good, 'another-key-another-key-another-key!')],
+    ['alg none', `${b64u('{"alg":"none"}')}.${b64u(JSON.stringify(good))}.`]];
+  for (const [name, token] of refused) {
+    const r = await fetch(resource, { method: 'POST', body: '{}', headers: { Authorization: `Bearer ${token}` } });
+    ok(`${label} refused: ${name}`, r.status === 401 && extractWWWAuthenticateParams(r).error === 'invalid_token', r.status);
+  }
+  const init = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'x', version: '1' } } });
+  const headers = token => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' });
+  const accepted = [['an array of audiences', jwt({ ...good, aud: ['https://other.example.com', resource] })],
+    ['an escaped audience', jwt(null, KEY, JSON.stringify(good).replaceAll('/', '\\/'))]];
+  for (const [name, token] of accepted) {
+    const r = await fetch(resource, { method: 'POST', body: init, headers: headers(token) });
+    ok(`${label} accepted: ${name}`, r.status === 200, r.status);
+  }
 
   const authProvider = new ClientCredentialsProvider({ clientId: 'fixture', clientSecret: 'secret', scope: 'mcp:read', expectedIssuer: issuer });
   const c = new Client({ name: 'bote-conformance', version: '1.0.0' }, { capabilities: {}, versionNegotiation: { mode } });

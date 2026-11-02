@@ -1,10 +1,10 @@
-# bote::jwt — JWT HS256 verifier (RFC 7519 + RFC 7515 §3.5).
+# bote::jwt — JWT HS256 verifier (RFC 7519 + RFC 7515 §3.5), for access tokens.
 #
 # Verifies `<base64url(header)>.<base64url(payload)>.<base64url(sig)>`
 # tokens where the signature is HMAC-SHA256 of the first two
 # base64url-encoded parts joined with `.`. Pairs with the bearer
 # middleware (1.9.0): plug in `auth_validator_jwt_hs256` as the
-# fn-pointer and the secret as the ctx.
+# fn-pointer and a JwtSecret as the ctx.
 #
 # Scope: HS256 only.
 #
@@ -14,9 +14,7 @@
 # several minors, and bote already depends on sigil. RS256 is therefore
 # unblocked whenever bote wants it; it is simply not built yet, and the
 # decision should be re-taken on merit rather than on a defunct
-# blocker. (Corrected at 3.2.0. agnosai, the consumer that surfaced
-# this, implements RS256 locally because it also needs iss/aud claim
-# validation that bote has no concept of.)
+# blocker. (Corrected at 3.2.0.)
 #
 # If RS256 ever lands here, note that `_jwt_str_field_eq` below already
 # reads `alg` as an exact JSON field. That is a precondition, not a
@@ -25,41 +23,73 @@
 #
 # Validation performed — this list is enforced, not aspirational:
 #   - exactly two `.` separators (3 segments), non-empty
-#   - header decodes as base64url and its `alg` field is EXACTLY the
-#     JSON string "HS256" (a parsed field read, byte-exact, case
-#     sensitive per RFC 7515 §4.1.1 — `alg` values are case-sensitive)
-#   - HMAC-SHA256(header.payload, secret) == base64url-decoded signature
+#   - each segment is base64url as RFC 7515 §2 writes it: no padding and no
+#     spare bits, so a signature has one spelling on every toolchain, and a
+#     token's text can key a revocation list or a replay cache
+#   - header decodes and its `alg` field is EXACTLY the JSON string "HS256"
+#     (a parsed field read, byte-exact, case sensitive per RFC 7515 §4.1.1)
+#   - HMAC-SHA256(header.payload, secret) == decoded signature
 #     (constant-time compare — no per-byte timing leak)
-#   - `exp` claim, if present in the payload, is strictly in the future
-#     (`clock_epoch_secs()`, RFC 7519 §4.1.4, no leeway) — checked only
-#     AFTER the signature verifies, so it never runs on attacker bytes
-#   - the signature segment is exactly the unpadded text the encoder writes
-#     for it (RFC 7515 §2, RFC 4648 §3.5), checked only AFTER the HMAC passes.
-#     So a signature has one spelling, on every toolchain, and a token's text
-#     can key a revocation list or a replay cache. The header and payload
-#     need no such check: the HMAC covers them as text
+#   - `exp`, if present, is strictly in the future, and `nbf`, if present, is
+#     not (`clock_epoch_secs()`, RFC 7519 §4.1.4 and §4.1.5, no leeway), checked
+#     only AFTER the signature verifies, so neither runs on attacker bytes
 #
-# Returns 1 on valid, 0 on any failure. The validator wrapper
-# (`auth_validator_jwt_hs256`) returns the original token cstr on
-# success so the dispatcher can thread it as opaque "claims" to
-# handlers (a future release will parse it into structured claims).
+# auth_validator_jwt_hs256 adds what makes this an MCP access-token check. MCP says a
+# server MUST validate that a token was issued for it, so with an audience set on the
+# JwtSecret, `aud` must name it, `exp` must be present, and `iss` must be one of the
+# issuers if any are set. A token for another server is the confused deputy that
+# rule exists to stop. Set no audience and a token that names one is refused, because
+# RFC 7519 §4.1.3 says a recipient that cannot identify itself in `aud` must.
 #
-# NOT validated: `nbf`, `iss`, `aud`, `sub`, `jti`. A consumer that
-# needs those must check them itself — say so, do not assume.
+# A request's bytes go on the request arena, so a forged token leaves nothing behind.
+#
+# NOT validated: `sub`, `jti`, `client_id`, and RFC 9068's `typ`, which many
+# authorization servers do not set: a token of another kind is stopped by `aud`.
+# `scope` is the next step. Returns 1 on valid, 0 on any failure. The validator
+# returns the original token cstr, as opaque "claims" for handlers.
 
-include "lib/bayan.cyr"
+# The shortest key RFC 7518 §3.2 allows HS256: the size of the hash output.
+var BOTE_JWT_MIN_KEY = 32;
 
-# base64url decode — uses cyrius stdlib's `lib/bayan.cyr` (which subsumed
-# the standalone lib/base64.cyr at 6.1.x).
-# Wrapper translates the stdlib's `{ptr,len}` 16-byte return-pair to
-# our older `(ptr, *out_len)` shape so existing call sites and tests
-# stay unchanged.
+fn _jwt_b64u_val(c) {
+    if (c >= 65 && c <= 90) { return c - 65; }
+    if (c >= 97 && c <= 122) { return c - 71; }
+    if (c >= 48 && c <= 57) { return c + 4; }
+    if (c == 45) { return 62; }
+    if (c == 95) { return 63; }
+    return 0 - 1;
+}
+
+# The base64url text enc[0, elen) decoded onto `a`, NUL-terminated, its length in
+# *out_len_p, or 0 when it is anything but what RFC 7515 §2 writes. Not bayan's decoder:
+# that keeps its output on the heap, and a forged token is a client's bytes.
+fn _jwt_b64u_a(a, enc, elen, out_len_p) {
+    if (enc == 0 || elen <= 0 || elen % 4 == 1) { return 0; }
+    var out = alloc_via(a, (elen / 4) * 3 + 4);
+    var acc = 0;
+    var bits = 0;
+    var o = 0;
+    var i = 0;
+    while (i < elen) {
+        var v = _jwt_b64u_val(load8(enc + i));
+        if (v < 0) { return 0; }
+        acc = ((acc << 6) | v) & 0xFFFFFF;
+        bits = bits + 6;
+        if (bits >= 8) {
+            bits = bits - 8;
+            store8(out + o, (acc >> bits) & 255);
+            o = o + 1;
+        }
+        i = i + 1;
+    }
+    if ((acc & ((1 << bits) - 1)) != 0) { return 0; }
+    store8(out + o, 0);
+    store64(out_len_p, o);
+    return out;
+}
+
 fn jwt_b64u_decode(enc, elen, out_len_p) {
-    if (enc == 0 || elen <= 0) { return 0; }
-    var pair = base64url_decode(enc, elen);
-    if (pair == 0) { return 0; }
-    store64(out_len_p, load64(pair + 8));
-    return load64(pair);
+    return _jwt_b64u_a(default_alloc(), enc, elen, out_len_p);
 }
 
 # HMAC-SHA256 — `sigil`'s `hmac_sha256(key, klen, msg, mlen, out)` is
@@ -133,6 +163,49 @@ fn _jwt_str_field_eq(buf, len, key, want) {
     var wlen = strlen(want);
     if (inner != wlen) { return 0; }
     if (memeq(buf + pos + 1, want, wlen) == 1) { return 1; }
+    return 0;
+}
+
+# 1 when the value at buf[pos] is a JSON string that decodes to exactly `want`, on `a`.
+# Decoded, because an encoder may write `https:\/\/` and that is the same text. By
+# length, because a decoded NUL must not make a shorter string look equal.
+fn _jwt_str_is(a, buf, len, pos, want) {
+    if (pos >= len || load8(buf + pos) != 34) { return 0; }
+    var end = _jx_skip_string(buf, len, pos);
+    if (end <= pos + 1 || load8(buf + end - 1) != 34) { return 0; }
+    var n = end - pos - 2;
+    var out = alloc_via(a, n + 1);
+    var dn = _jx_unescape_into(buf + pos + 1, n, out);
+    if (dn != strlen(want)) { return 0; }
+    return memeq(out, want, dn);
+}
+
+# 1 when `aud` in payload names `want`: RFC 7519 §4.1.3 lets it be one string or an
+# array of them. Anything else names nobody.
+fn _jwt_aud_has(a, payload, plen, want) {
+    var pos = _jx_find_value_pos(payload, plen, "aud");
+    if (pos == 0 - 1) { return 0; }
+    if (load8(payload + pos) != 91) { return _jwt_str_is(a, payload, plen, pos, want); }
+    var i = _jx_skip_ws(payload, plen, pos + 1);
+    while (i < plen && load8(payload + i) != 93) {
+        if (_jwt_str_is(a, payload, plen, i, want) == 1) { return 1; }
+        var e = _jx_skip_value(payload, plen, i);
+        if (e <= i) { return 0; }
+        i = _jx_skip_ws(payload, plen, e);
+        if (i < plen && load8(payload + i) == 44) { i = _jx_skip_ws(payload, plen, i + 1); }
+    }
+    return 0;
+}
+
+# 1 when `iss` in payload is one of `issuers`.
+fn _jwt_iss_in(a, payload, plen, issuers) {
+    var pos = _jx_find_value_pos(payload, plen, "iss");
+    if (pos == 0 - 1) { return 0; }
+    var i = 0;
+    while (i < vec_len(issuers)) {
+        if (_jwt_str_is(a, payload, plen, pos, vec_get(issuers, i)) == 1) { return 1; }
+        i = i + 1;
+    }
     return 0;
 }
 
@@ -215,8 +288,23 @@ fn _jwt_exp_ok(payload, plen) {
     return 1;
 }
 
-# Verify a JWT. Returns 1 on valid, 0 otherwise.
-fn jwt_verify_hs256(token, key, key_len) {
+# Enforce `nbf` (not before) over a decoded payload. Returns 1 = accept, 0 = reject,
+# with `exp`'s rules: absent is legal, present and not a NumericDate is a reject, an
+# unreadable clock skips it, and there is no leeway. RFC 7519 §4.1.5: the time MUST be
+# after or equal to it, so now == nbf passes.
+fn _jwt_nbf_ok(payload, plen) {
+    var pos = _jx_find_value_pos(payload, plen, "nbf");
+    if (pos == 0 - 1) { return 1; }
+    var nbf = _jwt_parse_uint(payload, pos, _jx_skip_value(payload, plen, pos));
+    if (nbf == 0 - 1) { return 0; }
+    var now = clock_epoch_secs();
+    if (now == 0) { return 1; }
+    if (now < nbf) { return 0; }
+    return 1;
+}
+
+# The verified payload of `token` on `a`, its length in *plen_out, or 0.
+fn _jwt_payload_a(a, token, key, key_len, plen_out) {
     if (token == 0 || key == 0 || key_len <= 0) { return 0; }
     var tlen = strlen(token);
     if (tlen < 16) { return 0; }   # impossibly short
@@ -241,31 +329,21 @@ fn jwt_verify_hs256(token, key, key_len) {
     # and total — no allocation, no recursion beyond jsonx's own
     # depth-capped skip.
     var hlen_slot[8]; store64(&hlen_slot, 0);
-    var header = jwt_b64u_decode(token, dot1, &hlen_slot);
+    var header = _jwt_b64u_a(a, token, dot1, &hlen_slot);
     if (header == 0) { return 0; }
     if (_jwt_str_field_eq(header, load64(&hlen_slot), "alg", "HS256") == 0) { return 0; }
 
     # Compute HMAC-SHA256 over `header_b64u . payload_b64u`.
-    var sig_input_len = dot2;
-    var expected = alloc(32);
-    hmac_sha256(key, key_len, token, sig_input_len, expected);
+    var expected[32];
+    hmac_sha256(key, key_len, token, dot2, &expected);
 
-    # Decode the signature segment.
-    var sig_b64u_len = tlen - dot2 - 1;
+    # Decode the signature segment. _jwt_b64u_a takes one spelling, so comparing
+    # the bytes compares the text.
     var slen_slot[8]; store64(&slen_slot, 0);
-    var actual = jwt_b64u_decode(token + dot2 + 1, sig_b64u_len, &slen_slot);
+    var actual = _jwt_b64u_a(a, token + dot2 + 1, tlen - dot2 - 1, &slen_slot);
     if (actual == 0) { return 0; }
     if (load64(&slen_slot) != 32) { return 0; }
-    if (_jwt_ct_eq(expected, actual, 32) == 0) { return 0; }
-
-    # One signature, one token string. The decoder is more forgiving than RFC
-    # 7515 §2 on every toolchain: it takes `=` padding, and through bayan 1.11.0
-    # it ignores spare bits and any run of `=`. The encoder writes one spelling,
-    # so comparing with it refuses them all. After the HMAC, so a forged token
-    # allocates nothing here and a valid one 48 bytes.
-    var canon = base64url_encode(actual, 32);
-    if (canon == 0 || strlen(canon) != sig_b64u_len) { return 0; }
-    if (memeq(canon, token + dot2 + 1, sig_b64u_len) != 1) { return 0; }
+    if (_jwt_ct_eq(&expected, actual, 32) == 0) { return 0; }
 
     # ---- everything below here runs on VERIFIED bytes only ----
     #
@@ -274,41 +352,77 @@ fn jwt_verify_hs256(token, key, key_len) {
     # ahead of it would have been parsing attacker-controlled input
     # that had not been authenticated yet. The signature gates the
     # claims, never the reverse.
-    var plen_slot[8]; store64(&plen_slot, 0);
-    var payload = jwt_b64u_decode(token + dot1 + 1, dot2 - dot1 - 1, &plen_slot);
+    #
     # A signed token whose payload is not valid base64url is malformed.
     # The signature covers the encoded text, so this is reachable — and
     # it is a reject, not a pass.
+    var payload = _jwt_b64u_a(a, token + dot1 + 1, dot2 - dot1 - 1, plen_out);
     if (payload == 0) { return 0; }
+    if (_jwt_exp_ok(payload, load64(plen_out)) == 0) { return 0; }
+    if (_jwt_nbf_ok(payload, load64(plen_out)) == 0) { return 0; }
+    return payload;
+}
 
-    return _jwt_exp_ok(payload, load64(&plen_slot));
+# Verify a JWT. Returns 1 on valid, 0 otherwise.
+fn jwt_verify_hs256(token, key, key_len) {
+    var plen[8];
+    if (_jwt_payload_a(bote_req_alloc(), token, key, key_len, &plen) == 0) { return 0; }
+    return 1;
 }
 
 # ================================================================
 # Validator adapter — plugs into auth_bearer_check via the existing
 # fn-pointer + ctx surface (1.9.0).
 #
-# ctx is a JwtSecret handle (16 bytes): {secret_ptr, secret_len}
+# ctx is a JwtSecret handle (32 bytes):
+#   +0  secret    cstr
+#   +8  length
+#   +16 audience  cstr or 0: this server's resource identifier
+#   +24 issuers   vec of cstrs or 0: the authorization servers it trusts
 # Use jwt_secret_new(secret_cstr) to build one.
 # ================================================================
 
 fn jwt_secret_new(key) {
-    var s = alloc(16);
+    var s = alloc(32);
     store64(s, key);
     if (key == 0) { store64(s + 8, 0); }
     else { store64(s + 8, strlen(key)); }
+    store64(s + 16, 0);
+    store64(s + 24, 0);
     return s;
 }
 
+fn jwt_secret_with_audience(s, audience) { store64(s + 16, audience); return s; }
+fn jwt_secret_with_issuers(s, issuers) { store64(s + 24, issuers); return s; }
+
 fn jwt_secret_data(s) { return load64(s); }
 fn jwt_secret_len(s)  { return load64(s + 8); }
+fn jwt_secret_audience(s) { return load64(s + 16); }
+fn jwt_secret_issuers(s) { return load64(s + 24); }
+
+# 1 when the verified payload is meant for this server.
+fn _jwt_for_us(a, payload, plen, s) {
+    var aud = jwt_secret_audience(s);
+    if (aud == 0) {
+        if (_jx_find_value_pos(payload, plen, "aud") != 0 - 1) { return 0; }
+    } else {
+        if (_jx_find_value_pos(payload, plen, "exp") == 0 - 1) { return 0; }
+        if (_jwt_aud_has(a, payload, plen, aud) == 0) { return 0; }
+    }
+    var issuers = jwt_secret_issuers(s);
+    if (issuers != 0 && vec_len(issuers) > 0) {
+        if (_jwt_iss_in(a, payload, plen, issuers) == 0) { return 0; }
+    }
+    return 1;
+}
 
 # Validator with the bearer-middleware signature: (token, ctx) → claims | 0
 fn auth_validator_jwt_hs256(token, jwt_secret) {
     if (jwt_secret == 0) { return 0; }
-    if (jwt_verify_hs256(token, jwt_secret_data(jwt_secret),
-        jwt_secret_len(jwt_secret)) == 1) {
-        return token;   # opaque claims = the validated token
-    }
-    return 0;
+    var a = bote_req_alloc();
+    var plen[8];
+    var payload = _jwt_payload_a(a, token, jwt_secret_data(jwt_secret), jwt_secret_len(jwt_secret), &plen);
+    if (payload == 0) { return 0; }
+    if (_jwt_for_us(a, payload, load64(&plen), jwt_secret) == 0) { return 0; }
+    return token;   # opaque claims = the validated token
 }

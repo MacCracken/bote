@@ -22,6 +22,9 @@ include "lib/assert.cyr"
 # 3.2.0: jwt.cyr reads `alg` and `exp` through jsonx's (buf, len)
 # internals rather than a strlen-based cstr API, so jsonx must be
 # included first — cyrius is single-pass.
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/jwt.cyr"
 
@@ -51,6 +54,56 @@ fn _mint_hs256(hdr_json, payload_json, key) {
 }
 
 # Build `{"sub":"a","exp":<secs>}` for a computed expiry.
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+
+var _AUD = "https://mcp.example.com/mcp";
+var _ISS = "https://as.example.com";
+var _KEY = "0123456789abcdef0123456789abcdef";
+var _HDR = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+
+# Claims with a live `exp`, and `extra` (`"aud":...,`) ahead of it.
+fn _claims(extra) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{");
+    str_builder_add_cstr(sb, extra);
+    str_builder_add_cstr(sb, "\"exp\":");
+    str_builder_add_int(sb, clock_epoch_secs() + 3600);
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
+fn _for_audience() {
+    var s = jwt_secret_new(_KEY);
+    jwt_secret_with_audience(s, _AUD);
+    return s;
+}
+
+# 1 when a validator on `s` takes a token with claims `payload`.
+fn _ok_on(s, payload) {
+    if (auth_validator_jwt_hs256(_mint_hs256(_HDR, payload, _KEY), s) != 0) { return 1; }
+    return 0;
+}
+
+fn _aud_ok(extra) { return _ok_on(_for_audience(), _claims(extra)); }
+
+fn _heap_per(tok, s) {
+    bote_req_begin();
+    auth_validator_jwt_hs256(tok, s);
+    var before = alloc_used();
+    var i = 0;
+    while (i < 20) {
+        bote_req_begin();
+        auth_validator_jwt_hs256(tok, s);
+        i = i + 1;
+    }
+    return (alloc_used() - before) / 20;
+}
+
 fn _payload_with_exp(secs) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"sub\":\"a\",\"exp\":");
@@ -278,6 +331,133 @@ fn main() {
     assert_eq(auth_validator_jwt_hs256(token, 0), 0, "validator null-handle safe");
 
     # ================================================================
+    # ---- the decoder: one spelling, and no heap ----
+    var bl[8];
+    assert(jwt_b64u_decode("Zm9vYg", 6, &bl) != 0 && load64(&bl) == 4, "decode: no padding needed");
+    assert_eq(jwt_b64u_decode("Zm9vYg==", 8, &bl), 0, "decode: padding is refused");
+    assert_eq(jwt_b64u_decode("Zm9vYh", 6, &bl), 0, "decode: spare bits are refused");
+    assert_eq(jwt_b64u_decode("Zm9v+g", 6, &bl), 0, "decode: the standard alphabet's + is refused");
+    assert_eq(jwt_b64u_decode("Zm9v/g", 6, &bl), 0, "decode: its / too");
+    assert_eq(jwt_b64u_decode("Zm9vY", 5, &bl), 0, "decode: a length no encoder writes");
+    assert_eq(jwt_b64u_decode("Zm9vA", 5, &bl), 0, "decode: ...even with no spare bit set");
+    assert_eq(jwt_b64u_decode("Zm9v Yg", 7, &bl), 0, "decode: a space");
+    assert_eq(jwt_b64u_decode("", 0, &bl), 0, "decode: nothing");
+    var nul = jwt_b64u_decode("QQBC", 4, &bl);
+    assert(nul != 0 && load64(&bl) == 3 && load8(nul + 1) == 0 && load8(nul + 2) == 66, "decode: a NUL inside is a byte");
+
+    # ---- what a signature covers ----
+    # The right MAC with more after it: a compare of 32 bytes alone would take this.
+    var lhdr = base64url_encode(_HDR, strlen(_HDR));
+    var lbody = base64url_encode("{}", 2);
+    var lsb = str_builder_new();
+    str_builder_add_cstr(lsb, lhdr);
+    str_builder_add_cstr(lsb, ".");
+    str_builder_add_cstr(lsb, lbody);
+    var linput = str_data(str_builder_build(lsb));
+    var lmac = alloc(36);
+    hmac_sha256(_KEY, strlen(_KEY), linput, strlen(linput), lmac);
+    assert_eq(jwt_verify_hs256(_with_suffix(_with_suffix(linput, "."), base64url_encode(lmac, 32)), _KEY, strlen(_KEY)), 1, "signature: the MAC alone");
+    store8(lmac + 32, 65);
+    store8(lmac + 33, 66);
+    store8(lmac + 34, 67);
+    assert_eq(jwt_verify_hs256(_with_suffix(_with_suffix(linput, "."), base64url_encode(lmac, 35)), _KEY, strlen(_KEY)), 0, "signature: the MAC with bytes after it");
+    assert_eq(jwt_verify_hs256(_with_suffix(_with_suffix(linput, "."), base64url_encode(lmac, 31)), _KEY, strlen(_KEY)), 0, "signature: the MAC cut short");
+    # A good signature over a payload that does not decode.
+    var bsb = str_builder_new();
+    str_builder_add_cstr(bsb, lhdr);
+    str_builder_add_cstr(bsb, ".!!!!");
+    var binput = str_data(str_builder_build(bsb));
+    var bmac = alloc(32);
+    hmac_sha256(_KEY, strlen(_KEY), binput, strlen(binput), bmac);
+    assert_eq(jwt_verify_hs256(_with_suffix(_with_suffix(binput, "."), base64url_encode(bmac, 32)), _KEY, strlen(_KEY)), 0, "signature: over a payload that is no base64url");
+
+    # ---- nbf ----
+    var hour = clock_epoch_secs() + 3600;
+    var past = _mint_hs256(_HDR, "{\"nbf\":1000}", _KEY);
+    assert_eq(jwt_verify_hs256(past, _KEY, strlen(_KEY)), 1, "nbf: in the past");
+    var fsb = str_builder_new();
+    str_builder_add_cstr(fsb, "{\"nbf\":");
+    str_builder_add_int(fsb, hour);
+    str_builder_add_cstr(fsb, "}");
+    assert_eq(jwt_verify_hs256(_mint_hs256(_HDR, str_data(str_builder_build(fsb)), _KEY), _KEY, strlen(_KEY)), 0, "nbf: in the future");
+    var nsb = str_builder_new();
+    str_builder_add_cstr(nsb, "{\"nbf\":");
+    str_builder_add_int(nsb, clock_epoch_secs());
+    str_builder_add_cstr(nsb, "}");
+    assert_eq(jwt_verify_hs256(_mint_hs256(_HDR, str_data(str_builder_build(nsb)), _KEY), _KEY, strlen(_KEY)), 1, "nbf: now is allowed, RFC 7519 4.1.5");
+    assert_eq(jwt_verify_hs256(_mint_hs256(_HDR, "{\"nbf\":\"1000\"}", _KEY), _KEY, strlen(_KEY)), 0, "nbf: a string");
+    assert_eq(jwt_verify_hs256(_mint_hs256(_HDR, "{\"nbf\":null}", _KEY), _KEY, strlen(_KEY)), 0, "nbf: null");
+    assert_eq(_jwt_nbf_ok("{}", 2), 1, "nbf: absent");
+
+    # ---- the audience: a token for this server, and no other ----
+    assert_eq(_aud_ok("\"aud\":\"https://mcp.example.com/mcp\","), 1, "aud: a string");
+    assert_eq(_aud_ok("\"aud\":[\"https://mcp.example.com/mcp\"],"), 1, "aud: an array of one");
+    assert_eq(_aud_ok("\"aud\":[\"a\",\"https://mcp.example.com/mcp\"],"), 1, "aud: the last of several");
+    assert_eq(_aud_ok("\"aud\":[\"https://mcp.example.com/mcp\",\"b\"],"), 1, "aud: the first of several");
+    assert_eq(_aud_ok("\"aud\": [ \"a\" , \"https://mcp.example.com/mcp\" ] ,"), 1, "aud: whitespace in the array");
+    assert_eq(_aud_ok("\"aud\":[ \"https://mcp.example.com/mcp\" ],"), 1, "aud: whitespace ahead of the first");
+    assert_eq(_aud_ok("\"aud\":[1,{\"x\":\"y\"},[2],\"https://mcp.example.com/mcp\"],"), 1, "aud: past what is no string");
+    assert_eq(_aud_ok("\"aud\":\"https:\\/\\/mcp.example.com\\/mcp\","), 1, "aud: as an encoder escapes it");
+    assert_eq(_aud_ok("\"aud\":\"\\u0068ttps://mcp.example.com/mcp\","), 1, "aud: unicode-escaped");
+    assert_eq(_aud_ok("\"aud\":\"https://other.example.com/mcp\","), 0, "aud: another server");
+    assert_eq(_aud_ok("\"aud\":\"https://mcp.example.com\","), 0, "aud: a prefix of this one");
+    assert_eq(_aud_ok("\"aud\":\"https://mcp.example.com/mcp2\","), 0, "aud: this one and more");
+    assert_eq(_aud_ok("\"aud\":\"https://mcp.example.com/mcp/\","), 0, "aud: a trailing slash");
+    assert_eq(_aud_ok("\"aud\":\"HTTPS://MCP.EXAMPLE.COM/MCP\","), 0, "aud: values are case-sensitive");
+    assert_eq(_aud_ok("\"aud\":\"\","), 0, "aud: empty");
+    assert_eq(_aud_ok("\"aud\":[],"), 0, "aud: an empty array");
+    assert_eq(_aud_ok("\"aud\":[\"a\",\"b\"],"), 0, "aud: an array without it");
+    assert_eq(_aud_ok("\"aud\":[[\"https://mcp.example.com/mcp\"]],"), 0, "aud: nested in an array");
+    assert_eq(_aud_ok("\"aud\":{\"aud\":\"https://mcp.example.com/mcp\"},"), 0, "aud: nested in an object");
+    assert_eq(_aud_ok("\"x\":{\"aud\":\"https://mcp.example.com/mcp\"},"), 0, "aud: in another claim");
+    assert_eq(_aud_ok("\"aud\":5,"), 0, "aud: a number");
+    assert_eq(_aud_ok("\"aud\":null,"), 0, "aud: null");
+    assert_eq(_aud_ok("\"aud\":true,"), 0, "aud: a boolean");
+    assert_eq(_aud_ok(""), 0, "aud: missing, with an audience set");
+    assert_eq(_aud_ok("\"aud\":\"https://mcp.example.com/mcp\\u0000x\","), 0, "aud: a NUL does not end the comparison");
+    assert_eq(_aud_ok("\"aud\":\"other\",\"aud\":\"https://mcp.example.com/mcp\","), 0, "aud: a repeated key, the first as everything here reads it");
+    assert_eq(_ok_on(_for_audience(), "{\"aud\":\"https://mcp.example.com/mcp\"}"), 0, "aud: with an audience, a token needs an exp");
+    assert_eq(_ok_on(_for_audience(), "{\"aud\":\"https://mcp.example.com/mcp\",\"exp\":1000}"), 0, "aud: an expired token is still refused");
+    var plain = jwt_secret_new(_KEY);
+    assert_eq(_ok_on(plain, _claims("")), 1, "aud: none set, none in the token");
+    assert_eq(_ok_on(plain, "{\"sub\":\"x\"}"), 1, "aud: none set, exp stays optional");
+    assert_eq(_ok_on(plain, _claims("\"aud\":\"anything\",")), 0, "aud: none set, a token that names one is refused (RFC 7519 4.1.3)");
+    assert_eq(_jwt_aud_has(default_alloc(), "{\"aud\":[\"a\"", 12, "b"), 0, "aud: an array never closed");
+
+    # ---- the issuer ----
+    var iss_s = _for_audience();
+    var isses = vec_new();
+    vec_push(isses, "https://other.example.com");
+    vec_push(isses, _ISS);
+    jwt_secret_with_issuers(iss_s, isses);
+    var aud_c = "\"aud\":\"https://mcp.example.com/mcp\",";
+    assert_eq(_ok_on(iss_s, _claims(_cat(aud_c, "\"iss\":\"https://as.example.com\","))), 1, "iss: one of the issuers");
+    assert_eq(_ok_on(iss_s, _claims(_cat(aud_c, "\"iss\":\"https://other.example.com\","))), 1, "iss: the other");
+    assert_eq(_ok_on(iss_s, _claims(_cat(aud_c, "\"iss\":\"https:\\/\\/as.example.com\","))), 1, "iss: escaped");
+    assert_eq(_ok_on(iss_s, _claims(_cat(aud_c, "\"iss\":\"https://evil.example.com\","))), 0, "iss: another");
+    assert_eq(_ok_on(iss_s, _claims(_cat(aud_c, "\"iss\":\"https://as.example.com/\","))), 0, "iss: a trailing slash");
+    assert_eq(_ok_on(iss_s, _claims(aud_c)), 0, "iss: missing, with issuers set");
+    assert_eq(_ok_on(iss_s, _claims(_cat(aud_c, "\"iss\":5,"))), 0, "iss: a number");
+    assert_eq(_ok_on(_for_audience(), _claims(_cat(aud_c, "\"iss\":\"anyone\","))), 1, "iss: none set, not read");
+    var empty_iss = jwt_secret_with_issuers(_for_audience(), vec_new());
+    assert_eq(_ok_on(empty_iss, _claims(aud_c)), 1, "iss: an empty list is none");
+    assert(jwt_secret_audience(_for_audience()) != 0 && jwt_secret_issuers(jwt_secret_new(_KEY)) == 0, "secret: the accessors");
+
+    # ---- nothing a request sends stays ----
+    var big_hdr = str_builder_new();
+    var bi = 0;
+    while (bi < 60000) {
+        str_builder_add_cstr(big_hdr, "A");
+        bi = bi + 1;
+    }
+    str_builder_add_cstr(big_hdr, ".e30.AAAA");
+    var hs = _for_audience();
+    assert_eq(_heap_per(str_data(str_builder_build(big_hdr)), hs), 0, "heap: a forged token with a 60 KB header");
+    assert_eq(_heap_per("eyJhbGciOiJIUzI1NiJ9.e30.AAAA", hs), 0, "heap: a forged token");
+    assert_eq(_heap_per(_mint_hs256(_HDR, _claims("\"aud\":\"https://other.example.com/mcp\","), _KEY), hs), 0, "heap: a good token for another server");
+    assert_eq(_heap_per(_mint_hs256(_HDR, _claims(aud_c), _KEY), hs), 0, "heap: a good token");
+    assert_eq(_heap_per(_mint_hs256(_HDR, _claims(aud_c), "the-wrong-key-the-wrong-key-the-wrong"), hs), 0, "heap: the wrong key");
+
     # Fn-pointer addressability (for plugging into auth_bearer_check)
     # ================================================================
     assert(&jwt_verify_hs256 != 0, "verify fp addressable");

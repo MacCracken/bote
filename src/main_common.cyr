@@ -114,6 +114,35 @@ fn _bote_bearer_from_env(out_fp, out_ctx) {
     return 1;
 }
 
+# BOTE_JWT_SECRET: an HS256 key, for tokens from an authorization server. Each must name
+# BOTE_RESOURCE_URL in `aud`, and one of BOTE_AUTH_SERVERS in `iss`, so the first is
+# required: a verifier with no audience of its own cannot do what MCP asks. Returns 1, 0
+# when it is unset, or -1 when the server should not start. The key is never logged.
+fn _bote_jwt_from_env(out_fp, out_ctx) {
+    var key = getenv("BOTE_JWT_SECRET");
+    if (key == 0) { return 0; }
+    if (load64(out_fp) != 0) {
+        bote_log_error("BOTE_JWT_SECRET and BOTE_BEARER_TOKENS are both set: a request has one validator");
+        return 0 - 1;
+    }
+    if (strlen(key) < BOTE_JWT_MIN_KEY) {
+        bote_log_error("BOTE_JWT_SECRET is under 32 bytes, which RFC 7518 3.2 does not allow for HS256");
+        return 0 - 1;
+    }
+    var url = getenv("BOTE_RESOURCE_URL");
+    if (url == 0) {
+        bote_log_error("BOTE_JWT_SECRET needs BOTE_RESOURCE_URL: a token must be checked against this server's identity");
+        return 0 - 1;
+    }
+    var s = jwt_secret_new(key);
+    jwt_secret_with_audience(s, url);
+    jwt_secret_with_issuers(s, _split_csv_tokens(getenv("BOTE_AUTH_SERVERS")));
+    store64(out_fp, &auth_validator_jwt_hs256);
+    store64(out_ctx, s);
+    bote_log_info("jwt auth enabled");
+    return 1;
+}
+
 # ================================================================
 # Mode selection (3.4.2)
 # ================================================================

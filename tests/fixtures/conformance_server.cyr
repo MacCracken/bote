@@ -228,11 +228,13 @@ fn main() {
         vec_push(servers, _cat("http://127.0.0.1:", argv(3), ""));
         var scopes = vec_new();
         vec_push(scopes, "mcp:read");
-        var tokens = vec_new();
-        vec_push(tokens, "fixture-token");
+        var resource = _cat("http://127.0.0.1:", arg, "/mcp");
+        var jwt = jwt_secret_new("conformance-fixture-secret-32-bytes!");
+        jwt_secret_with_audience(jwt, resource);
+        jwt_secret_with_issuers(jwt, servers);
         var acfg = http_config_new("/mcp", INADDR_LOOPBACK(), port);
-        http_config_with_bearer_validator(acfg, &auth_validator_allowlist, tokens);
-        http_config_with_resource_metadata(acfg, bote_prm_new(_cat("http://127.0.0.1:", arg, "/mcp"), servers, scopes, "fixture"));
+        http_config_with_bearer_validator(acfg, &auth_validator_jwt_hs256, jwt);
+        http_config_with_resource_metadata(acfg, bote_prm_new(resource, servers, scopes, "fixture"));
         return transport_http_run(d, acfg);
     }
     if (streq(mode, "bridge") == 1) {

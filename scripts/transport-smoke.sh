@@ -201,6 +201,37 @@ grep -q '\[ERROR\] resource metadata refused' "$L/prm-http.held" || err "no reas
 rc=0; BOTE_AUTH_SERVERS=https://as.example.com timeout 5 $B http 18399 2> "$L/prm-half.held" || rc=$?
 [ "$rc" -eq 2 ] || err "authorization servers with no resource: rc=$rc, not 2"
 
+# A signed token is let in only if it was issued for this server, and a bad configuration
+# stops the server. The key must not reach a log.
+JKEY=smoke-secret-smoke-secret-smoke-secret
+jwt() {
+  python3 -I -c 'import base64,hashlib,hmac,json,sys
+e=lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+s=e(b"{\"alg\":\"HS256\"}")+"."+e(sys.argv[2].encode())
+print(s+"."+e(hmac.new(sys.argv[1].encode(),s.encode(),hashlib.sha256).digest()))' "$JKEY" "$1"
+}
+BOTE_LOG=debug BOTE_RESOURCE_URL=http://127.0.0.1:18399/mcp BOTE_AUTH_SERVERS=https://as.example.com BOTE_JWT_SECRET=$JKEY \
+  start jwt "$L/jwt.err" $B http 18399
+wait_port 18399 || err "nothing listening on 18399"
+ok_t=$(jwt '{"aud":"http://127.0.0.1:18399/mcp","iss":"https://as.example.com","exp":4102444800}')
+c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H "Authorization: Bearer $ok_t" -d "$INIT" http://127.0.0.1:18399/mcp)
+[ "$c" = "200" ] || err "a token for this server answered $c, not 200"
+bad_t=$(jwt '{"aud":"https://other.example.com/mcp","iss":"https://as.example.com","exp":4102444800}')
+h=$(curl -s -D - -o /dev/null "${H[@]}" -H "Authorization: Bearer $bad_t" -d "$INIT" http://127.0.0.1:18399/mcp)
+echo "$h" | sed -n 1p | grep -q ' 401 ' || err "a token for another server: $h"
+echo "$h" | grep -qi 'error="invalid_token"' || err "a token for another server has no error code: $h"
+bad_t=$(jwt '{"aud":"http://127.0.0.1:18399/mcp","iss":"https://evil.example.com","exp":4102444800}')
+c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H "Authorization: Bearer $bad_t" -d "$INIT" http://127.0.0.1:18399/mcp)
+[ "$c" = "401" ] || err "a token from another issuer answered $c, not 401"
+grep -q "$JKEY" "$L/jwt.err" && err "the JWT key reached a log"
+rc=0; BOTE_JWT_SECRET=short BOTE_RESOURCE_URL=http://127.0.0.1:18399/mcp BOTE_AUTH_SERVERS=https://as.example.com timeout 5 $B http 18388 2> "$L/jwt-short.held" || rc=$?
+[ "$rc" -eq 2 ] || err "a short JWT key: rc=$rc, not 2"
+rc=0; BOTE_JWT_SECRET=$JKEY timeout 5 $B http 18388 2> "$L/jwt-noaud.held" || rc=$?
+[ "$rc" -eq 2 ] || err "a JWT key with no resource: rc=$rc, not 2"
+grep -q "$JKEY" "$L/jwt-noaud.held" && err "the JWT key reached a log on the way out"
+rc=0; BOTE_JWT_SECRET=$JKEY BOTE_BEARER_TOKENS=tok BOTE_RESOURCE_URL=http://127.0.0.1:18399/mcp BOTE_AUTH_SERVERS=https://as.example.com timeout 5 $B http 18388 2> "$L/jwt-both.held" || rc=$?
+[ "$rc" -eq 2 ] || err "a JWT key and a token list: rc=$rc, not 2"
+
 # A session exists once initialize has succeeded (3.4.15): a refused one gets none.
 h=$(curl -s -D - -o /dev/null "${H[@]}" -d '{"method":"initialize"' http://127.0.0.1:18392/mcp)
 echo "$h" | grep -qi '^mcp-session-id:' && err "a refused initialize was given a session: $h"

@@ -33,6 +33,7 @@ include "src/schema.cyr"
 include "src/stream.cyr"
 include "src/session.cyr"
 include "src/auth.cyr"
+include "src/jwt.cyr"
 include "src/http_era.cyr"
 
 # ================================================================
@@ -83,6 +84,8 @@ var _b_era_params = "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/
 var _b_era_params_at = 0;
 var _b_result_dispatcher = 0;
 var _b_param_dispatcher = 0;
+var _b_jwt_token = 0;
+var _b_jwt_secret = 0;
 
 # ================================================================
 # Benchmark callbacks (no-arg functions, called by bench_run)
@@ -101,6 +104,10 @@ fn b_http_era_legacy() { return _b_era(_b_dispatcher, _b_era_legacy, _b_era_lega
 fn b_http_era_modern() { return _b_era(_b_dispatcher, _b_era_modern, _b_era_modern + _b_era_modern_at); }
 fn b_resource_template_match() {
     return resource_template_matches("repo://{owner}/{name}/issues/{n}", "repo://agnos/bote/issues/42");
+}
+fn b_jwt_validate_audience() {
+    bote_req_begin();
+    return auth_validator_jwt_hs256(_b_jwt_token, _b_jwt_secret);
 }
 fn b_http_era_params() { return _b_era(_b_param_dispatcher, _b_era_params, _b_era_params + _b_era_params_at); }
 
@@ -235,6 +242,27 @@ fn _bench_setup() {
 
     # Auth bearer bench setup.
     _b_auth_req_len = strlen(_b_auth_req);
+
+    # A token that passes every check: signed, unexpired, and for this audience.
+    var jh = "{\"alg\":\"HS256\"}";
+    var jp = "{\"aud\":[\"https://other.example.com\",\"https://mcp.example.com/mcp\"],\"iss\":\"https://as.example.com\",\"exp\":4102444800}";
+    var jsb = str_builder_new();
+    str_builder_add_cstr(jsb, base64url_encode(jh, strlen(jh)));
+    str_builder_add_cstr(jsb, ".");
+    str_builder_add_cstr(jsb, base64url_encode(jp, strlen(jp)));
+    var jin = str_data(str_builder_build(jsb));
+    var jkey = "0123456789abcdef0123456789abcdef";
+    var jmac = alloc(32);
+    hmac_sha256(jkey, strlen(jkey), jin, strlen(jin), jmac);
+    var jtb = str_builder_new();
+    str_builder_add_cstr(jtb, jin);
+    str_builder_add_cstr(jtb, ".");
+    str_builder_add_cstr(jtb, base64url_encode(jmac, 32));
+    _b_jwt_token = str_data(str_builder_build(jtb));
+    _b_jwt_secret = jwt_secret_with_audience(jwt_secret_new(jkey), "https://mcp.example.com/mcp");
+    var jis = vec_new();
+    vec_push(jis, "https://as.example.com");
+    jwt_secret_with_issuers(_b_jwt_secret, jis);
     _b_auth_allowed = vec_new();
     vec_push(_b_auth_allowed, "tok-A");
     vec_push(_b_auth_allowed, "tok-B");
@@ -328,6 +356,9 @@ fn main() {
     var b20 = bench_new("resource_template_match");
     bench_run(b20, &b_resource_template_match, 10000);
     vec_push(benches, b20);
+    var b21 = bench_new("jwt_validate_audience");
+    bench_run(b21, &b_jwt_validate_audience, 10000);
+    vec_push(benches, b21);
 
     bench_report_all(benches);
     return 0;

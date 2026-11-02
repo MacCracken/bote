@@ -130,6 +130,7 @@ fn main() {
     var auth_fp_slot[8]; var auth_ctx_slot[8];
     store64(&auth_fp_slot, 0); store64(&auth_ctx_slot, 0);
     if (_bote_bearer_from_env(&auth_fp_slot, &auth_ctx_slot) < 0) { return 2; }
+    if (_bote_jwt_from_env(&auth_fp_slot, &auth_ctx_slot) < 0) { return 2; }
     var allowed_origins = bote_main_origins_from_env();
     var bearer_fp = load64(&auth_fp_slot);
     var bearer_ctx = load64(&auth_ctx_slot);

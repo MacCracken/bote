@@ -59,6 +59,16 @@ The primary security-relevant surface areas are:
   at startup, so none can end a quoted header parameter or split a line, and what fails
   stops the server. The document says where to get a token and enforces nothing: the
   bearer validator does that, and a server with metadata and no validator logs a WARN.
+- **Tokens** — MCP says a server must validate that a token was issued for it, and since
+  **3.6.1** `auth_validator_jwt_hs256` does, given an audience: a good signature on a token
+  meant for another server gets a 401, which is what stops a confused deputy. Every
+  check runs on bytes the signature has already covered, and the decoder takes one spelling
+  of a token, so a token's text can key a revocation list. A key under 32 bytes does not start.
+  Through 3.6.0 the verifier decoded a client's bytes onto the heap, so a forged token with a
+  60 KB header kept 45,024 B per request. Nothing called it then, and it now uses the request
+  arena. A validator an embedder supplies has to check the audience itself. HS256 means the
+  key is shared with the authorization server, so anyone holding it can mint a token for
+  this server.
 - **Memory** — `alloc` never frees, so what a request leaves on the heap stays for
   the life of the process. Since **3.4.15** everything bote allocates to answer a
   message goes on a request arena that the next message rewinds, including
