@@ -401,9 +401,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 4499 total across nineteen files (+ a core-only drift smoke)
+### Tests — 4536 total across nineteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 4499 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 4536 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 969 — core protocol/dispatch/codec/schema/session/transports
@@ -415,13 +415,13 @@ cyrius test tests/bote_fs_tools.tcyr      # 56 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 207 — host registry + SSRF guard (IPv4 + IPv6)
 cyrius test tests/bote_http_era.tcyr      # 1833 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
 cyrius test tests/bote_jwks.tcyr          # 49 — a jwks_uri: what it may be, and real fetches from a child
-cyrius test tests/bote_jwt.tcyr           # 471 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
+cyrius test tests/bote_jwt.tcyr           # 483 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 58 — Streamable HTTP / SSE internals
-cyrius test tests/bote_threads.tcyr       # 49 — bote on worker threads: each case from several threads at once
+cyrius test tests/bote_threads.tcyr       # 74 — bote on worker threads: each case from several threads at once
 cyrius test tests/bote_transport_unix.tcyr # 76 — Unix transport: sockaddr, accept-error policy, backoff, deadlines, closed-peer write
 cyrius test tests/bote_web_tools.tcyr     # 88 — web_fetch / web_search + the SSRF guard (URL and resolved address) + their records
 cyrius test tests/bote_ws.tcyr            # 94 — WebSocket config + wire-up + the send-deadline drop + scopes per frame + what an upgrade and a connection keep

@@ -406,7 +406,8 @@ fn bote_main_port(arg, default_port) {
     return default_port;
 }
 
-# BOTE_JWT_CACHE and the like: a count, or `cur` with a WARN when it is not one.
+# BOTE_JWT_CACHE and the like: a count, or `cur` with a WARN when it is not one. A count
+# past nine digits reads as 999999999 (3.7.1), so that a caller's bound holds it.
 fn _bote_env_count(name, cur) {
     var v = getenv(name);
     if (v == 0) { return cur; }
@@ -416,7 +417,8 @@ fn _bote_env_count(name, cur) {
     if (load8(v) == 0) { ok = 0; }
     while (load8(v + i) != 0) {
         var c = load8(v + i);
-        if (c < 48 || c > 57 || i >= 9) { ok = 0; }
+        if (c < 48 || c > 57) { ok = 0; }
+        elif (i >= 9) { n = 999999999; }
         else { n = n * 10 + (c - 48); }
         i = i + 1;
     }
@@ -525,9 +527,10 @@ fn bote_main_conn_from_env() {
 }
 
 # BOTE_WORKERS (3.7.0): how many worker threads `bote streamable` serves on, from 0 to
-# BOTE_WORKERS_MAX, 4 when unset; 0 is the one serving loop it had before. A value that is
-# not a count keeps 4 with a WARN, one past the bound is held to it with a WARN. Logged at
-# INFO.
+# BOTE_WORKERS_MAX, 4 when unset; 0 is the one serving loop it had before. The bound is
+# sigil's 64 crypto lanes: an ES256 verify holds one while it runs, so 64 workers cannot
+# run out. A value that is not a count keeps 4 with a WARN, one past the bound is held to
+# it with a WARN. Logged at INFO.
 var BOTE_WORKERS_DEFAULT = 4;
 var BOTE_WORKERS_MAX = 64;
 

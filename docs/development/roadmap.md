@@ -34,27 +34,24 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.7.1 — The rest of the per-worker state.** Item 1 of 3.7.x below: bote's own tools, and registering while a threaded server
-runs, so that streamable on worker threads can serve what the other transports do.
+**3.7.2 — `subscriptions/listen`.** Item 1 of 3.7.x below, and before it the room a listening stream needs in the worker
+pool.
 
 ## 3.7.x — Threaded dispatch and `subscriptions/listen`
 
-`bote streamable` serves on worker threads since 3.7.0, so a held-open stream no longer starves the POSTs that feed it,
-and `subscriptions/listen` is such a stream. **Large: small bites.**
+`bote streamable` serves on worker threads since 3.7.0, and since 3.7.1 everything a request reaches in bote is safe there:
+bote's own tools, and registering a tool, prompt or resource while it serves. So a held-open stream no longer starves the
+POSTs that feed it, and `subscriptions/listen` is such a stream. **Large: small bites.** The other transports' buffers
+(`_ws_frame_buf`, `_ws_token_buf`, `_unix_buf`, stdio's) matter only if those transports take workers too.
 
-1. The rest of the per-worker state. The request's own state, sessions and their buffers, a JwtSecret, the dispatcher's
-   sinks and a forked fetch are safe on worker threads. bote's own tools are not: `_fs_read_buf`, the web tools' globals
-   and the libro tools' chain, which is why streamable keeps the echo references. Neither is registering a tool, prompt or
-   resource while a threaded server runs, which is how a `listChanged` notification comes about. The other transports'
-   buffers (`_ws_frame_buf`, `_ws_token_buf`, `_unix_buf`, stdio's) matter only if those transports take workers too.
-2. `subscriptions/listen`, with `toolsListChanged`, `promptsListChanged`, `resourcesListChanged` and
+1. `subscriptions/listen`, with `toolsListChanged`, `promptsListChanged`, `resourcesListChanged` and
    `resourceSubscriptions`, `notifications/subscriptions/acknowledged`, and
    `io.modelcontextprotocol/subscriptionId` tagging. Then `notifications/resources/updated`. A listening stream holds a
    worker for as long as it is open, so the pool needs room for streams beside requests: a bound on streams, or streams
    parked off the pool.
-3. Cancellation: on Streamable HTTP closing the response stream cancels the request, and on stdio
+2. Cancellation: on Streamable HTTP closing the response stream cancels the request, and on stdio
    `notifications/cancelled`. `bote_cancel_token_*` is the data layer.
-4. `notifications/progress` on a request's own response stream.
+3. `notifications/progress` on a request's own response stream.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption.
@@ -107,7 +104,8 @@ Not planned, because the current spec removes or deprecates them: the held-open 
 - **The tool set streamable and ws expose.** stdio, http, unix and bridge register the echo references
   plus the libro, fs and web tools; streamable and ws register the echo references only, kept so that
   folding the binaries into one did not widen what two network transports expose. Either every mode gets
-  the full set, or the fs and web tools become stdio-and-unix-only. `scripts/transport-smoke.sh` pins
+  the full set, or the fs and web tools become stdio-and-unix-only. Nothing technical holds it any more:
+  bote's own tools are safe on streamable's worker threads since 3.7.1. `scripts/transport-smoke.sh` pins
   the current shape.
 - **`libro_retention`'s archive.** `chain_apply_retention` returns what it removed, and the tool drops
   it, so "archived" means deleted. It also ignores `claims`. It reaches nothing in the binary, whose

@@ -18,6 +18,119 @@ have per release.
 
 _(empty)_
 
+## [3.7.1] — 2026-11-02 · Registering while serving
+
+**Everything a request reaches in bote is safe on worker threads.** 3.7.0 made streamable's own state safe between its
+workers. This makes the rest safe: bote's own tools, and registering a tool, prompt or resource while a threaded server
+serves, which is how a `listChanged` notification comes about. The binary's tool sets are unchanged: what streamable
+exposes is an open decision, and nothing technical holds it any more.
+
+**Five defects in 3.7.0 land ahead of it**, from an independent review of that release; the worst hung a threaded server
+that had no entropy. See the correction notice in 3.7.0.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Added
+
+- **The registries' lock** (`src/protocol.cyr`, in core): `bote_reg_read` / `bote_reg_read_end` and `bote_reg_write` /
+  `bote_reg_write_end`. One word: readers share it, a writer has it alone, and a writer that is waiting holds new readers
+  off. It is taken only once a thread exists, so a single-threaded server pays a compare for each. It is not re-entrant.
+- `bote_libro_lock` / `bote_libro_unlock` (`src/audit_libro.cyr`): the one lock on libro's chains.
+
+### Changed
+
+- **The tool, prompt and resource registries and the dispatcher's handler maps are under the registries' lock.** Each
+  public function takes it for its own body and calls only the `_u` forms inside it (`_registry_get_u`, `_registry_add_u`,
+  `_registry_deregister_u`, `_prompt_registry_get_u`, `_resource_registry_get_u`, `_resource_registry_template_for_u`).
+  Registration's checks and schema compile run before it (`_registry_prepare`). The list builders hold it across both of
+  their passes, the one that sizes the reply and the one that writes it. `dispatcher_register_tool` and
+  `dispatcher_deregister_tool` put the tool and its handler in, or take them out, in one write, and publish their event
+  after it, with nothing held.
+- **`fs_read`'s buffer is on the request arena**, the calling thread's, where it was one buffer for the process.
+- **The libro audit sink and the five libro tools take the chain's lock** around all of their work: libro locks nothing.
+- **A JwtSecret builds the sigil tables its verifies need when it is made**: SHA-256's in `jwt_secret_new`, P-256's when it
+  takes an EC key. An ES256 server pays the 0.4 s that costs at startup rather than on its first token.
+- The session store reads the clock before it takes its lock, not under it.
+- A count from the environment past nine digits reads as 999999999 (`BOTE_WORKERS`, `BOTE_JWT_CACHE`,
+  `BOTE_JWKS_REFRESH`), which each one's bound then holds.
+- `_bote_ses_random`, a test's stand-in for the session id's entropy, beside `_bote_jwt_clock`.
+
+### Fixed
+
+- **On worker threads, two `fs_read` calls could read into the same buffer**, and hand one client another's file.
+- **The libro audit sink could append to a chain while a libro tool walked it**, from two workers.
+- **Registering while a threaded server ran could crash it**, or make a tool that was there all along answer as not found:
+  a map that grows rebuilds its table under a reader. Between registering a tool and its handler, a call could also find the
+  one without the other.
+- **A worker that found no entropy hung the server** (3.7.0). `_gen_session_id` exited 90 with `sys_exit`, which ends the
+  calling thread alone, and it did so holding the session store's lock. It exits the process now, with `sys_exit_group`,
+  and so does the binary on its way out, where a worker may still be running.
+- **Two workers could each fetch the keys** (3.7.0), when one read the clock a second before the other took the ask: it saw a
+  clock gone back, which opens the gate. A clock that went back by less than the cooldown no longer does.
+- **A fetch forked from one worker while another built one of sigil's tables waited on it** until its deadline (3.7.0): the
+  child inherits the build's claim and nobody to finish it. The tables a JWT verify builds lazily, SHA-256's and P-256's,
+  which a fetch's TLS handshake also needs, are built before any worker is (above).
+- **`BOTE_WORKERS` past nine digits kept 4** (3.7.0) rather than being held to its bound.
+
+### Security
+
+- **More than 64 workers can turn good ES256 tokens away.** A verify holds one of sigil's 64 crypto lanes while it runs, and
+  refuses the token when none is free. `BOTE_WORKERS` stops at 64, and nothing else in bote holds a lane, so the binary
+  cannot run out; `streamable_config_with_workers` now says so for an embedder, who can configure more.
+
+### Tests
+
+- 4,536 assertions, from 4,499, on x86_64 and under `qemu-aarch64`.
+  - **`tests/bote_threads.tcyr`** has 74, from 49:
+    - `fs_read` of four files on eight threads, none handed another's.
+    - libro appends from three threads beside two walking the chain with its tools, then again with retention rewriting
+      the chain.
+    - Children forked from six threads at once, each answering its own.
+    - Registering while serving: two writers grow every map, one through `dispatcher_register_tool` and one through
+      `registry_register` and `dispatcher_handle`. Beside them run three threads dispatching, a thread for each public
+      lookup and for each list calling only it, and a tool and its handler checked together under one hold of the lock.
+    - Four threads each registering templates, and setting handlers, losing none.
+    - No entropy on a worker ending the process with 90, in a child the test forks.
+  - **`tests/bote_jwt.tcyr`** has 483, from 471:
+    - One ask whichever second a worker read, and a clock gone back past the cooldown still asking.
+    - The tables a handle builds when it is made and when it takes an EC key.
+- **30 mutants, 27 killed.**
+  - **The first run left 12 standing**, and they showed how a race hides from a test:
+    - A lookup with an unlocked mutant was sheltered by a locked call beside it on the same path, so every lookup and
+      every list got a thread of its own, calling nothing else.
+    - A missing lock between writers needs two writers.
+    - A tool and its handler must be checked while the name is being added, not once it has been.
+  - **Three are equivalent on x86**, where a vec that never frees, and stores seen in order, give an unlocked reader whole,
+    stale data: libro's read-only tools beside appends and retention, and the templates list builder. The locks stay, for
+    aarch64's weaker ordering, which QEMU on an x86 host cannot show either.
+  - **Two of the review's mutants first survived on a test of mine that was wrong:** an EC key's own checks already build the
+    flag it read.
+- **`scripts/transport-smoke.sh`**: a twelve-digit `BOTE_WORKERS` is held at 64.
+- **The official suite** is where 3.7.0 left it, and the official client passes 410 of 410.
+- stdio is byte-identical to 3.7.0 over 200,000 messages, and HTTP over 50 of 50.
+
+### Performance
+
+**Unthreaded, the request path costs what it did.** Interleaved A/B against 3.7.0, 15 rounds pinned to an idle core.
+Minimums, in ns:
+
+| Bench | 3.7.0 | 3.7.1 | Delta |
+|---|---|---|---|
+| `dispatch_tools_call` | 2,162 | 2,222 | +2.8% |
+| `dispatch_initialize` | 1,752 | 1,734 | −1.0% |
+| `codec_process_message` | 4,038 | 4,063 | +0.6% |
+| `http_era_modern` | 11,288 | 11,319 | +0.3% |
+| `scope_gate_open` | 2,294 | 2,353 | +2.6% |
+
+Rows that run none of this patch's code moved as far (`validate_compiled_simple` +3.3%, `jsonx_get_str_flat` −6.2%),
+which is layout. Until a thread exists, each registry function's lock is one compare.
+
+**On a worker the registries' lock costs a message 52 ns.** `codec_process_message_threaded` now starts and joins a thread
+first, so it runs as a worker does, with every lock that waits for threads taken; in 3.7.0 it ran without one. It takes
+4,364 ns against `codec_process_message_arena`'s 4,048 ns for the same message unthreaded. Against a control with the
+registries' lock emptied, its calls kept, 7 rounds: 4,311 ns, so 52 ns (1.2%) of that is this lock's atomics. Most of the
+rest is lib/alloc.cyr's lock, which every heap allocation takes once a thread exists, and the 47 ns per-thread lookup.
+
 ## [3.7.0] — 2026-11-02 · Streamable on worker threads
 
 **`bote streamable` serves on worker threads**, 4 by default (`BOTE_WORKERS`). Its loop only accepts, and each connection
@@ -31,6 +144,17 @@ kept a chunk for every message a little larger than the one before, 105 MB for 3
 auth. See the correction notices in 3.6.6 and 3.4.15.
 
 The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+> ⚠ **Corrected at 3.7.1.** Four claims below were not true, found by an independent review of this release. "Everything a
+> streamable request reaches in bote is made safe between workers" missed the session store's entropy check: with no
+> entropy it exited with `sys_exit`, which ends only the calling thread, so on a worker the server stayed up with the
+> store's lock held by a thread that was gone, and the next request waited for good. "Workers that find the keys due
+> together make one fetch between them" failed across a second boundary: a worker that read the clock a second before
+> another took the ask saw a clock gone back, and asked again. "One past the bound is held there" failed for
+> `BOTE_WORKERS` past nine digits, which read as no count and kept 4. "The per-thread lookup costs a message 47 ns" holds
+> armed from the main thread; armed from another, each lookup also asks sigil whether the thread has a block, which on
+> an x86 kernel before Linux 5.9 is two system calls. And a fetch forked from a worker could still inherit sigil's claim on
+> a table another worker was building, which the child then waited on until its deadline. Each is fixed in 3.7.1.
 
 ### Added
 

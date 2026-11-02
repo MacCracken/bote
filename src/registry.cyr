@@ -534,7 +534,9 @@ fn _reg_warn_unenforced(tool_def) {
     return 0;
 }
 
-fn registry_register(r, tool_def) {
+# What registration does before it touches the registry: refuses a malformed definition
+# (a BoteError), compiles its schema and reads its headers. 0 when it may be added.
+fn _registry_prepare(tool_def) {
     var why = registry_check_tool_def(tool_def);
     if (why != 0) {
         _reg_log_refused(tool_def, why);
@@ -549,6 +551,11 @@ fn registry_register(r, tool_def) {
     _reg_scan_tool(tool_def, headers);
     if (vec_len(headers) > 0) { store64(tool_def + 64, headers); }
     _reg_warn_unenforced(tool_def);
+    return 0;
+}
+
+# Add a prepared definition, with the registries' lock held to write (3.7.1).
+fn _registry_add_u(r, tool_def) {
     var name = tool_def_name(tool_def);
     var entries = registry_entries(r);
     var names = registry_names(r);
@@ -570,16 +577,36 @@ fn registry_register(r, tool_def) {
     return 0;
 }
 
+fn registry_register(r, tool_def) {
+    var err = _registry_prepare(tool_def);
+    if (err != 0) { return err; }
+    bote_reg_write();
+    _registry_add_u(r, tool_def);
+    bote_reg_write_end();
+    return 0;
+}
+
+fn _registry_get_u(r, name) { return map_get(registry_entries(r), name); }
+
 fn registry_get(r, name) {
-    return map_get(registry_entries(r), name);
+    bote_reg_read();
+    var t = _registry_get_u(r, name);
+    bote_reg_read_end();
+    return t;
 }
 
 fn registry_contains(r, name) {
-    return map_has(registry_entries(r), name);
+    bote_reg_read();
+    var h = map_has(registry_entries(r), name);
+    bote_reg_read_end();
+    return h;
 }
 
 fn registry_len(r) {
-    return map_count(registry_entries(r));
+    bote_reg_read();
+    var n = map_count(registry_entries(r));
+    bote_reg_read_end();
+    return n;
 }
 
 fn registry_is_empty(r) {
@@ -590,6 +617,7 @@ fn registry_is_empty(r) {
 # Return a vec of ToolDef pointers in insertion order.
 fn registry_list(r) {
     var out = vec_new();
+    bote_reg_read();
     var names = registry_names(r);
     var entries = registry_entries(r);
     var n = vec_len(names);
@@ -601,10 +629,18 @@ fn registry_list(r) {
         }
         i = i + 1;
     }
+    bote_reg_read_end();
     return out;
 }
 
 fn registry_get_versioned(r, name, version) {
+    bote_reg_read();
+    var t = _registry_get_versioned_u(r, name, version);
+    bote_reg_read_end();
+    return t;
+}
+
+fn _registry_get_versioned_u(r, name, version) {
     var bucket = map_get(registry_versions_map(r), name);
     if (bucket == 0) { return 0; }
     var n = vec_len(bucket);
@@ -618,14 +654,25 @@ fn registry_get_versioned(r, name, version) {
     return 0;
 }
 
+# The vec of a tool's versions: the registry's own, which a registration that runs beside
+# a read may grow (3.7.1).
 fn registry_list_versions(r, name) {
+    bote_reg_read();
     var bucket = map_get(registry_versions_map(r), name);
+    bote_reg_read_end();
     if (bucket == 0) { return vec_new(); }
     return bucket;
 }
 
 # Remove a tool. Returns the removed ToolDef ptr or 0 if absent.
 fn registry_deregister(r, name) {
+    bote_reg_write();
+    var t = _registry_deregister_u(r, name);
+    bote_reg_write_end();
+    return t;
+}
+
+fn _registry_deregister_u(r, name) {
     var entries = registry_entries(r);
     var existing = map_get(entries, name);
     if (existing == 0) { return 0; }

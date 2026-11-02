@@ -112,6 +112,56 @@ fn bote_req_alloc() {
     return a;
 }
 
+# The registries' lock (3.7.1). A threaded server's workers read the tool, prompt and
+# resource registries and the dispatcher's handler maps for every request, and registering
+# while it serves writes them: a map that grows moves its entries, and a reader at that
+# moment misses a tool or reads past the old table. Readers share the lock, a writer has it
+# alone, and a writer that is waiting holds new readers off. It is one word, the readers
+# counted in its low bits and BOTE_RW_WRITER above them, and it is taken only once a thread
+# exists (`_threads_active`, which a section cannot see change: only thread_create sets it,
+# and nothing it guards creates a thread).
+#
+# ⚠ Not re-entrant either way: a holder that takes it again waits for a writer that waits
+# for the holder. Each registry's public functions take it for their own body only and call
+# their `_u` forms, which take nothing, inside it.
+var BOTE_RW_WRITER = 1099511627776;   # 2^40: far above any count of readers
+var _bote_reg_lock = 0;
+
+fn bote_reg_read() {
+    if (_threads_active == 0) { return 0; }
+    while (1 == 1) {
+        if ((atomic_fetch_add(&_bote_reg_lock, 1) & BOTE_RW_WRITER) == 0) { return 0; }
+        atomic_fetch_add(&_bote_reg_lock, 0 - 1);
+        while ((atomic_load(&_bote_reg_lock) & BOTE_RW_WRITER) != 0) { }
+    }
+    return 0;
+}
+
+fn bote_reg_read_end() {
+    if (_threads_active == 0) { return 0; }
+    atomic_fetch_add(&_bote_reg_lock, 0 - 1);
+    return 0;
+}
+
+fn bote_reg_write() {
+    if (_threads_active == 0) { return 0; }
+    var held = 0;
+    while (held == 0) {
+        var s = atomic_load(&_bote_reg_lock);
+        if ((s & BOTE_RW_WRITER) == 0) { held = atomic_cas(&_bote_reg_lock, s, s + BOTE_RW_WRITER); }
+    }
+    # The readers inside finish; none comes in past the writer bit.
+    while ((atomic_load(&_bote_reg_lock) & (BOTE_RW_WRITER - 1)) != 0) { }
+    atomic_fence();
+    return 0;
+}
+
+fn bote_reg_write_end() {
+    if (_threads_active == 0) { return 0; }
+    atomic_fetch_add(&_bote_reg_lock, 0 - BOTE_RW_WRITER);
+    return 0;
+}
+
 # The arena itself (3.7.0). lib/alloc.cyr's growable arena, when the chunk after the one
 # in use is too small for a request, links a new chunk in front of it and keeps both. A
 # client whose every message was a little larger than the last therefore added a chunk a

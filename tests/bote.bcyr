@@ -135,6 +135,9 @@ var _b_sess_store = 0;
 var _b_sess_id = 0;
 fn b_session_validate() { return session_store_validate(_b_sess_store, _b_sess_id); }
 fn b_codec_process_message_arena() { return codec_process_message_a(bote_req_begin(), _b_call_line, _b_dispatcher, 0); }
+# 3.7.1: a thread started and joined, so that the row after it runs as a worker does, with
+# every lock that waits for threads taken: the allocator's, the registries'.
+fn _b_thread_nop(arg) { return 0; }
 
 fn _b_child_nop(ctx, rec) { return 0; }
 fn b_fetch_in_child_empty() {
@@ -534,6 +537,7 @@ fn main() {
     bench_run(b35, &b_codec_process_message_arena, 10000);
     vec_push(benches, b35);
     bote_conn_arm();
+    thread_join(thread_create(&_b_thread_nop, 0));
     var b36 = bench_new("codec_process_message_threaded");
     bench_run(b36, &b_codec_process_message_arena, 10000);
     vec_push(benches, b36);

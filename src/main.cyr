@@ -246,4 +246,5 @@ fn main() {
 }
 
 var r = main();
-sys_exit(r);
+# The whole process: on a threaded server a worker may still be running (3.7.1).
+sys_exit_group(r);

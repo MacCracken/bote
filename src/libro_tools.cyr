@@ -200,7 +200,7 @@ fn _lt_emit_entries_array(sb, entries) {
 # result: {"ok":true,"entries":[{...}]}
 # ================================================================
 
-fn libro_tool_query(args, claims) {
+fn _libro_tool_query_held(args, claims) {
     if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
 
     var q = query_new();
@@ -257,7 +257,7 @@ fn libro_tool_query(args, claims) {
 # result: {"ok":true} | {"ok":false,"code":N,"message":"..."}
 # ================================================================
 
-fn libro_tool_verify(args, claims) {
+fn _libro_tool_verify_held(args, claims) {
     if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
     var err = chain_verify(_libro_tools_chain);
     if (err == 0) { return _lt_result("{\"ok\":true}", 0); }
@@ -292,7 +292,7 @@ fn libro_tool_verify(args, claims) {
 # result: {"ok":true,"count":N,"entries":[...]}
 # ================================================================
 
-fn libro_tool_export(args, claims) {
+fn _libro_tool_export_held(args, claims) {
     if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
     var entries = _lt_chain_entries(_libro_tools_chain);
     var sb = str_builder_new();
@@ -317,7 +317,7 @@ fn libro_tool_export(args, claims) {
 # wire format is pinned.
 # ================================================================
 
-fn libro_tool_proof(args, claims) {
+fn _libro_tool_proof_held(args, claims) {
     if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
     if (jsonx_has(args, "index") == 0) { return _lt_error("missing 'index'"); }
     var idx = _lt_get_int(args, "index");
@@ -352,7 +352,7 @@ fn libro_tool_proof(args, claims) {
 #         {"ok":false,"error":"..."}
 # ================================================================
 
-fn libro_tool_retention(args, claims) {
+fn _libro_tool_retention_held(args, claims) {
     if (_libro_tools_chain == 0) { return _lt_error("libro not configured"); }
     var policy_name = jsonx_get_str(args, "policy");
     if (policy_name == 0) { return _lt_error("missing 'policy'"); }
@@ -406,6 +406,43 @@ fn libro_tool_retention(args, claims) {
 # ================================================================
 
 # One property: `name` with schema `json`, pushed onto `props`.
+# Each tool walks the chain the audit sink may be appending to from another worker, so each
+# does all its work under the chain's lock (3.7.1, src/audit_libro.cyr).
+fn libro_tool_query(args, claims) {
+    bote_libro_lock();
+    var r = _libro_tool_query_held(args, claims);
+    bote_libro_unlock();
+    return r;
+}
+
+fn libro_tool_verify(args, claims) {
+    bote_libro_lock();
+    var r = _libro_tool_verify_held(args, claims);
+    bote_libro_unlock();
+    return r;
+}
+
+fn libro_tool_export(args, claims) {
+    bote_libro_lock();
+    var r = _libro_tool_export_held(args, claims);
+    bote_libro_unlock();
+    return r;
+}
+
+fn libro_tool_proof(args, claims) {
+    bote_libro_lock();
+    var r = _libro_tool_proof_held(args, claims);
+    bote_libro_unlock();
+    return r;
+}
+
+fn libro_tool_retention(args, claims) {
+    bote_libro_lock();
+    var r = _libro_tool_retention_held(args, claims);
+    bote_libro_unlock();
+    return r;
+}
+
 fn _lt_prop(props, name, json) {
     vec_push(props, schema_prop_new(name, json));
     return 0;

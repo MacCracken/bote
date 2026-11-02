@@ -143,7 +143,9 @@ fn bote_conn_serve(transport, addr, port, handler_fp, ctx) {
 # that was not, the main thread, can lack one; sigil's crypto_tls_main_init gives the
 # calling thread one if it has none. bote_conn_arm calls it, and when the arming thread
 # is not the main one, so does every lookup, which a main thread with no block would
-# otherwise fault on.
+# otherwise fault on. That costs each lookup sigil's check, which on an x86 kernel without
+# FSGSBASE (before Linux 5.9) is two system calls until the main thread has a block: arm
+# from the main thread.
 
 var _bote_conn_slot = 0 - 1;
 var _bote_conn_main = 0;

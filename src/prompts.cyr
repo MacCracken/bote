@@ -91,36 +91,54 @@ fn prompt_registry_handlers(r) { return load64(r + 16); }
 fn prompt_registry_register(r, prompt_def, handler_fp) {
     if (bote_scope_list_ok(prompt_def_required_scopes(prompt_def)) == 0) { return 0 - 1; }
     var name = prompt_def_name(prompt_def);
+    # Under the registries' lock (3.7.1, src/protocol.cyr), as every function below.
+    bote_reg_write();
     var entries = prompt_registry_entries(r);
     if (map_has(entries, name) == 0) {
         vec_push(prompt_registry_names(r), name);
     }
     map_set(entries, name, prompt_def);
     map_set(prompt_registry_handlers(r), name, handler_fp);
+    bote_reg_write_end();
     return 0;
 }
 
+fn _prompt_registry_get_u(r, name) { return map_get(prompt_registry_entries(r), name); }
+
 fn prompt_registry_get(r, name) {
-    return map_get(prompt_registry_entries(r), name);
+    bote_reg_read();
+    var p = _prompt_registry_get_u(r, name);
+    bote_reg_read_end();
+    return p;
 }
 
 fn prompt_registry_contains(r, name) {
-    return map_has(prompt_registry_entries(r), name);
+    bote_reg_read();
+    var h = map_has(prompt_registry_entries(r), name);
+    bote_reg_read_end();
+    return h;
 }
 
 # Handler fn ptr for `name`, or 0 if the prompt is unknown.
 fn prompt_registry_handler(r, name) {
-    if (map_has(prompt_registry_handlers(r), name) == 0) { return 0; }
-    return map_get(prompt_registry_handlers(r), name);
+    bote_reg_read();
+    var fp = 0;
+    if (map_has(prompt_registry_handlers(r), name) == 1) { fp = map_get(prompt_registry_handlers(r), name); }
+    bote_reg_read_end();
+    return fp;
 }
 
 fn prompt_registry_len(r) {
-    return map_count(prompt_registry_entries(r));
+    bote_reg_read();
+    var n = map_count(prompt_registry_entries(r));
+    bote_reg_read_end();
+    return n;
 }
 
 # Return a vec of PromptDef pointers in insertion order.
 fn prompt_registry_list(r) {
     var out = vec_new();
+    bote_reg_read();
     var names = prompt_registry_names(r);
     var entries = prompt_registry_entries(r);
     var n = vec_len(names);
@@ -132,5 +150,6 @@ fn prompt_registry_list(r) {
         }
         i = i + 1;
     }
+    bote_reg_read_end();
     return out;
 }

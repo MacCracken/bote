@@ -48,6 +48,7 @@ include "src/prompts.cyr"
 include "src/resources.cyr"
 include "src/events.cyr"
 include "src/audit.cyr"
+include "src/audit_libro.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
@@ -60,6 +61,8 @@ include "src/fetch.cyr"
 include "src/http_era.cyr"
 include "src/oauth_metadata.cyr"
 include "src/transport_streamable.cyr"
+include "src/libro_tools.cyr"
+include "src/fs_tools.cyr"
 include "tests/fixtures/jwt_vectors.cyr"
 
 #ifndef CYRIUS_TARGET_AGNOS
@@ -464,6 +467,351 @@ fn _sh_worker(i) {
     return 0;
 }
 
+# ---- bote's own tools on threads (3.7.1) ----------------------------------------
+# fs_read of four files at once, each thread its own: a result holds its file's marker and
+# none of the others'.
+var _ft_files = 0;
+var _ft_marks = 0;
+var _ft_ok = 0;
+var _ft_bad = 0;
+
+fn _ft_worker(i) {
+    _wait_go();
+    var args = _cat3("{\"path\":\"", load64(_ft_files + (i % 4) * 8), "\"}");
+    var k = 0;
+    while (k < 60) {
+        bote_req_begin();
+        var r = fs_read_handler(args, 0);
+        var good = _has(r, load64(_ft_marks + (i % 4) * 8));
+        var j = 0;
+        while (j < 4) {
+            if (j != i % 4 && _has(r, load64(_ft_marks + j * 8)) == 1) { good = 0; }
+            j = j + 1;
+        }
+        if (good == 1) { atomic_fetch_add(&_ft_ok, 1); } else { atomic_fetch_add(&_ft_bad, 1); }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# libro: three threads append through the audit sink while two walk the chain with the tools.
+var _lb_ctx = 0;
+var _lb_stop = 0;
+var _lb_bad = 0;
+var _lb_walks = 0;
+
+fn _lb_appender(i) {
+    _wait_go();
+    var k = 0;
+    while (k < 200) {
+        libro_audit_log(_lb_ctx, tool_call_event_new("t_lb", 1, 1, 0, 0));
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn _lb_walker(i) {
+    _wait_go();
+    while (atomic_load(&_lb_stop) == 0) {
+        var v = libro_tool_verify("{}", 0);
+        if (_has(v, "\"ok\":true") == 0) { atomic_fetch_add(&_lb_bad, 1); }
+        var q = libro_tool_query("{\"limit\":5}", 0);
+        if (_has(q, "\"ok\":true") == 0) { atomic_fetch_add(&_lb_bad, 1); }
+        atomic_fetch_add(&_lb_walks, 1);
+    }
+    return 0;
+}
+
+# Retention rewrites the chain: a new entries vec, and the archive's head.
+fn _lb_trimmer(i) {
+    _wait_go();
+    while (atomic_load(&_lb_stop) == 0) {
+        var r = libro_tool_retention("{\"policy\":\"keep_count\",\"value\":50}", 0);
+        if (r == 0 || _has(r, "isError") == 1) { atomic_fetch_add(&_lb_bad, 1); }
+        var k = 0;
+        while (k < 20000) { k = k + 1; }
+    }
+    return 0;
+}
+
+var _lb_appenders_done = 0;
+fn _lb_run(i) {
+    if (i < 3) {
+        _lb_appender(i);
+        if (atomic_fetch_add(&_lb_appenders_done, 1) == 2) { atomic_store(&_lb_stop, 1); }
+        return 0;
+    }
+    if (i == 5) { return _lb_trimmer(i); }
+    return _lb_walker(i);
+}
+
+# Children forked from six threads at once, each answering with its own number.
+var _fc_ok = 0;
+var _fc_bad = 0;
+
+fn _fc_child(n, r) {
+    var p = alloc(32);
+    store64(p, n);
+    bote_fetch_put_int(r, load64(p));
+    return 0;
+}
+
+fn _fc_worker(i) {
+    _wait_go();
+    var k = 0;
+    while (k < 20) {
+        bote_req_begin();
+        var cur[24];
+        var want = i * 1000 + k;
+        if (bote_fetch_in_child(&_fc_child, want, 64, 5000, &cur) == 1 && bote_fetch_int(&cur) == want && bote_fetch_why() == 0) {
+            atomic_fetch_add(&_fc_ok, 1);
+        } else {
+            atomic_fetch_add(&_fc_bad, 1);
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# ---- registering while a threaded server serves (3.7.1) ---------------------------
+# Readers dispatch against tools, prompts and resources that are there throughout, while
+# two writers register others: one through dispatcher_register_tool, adding a tool and
+# removing the one before, the other through registry_register and dispatcher_handle,
+# keeping all it adds, which grows every map and rebuilds it.
+var _rg_d = 0;
+var _rg_stop = 0;
+var _rg_bad = 0;
+var _rg_calls = 0;
+var _rg_writers = 0;
+var RG_N = 1000;
+
+fn _rg_tool(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"rg-ok\"}]}"; }
+fn _rg_prompt(args, claims) { return "{\"messages\":[]}"; }
+fn _rg_res(uri, claims) { return "{\"contents\":[{\"uri\":\"rg\",\"text\":\"rg-res\"}]}"; }
+
+fn _rg_name(prefix, i) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_int(sb, i);
+    return str_data(str_builder_build(sb));
+}
+
+fn _rg_msg(method, params) {
+    return _cat3(_cat3("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"", method, "\",\"params\":"), params, "}");
+}
+
+var _rg_msgs = 0;
+var _rg_coming = 0 - 1;
+var _rg_going = 0 - 1;
+var _rg_torn = 0;
+
+# A tool and its handler, read under one hold of the lock: there together, or gone together.
+fn _rg_check(k) {
+    if (k < 0) { return 0; }
+    var nm = _rg_name("rg_dyn_", k);
+    bote_reg_read();
+    var h = map_has(dispatcher_handlers(_rg_d), nm);
+    var c = map_has(registry_entries(dispatcher_registry(_rg_d)), nm);
+    bote_reg_read_end();
+    if (h != c) { atomic_fetch_add(&_rg_torn, 1); }
+    return 0;
+}
+
+# A point lookup: the ten tools that stay, the resource, the prompt, and the tool being added
+# and the one being taken away.
+fn _rg_looker(i) {
+    _wait_go();
+    var k = 0;
+    while (atomic_load(&_rg_stop) == 0) {
+        var m = k % 3;
+        var at = 10 + k % 10;
+        if (m == 1) { at = 7; }
+        if (m == 2) { at = 8; }
+        var r = codec_process_message_a(bote_req_begin(), load64(_rg_msgs + at * 8), _rg_d, 0);
+        var ok = 0;
+        if (r != 0) {
+            if (m == 0) { ok = _has(r, "rg-ok"); }
+            if (m == 1) { ok = _has(r, "rg-res"); }
+            if (m == 2) { ok = _has(r, "\"messages\""); }
+        }
+        if (ok == 0) { atomic_fetch_add(&_rg_bad, 1); }
+        _rg_check(atomic_load(&_rg_coming));
+        _rg_check(atomic_load(&_rg_going));
+        atomic_fetch_add(&_rg_calls, 1);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# The four lists, each holding what was there throughout.
+fn _rg_lister(i) {
+    _wait_go();
+    var k = 0;
+    while (atomic_load(&_rg_stop) == 0) {
+        var m = k % 4;
+        var r = codec_process_message_a(bote_req_begin(), load64(_rg_msgs + (1 + m) * 8), _rg_d, 0);
+        var ok = 0;
+        if (r != 0) {
+            if (m == 0) { ok = _has(r, "\"name\":\"rg_base_7\""); }
+            if (m == 1) { ok = _has(r, "\"name\":\"rgp_base\""); }
+            if (m == 2) { ok = _has(r, "\"uri\":\"rg://base\""); }
+            if (m == 3) { ok = _has(r, "\"uriTemplate\":\"rgt://base/{x}\""); }
+        }
+        if (ok == 0) { atomic_fetch_add(&_rg_bad, 1); }
+        atomic_fetch_add(&_rg_calls, 1);
+        var p = 0;
+        while (p < 20000) { p = p + 1; }
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn _rg_done() {
+    if (atomic_fetch_add(&_rg_writers, 1) == 1) { atomic_store(&_rg_stop, 1); }
+    return 0;
+}
+
+fn _rg_writer(i) {
+    _wait_go();
+    var k = 0;
+    while (k < RG_N) {
+        atomic_store(&_rg_coming, k);
+        dispatcher_register_tool(_rg_d, tool_def_new(_rg_name("rg_dyn_", k), "Dyn", schema_new("object", 0, vec_new())), &_rg_tool);
+        dispatcher_register_prompt(_rg_d, prompt_def_new(_rg_name("rgp_dyn_", k), "Dyn", vec_new()), &_rg_prompt);
+        dispatcher_register_resource(_rg_d, resource_def_new(_rg_name("rg://dyn/", k), "d", "D", "text/plain"), &_rg_res);
+        dispatcher_register_resource_template(_rg_d, resource_template_new(_cat3("rgt://dyn", _rg_name("", k), "/{x}"), "t", "T", "text/plain"), &_rg_res);
+        if (k > 0) {
+            atomic_store(&_rg_going, k - 1);
+            dispatcher_deregister_tool(_rg_d, _rg_name("rg_dyn_", k - 1));
+        }
+        k = k + 1;
+    }
+    return _rg_done();
+}
+
+fn _rg_grower(i) {
+    _wait_go();
+    var k = 0;
+    while (k < RG_N) {
+        var nm = _rg_name("rg_grow_", k);
+        registry_register(dispatcher_registry(_rg_d), tool_def_new(nm, "Grow", schema_new("object", 0, vec_new())));
+        dispatcher_handle(_rg_d, nm, &_rg_tool);
+        dispatcher_register_prompt(_rg_d, prompt_def_new(_rg_name("rgp_grow_", k), "Grow", vec_new()), &_rg_prompt);
+        dispatcher_register_resource_template(_rg_d, resource_template_new(_cat3("rgt://grow", _rg_name("", k), "/{x}"), "t", "T", "text/plain"), &_rg_res);
+        k = k + 1;
+    }
+    return _rg_done();
+}
+
+# The public lookups an embedder may call, each on a thread of its own in a tight loop,
+# with no other call between: one that takes the lock beside it would shelter it.
+fn _rg_prober(i) {
+    _wait_go();
+    var reg = dispatcher_registry(_rg_d);
+    var pr = dispatcher_prompts(_rg_d);
+    var rr = dispatcher_resources(_rg_d);
+    var names = alloc(10 * 8);
+    var j = 0;
+    while (j < 10) {
+        store64(names + j * 8, _rg_name("rg_base_", j));
+        j = j + 1;
+    }
+    var has[8];
+    var which = i - 3;
+    var k = 0;
+    while (atomic_load(&_rg_stop) == 0) {
+        var nm = load64(names + (k % 10) * 8);
+        var ok = 1;
+        if (which == 0) { ok = registry_get(reg, nm) != 0; }
+        if (which == 1) { ok = _dsp_handler(_rg_d, nm, &has) == &_rg_tool; }
+        if (which == 2) { ok = resource_registry_handler(rr, "rg://base") == &_rg_res; }
+        if (which == 3) { ok = prompt_registry_handler(pr, "rgp_base") == &_rg_prompt; }
+        if (which == 4) { ok = resource_registry_template_for(rr, "rgt://base/9") != 0; }
+        if (ok == 0) { atomic_fetch_add(&_rg_bad, 1); }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# One list alone, with no pause, while the writers grow the map under it: `at` is its
+# message, `want` what the list must hold.
+fn _rg_one_list(at, want) {
+    _wait_go();
+    while (atomic_load(&_rg_stop) == 0) {
+        var r = codec_process_message_a(bote_req_begin(), load64(_rg_msgs + at * 8), _rg_d, 0);
+        if (r == 0 || _has(r, want) == 0) { atomic_fetch_add(&_rg_bad, 1); }
+        atomic_fetch_add(&_rg_calls, 1);
+    }
+    return 0;
+}
+
+fn _rg_run(i) {
+    if (i == 0) { return _rg_writer(i); }
+    if (i == 1) { return _rg_grower(i); }
+    if (i == 2) { return _rg_lister(i); }
+    if (i >= 3 && i <= 7) { return _rg_prober(i); }
+    if (i == 8) { return _rg_one_list(2, "\"name\":\"rgp_base\""); }
+    if (i == 9) { return _rg_one_list(1, "\"name\":\"rg_base_7\""); }
+    if (i == 10) { return _rg_one_list(3, "\"uri\":\"rg://base\""); }
+    return _rg_looker(i);
+}
+
+# Four threads setting handlers and nothing else, on one dispatcher.
+var _hd_d = 0;
+fn _hd_writer(i) {
+    _wait_go();
+    var k = 0;
+    while (k < 300) {
+        dispatcher_handle(_hd_d, _cat3(_rg_name("hd_", i), "_", _rg_name("", k)), &_rg_tool);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# Four threads registering templates and nothing else, into one registry.
+var _rt_reg = 0;
+fn _rt_writer(i) {
+    _wait_go();
+    var k = 0;
+    while (k < 300) {
+        resource_registry_register_template(_rt_reg, resource_template_new(_cat3(_rg_name("rt://", i), _rg_name("/", k), "/{x}"), "t", "T", "text/plain"), &_rg_res);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# ---- a failure that ends the process, from a worker (3.7.1) -----------------------
+# _gen_session_id exits 90 when the kernel gives no entropy. Called with sys_exit from a
+# worker, it ended that thread alone, holding the store's lock: the process stayed up and
+# the next caller of the store waited for good.
+fn _ex_no_entropy(buf, n) { return 0 - 38; }
+
+fn _ex_worker(i) {
+    session_store_create(_ss_store, "2025-11-25");
+    return 0;
+}
+
+# The exit status of a child that makes a session on a worker with no entropy, or -1 if
+# it was still running after 5 s.
+fn _ex_status() {
+    var pid = sys_fork();
+    if (pid == 0) {
+        _bote_ses_random = &_ex_no_entropy;
+        thread_join(thread_create(&_ex_worker, 0));
+        session_store_active_count(_ss_store);
+        sys_exit_group(0);
+    }
+    var st[8];
+    var end = clock_now_ms() + 5000;
+    while (clock_now_ms() < end) {
+        if (sys_waitpid(pid, &st, 1) == pid) { return (load64(&st) >> 8) & 255; }
+        sleep_ms(10);
+    }
+    sys_kill(pid, SIGKILL);
+    sys_waitpid(pid, &st, 0);
+    return 0 - 1;
+}
+
 #endif
 
 fn main() {
@@ -665,6 +1013,97 @@ fn main() {
         dr_i = dr_i + 1;
     }
     assert_eq(alloc_used() - dr_at, 0, "drain heap: twenty POSTs carrying them keep nothing");
+
+    # ---------------- bote's own tools on threads (3.7.1) ----------------
+    _ft_files = alloc(4 * 8);
+    _ft_marks = alloc(4 * 8);
+    store64(_ft_files, "LICENSE");
+    store64(_ft_marks, "GNU GENERAL PUBLIC LICENSE");
+    store64(_ft_files + 8, "CLAUDE.md");
+    store64(_ft_marks + 8, "Claude Code Instructions");
+    store64(_ft_files + 16, "SECURITY.md");
+    store64(_ft_marks + 16, "Reporting a Vulnerability");
+    store64(_ft_files + 24, "CHANGELOG.md");
+    store64(_ft_marks + 24, "All notable changes to bote");
+    _on_threads(&_ft_worker, 8);
+    assert_eq(_ft_bad, 0, "fs_read: eight threads reading four files, none handed another's");
+    assert_eq(_ft_ok, 480, "fs_read: every read its own file");
+
+    var lb_chain = chain_new();
+    _lb_ctx = libro_audit_new(lb_chain);
+    libro_tools_init(lb_chain);
+    _on_threads(&_lb_run, 5);
+    assert_eq(_lb_bad, 0, "libro: the chain verifies at every walk, with three threads appending");
+    assert(_lb_walks > 0, "libro: the walks ran");
+    assert_eq(vec_len(load64(lb_chain)), 600, "libro: every append kept");
+    assert(_has(libro_tool_verify("{}", 0), "\"ok\":true") == 1, "libro: and the chain verifies after");
+    # And again with retention rewriting the chain beside the appends and the walks.
+    var lb2 = chain_new();
+    _lb_ctx = libro_audit_new(lb2);
+    libro_tools_init(lb2);
+    _lb_stop = 0;
+    _lb_appenders_done = 0;
+    _lb_walks = 0;
+    _on_threads(&_lb_run, 6);
+    assert_eq(_lb_bad, 0, "libro: every walk verifies, with retention rewriting the chain beside it");
+    assert(_lb_walks > 0, "libro: those walks ran");
+    assert(vec_len(load64(lb2)) <= 600 && _has(libro_tool_verify("{}", 0), "\"ok\":true") == 1, "libro: and the chain verifies after");
+
+    _on_threads(&_fc_worker, 6);
+    assert_eq(_fc_bad, 0, "fetch: children forked from six threads at once");
+    assert_eq(_fc_ok, 120, "fetch: each answered its own thread with its own number");
+
+    # ---------------- registering while serving (3.7.1) ----------------
+    _rg_d = dispatcher_new(tool_registry_new());
+    var rg_i = 0;
+    while (rg_i < 10) {
+        dispatcher_register_tool(_rg_d, tool_def_new(_rg_name("rg_base_", rg_i), "Base", schema_new("object", 0, vec_new())), &_rg_tool);
+        rg_i = rg_i + 1;
+    }
+    dispatcher_register_prompt(_rg_d, prompt_def_new("rgp_base", "Base", vec_new()), &_rg_prompt);
+    dispatcher_register_resource(_rg_d, resource_def_new("rg://base", "b", "B", "text/plain"), &_rg_res);
+    dispatcher_register_resource_template(_rg_d, resource_template_new("rgt://base/{x}", "t", "T", "text/plain"), &_rg_res);
+    _rg_msgs = alloc(20 * 8);
+    store64(_rg_msgs + 8, _rg_msg("tools/list", "{}"));
+    store64(_rg_msgs + 16, _rg_msg("prompts/list", "{}"));
+    store64(_rg_msgs + 24, _rg_msg("resources/list", "{}"));
+    store64(_rg_msgs + 32, _rg_msg("resources/templates/list", "{}"));
+    store64(_rg_msgs + 56, _rg_msg("resources/read", "{\"uri\":\"rg://base\"}"));
+    store64(_rg_msgs + 64, _rg_msg("prompts/get", "{\"name\":\"rgp_base\",\"arguments\":{}}"));
+    rg_i = 0;
+    while (rg_i < 10) {
+        store64(_rg_msgs + (10 + rg_i) * 8, _rg_msg("tools/call", _cat3("{\"name\":\"rg_base_", _rg_name("", rg_i), "\",\"arguments\":{}}")));
+        rg_i = rg_i + 1;
+    }
+    _on_threads(&_rg_run, 13);
+    assert_eq(_rg_bad, 0, "register: three threads looking up and one listing, while two register 1,000 tools, prompts, resources and templates each");
+    assert(_rg_calls > 100, "register: the readers ran");
+    assert_eq(_rg_torn, 0, "register: a tool and its handler appear and go together");
+    assert_eq(registry_len(dispatcher_registry(_rg_d)), 10 + 1 + RG_N, "register: the ten that stayed, the last one added and every one kept");
+    assert(registry_contains(dispatcher_registry(_rg_d), _rg_name("rg_dyn_", RG_N - 1)) == 1 && registry_contains(dispatcher_registry(_rg_d), _rg_name("rg_dyn_", RG_N - 2)) == 0, "register: the last added, the one before removed");
+    assert_eq(prompt_registry_len(dispatcher_prompts(_rg_d)), 1 + 2 * RG_N, "register: every prompt kept, from both writers");
+    assert_eq(resource_registry_len(dispatcher_resources(_rg_d)), 1 + RG_N, "register: every resource kept");
+    assert_eq(vec_len(resource_registry_templates(dispatcher_resources(_rg_d))), 1 + 2 * RG_N, "register: every template kept, from both writers");
+    var rg_has[8];
+    assert(_dsp_handler(_rg_d, _rg_name("rg_dyn_", RG_N - 1), &rg_has) == &_rg_tool && load64(&rg_has) == 1, "register: the last tool's handler is there");
+    _dsp_handler(_rg_d, "rg_dyn_5", &rg_has);
+    assert_eq(load64(&rg_has), 0, "register: a removed tool's is gone");
+    var rg_lost = 0;
+    rg_i = 0;
+    while (rg_i < RG_N) {
+        if (_dsp_handler(_rg_d, _rg_name("rg_grow_", rg_i), &rg_has) != &_rg_tool) { rg_lost = rg_lost + 1; }
+        rg_i = rg_i + 1;
+    }
+    assert_eq(rg_lost, 0, "register: every handler the second writer set is there");
+    _rt_reg = resource_registry_new();
+    _on_threads(&_rt_writer, 4);
+    assert_eq(vec_len(resource_registry_templates(_rt_reg)), 1200, "register: four threads registering templates at once lose none");
+    _hd_d = dispatcher_new(tool_registry_new());
+    _on_threads(&_hd_writer, 4);
+    assert_eq(map_count(dispatcher_handlers(_hd_d)), 1200, "register: four threads setting handlers at once lose none");
+
+    # ---------------- a failure that ends the process, from a worker ----------------
+    assert_eq(_ex_status(), 90, "exit: no entropy on a worker ends the process with 90, not the thread");
     #endif
     return assert_summary();
 }

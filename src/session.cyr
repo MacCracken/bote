@@ -131,6 +131,9 @@ fn _hex_byte(b, out) {
     return 0;
 }
 
+# A test's stand-in for random_bytes, fn (buf, n) → bytes filled, or 0 for the kernel's.
+var _bote_ses_random = 0;
+
 fn _gen_session_id() {
     var raw = alloc(16);
 
@@ -157,14 +160,18 @@ fn _gen_session_id() {
     # acceptable substitute for kernel entropy here — refuse to mint a
     # session ID rather than ship a guessable one. That fail-closed
     # contract is preserved exactly; only the source of the bytes changed.
-    var got = random_bytes(raw, 16);
+    var got = 0;
+    if (_bote_ses_random != 0) { got = fncall2(_bote_ses_random, raw, 16); }
+    else { got = random_bytes(raw, 16); }
     if (got != 16) {
         # 3.4.0: through sakshi (was a raw eprint). The exit is unchanged.
         var ln[BOTE_LOG_LINE_BYTES];
         bote_log_line(&ln, SK_FATAL, "kernel CSPRNG unavailable for session id; exiting 90");
         bote_log_int(&ln, "rc", got);
         bote_log_emit(&ln);
-        sys_exit(90);
+        # The whole process (3.7.1). sys_exit ends the calling thread alone, and on a worker
+        # that left the server up, the store's lock held by a thread that was gone.
+        sys_exit_group(90);
     }
     var i = 0;
     while (i < 16) {
@@ -249,9 +256,12 @@ var BOTE_SESSION_MAX = 4096;
 
 # Returns the new session id, or 0 when the store is full of live sessions.
 fn session_store_create(st, protocol_version) {
+    # The clock is read before the lock (3.7.1): a system call on most hosts, it need not
+    # hold the other workers.
+    var now = clock_now_ns();
     session_store_lock(st);
     if (vec_len(session_store_ids(st)) >= BOTE_SESSION_MAX) {
-        _ses_prune(st);
+        _ses_prune(st, now);
         if (vec_len(session_store_ids(st)) >= BOTE_SESSION_MAX) {
             session_store_unlock(st);
             return 0;
@@ -259,7 +269,6 @@ fn session_store_create(st, protocol_version) {
     }
     # Drawn only once there is room, so a full store keeps nothing for a refusal.
     var sid = _gen_session_id();
-    var now = clock_now_ns();
     var session = mcp_session_new(sid, protocol_version, now);
     map_set(session_store_sessions(st), sid, session);
     vec_push(session_store_ids(st), sid);
@@ -269,15 +278,15 @@ fn session_store_create(st, protocol_version) {
 
 # Validate and touch a session. Returns the session ptr or 0 if unknown.
 fn session_store_validate(st, sid) {
+    var now = clock_now_ns();
     session_store_lock(st);
     var s = map_get(session_store_sessions(st), sid);
     if (s == 0) {
         session_store_unlock(st);
         return 0;
     }
-    var now = clock_now_ns();
     if (now - mcp_session_last_active(s) >= session_store_timeout_ns(st)) {
-        _ses_prune(st);
+        _ses_prune(st, now);
         session_store_unlock(st);
         return 0;
     }
@@ -318,15 +327,15 @@ fn session_store_active_count(st) {
 
 # Prune sessions inactive longer than timeout. Returns the number pruned.
 fn session_store_prune_expired(st) {
+    var now = clock_now_ns();
     session_store_lock(st);
-    var n = _ses_prune(st);
+    var n = _ses_prune(st, now);
     session_store_unlock(st);
     return n;
 }
 
-# session_store_prune_expired, with the lock held.
-fn _ses_prune(st) {
-    var now = clock_now_ns();
+# session_store_prune_expired at `now`, with the lock held.
+fn _ses_prune(st, now) {
     var timeout = session_store_timeout_ns(st);
     var sessions = session_store_sessions(st);
     var ids = session_store_ids(st);

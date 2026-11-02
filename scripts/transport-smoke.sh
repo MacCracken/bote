@@ -417,10 +417,11 @@ grep -q 'worker threads workers=0' "$L/workers0.err" || err "workers: BOTE_WORKE
 hold 18378 3
 c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 "${H[@]}" -d "$INIT" http://127.0.0.1:18378/mcp)
 [ "$c" = "200" ] && err "workers: with BOTE_WORKERS=0 a held connection held nothing, which this check needs to show"
-BOTE_WORKERS=500 start workers500 "$L/workers500.err" $B streamable 18377
+# Twelve digits: a count past what an int of nine holds is held to the bound too (3.7.1).
+BOTE_WORKERS=500000000000 start workers500 "$L/workers500.err" $B streamable 18377
 wait_port 18377 || err "workers: nothing listening on 18377"
-grep -q 'BOTE_WORKERS past its bound; holding it there workers=500 max=64' "$L/workers500.err" && grep -q 'worker threads workers=64' "$L/workers500.err" \
-  || err "workers: 500 not held at 64: $(head -3 "$L/workers500.err")"
+grep -q 'BOTE_WORKERS past its bound; holding it there workers=999999999 max=64' "$L/workers500.err" && grep -q 'worker threads workers=64' "$L/workers500.err" \
+  || err "workers: a twelve-digit count not held at 64: $(head -3 "$L/workers500.err")"
 python3 -I -m http.server 18376 --bind 127.0.0.1 --directory "$jk" > /dev/null 2>&1 & pids+=($!)
 wait_port 18376 || err "workers: the key server did not start"
 env "${JENV[@]}" BOTE_LOG=debug BOTE_JWKS_URL=http://127.0.0.1:18376/full.json BOTE_JWKS_REFRESH=1 BOTE_WORKERS=4 \

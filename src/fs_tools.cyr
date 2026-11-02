@@ -99,7 +99,6 @@ fn _fs_unescape(src, len_out) {
 
 # ---- result builders ------------------------------------------------------
 
-var _fs_read_buf = 0;
 fn _fs_result(msg, is_err) {
     var sb = str_builder_new();
     var ml = strlen(msg);
@@ -229,8 +228,9 @@ fn fs_read_handler(args, claims) {
     if (_fs_walk_ok(full) == 0) {
         return _fs_refuse("fs_read", path, "fs_read: refused a path through a symlink");
     }
-    if (_fs_read_buf == 0) { _fs_read_buf = alloc(FS_READ_CAP + FS_READ_NOTE); }
-    var buf = _fs_read_buf;
+    # On the request arena, which is the calling thread's (3.7.1): one buffer for the
+    # process let two workers read into it at once, and hand a client another's file.
+    var buf = alloc_via(bote_req_alloc(), FS_READ_CAP + FS_READ_NOTE);
     # O_NONBLOCK: a FIFO with no writer would otherwise park this call, and with
     # it every client of the server.
     var fd = file_open(full, O_RDONLY | BOTE_O_NONBLOCK | O_NOFOLLOW, 0);

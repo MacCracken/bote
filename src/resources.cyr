@@ -232,27 +232,41 @@ fn resource_registry_templates(r) { return load64(r + 24); }
 fn resource_registry_register(r, resource_def, handler_fp) {
     if (bote_scope_list_ok(resource_def_required_scopes(resource_def)) == 0) { return 0 - 1; }
     var uri = resource_def_uri(resource_def);
+    # Under the registries' lock (3.7.1, src/protocol.cyr), as every function below.
+    bote_reg_write();
     var entries = resource_registry_entries(r);
     if (map_has(entries, uri) == 0) {
         vec_push(resource_registry_uris(r), uri);
     }
     map_set(entries, uri, resource_def);
     map_set(resource_registry_handlers(r), uri, handler_fp);
+    bote_reg_write_end();
     return 0;
 }
 
+fn _resource_registry_get_u(r, uri) { return map_get(resource_registry_entries(r), uri); }
+
 fn resource_registry_get(r, uri) {
-    return map_get(resource_registry_entries(r), uri);
+    bote_reg_read();
+    var d = _resource_registry_get_u(r, uri);
+    bote_reg_read_end();
+    return d;
 }
 
 fn resource_registry_contains(r, uri) {
-    return map_has(resource_registry_entries(r), uri);
+    bote_reg_read();
+    var h = map_has(resource_registry_entries(r), uri);
+    bote_reg_read_end();
+    return h;
 }
 
 # Read-handler fn ptr for `uri`, or 0 if the resource is unknown.
 fn resource_registry_handler(r, uri) {
-    if (map_has(resource_registry_handlers(r), uri) == 0) { return 0; }
-    return map_get(resource_registry_handlers(r), uri);
+    bote_reg_read();
+    var fp = 0;
+    if (map_has(resource_registry_handlers(r), uri) == 1) { fp = map_get(resource_registry_handlers(r), uri); }
+    bote_reg_read_end();
+    return fp;
 }
 
 # Register (or replace, by uriTemplate) a template + its read handler. Returns 0, or -1
@@ -260,21 +274,31 @@ fn resource_registry_handler(r, uri) {
 fn resource_registry_register_template(r, template, handler_fp) {
     if (bote_scope_list_ok(resource_template_required_scopes(template)) == 0) { return 0 - 1; }
     store64(template + 32, handler_fp);
+    bote_reg_write();
     var ts = resource_registry_templates(r);
     var i = 0;
-    while (i < vec_len(ts)) {
+    var placed = 0;
+    while (i < vec_len(ts) && placed == 0) {
         if (streq(resource_template_uri(vec_get(ts, i)), resource_template_uri(template)) == 1) {
             vec_set(ts, i, template);
-            return 0;
+            placed = 1;
         }
         i = i + 1;
     }
-    vec_push(ts, template);
+    if (placed == 0) { vec_push(ts, template); }
+    bote_reg_write_end();
     return 0;
 }
 
 # The first template `uri` matches, which is the one that serves it, or 0.
 fn resource_registry_template_for(r, uri) {
+    bote_reg_read();
+    var t = _resource_registry_template_for_u(r, uri);
+    bote_reg_read_end();
+    return t;
+}
+
+fn _resource_registry_template_for_u(r, uri) {
     var ts = resource_registry_templates(r);
     var i = 0;
     while (i < vec_len(ts)) {
@@ -287,13 +311,16 @@ fn resource_registry_template_for(r, uri) {
 
 # The template whose uriTemplate is `tpl` exactly, or 0: what a completion names.
 fn resource_registry_template_named(r, tpl) {
+    bote_reg_read();
     var ts = resource_registry_templates(r);
+    var found = 0;
     var i = 0;
-    while (i < vec_len(ts)) {
-        if (streq(resource_template_uri(vec_get(ts, i)), tpl) == 1) { return vec_get(ts, i); }
+    while (i < vec_len(ts) && found == 0) {
+        if (streq(resource_template_uri(vec_get(ts, i)), tpl) == 1) { found = vec_get(ts, i); }
         i = i + 1;
     }
-    return 0;
+    bote_reg_read_end();
+    return found;
 }
 
 # Read-handler fn ptr of the first template `uri` matches, or 0.
@@ -304,12 +331,16 @@ fn resource_registry_template_handler(r, uri) {
 }
 
 fn resource_registry_len(r) {
-    return map_count(resource_registry_entries(r));
+    bote_reg_read();
+    var n = map_count(resource_registry_entries(r));
+    bote_reg_read_end();
+    return n;
 }
 
 # Return a vec of ResourceDef pointers in insertion order.
 fn resource_registry_list(r) {
     var out = vec_new();
+    bote_reg_read();
     var uris = resource_registry_uris(r);
     var entries = resource_registry_entries(r);
     var n = vec_len(uris);
@@ -321,5 +352,6 @@ fn resource_registry_list(r) {
         }
         i = i + 1;
     }
+    bote_reg_read_end();
     return out;
 }

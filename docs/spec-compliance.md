@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.7.0 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.7.1 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
 > ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not. Every other table here is against 2025-11-25.
 
@@ -281,7 +281,7 @@ registered by default in the binaries.
 
 ---
 
-## Test Coverage (bote 3.7.0)
+## Test Coverage (bote 3.7.1)
 
 | Scope | Count | Source |
 |---|---|---|
@@ -294,17 +294,17 @@ registered by default in the binaries.
 | HostRegistry + IPv4 / IPv6 SSRF (URL and resolved address; each 3.4.7 range named) + the IPv6 parser against cyrius's + hot-reload | **207** | `tests/bote_host.tcyr` |
 | MCP 2026-07-28 on HTTP, each clause on the real handlers over a socketpair; Protected Resource Metadata; the 403 for a missing scope | **1833** | `tests/bote_http_era.tcyr` |
 | A `jwks_uri`: what it may be, and real fetches from a child | **49** | `tests/bote_jwks.tcyr` |
-| JWT — HS256, RS256, ES256, JWK Sets, exact `alg`, `crit`, `exp`, `nbf`, `aud`, `iss`, algorithm confusion, scopes, tokens already verified, keys from a source, no heap (mutation-proven) | **471** | `tests/bote_jwt.tcyr` |
+| JWT — HS256, RS256, ES256, JWK Sets, exact `alg`, `crit`, `exp`, `nbf`, `aud`, `iss`, algorithm confusion, scopes, tokens already verified, keys from a source, no heap (mutation-proven) | **483** | `tests/bote_jwt.tcyr` |
 | `libro_tools` incl. tampered-chain decode + populated-chain proof + CallToolResults, the retention guard, RFC 3339 timestamps, schemas, integers as validated, audit identity | **73** | `tests/bote_libro_tools.tcyr` |
 | Operational logging over sakshi | **50** | `tests/bote_log.tcyr` |
 | RFC 7636 PKCE-S256 | **17** | `tests/bote_pkce.tcyr` |
 | Sandbox runner adapter | **13** | `tests/bote_sandbox.tcyr` |
 | Streamable HTTP — event ids, resumption, per-session outbound, drain selection, a full store's refusal | **58** | `tests/bote_streamable.tcyr` |
-| bote on worker threads — each case driven from several threads at once (3.7.0) | **49** | `tests/bote_threads.tcyr` |
+| bote on worker threads — each case driven from several threads at once (3.7.0); bote's own tools and registering while serving (3.7.1) | **74** | `tests/bote_threads.tcyr` |
 | Unix transport — sockaddr, accept-error policy, backoff, deadlines, closed-peer write, overlong lines, socket-path refusals | **76** | `tests/bote_transport_unix.tcyr` |
 | `web_tools` — scheme guard, SSRF guard (URL and resolved address), HTML stripper, entities, schemas and annotations, outbound deadline, a request in a child | **88** | `tests/bote_web_tools.tcyr` |
 | WebSocket config + wire-up + the send-deadline drop + the upgrade's version check + scopes per frame + the token judged again | **94** | `tests/bote_ws.tcyr` |
-| **Total assertions** | **4499** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
+| **Total assertions** | **4536** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
 | Hot-path benchmarks | **36** | `tests/bote.bcyr` |
 | Fuzz harnesses | **12** | `fuzz/*.fcyr` (in CI since 3.3.8) |
 | End-to-end transport round trips | 6 (stdio, HTTP, Unix, bridge, streamable, WS) | CI's "Transport smoke" step plus a per-release stdio probe on the built binary |

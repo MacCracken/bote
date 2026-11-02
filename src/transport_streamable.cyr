@@ -249,8 +249,13 @@ fn strm_notify_sink(store) {
 #                         thread alone. With workers, bote's own state is safe
 #                         between them and the dispatcher's sinks take turns
 #                         (bote_conn_serial_sinks); a handler is called from any
-#                         of them. bote's fs, web and libro tools are not yet
-#                         safe there, and neither is registering while serving.
+#                         of them. bote's own tools are safe there, and so is
+#                         registering while serving (3.7.1). An ES256 verify
+#                         holds one of sigil's 64 crypto lanes while it runs,
+#                         and finding none free refuses the token: more than
+#                         64 workers verifying at once turn good tokens away.
+#                         Each worker keeps its own request arena, bounded by
+#                         the largest message it has served.
 # ================================================================
 
 fn streamable_config_new(path, addr, port) {

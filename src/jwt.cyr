@@ -800,9 +800,16 @@ fn _jwt_backoff(s) {
     return b;
 }
 
-# 1 when the source may be asked at `now`, last asked at `tried`.
+# 1 when the source may be asked at `now`, last asked at `tried`. A clock that went back
+# opens the gate, but not one that went back by less than the cooldown (3.7.1): that is a
+# worker that read the clock a second before another took the ask, and so would take it
+# again.
 fn _jwt_gate_at(s, tried, now) {
-    if (tried == 0 || now < tried) { return 1; }
+    if (tried == 0) { return 1; }
+    if (now < tried) {
+        if (tried - now > _jwt_cooldown(s)) { return 1; }
+        return 0;
+    }
     if (now - tried >= _jwt_backoff(s)) { return 1; }
     return 0;
 }
@@ -924,6 +931,11 @@ fn _jwt_refetch_for_kid(s, header, hlen) {
 var BOTE_JWT_SECRET_BYTES = 136;
 
 fn jwt_secret_new(key) {
+    # sigil builds its tables on first use, a claim flag held while it does. A fetch forked
+    # from one worker while another builds one leaves the child waiting on that flag, so a
+    # handle builds what its verifies will need now, on the thread making it (3.7.1): the
+    # SHA-256 tables here, the P-256 ones when it takes an EC key (_jwt_set_jwks).
+    sha256_global_init();
     var s = alloc(BOTE_JWT_SECRET_BYTES);
     memset(s, 0, BOTE_JWT_SECRET_BYTES);
     store64(s, key);
@@ -972,6 +984,7 @@ fn _jwt_set_jwks(s, json, changed_out) {
     i = 0;
     while (i < vec_len(fresh)) {
         vec_push(kept, _jwt_key_keep(vec_get(fresh, i)));
+        if (_jwt_key_alg(vec_get(fresh, i)) == BOTE_JWT_ES256) { ecdsa_p256_warm(); }
         i = i + 1;
     }
     i = 0;

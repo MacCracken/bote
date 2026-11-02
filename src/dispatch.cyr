@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.7.0"; }
+fn _bote_server_version() { return "3.7.1"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -193,19 +193,40 @@ fn dispatcher_set_notifications(d, on) { store64(d + 64, on); return d; }
 
 # Register a sync tool handler. **2.0 ABI**: handler signature is
 #   fn h(args_cstr, claims) → result_cstr (claims always 0 today)
+# The handler maps are under the registries' lock (3.7.1, src/protocol.cyr), as the
+# registries are: a threaded server reads them for every call.
 fn dispatcher_handle(d, name, handler_fp) {
+    bote_reg_write();
     map_set(dispatcher_handlers(d), name, handler_fp);
+    bote_reg_write_end();
     return 0;
 }
 
 # Register a streaming tool handler (placeholder — dispatch_streaming not yet ported).
 fn dispatcher_handle_streaming(d, name, handler_fp) {
+    bote_reg_write();
     map_set(dispatcher_streaming(d), name, handler_fp);
+    bote_reg_write_end();
     return 0;
 }
 
 fn dispatcher_is_streaming_tool(d, name) {
-    return map_has(dispatcher_streaming(d), name);
+    bote_reg_read();
+    var h = map_has(dispatcher_streaming(d), name);
+    bote_reg_read_end();
+    return h;
+}
+
+# The handler registered for tool `name`, through *has_out 1 when there is one (a handler
+# may be registered as 0), or 0.
+fn _dsp_handler(d, name, has_out) {
+    bote_reg_read();
+    var fp = 0;
+    var has = map_has(dispatcher_handlers(d), name);
+    if (has == 1) { fp = map_get(dispatcher_handlers(d), name); }
+    bote_reg_read_end();
+    store64(has_out, has);
+    return fp;
 }
 
 # Build {"tool_name":"<name>"} for a register/dereg/deprecate event payload.
@@ -225,9 +246,14 @@ fn dispatcher_register_tool(d, tool_def, handler_fp) {
     var name = tool_def_name(tool_def);
     var verr = validate_tool_name(name);
     if (verr != 0) { return verr; }
-    var rerr = registry_register(dispatcher_registry(d), tool_def);
+    var rerr = _registry_prepare(tool_def);
     if (rerr != 0) { return rerr; }
+    # The tool and its handler in one write (3.7.1), so a call on another worker never
+    # finds the one without the other; the event after, with nothing held.
+    bote_reg_write();
     map_set(dispatcher_handlers(d), name, handler_fp);
+    _registry_add_u(dispatcher_registry(d), tool_def);
+    bote_reg_write_end();
     event_sink_publish(dispatcher_event_sink(d), TOPIC_TOOL_REGISTERED(),
       _emit_tool_name_payload(name));
     return 0;
@@ -236,9 +262,11 @@ fn dispatcher_register_tool(d, tool_def, handler_fp) {
 # Returns 0 on success, BoteError ptr on failure (tool not found).
 # Emits TOPIC_TOOL_DEREGISTERED on success.
 fn dispatcher_deregister_tool(d, name) {
-    var removed = registry_deregister(dispatcher_registry(d), name);
+    bote_reg_write();
+    var removed = _registry_deregister_u(dispatcher_registry(d), name);
     map_delete(dispatcher_handlers(d), name);
     map_delete(dispatcher_streaming(d), name);
+    bote_reg_write_end();
     if (removed == 0) {
         return bote_err_new(BOTE_ERR_TOOL_NOT_FOUND, name, 0);
     }
@@ -516,12 +544,13 @@ fn _build_initialize_result_a(a, d, params_cstr) {
 
 # Build the prompts/list response result body.
 fn _build_prompts_list_result(a, preg) {
+    bote_reg_read();
     var names = prompt_registry_names(preg);
     var n = vec_len(names);
     var room = 32;
     var i = 0;
     while (i < n) {
-        var c = prompt_registry_get(preg, vec_get(names, i));
+        var c = _prompt_registry_get_u(preg, vec_get(names, i));
         room = room + 64 + _dsp_room(prompt_def_name(c)) + _dsp_room(prompt_def_description(c));
         var cargs = prompt_def_arguments(c);
         if (cargs != 0) {
@@ -540,7 +569,7 @@ fn _build_prompts_list_result(a, preg) {
     i = 0;
     while (i < n) {
         if (i > 0) { str_builder_add_cstr(sb, ","); }
-        var p = prompt_registry_get(preg, vec_get(names, i));
+        var p = _prompt_registry_get_u(preg, vec_get(names, i));
         str_builder_add_cstr(sb, "{");
         _json_emit_str_field(sb, "name", prompt_def_name(p));
         var pd = prompt_def_description(p);
@@ -575,6 +604,7 @@ fn _build_prompts_list_result(a, preg) {
         i = i + 1;
     }
     str_builder_add_cstr(sb, "]}");
+    bote_reg_read_end();
     return str_data(str_builder_build_a(a, sb));
 }
 
@@ -620,12 +650,13 @@ fn _dsp_tool_list_room(t) {
 }
 
 fn _build_tools_list_result_a(a, reg, profile) {
+    bote_reg_read();
     var sb = str_builder_new_a(a);
     var room = 64;
     var rnames = registry_names(reg);
     var ri = 0;
     while (ri < vec_len(rnames)) {
-        room = room + _dsp_tool_list_room(registry_get(reg, vec_get(rnames, ri)));
+        room = room + _dsp_tool_list_room(_registry_get_u(reg, vec_get(rnames, ri)));
         ri = ri + 1;
     }
     _sb_grow_a(a, sb, room);
@@ -634,7 +665,7 @@ fn _build_tools_list_result_a(a, reg, profile) {
     var i = 0;
     var emitted = 0;
     while (i < n) {
-        var t = registry_get(reg, vec_get(rnames, i));
+        var t = _registry_get_u(reg, vec_get(rnames, i));
         if (_tool_matches_profile(t, profile) == 0) {
             i = i + 1;
             continue;
@@ -662,6 +693,7 @@ fn _build_tools_list_result_a(a, reg, profile) {
         i = i + 1;
     }
     str_builder_add_cstr(sb, "]}");
+    bote_reg_read_end();
     return str_data(str_builder_build_a(a, sb));
 }
 
@@ -919,12 +951,13 @@ fn _prompt_missing_required(pdef, args_obj) {
 
 # Build the resources/list response result body.
 fn _build_resources_list_result(a, rreg) {
+    bote_reg_read();
     var uris = resource_registry_uris(rreg);
     var n = vec_len(uris);
     var room = 32;
     var i = 0;
     while (i < n) {
-        var c = resource_registry_get(rreg, vec_get(uris, i));
+        var c = _resource_registry_get_u(rreg, vec_get(uris, i));
         room = room + 64 + _dsp_room(resource_def_uri(c)) + _dsp_room(resource_def_name(c));
         room = room + _dsp_room(resource_def_description(c)) + _dsp_room(resource_def_mime_type(c));
         i = i + 1;
@@ -935,7 +968,7 @@ fn _build_resources_list_result(a, rreg) {
     i = 0;
     while (i < n) {
         if (i > 0) { str_builder_add_cstr(sb, ","); }
-        var r = resource_registry_get(rreg, vec_get(uris, i));
+        var r = _resource_registry_get_u(rreg, vec_get(uris, i));
         str_builder_add_cstr(sb, "{");
         _json_emit_str_field(sb, "uri", resource_def_uri(r));
         str_builder_add_cstr(sb, ",");
@@ -954,11 +987,13 @@ fn _build_resources_list_result(a, rreg) {
         i = i + 1;
     }
     str_builder_add_cstr(sb, "]}");
+    bote_reg_read_end();
     return str_data(str_builder_build_a(a, sb));
 }
 
 # Build the resources/templates/list response result body.
 fn _build_resource_templates_result(a, rreg) {
+    bote_reg_read();
     var ts = resource_registry_templates(rreg);
     var n = vec_len(ts);
     var room = 32;
@@ -994,6 +1029,7 @@ fn _build_resource_templates_result(a, rreg) {
         i = i + 1;
     }
     str_builder_add_cstr(sb, "]}");
+    bote_reg_read_end();
     return str_data(str_builder_build_a(a, sb));
 }
 
@@ -1255,7 +1291,6 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
     var method = req_method(request);
     var params = req_params(request);
     var reg = dispatcher_registry(d);
-    var handlers = dispatcher_handlers(d);
 
     if (streq(method, "tools/call") == 1) {
         var name = _jx_str_dec_at_a(a, params, plen, load64(pos));
@@ -1344,7 +1379,9 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
             name = _jx_str_dec_at_a(default_alloc(), params, plen, load64(pos));
             caller_id = _jx_str_at_a(default_alloc(), params, plen, load64(pos + 24));
         }
-        if (map_has(handlers, name) == 0) {
+        var has_fp[8];
+        var fp = _dsp_handler(d, name, &has_fp);
+        if (load64(&has_fp) == 0) {
             var nf = bote_err_new_a(a, BOTE_ERR_TOOL_NOT_FOUND, name, 0);
             var msg_nh = str_data(bote_err_format_a(a, nf));
             if (audit_on == 1 || events_on == 1) {
@@ -1358,7 +1395,6 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
             }
             return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(nf)), msg_nh);
         }
-        var fp = map_get(handlers, name);
         # A handler may keep `args` (2.0 ABI), so it reaches the heap here,
         # past every refusal, and not before.
         args = _slice_cstr(default_alloc(), args, 0, strlen(args));
