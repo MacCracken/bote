@@ -50,7 +50,7 @@ apps don't each reimplement the same protocol.
 | **`HostRegistry` + SSRF guard** — IPv4 + IPv6 blocklists for loopback, private, link-local, cloud-metadata | ✅ |
 | **Audit / events sinks** — fn-pointer + ctx adapters, libro + majra wired | ✅ |
 | **Streaming primitives** — `ProgressUpdate`, `CancellationToken`, progress notifications | data layer ✅ / threaded dispatch ⏳ (roadmap 3.5.x) |
-| **OAuth 2.1 substrate** — bearer (RFC 6750), JWT HS256 verifier, PKCE-S256 helpers | ✅ |
+| **OAuth 2.1 substrate** — bearer (RFC 6750), Protected Resource Metadata (RFC 9728), JWT HS256 verifier, PKCE-S256 helpers | ✅ |
 | **Sandbox runner** — fn-pointer + ctx adapter (kavach-shaped), noop default | ✅ in `dist/bote.cyr` (3.3.13); not in the core bundle |
 
 ---
@@ -95,6 +95,24 @@ BOTE_BEARER_TOKENS="tok-a,tok-b" ./build/bote http 8390
 
 Stdio + Unix sockets are local-only and skip the bearer check. `BOTE_BEARER_TOKENS` set with no
 token in it refuses to start.
+
+To have clients find their way to a token, name this server and the servers that issue its tokens:
+
+```sh
+BOTE_RESOURCE_URL="https://mcp.example.com/mcp" \
+BOTE_AUTH_SERVERS="https://auth.example.com" \
+BOTE_AUTH_SCOPES="files:read,files:write" \
+BOTE_BEARER_TOKENS="tok-a" ./build/bote http 8390
+# GET /.well-known/oauth-protected-resource/mcp → the RFC 9728 document, with no token
+# no token → 401 with WWW-Authenticate: Bearer resource_metadata="https://mcp.example.com/
+#   .well-known/oauth-protected-resource/mcp", scope="files:read files:write"
+```
+
+`BOTE_RESOURCE_URL` is the URL a client uses, exactly: a client refuses a document that names any
+other, so bote never builds it from a request. It must be https, or http on loopback. Works on
+`http`, `streamable` and `bridge`. Anything that cannot be published stops the server at startup.
+bote is the resource server: it names the authorization servers and issues nothing, and the
+validator is still what decides whether a token is good.
 
 ### Browsers
 
@@ -277,7 +295,7 @@ src/main_common.cyr        Entry helpers (dispatcher, mode selection, env bearer
 Dependencies rehydrate into `lib/` (gitignored) via `cyrius deps`.
 Cross-project deps **libro and majra** are git-pinned via
 `[deps.<name>]` in `cyrius.cyml`. Two consumer bundles ship in `dist/`:
-`bote.cyr` (full, 34 modules) and `bote-core.cyr` (core 13,
+`bote.cyr` (full, 35 modules) and `bote-core.cyr` (core 13,
 transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md). Both state
 **cyrius ≥ 6.7.13** on the `# Minimum cyrius:` line near the top of each (`bote-core.cyr` alone still builds from 6.7.2);
 a repo that copies the core bundle rather than pinning it must also declare
@@ -287,9 +305,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 3016 total across sixteen files (+ a core-only drift smoke)
+### Tests — 3176 total across sixteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 3016 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 3176 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 819 — core protocol/dispatch/codec/schema/session/transports
@@ -298,7 +316,7 @@ cyrius test tests/bote_auth.tcyr          # 55 — bearer + allowlist + JWT + PK
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 56 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 203 — host registry + SSRF guard (IPv4 + IPv6)
-cyrius test tests/bote_http_era.tcyr      # 1212 — MCP 2026-07-28 on HTTP, on the real handlers
+cyrius test tests/bote_http_era.tcyr      # 1372 — MCP 2026-07-28 on HTTP, on the real handlers
 cyrius test tests/bote_jwt.tcyr           # 59 — JWT HS256 verify + exact alg + exp enforcement
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
@@ -359,6 +377,7 @@ cyrius fuzz fuzz/codec_process.fcyr
 cyrius fuzz fuzz/jsonx_extract.fcyr
 cyrius fuzz fuzz/http_era.fcyr
 cyrius fuzz fuzz/jsonx_valid.fcyr
+cyrius fuzz fuzz/oauth_metadata.fcyr
 cyrius fuzz fuzz/resource_template.fcyr
 cyrius fuzz fuzz/schema_validate.fcyr
 cyrius fuzz fuzz/ssrf_ipv6.fcyr

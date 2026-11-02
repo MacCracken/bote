@@ -1,0 +1,228 @@
+# bote::oauth_metadata — OAuth 2.0 Protected Resource Metadata (RFC 9728).
+#
+# A server that takes tokens says where they come from. MCP requires it of a protected
+# server, in a document at a well-known URL that a client reads before it has a token,
+# so it is served ahead of the bearer check. The Origin check still comes first.
+#
+# The resource identifier comes from the operator and never from a request. A client
+# refuses a document whose `resource` is not the URL it asked for, and that comparison
+# is its defence against impersonation (RFC 9728 §7.3), so `Host` is not read here: bote
+# cannot know its public URL behind a proxy, and a client chooses what `Host` says.
+#
+# bote is the resource server and not the authorization server. It names the servers
+# that issue its tokens and takes no part in the flow.
+#
+# The document and the challenge a 401 carries are built once, here, so a request
+# allocates nothing for them. A bearer validator is what enforces a token: configuring
+# this says where to get one and requires nothing.
+
+var BOTE_PRM_WELL_KNOWN = "/.well-known/oauth-protected-resource";
+
+# ================================================================
+# Checking what the operator wrote
+# ================================================================
+
+# 1 when `c` may stand in one of these URLs: what RFC 3986 allows outside a query, a
+# fragment and userinfo. Each of these URLs goes out inside a quoted header parameter
+# too, so this is also what keeps a value from ending the parameter or the line.
+fn _prm_url_char(c) {
+    if (c <= 32 || c >= 127) { return 0; }
+    if (c == 34 || c == 35 || c == 60 || c == 62 || c == 63 || c == 64) { return 0; }
+    if (c == 92 || c == 94 || c == 96 || c == 123 || c == 124 || c == 125) { return 0; }
+    return 1;
+}
+
+# Where the host of `url` starts, or 0 unless `url` is one bote can publish: https, or
+# http on this machine. RFC 9728 makes a resource identifier an https URL, and MCP
+# serves an authorization server over https. A loopback server has no certificate to
+# show, and the traffic does not leave the machine.
+fn _prm_host_at(url) {
+    var at = 0;
+    if (memeq(url, "https://", 8) == 1) { at = 8; }
+    elif (memeq(url, "http://", 7) == 1) {
+        var n = _ses_loopback_len(url + 7);
+        if (n == 0) { return 0; }
+        var c = load8(url + 7 + n);
+        if (c != 0 && c != 58 && c != 47) { return 0; }
+        at = 7;
+    }
+    if (at == 0) { return 0; }
+    var first = load8(url + at);
+    if (first == 0 || first == 47 || first == 58) { return 0; }
+    var i = at;
+    while (load8(url + i) != 0) {
+        if (_prm_url_char(load8(url + i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return at;
+}
+
+# 1 when `s` is an RFC 6749 scope-token. The same set keeps it safe in a quoted parameter.
+fn _prm_scope_ok(s) {
+    if (s == 0 || load8(s) == 0) { return 0; }
+    var i = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c < 33 || c > 126 || c == 34 || c == 92) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Why these cannot be published, as a message, or 0 when they can. A refresh token is
+# not a resource requirement, so MCP says to leave `offline_access` out. Public, so a
+# caller can say why before it builds one.
+fn bote_prm_check(resource, servers, scopes) {
+    if (resource == 0 || _prm_host_at(resource) == 0) {
+        return "the resource must be an https URL, or http on loopback, with no query, fragment or userinfo";
+    }
+    if (servers == 0 || vec_len(servers) == 0) { return "at least one authorization server is required"; }
+    var i = 0;
+    while (i < vec_len(servers)) {
+        var s = vec_get(servers, i);
+        if (s == 0 || _prm_host_at(s) == 0) {
+            return "an authorization server must be an https URL, or http on loopback, with no query, fragment or userinfo";
+        }
+        i = i + 1;
+    }
+    if (scopes != 0) {
+        i = 0;
+        while (i < vec_len(scopes)) {
+            var sc = vec_get(scopes, i);
+            if (_prm_scope_ok(sc) == 0) { return "a scope must be a non-empty token with no space, quote or backslash"; }
+            if (streq(sc, "offline_access") == 1) { return "offline_access is not a resource's to require"; }
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# ================================================================
+# ProtectedResource — built once, read by every request
+# ================================================================
+#
+# Layout (32 bytes):
+#   +0  path       cstr, where the document is served
+#   +8  json       cstr, the document
+#   +16 json_len
+#   +24 challenge  cstr, what a 401 says after `Bearer`
+
+# RFC 9728 §3.1: the well-known path, then the resource's path, with a lone `/` gone.
+fn _prm_path(resource) {
+    var p = resource + _prm_host_at(resource);
+    while (load8(p) != 0 && load8(p) != 47) { p = p + 1; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, BOTE_PRM_WELL_KNOWN);
+    if (streq(p, "/") == 0) { str_builder_add_cstr(sb, p); }
+    return str_data(str_builder_build(sb));
+}
+
+fn _prm_add_array(sb, key, v) {
+    str_builder_add_cstr(sb, ",\"");
+    str_builder_add_cstr(sb, key);
+    str_builder_add_cstr(sb, "\":[");
+    var i = 0;
+    while (i < vec_len(v)) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"");
+        bote_json_escape(sb, vec_get(v, i));
+        str_builder_add_cstr(sb, "\"");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]");
+    return 0;
+}
+
+# `resource_metadata` must be absolute, and its scheme and host are the identifier's.
+fn _prm_challenge(resource, path, scopes) {
+    var hostlen = _prm_host_at(resource);
+    while (load8(resource + hostlen) != 0 && load8(resource + hostlen) != 47) { hostlen = hostlen + 1; }
+    var origin = alloc(hostlen + 1);
+    memcpy(origin, resource, hostlen);
+    store8(origin + hostlen, 0);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "resource_metadata=\"");
+    str_builder_add_cstr(sb, origin);
+    str_builder_add_cstr(sb, path);
+    str_builder_add_cstr(sb, "\"");
+    if (scopes != 0 && vec_len(scopes) > 0) {
+        str_builder_add_cstr(sb, ", scope=\"");
+        var i = 0;
+        while (i < vec_len(scopes)) {
+            if (i > 0) { str_builder_add_cstr(sb, " "); }
+            str_builder_add_cstr(sb, vec_get(scopes, i));
+            i = i + 1;
+        }
+        str_builder_add_cstr(sb, "\"");
+    }
+    return str_data(str_builder_build(sb));
+}
+
+# A ProtectedResource, or 0 when bote_prm_check refuses these. `resource` is the MCP
+# endpoint's public URL, exactly as a client reaches it. `servers` and `scopes` are vecs
+# of cstrs, and `scopes` and `name` may be 0.
+fn bote_prm_new(resource, servers, scopes, name) {
+    if (bote_prm_check(resource, servers, scopes) != 0) { return 0; }
+    var path = _prm_path(resource);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"resource\":\"");
+    bote_json_escape(sb, resource);
+    str_builder_add_cstr(sb, "\"");
+    _prm_add_array(sb, "authorization_servers", servers);
+    if (scopes != 0 && vec_len(scopes) > 0) { _prm_add_array(sb, "scopes_supported", scopes); }
+    str_builder_add_cstr(sb, ",\"bearer_methods_supported\":[\"header\"]");
+    if (name != 0) {
+        str_builder_add_cstr(sb, ",\"resource_name\":\"");
+        bote_json_escape(sb, name);
+        str_builder_add_cstr(sb, "\"");
+    }
+    str_builder_add_cstr(sb, "}");
+    var json = str_data(str_builder_build(sb));
+    var p = alloc(32);
+    store64(p, path);
+    store64(p + 8, json);
+    store64(p + 16, strlen(json));
+    store64(p + 24, _prm_challenge(resource, path, scopes));
+    return p;
+}
+
+fn bote_prm_path(p) { return load64(p); }
+fn bote_prm_json(p) { return load64(p + 8); }
+
+# What a 401 says, or 0 with no metadata configured, which leaves the plain challenge.
+fn bote_prm_challenge(p) {
+    if (p == 0) { return 0; }
+    return load64(p + 24);
+}
+
+# ================================================================
+# Serving it
+# ================================================================
+
+# Answer this request if it is for the document. 1 when it has been answered, however,
+# and 0 when it is not for the document, which with none configured costs one compare.
+fn bote_prm_route(hc, p, method, path, allowed_origins) {
+    if (p == 0) { return 0; }
+    var a = bote_req_alloc();
+    if (streq(sandhi_server_path_only_a(a, path), bote_prm_path(p)) == 0) { return 0; }
+    var cfd = _he_cfd(hc);
+    var transport = _he_transport(hc);
+    var buf = _he_buf(hc);
+    var n = _he_n(hc);
+    var origin = sandhi_server_find_header_a(a, buf, n, "Origin");
+    if (bote_http_origin_ok(origin, allowed_origins, buf, n) == 0) {
+        bote_http_refuse(cfd, SK_WARN, transport, HTTP_FORBIDDEN, "Forbidden", "origin");
+        return 1;
+    }
+    if (sandhi_server_find_header_a(a, buf, n, "Transfer-Encoding") != 0) {
+        bote_http_refuse(cfd, SK_WARN, transport, HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding");
+        return 1;
+    }
+    if (streq(method, "GET") == 0) {
+        bote_http_refuse_method(cfd, transport, "Allow: GET\r\n");
+        return 1;
+    }
+    sandhi_server_send_response_a(a, cfd, HTTP_OK, "OK", "application/json",
+      bote_prm_json(p), load64(p + 16), _he_extra(hc));
+    return 1;
+}

@@ -51,6 +51,7 @@ include "src/session.cyr"
 include "src/auth.cyr"
 include "src/conn.cyr"
 include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
 include "src/transport_http.cyr"
 include "src/bridge.cyr"
 include "src/transport_streamable.cyr"
@@ -66,6 +67,7 @@ fn h_claims(args, claims) {
     return "{\"content\":[]}";
 }
 fn _allow(token, ctx) { return "the-claims"; }
+fn _deny(token, ctx) { return 0; }
 
 fn _mk_d() {
     var reg = tool_registry_new();
@@ -109,6 +111,12 @@ fn _mk_d() {
 
 # 1 when `hay` holds `needle`.
 fn _has(hay, needle) { return strstr(hay, needle) >= 0; }
+
+fn _one_vec(s) {
+    var v = vec_new();
+    vec_push(v, s);
+    return v;
+}
 
 # ---- requests -----------------------------------------------------------------
 
@@ -201,8 +209,8 @@ fn _run(kind, raw) {
     store8(_rbuf + n, 0);
     # The bridge's endpoint is "/".
     if (kind == 2) {
-        var mp = strstr(_rbuf, "/mcp ");
-        memcpy(_rbuf + mp + 1, "   ", 3);
+        var mp = strstr(_rbuf, " /mcp ");
+        if (mp >= 0) { memcpy(_rbuf + mp + 2, "   ", 3); }
     }
     var sp[16];
     sys_socketpair(1, 1, 0, &sp);
@@ -283,6 +291,91 @@ fn _ohost(raw) {
     str_builder_add_cstr(sb, head);
     str_builder_add_cstr(sb, raw + at + 9);
     return str_data(str_builder_build(sb));
+}
+
+# A request for `target`, with no body.
+fn _get(verb, target, hdrs) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, verb);
+    str_builder_add_cstr(sb, " ");
+    str_builder_add_cstr(sb, target);
+    str_builder_add_cstr(sb, " HTTP/1.1\r\nHost: x\r\n");
+    str_builder_add_cstr(sb, hdrs);
+    str_builder_add_cstr(sb, "\r\n");
+    return str_data(str_builder_build(sb));
+}
+
+var _WK = "/.well-known/oauth-protected-resource/mcp";
+var _DOC = "{\"resource\":\"https://mcp.example.com/mcp\",\"authorization_servers\":[\"https://as.example.com\"],\"scopes_supported\":[\"files:read\",\"files:write\"],\"bearer_methods_supported\":[\"header\"],\"resource_name\":\"bote test\"}";
+var _CHALLENGE = "WWW-Authenticate: Bearer resource_metadata=\"https://mcp.example.com/.well-known/oauth-protected-resource/mcp\", scope=\"files:read files:write\"";
+
+fn _prm_set(k, p) {
+    if (k == 0) { http_config_with_resource_metadata(_http_cfg, p); }
+    elif (k == 1) { streamable_config_with_resource_metadata(_strm_cfg, p); }
+    else { bridge_config_with_resource_metadata(_brg_cfg, p); }
+    return 0;
+}
+
+fn _prm_bearer(k, fp, ctx) {
+    if (k == 0) { http_config_with_bearer_validator(_http_cfg, fp, ctx); }
+    elif (k == 1) { streamable_config_with_bearer_validator(_strm_cfg, fp, ctx); }
+    else { bridge_config_with_bearer_validator(_brg_cfg, fp, ctx); }
+    return 0;
+}
+
+# The status of `raw` on `k`.
+fn _st(k, raw) {
+    _run(k, raw);
+    return _status;
+}
+
+fn _metadata(k, prm) {
+    _prm_set(k, prm);
+    _prm_bearer(k, &_deny, 0);
+    assert_eq(_st(k, _get("GET", _WK, "")), 200, _nm(k, "metadata: served with no token"));
+    assert(streq(_body, _DOC) == 1, _nm(k, "metadata: the document"));
+    assert(_has(_head, "Content-Type: application/json"), _nm(k, "metadata: as JSON"));
+    assert_eq(_replies, 1, _nm(k, "metadata: one reply"));
+    assert_eq(_st(k, _get("GET", _WK, "Authorization: Bearer nope\r\n")), 200, _nm(k, "metadata: a bad token does not matter"));
+    assert_eq(_st(k, _get("GET", _cat3(_WK, "?x=1", ""), "")), 200, _nm(k, "metadata: a query is no other path"));
+    _run(k, _get("GET", _WK, "Host: evil.example\r\nX-Forwarded-Host: evil.example\r\n"));
+    assert(streq(_body, _DOC) == 1, _nm(k, "metadata: no header reaches the document"));
+    assert_eq(_st(k, _get("POST", _WK, "")), 405, _nm(k, "metadata: GET alone"));
+    assert(_has(_head, "Allow: GET\r\n"), _nm(k, "metadata: ...and says so"));
+    assert_eq(_st(k, _get("DELETE", _WK, "")), 405, _nm(k, "metadata: nor DELETE"));
+    assert_eq(_st(k, _get("GET", _WK, "Transfer-Encoding: chunked\r\n")), 400, _nm(k, "metadata: Transfer-Encoding is refused here too"));
+    assert_eq(_st(k, _get("GET", _WK, "Origin: https://evil.example\r\n")), 403, _nm(k, "metadata: a hostile Origin"));
+    assert_eq(_st(k, _get("GET", _cat3(_WK, "x", ""), "")) == 200, 0, _nm(k, "metadata: a longer path is not it"));
+    assert_eq(_st(k, _get("GET", "/.well-known/oauth-protected-resource", "")) == 200, 0, _nm(k, "metadata: nor is the root"));
+
+    # The 401.
+    _t(k, _raw("POST", _mh("tools/list", 0), _mb("tools/list", "")), 401, "", "no token, with metadata");
+    assert(_has(_head, _CHALLENGE), _nm(k, "challenge: names the metadata and the scope"));
+    assert(_has(_head, "realm=") == 0, _nm(k, "challenge: and no realm"));
+    assert(_has(_head, "error=") == 0, _nm(k, "challenge: no error with no token"));
+    _t(k, _raw("POST", _cat3(_mh("tools/list", 0), "Authorization: Bearer nope\r\n", ""), _mb("tools/list", "")), 401, "", "a bad token, with metadata");
+    assert(_has(_head, _CHALLENGE) && _has(_head, ", error=\"invalid_token\"\r\n"), _nm(k, "challenge: a refused token says so"));
+
+    if (k == 1) {
+        _t(1, _get("GET", "/mcp", ""), 401, "", "a GET with no token, with metadata");
+        assert(_has(_head, _CHALLENGE), "streamable: the stream's 401 names it too");
+    }
+
+    # Nothing here keeps a byte.
+    var long = _rep("x", 60000);
+    assert_eq(_heap_per(k, _get("GET", _WK, "")), 0, _nm(k, "heap: the document"));
+    assert_eq(_heap_per(k, _get("GET", _cat3(_WK, "/", long), "")), 0, _nm(k, "heap: a 60 KB path"));
+    assert_eq(_heap_per(k, _get("GET", _WK, _cat3("Origin: ", long, "\r\n"))), 0, _nm(k, "heap: a 60 KB Origin"));
+    assert_eq(_heap_per(k, _raw("POST", _mh("tools/list", 0), _mb("tools/list", ""))), 0, _nm(k, "heap: a 401"));
+    assert_eq(_heap_per(k, _raw("POST", _cat3(_mh("tools/list", 0), "Authorization: Bearer ", _cat3(long, "\r\n", "")), _mb("tools/list", ""))), 0, _nm(k, "heap: a 401 for a 60 KB token"));
+
+    # With none configured nothing changes.
+    _prm_set(k, 0);
+    assert_eq(_st(k, _get("GET", _WK, "")) == 200, 0, _nm(k, "metadata: not served unless configured"));
+    _t(k, _raw("POST", _mh("tools/list", 0), _mb("tools/list", "")), 401, "", "no token, no metadata");
+    assert(_has(_head, "WWW-Authenticate: Bearer realm=\"mcp\"\r\n"), _nm(k, "challenge: the plain one"));
+    _prm_bearer(k, 0, 0);
+    return 0;
 }
 
 fn _pc_legacy() {
@@ -603,6 +696,70 @@ fn main() {
     assert_eq(_he_status_for(0 - 32022), 400, "status: -32022");
     assert_eq(_he_status_for(0 - 32603), 200, "status: -32603");
     assert_eq(_he_status_for(0 - 32000), 200, "status: what the spec leaves open");
+    # ---- Protected Resource Metadata ----
+    var one = vec_new();
+    vec_push(one, "https://as.example.com");
+    assert_eq(bote_prm_check("https://mcp.example.com/mcp", one, 0), 0, "prm: the spec's example");
+    assert_eq(bote_prm_check("https://mcp.example.com", one, 0), 0, "prm: no path");
+    assert_eq(bote_prm_check("https://mcp.example.com:8443", one, 0), 0, "prm: a port");
+    assert_eq(bote_prm_check("https://mcp.example.com/server/mcp", one, 0), 0, "prm: a longer path");
+    assert_eq(bote_prm_check("https://mcp.example.com/", one, 0), 0, "prm: a trailing slash");
+    assert_eq(bote_prm_check("http://localhost:8390/mcp", one, 0), 0, "prm: http on localhost");
+    assert_eq(bote_prm_check("http://127.0.0.1/mcp", one, 0), 0, "prm: http on 127.0.0.1");
+    assert_eq(bote_prm_check("http://[::1]:8390/mcp", one, 0), 0, "prm: http on [::1]");
+    assert_eq(bote_prm_check("http://localhost", one, 0), 0, "prm: http on loopback, no path");
+    assert(bote_prm_check(0, one, 0) != 0, "prm refused: no resource");
+    assert(bote_prm_check("mcp.example.com", one, 0) != 0, "prm refused: no scheme, the spec's example");
+    assert(bote_prm_check("https://mcp.example.com#fragment", one, 0) != 0, "prm refused: a fragment, the spec's example");
+    assert(bote_prm_check("https://mcp.example.com?x=1", one, 0) != 0, "prm refused: a query");
+    assert(bote_prm_check("http://mcp.example.com/mcp", one, 0) != 0, "prm refused: http off loopback");
+    assert(bote_prm_check("http://localhost.evil.example/mcp", one, 0) != 0, "prm refused: a name that starts like localhost");
+    assert(bote_prm_check("http://127.0.0.10/mcp", one, 0) != 0, "prm refused: an address that starts like loopback");
+    assert(bote_prm_check("ftp://mcp.example.com", one, 0) != 0, "prm refused: another scheme");
+    assert(bote_prm_check("https://", one, 0) != 0, "prm refused: no host");
+    assert(bote_prm_check("https:///mcp", one, 0) != 0, "prm refused: an empty host");
+    assert(bote_prm_check("https://:8443", one, 0) != 0, "prm refused: a port alone");
+    assert(bote_prm_check("https://user@mcp.example.com", one, 0) != 0, "prm refused: userinfo");
+    assert(bote_prm_check("https://x/a b", one, 0) != 0, "prm refused: a space");
+    assert(bote_prm_check("https://x/a\"b", one, 0) != 0, "prm refused: a quote, which would end the parameter");
+    assert(bote_prm_check("https://x/a\\b", one, 0) != 0, "prm refused: a backslash");
+    assert(bote_prm_check("https://x/a\r\nSet-Cookie: 1", one, 0) != 0, "prm refused: a header injected");
+    assert(bote_prm_check("https://x/a\r\nSet-Cookie:1", one, 0) != 0, "prm refused: a header injected with no space to catch");
+    assert(bote_prm_check("https://x/a\x01b", one, 0) != 0, "prm refused: a control byte");
+    assert(bote_prm_check("https://x/a\x7Fb", one, 0) != 0, "prm refused: DEL");
+    assert(bote_prm_check("https://x/\xC3\xA9", one, 0) != 0, "prm refused: non-ASCII");
+    assert(bote_prm_check("https://mcp.example.com", 0, 0) != 0, "prm refused: no authorization servers");
+    assert(bote_prm_check("https://mcp.example.com", vec_new(), 0) != 0, "prm refused: an empty list of them");
+    var bad_as = vec_new();
+    vec_push(bad_as, "https://as.example.com");
+    vec_push(bad_as, "http://as.example.com");
+    assert(bote_prm_check("https://mcp.example.com", bad_as, 0) != 0, "prm refused: any bad authorization server");
+    var sc = vec_new();
+    assert_eq(bote_prm_check("https://x", one, sc), 0, "prm: no scopes");
+    vec_push(sc, "files:read");
+    assert_eq(bote_prm_check("https://x", one, sc), 0, "prm: a scope");
+    assert(bote_prm_check("https://x", one, _one_vec("a b")) != 0, "prm refused: a scope with a space");
+    assert(bote_prm_check("https://x", one, _one_vec("a\"b")) != 0, "prm refused: a scope with a quote");
+    assert(bote_prm_check("https://x", one, _one_vec("a\\b")) != 0, "prm refused: a scope with a backslash");
+    assert(bote_prm_check("https://x", one, _one_vec("a\r\nb")) != 0, "prm refused: a scope with CRLF");
+    assert(bote_prm_check("https://x", one, _one_vec("")) != 0, "prm refused: an empty scope");
+    assert(bote_prm_check("https://x", one, _one_vec("offline_access")) != 0, "prm refused: offline_access");
+    assert_eq(bote_prm_new("nope", one, 0, 0), 0, "prm: new refuses what the check refuses");
+
+    assert(streq(bote_prm_path(bote_prm_new("https://x", one, 0, 0)), "/.well-known/oauth-protected-resource") == 1, "prm path: no path");
+    assert(streq(bote_prm_path(bote_prm_new("https://x/", one, 0, 0)), "/.well-known/oauth-protected-resource") == 1, "prm path: a lone slash goes");
+    assert(streq(bote_prm_path(bote_prm_new("https://x:8443", one, 0, 0)), "/.well-known/oauth-protected-resource") == 1, "prm path: a port is not a path");
+    assert(streq(bote_prm_path(bote_prm_new("https://x:8443/a/b", one, 0, 0)), "/.well-known/oauth-protected-resource/a/b") == 1, "prm path: inserted ahead of the path");
+    assert(streq(bote_prm_path(bote_prm_new("https://x/a/", one, 0, 0)), "/.well-known/oauth-protected-resource/a/") == 1, "prm path: only a lone slash goes");
+    assert_eq(bote_prm_challenge(0), 0, "prm: no challenge with none configured");
+    assert(streq(bote_prm_challenge(bote_prm_new("https://x:8443/mcp", one, 0, 0)), "resource_metadata=\"https://x:8443/.well-known/oauth-protected-resource/mcp\"") == 1, "prm: a challenge with no scope");
+    assert(streq(bote_prm_challenge(bote_prm_new("https://x", one, vec_new(), 0)), "resource_metadata=\"https://x/.well-known/oauth-protected-resource\"") == 1, "prm: an empty list of scopes is none");
+    var noname = bote_prm_json(bote_prm_new("https://x", one, 0, 0));
+    assert(streq(noname, "{\"resource\":\"https://x\",\"authorization_servers\":[\"https://as.example.com\"],\"bearer_methods_supported\":[\"header\"]}") == 1, "prm: what has no value is left out");
+    assert(streq(bote_prm_json(bote_prm_new("https://x", one, vec_new(), 0)), noname) == 1, "prm: an empty list of scopes is left out too, RFC 9728 3.2");
+    var quoted = bote_prm_json(bote_prm_new("https://x", one, 0, "a\"b\n"));
+    assert(jsonx_valid(quoted, strlen(quoted)) == 1 && _has(quoted, "\"resource_name\":\"a\\\"b\\n\""), "prm: a name is escaped");
+
     assert_eq(bote_protocol_known("2026-07-28"), 1, "known: the modern revision");
     assert_eq(bote_protocol_known("2025-11-25"), 1, "known: a legacy revision");
     assert_eq(bote_protocol_known("1900-01-01"), 0, "known: not a revision");
@@ -655,6 +812,22 @@ fn main() {
     assert(_has(_body, "isError") == 0, "streamable: ...and runs it");
     http_config_with_session_store(_http_cfg, session_store_default());
     streamable_config_with_session_store(_strm_cfg, session_store_default());
+
+    var pa = vec_new();
+    vec_push(pa, "https://as.example.com");
+    var ps = vec_new();
+    vec_push(ps, "files:read");
+    vec_push(ps, "files:write");
+    var prm = bote_prm_new("https://mcp.example.com/mcp", pa, ps, "bote test");
+    _metadata(0, prm);
+    _metadata(1, prm);
+    _metadata(2, prm);
+    # A listed Origin reads the document, on the bridge with CORS.
+    _prm_set(2, prm);
+    _run(2, _get("GET", _WK, "Origin: http://localhost\r\n"));
+    assert_eq(_status, 200, "bridge: metadata, for a listed Origin");
+    assert(_has(_head, "Access-Control-Allow-Origin: http://localhost"), "bridge: ...with CORS");
+    _prm_set(2, 0);
 
     # An Origin. The rebinding pair is refused and the server's own loopback address
     # is not, with no list set. `Host` here is the harness's `x`, so each line names one.

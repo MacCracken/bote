@@ -30,7 +30,8 @@ revision's required list is features bote lacks. Each has a place below.
 
 ## Next patch
 
-**3.6.0 — Protected Resource Metadata.** The first item of 3.6.x. A defect found in 3.5.3 lands ahead of it.
+**3.6.1 — audience validation.** Item 3 of 3.6.x goes first: it is a `MUST`, and the `403` is a `SHOULD`. A
+defect found in 3.6.0 lands ahead of it.
 
 ## 3.5.x — MCP 2026-07-28, dual-era
 
@@ -61,14 +62,15 @@ bote is a resource server with bearer auth, and the 2026-07-28 authorization spe
 does not meet. Each is a `MUST` or `SHOULD` in the spec, and authorization as a whole is optional, so
 this applies when an operator turns auth on.
 
-1. **OAuth 2.0 Protected Resource Metadata (RFC 9728):** the well-known endpoint, which servers MUST
-   implement. Read `basic/authorization/authorization-server-discovery` for the path and fields.
-2. **`WWW-Authenticate`** on 401 with `resource_metadata` and `scope`, and `403` with
-   `error="insufficient_scope"` when a token lacks a scope.
-3. **Audience validation (RFC 8707).** Servers MUST validate that a token was issued for them, and today
-   `jwt.cyr` reads neither `aud` nor `iss`.
+1. **Audience validation (RFC 8707).** Servers MUST validate that a token was issued for them, and today
+   `jwt.cyr` reads neither `aud` nor `iss`. The resource identifier 3.6.0 configured is the value to compare.
+2. **`403` with `error="insufficient_scope"`** when a token lacks a scope, with `scope` and `resource_metadata`
+   in the challenge. A validator's return is opaque to bote, so bote cannot yet see what a token grants, and a
+   scope hierarchy is the server's to account for.
+3. **An audit of a real token.** The official client's OAuth flow has only met an allowlist validator, so
+   `scripts/conformance.sh` should run it against `jwt.cyr` once item 1 lands.
 4. **RS256 and ES256.** An OAuth 2.1 authorization server does not share an HS256 secret with its
-   resource servers, so HS256 alone cannot meet item 3 in practice. sigil has the primitives
+   resource servers, so HS256 alone cannot meet item 1 in practice. sigil has the primitives
    (`rsa_pkcs1v15_verify_sha256`, `ecdsa_p256_verify`), and `_jwt_str_field_eq` already reads `alg` as an
    exact field, which is the precondition for accepting more than one algorithm.
 

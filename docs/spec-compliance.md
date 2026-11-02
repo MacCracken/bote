@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.5.3 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.6.0 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
 > ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not. Every other table here is against 2025-11-25.
 
@@ -74,7 +74,7 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | An `x-mcp-header` that breaks the rules makes the tool invalid | ✅ (3.5.2) registration refuses it, since a client would drop the tool: an empty or non-token name, a type other than string, integer or boolean, a repeat ignoring case, or anywhere but a chain of `properties` keys |
 | Integers mirrored in a header stay in the safe range | ✅ (3.5.2) a value past ±(2^53 − 1) is refused with `-32020`, even with its header |
 | `-32021` for a missing client capability | ⏳ no request bote serves needs one yet; capabilities are required and not otherwise read |
-| A third-party client | ✅ (3.5.3) `@modelcontextprotocol/client` 2.4.0 connects and uses every capability bote has, 140 checks on `http`, `streamable` and stdio in both eras and `bridge` in the modern one. `./scripts/conformance.sh` repeats it |
+| A third-party client | ✅ (3.5.3) `@modelcontextprotocol/client` 2.4.0 connects and uses every capability bote has, 158 checks on `http`, `streamable` and stdio in both eras and `bridge` in the modern one, and (3.6.0) its whole OAuth flow. `./scripts/conformance.sh` repeats it |
 | `@modelcontextprotocol/conformance`, by its frozen requirement list | ⏳ (3.5.3) **25 of 37** on 2026-07-28, **21 of 30** on 2025-11-25, the same on `http` and `streamable`. What fails is a feature bote lacks: `InputRequiredResult`, progress, sampling and elicitation, logging, subscriptions. `tests/fixtures/conformance-expected-<revision>.yaml` lists each, and why |
 | `subscriptions/listen` and the rest of its notifications | ⏳ roadmap 3.7.x |
 
@@ -156,7 +156,7 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | Strict mode (empty allow-list rejects all) | same | ✅ |
 | CORS preflight (OPTIONS / + 3 ACA-* headers) | `bridge::_bridge_cors_headers` | ✅ |
 | **Bearer-token middleware (RFC 6750)** — opt-in fn-pointer + ctx validator on every HTTP-family transport | `auth::auth_bearer_check` + per-transport wiring | ✅ (1.9.0) |
-| **`WWW-Authenticate: Bearer realm="..."` on 401** | `auth::auth_send_unauthorized` | ✅ |
+| **`WWW-Authenticate: Bearer realm="mcp"` on 401**, with no metadata configured | `auth::auth_send_challenge` | ✅ |
 | **Built-in validators**: `auth_validator_allow_all` (dev), `auth_validator_allowlist` (vec membership) | `auth` | ✅ |
 | **`BOTE_BEARER_TOKENS` env var** wires an allowlist validator across all four HTTP-family transports at startup | `main::_bote_bearer_from_env` | ✅ (1.9.1) |
 | **HTTP body-length clamp** — `clen = min(clen, n - bo)` so a lying Content-Length can't make `memcpy` read past the request buffer | `transport_http`, `transport_streamable`, `bridge` | ✅ (1.5.1) |
@@ -165,7 +165,9 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | **RFC 7636 PKCE-S256** — `pkce_code_verifier` (CSPRNG) + `pkce_code_challenge_s256` | `pkce` | ✅ (2.3.0; ships in `dist/bote.cyr` since 3.2.0) |
 | **Pluggable sandbox runner** — fn-pointer + ctx adapter for tool handlers (kavach-shaped), noop default, error envelope on a null runner | `sandbox::sandbox_run` | ✅ (2.1.0; ships in `dist/bote.cyr` since **3.3.13** — before that it was in `src/` only and reached no consumer). Not in `dist/bote-core.cyr` |
 | Asymmetric JWT (RS256 / ES256) | — | ⏳ roadmap 3.6.x |
-| OAuth 2.0 Protected Resource Metadata (RFC 9728), `WWW-Authenticate` `resource_metadata` / `scope`, `insufficient_scope`, audience validation (RFC 8707) | — | ⏳ roadmap 3.6.x. Required of an HTTP server that does authorization |
+| OAuth 2.0 Protected Resource Metadata (RFC 9728): a document at `/.well-known/oauth-protected-resource` + the resource's path, with `resource` and at least one authorization server, readable with no token | `oauth_metadata` | ✅ (3.6.0) on `http`, `streamable` and `bridge`, from `bote_prm_new` or `BOTE_RESOURCE_URL` + `BOTE_AUTH_SERVERS` + `BOTE_AUTH_SCOPES`. `resource` is the operator's and never comes from a request (RFC 9728 §7.3). `scopes_supported`, `bearer_methods_supported` and `resource_name` go with it; `offline_access` is refused |
+| `resource_metadata` and `scope` in the `WWW-Authenticate` of a 401, and `error="invalid_token"` when a token was refused | `auth::auth_bearer_check_c` | ✅ (3.6.0), which meets both of MCP's discovery mechanisms at once. The official TypeScript client completes its OAuth flow on this, in both eras |
+| `403` with `error="insufficient_scope"`, audience validation (RFC 8707) | — | ⏳ roadmap 3.6.x |
 
 ## Transports
 

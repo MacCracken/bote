@@ -235,6 +235,34 @@ fn bote_main_origins_from_env() {
     return origins;
 }
 
+# BOTE_RESOURCE_URL: this server's public MCP endpoint, exactly as a client reaches it.
+# With BOTE_AUTH_SERVERS, the comma-separated servers that issue its tokens, and
+# BOTE_AUTH_SCOPES, its comma-separated scopes, it turns on Protected Resource Metadata.
+# Returns the ProtectedResource, 0 when it is off, or -1 when what is set cannot be
+# published: an operator who asked for this should not get a server without it.
+fn bote_main_resource_from_env(bearer_set) {
+    var url = getenv("BOTE_RESOURCE_URL");
+    var csv = getenv("BOTE_AUTH_SERVERS");
+    if (url == 0 && csv == 0) { return 0; }
+    var servers = _split_csv_tokens(csv);
+    var scopes = _split_csv_tokens(getenv("BOTE_AUTH_SCOPES"));
+    var why = bote_prm_check(url, servers, scopes);
+    var ln[BOTE_LOG_LINE_BYTES];
+    if (why != 0) {
+        bote_log_line(&ln, SK_ERROR, "resource metadata refused");
+        bote_log_str(&ln, "reason", why);
+        bote_log_emit(&ln);
+        return 0 - 1;
+    }
+    var p = bote_prm_new(url, servers, scopes, "bote");
+    bote_log_line(&ln, SK_INFO, "resource metadata enabled");
+    bote_log_str(&ln, "path", bote_prm_path(p));
+    bote_log_int(&ln, "servers", vec_len(servers));
+    bote_log_emit(&ln);
+    if (bearer_set == 0) { bote_log_warn("resource metadata is set and no bearer validator is: no token is required"); }
+    return p;
+}
+
 fn bote_main_conn_from_env() {
     BOTE_SEND_TIMEOUT_MS = _bote_env_ms("BOTE_SEND_TIMEOUT_MS", BOTE_SEND_TIMEOUT_MS);
     BOTE_UNIX_IDLE_MS = _bote_env_ms("BOTE_UNIX_IDLE_MS", BOTE_UNIX_IDLE_MS);

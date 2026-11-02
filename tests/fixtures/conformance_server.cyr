@@ -6,6 +6,8 @@
 #   conformance-server http [port]        HTTP, with sessions, default 8395
 #   conformance-server streamable [port]  Streamable HTTP, with sessions, default 8396
 #   conformance-server bridge [port]      the bridge, default 8397
+#   conformance-server auth <port> <as>   HTTP that wants a token, naming the authorization
+#                                         server on port <as>
 #   conformance-server                    stdio
 #
 # A scenario that needs what bote lacks stays failing here on purpose, and
@@ -34,6 +36,7 @@ include "src/jwt.cyr"
 include "src/pkce.cyr"
 include "src/conn.cyr"
 include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
 include "src/transport_stdio.cyr"
 include "src/transport_http.cyr"
 include "src/transport_unix.cyr"
@@ -218,6 +221,19 @@ fn main() {
         var hcfg = http_config_new("/mcp", INADDR_LOOPBACK(), _port(arg, 8395));
         http_config_with_session_store(hcfg, session_store_default());
         return transport_http_run(d, hcfg);
+    }
+    if (streq(mode, "auth") == 1) {
+        var port = _port(arg, 8398);
+        var servers = vec_new();
+        vec_push(servers, _cat("http://127.0.0.1:", argv(3), ""));
+        var scopes = vec_new();
+        vec_push(scopes, "mcp:read");
+        var tokens = vec_new();
+        vec_push(tokens, "fixture-token");
+        var acfg = http_config_new("/mcp", INADDR_LOOPBACK(), port);
+        http_config_with_bearer_validator(acfg, &auth_validator_allowlist, tokens);
+        http_config_with_resource_metadata(acfg, bote_prm_new(_cat("http://127.0.0.1:", arg, "/mcp"), servers, scopes, "fixture"));
+        return transport_http_run(d, acfg);
     }
     if (streq(mode, "bridge") == 1) {
         return transport_bridge_run(d, bridge_config_new(INADDR_LOOPBACK(), _port(arg, 8397)));

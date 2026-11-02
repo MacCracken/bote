@@ -48,6 +48,7 @@ modules = [
     "src/pkce.cyr",
     "src/conn.cyr",
     "src/http_era.cyr",
+    "src/oauth_metadata.cyr",
     "src/transport_stdio.cyr",
     "src/transport_http.cyr",
     "src/transport_unix.cyr",

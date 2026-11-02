@@ -73,6 +73,7 @@ include "src/pkce.cyr"
 # conn.cyr — per-connection send / idle deadlines every transport applies (3.4.3).
 include "src/conn.cyr"
 include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
 include "src/transport_stdio.cyr"
 include "src/transport_http.cyr"
 include "src/transport_unix.cyr"
@@ -132,6 +133,8 @@ fn main() {
     var allowed_origins = bote_main_origins_from_env();
     var bearer_fp = load64(&auth_fp_slot);
     var bearer_ctx = load64(&auth_ctx_slot);
+    var prm = bote_main_resource_from_env(bearer_fp != 0);
+    if (prm == 0 - 1) { return 2; }
 
     # streamable and ws keep the tool set they had as separate binaries:
     # the echo / greeting / info references only. The libro, fs and web
@@ -157,6 +160,7 @@ fn main() {
         var scfg = streamable_config_new("/mcp", INADDR_LOOPBACK(), sport);
         streamable_config_with_session_store(scfg, session_store);
         streamable_config_with_allowed_origins(scfg, allowed_origins);
+        streamable_config_with_resource_metadata(scfg, prm);
         if (bearer_fp != 0) { streamable_config_with_bearer_validator(scfg, bearer_fp, bearer_ctx); }
         bote_main_log_start("streamable", sport, 0, bearer_fp != 0);
         return bote_main_log_exit("streamable", transport_streamable_run(sdisp, scfg));
@@ -195,6 +199,7 @@ fn main() {
         if (arg != 0) { port = bote_main_port(arg, 8390); }
         var cfg = http_config_new("/mcp", INADDR_LOOPBACK(), port);
         http_config_with_allowed_origins(cfg, allowed_origins);
+        http_config_with_resource_metadata(cfg, prm);
         if (bearer_fp != 0) { http_config_with_bearer_validator(cfg, bearer_fp, bearer_ctx); }
         bote_main_log_start("http", port, 0, bearer_fp != 0);
         return bote_main_log_exit("http", transport_http_run(dispatcher, cfg));
@@ -212,6 +217,7 @@ fn main() {
         if (arg != 0) { bport = bote_main_port(arg, 8391); }
         var bcfg = bridge_config_new(INADDR_LOOPBACK(), bport);
         bridge_config_with_origins(bcfg, allowed_origins);
+        bridge_config_with_resource_metadata(bcfg, prm);
         if (bearer_fp != 0) { bridge_config_with_bearer_validator(bcfg, bearer_fp, bearer_ctx); }
         bote_main_log_start("bridge", bport, 0, bearer_fp != 0);
         return bote_main_log_exit("bridge", transport_bridge_run(dispatcher, bcfg));

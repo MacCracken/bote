@@ -51,6 +51,14 @@ The primary security-relevant surface areas are:
   request to the same rules. A tool's author should not mark a secret with
   `x-mcp-header`: the value goes out in a header, visible to every intermediary. bote
   logs no header value, and a refusal names the header and not its value.
+- **Protected Resource Metadata** — since **3.6.0** a server can publish RFC 9728 metadata, and
+  it is public on purpose, because a client reads it to learn where to get a token. It says
+  nothing a client could not be told. The `resource` in it comes from the operator and
+  never from a request: a client compares it with the URL it used, and that is its defence
+  against impersonation, so a `Host` an attacker chose must not reach it. Every value is checked
+  at startup, so none can end a quoted header parameter or split a line, and what fails
+  stops the server. The document says where to get a token and enforces nothing: the
+  bearer validator does that, and a server with metadata and no validator logs a WARN.
 - **Memory** — `alloc` never frees, so what a request leaves on the heap stays for
   the life of the process. Since **3.4.15** everything bote allocates to answer a
   message goes on a request arena that the next message rewinds, including

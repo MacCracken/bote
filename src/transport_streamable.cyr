@@ -235,7 +235,7 @@ fn strm_notify_sink(store) {
 # ================================================================
 
 fn streamable_config_new(path, addr, port) {
-    var c = alloc(80);
+    var c = alloc(88);
     store64(c, path);
     store64(c + 8, addr);
     store64(c + 16, port);
@@ -246,8 +246,12 @@ fn streamable_config_new(path, addr, port) {
     store64(c + 56, 0);
     store64(c + 64, 0);
     store64(c + 72, 0);
+    store64(c + 80, 0);
     return c;
 }
+
+fn streamable_config_with_resource_metadata(c, p) { store64(c + 80, p); return c; }
+fn streamable_config_resource_metadata(c) { return load64(c + 80); }
 
 fn streamable_config_with_allowed_origins(c, vec) { store64(c + 24, vec); return c; }
 fn streamable_config_with_require_protocol(c, r)  { store64(c + 32, r);   return c; }
@@ -359,10 +363,10 @@ fn _strm_handle_post(cfd, buf, n, config) {
     if (sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Transfer-Encoding") != 0) {
         bote_http_refuse(cfd, SK_WARN, "streamable", HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding"); return 0;
     }
-    if (auth_bearer_check(cfd, buf, n,
+    if (auth_bearer_check_c(cfd, buf, n,
         streamable_config_bearer_validator(config),
         streamable_config_bearer_ctx(config),
-        &claims_slot) != 0) { return 0; }
+        &claims_slot, bote_prm_challenge(streamable_config_resource_metadata(config))) != 0) { return 0; }
 
     var bo = sandhi_server_body_offset(buf, n);
     if (bo < 0 || bo > n) {
@@ -494,10 +498,10 @@ fn _strm_handle_get(cfd, buf, n, config) {
     if (sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Transfer-Encoding") != 0) {
         bote_http_refuse(cfd, SK_WARN, "streamable", HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding"); return 0;
     }
-    if (auth_bearer_check(cfd, buf, n,
+    if (auth_bearer_check_c(cfd, buf, n,
         streamable_config_bearer_validator(config),
         streamable_config_bearer_ctx(config),
-        0) != 0) { return 0; }
+        0, bote_prm_challenge(streamable_config_resource_metadata(config))) != 0) { return 0; }
     var gv = sandhi_server_find_header_a(bote_req_alloc(), buf, n, "MCP-Protocol-Version");
     if (gv != 0 && _mcp_is_modern(gv) == 1) {
         bote_http_refuse_method(cfd, "streamable", "Allow: POST\r\n");
@@ -571,6 +575,10 @@ fn _strm_handle(config, cfd, buf, n) {
     var a = bote_req_begin();
     var method = sandhi_server_get_method_a(a, buf, n);
     var path   = sandhi_server_get_path_a(a, buf, n);
+    var hc[40];
+    bote_http_ctx(&hc, cfd, "streamable", buf, n, 0);
+    if (bote_prm_route(&hc, streamable_config_resource_metadata(config), method, path,
+        streamable_config_allowed_origins(config)) == 1) { return 0; }
 
     # Path must match the configured endpoint (strip query first).
     if (streq(sandhi_server_path_only_a(bote_req_alloc(), path), streamable_config_path(config)) == 0) {

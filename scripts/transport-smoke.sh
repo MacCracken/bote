@@ -183,6 +183,24 @@ h=$(curl -s -D - -o /dev/null -X OPTIONS -H 'Origin: https://ok.example' http://
 echo "$h" | grep -qi '^access-control-allow-origin: https://ok.example' || err "bridge did not allow a listed Origin: $h"
 c=$(curl -s -o /dev/null -w '%{http_code}' -H 'Origin: https://evil.example' -d "$INIT" http://127.0.0.1:18396/)
 [ "$c" = "403" ] || err "bridge with a list answered a hostile Origin with $c, not 403"
+# Protected Resource Metadata: public where the rest wants a token, and a 401 points at it.
+BOTE_RESOURCE_URL=http://127.0.0.1:18397/mcp BOTE_AUTH_SERVERS=https://as.example.com BOTE_AUTH_SCOPES=mcp:read \
+  BOTE_BEARER_TOKENS=tok start prm "$L/prm.err" $B http 18397
+wait_port 18397 || err "nothing listening on 18397"
+r=$(curl -s -w ' HTTP%{http_code}' http://127.0.0.1:18397/.well-known/oauth-protected-resource/mcp)
+echo "$r" | grep -q '"resource":"http://127.0.0.1:18397/mcp","authorization_servers":\["https://as.example.com"\].* HTTP200$' \
+  || err "the metadata document: $r"
+h=$(curl -s -D - -o /dev/null -X POST -H 'Content-Type: application/json' -d "$INIT" http://127.0.0.1:18397/mcp)
+echo "$h" | sed -n 1p | grep -q ' 401 ' || err "no token, metadata on: $h"
+echo "$h" | grep -qi '^www-authenticate: Bearer resource_metadata="http://127.0.0.1:18397/.well-known/oauth-protected-resource/mcp", scope="mcp:read"' \
+  || err "the 401 does not name the metadata: $h"
+# What cannot be published stops the server, which says why. These go to .held.
+rc=0; BOTE_RESOURCE_URL=http://example.com/mcp BOTE_AUTH_SERVERS=https://as.example.com timeout 5 $B http 18399 2> "$L/prm-http.held" || rc=$?
+[ "$rc" -eq 2 ] || err "a resource on plain http off loopback: rc=$rc, not 2"
+grep -q '\[ERROR\] resource metadata refused' "$L/prm-http.held" || err "no reason for the refused resource: $(cat "$L/prm-http.held")"
+rc=0; BOTE_AUTH_SERVERS=https://as.example.com timeout 5 $B http 18399 2> "$L/prm-half.held" || rc=$?
+[ "$rc" -eq 2 ] || err "authorization servers with no resource: rc=$rc, not 2"
+
 # A session exists once initialize has succeeded (3.4.15): a refused one gets none.
 h=$(curl -s -D - -o /dev/null "${H[@]}" -d '{"method":"initialize"' http://127.0.0.1:18392/mcp)
 echo "$h" | grep -qi '^mcp-session-id:' && err "a refused initialize was given a session: $h"

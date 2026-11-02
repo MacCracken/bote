@@ -18,6 +18,89 @@ have per release.
 
 _(empty)_
 
+## [3.6.0] — 2026-11-01 · A client can find out where to get a token
+
+MCP requires a protected server to say which authorization servers issue its tokens, and until now bote could not. A client
+that hit a 401 had nowhere to go. With OAuth 2.0 Protected Resource Metadata (RFC 9728) configured, a 401 names a document, the
+document names the authorization server, and the client gets a token and comes back.
+
+**The official client has done exactly that.** `@modelcontextprotocol/client` 2.4.0's `ClientCredentialsProvider` was pointed at a
+protected bote and a small mock authorization server: it took the 401, followed `resource_metadata`, read the document, found
+the server, asked for a token bound to this resource with `resource=`, and retried, in both eras, with nothing else to go on.
+The conformance suite has no resource-server scenario, so that is the third-party evidence here. It ran against an allowlist
+validator: a real JWT has not been through it.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged, and with nothing configured every byte on the wire is
+what it was, apart from the fix below.
+
+### Added
+
+- **`src/oauth_metadata.cyr`**, on `bote http`, `bote streamable` and `bote bridge`. `bote_prm_new(resource, servers, scopes, name)`
+  builds the document and the 401's challenge once, at startup, and `http_config_with_resource_metadata`, and its two siblings,
+  turn it on. The document is at `/.well-known/oauth-protected-resource` plus the resource's path, as RFC 9728 §3.1 has it:
+
+  ```json
+  {"resource":"https://mcp.example.com/mcp","authorization_servers":["https://auth.example.com"],
+   "scopes_supported":["files:read"],"bearer_methods_supported":["header"],"resource_name":"bote"}
+  ```
+
+  It is served ahead of the bearer check, because a client reads it before it has a token, and after the Origin check, as
+  everything is. `GET` alone, with `405` and `Allow` for the rest.
+- **`BOTE_RESOURCE_URL`, `BOTE_AUTH_SERVERS`, `BOTE_AUTH_SCOPES`** set it up in the binary. What cannot be published stops the
+  server with exit 2 and the reason, as `BOTE_BEARER_TOKENS` with no token does, and so does either of the first two without the
+  other. Metadata with no bearer validator logs a WARN: it says where to get a token and requires none.
+- **`bote_prm_check`** says why something cannot be published. A resource or an authorization server must be https, or http on
+  loopback, with no query, fragment or userinfo. There must be at least one authorization server. A scope must be an RFC 6749
+  token. `offline_access` is refused, because MCP says a resource does not require it.
+- **`resource_metadata` and `scope` on a 401**, through `auth_bearer_check_c(..., challenge)` and `bote_prm_challenge`.
+  `auth_send_challenge` builds the header. `auth_bearer_check` keeps its shape.
+- **`conformance-server auth`** and the OAuth flow in `tests/fixtures/conformance_client.mjs`, 18 checks across both eras.
+- `fuzz/oauth_metadata.fcyr`: whatever `bote_prm_check` accepts stays inside its header parameter, on one line, and the document
+  stays valid JSON that reads back as what was configured.
+
+### Changed
+
+- **A 401 for a refused token carries `error="invalid_token"`**, as RFC 6750 §3.1 asks, with metadata or without. A request with
+  no token gets no error code. This is the one change to the wire with nothing configured.
+- `http_config_new`, `streamable_config_new` and `bridge_config_new` each gain a tail field, `resource_metadata`.
+- `dist/bote.cyr` has 35 modules.
+
+### Security
+
+- **`resource` comes from the operator and never from a request.** A client compares it with the URL it used, which is its
+  defence against impersonation (RFC 9728 §7.3), so bote does not read `Host` to build it, and a test sends a hostile `Host` and
+  `X-Forwarded-Host` and gets the same bytes back.
+- Every configured value is checked at startup, so none can end a quoted header parameter or split a line.
+
+### Tests
+
+- 3,176 assertions, from 3,016, on x86_64 and under `qemu-aarch64`. `tests/bote_http_era.tcyr` has 1,372, from 1,212: every rule on
+  all three transports, the spec's own valid and invalid URIs, and 0 heap bytes for the document and for a 401, with 60 KB in the
+  path, the Origin and the token.
+- `scripts/transport-smoke.sh` runs it on the real binary, and proves a bad configuration stops the server.
+- 67 mutants, all killed. One survivor was a test that could not fail: the CRLF injection case held a space, so the space rule
+  refused it and the control-byte rule was never reached. Another showed nothing proved that an empty scope list is left out of
+  the document, which RFC 9728 §3.2 requires, on the path the binary takes.
+
+### Performance
+
+No regression. Interleaved A/B, 15 alternating rounds, pinned to one core, 3.5.3 against this tree. The machine was busy with
+other work, so this compares minimums, in ns, which load cannot lower:
+
+| Bench | 3.5.3 | 3.6.0 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 4,116 | 4,163 | +1.1% |
+| `dispatch_tools_call` | 2,191 | 2,223 | +1.5% |
+| `http_era_legacy` | 2,538 | 2,526 | −0.5% |
+| `http_era_modern` | 11,729 | 11,701 | −0.2% |
+| `auth_bearer_check_unset` | 8 | 8 | 0.0% |
+| `auth_bearer_check_set` | 845 | 841 | −0.5% |
+
+A first build took `auth_bearer_check_unset` from 8 to 16 ns, a wrapper's extra call before it could return. It returns first now.
+
+Stdio is byte-identical to 3.5.3 over 200,000 messages, and HTTP with no auth configured on 50 of 50 cases, with only the version
+string aligned.
+
 ## [3.5.3] — 2026-11-01 · The official MCP client and conformance suite have run against bote
 
 Until this release, every claim about MCP conformance here was bote's own reading of the spec. Now the official

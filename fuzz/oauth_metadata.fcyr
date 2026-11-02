@@ -1,0 +1,114 @@
+# Fuzz: what an operator configures goes out inside a quoted header parameter and a JSON
+# document, on every 401 and to anyone who asks. Each property has its own exit code:
+#
+#   10  whatever bote_prm_check accepts cannot leave its parameter: the challenge is one
+#       line, with exactly the quotes bote wrote;
+#   20  and the document is valid JSON that reads back as what was configured.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/auth.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+
+alloc_init();
+sakshi_set_level(SK_ERROR);
+
+var _sub = "\x01\t\n\r \"'\\/:?#@%.[]{}<>^`|~0aZ\x7F\xC3\xFF";
+
+fn _count(s, c) {
+    var n = 0;
+    var i = 0;
+    while (load8(s + i) != 0) {
+        if (load8(s + i) == c) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn _judge(resource, server, scope) {
+    var servers = vec_new();
+    vec_push(servers, server);
+    var scopes = vec_new();
+    vec_push(scopes, scope);
+    if (bote_prm_check(resource, servers, scopes) != 0) { return 0; }
+    var p = bote_prm_new(resource, servers, scopes, "name");
+    if (p == 0) { sys_exit(10); }
+    var c = bote_prm_challenge(p);
+    if (_count(c, 13) != 0 || _count(c, 10) != 0 || _count(c, 92) != 0 || _count(c, 34) != 4) { sys_exit(10); }
+    var j = bote_prm_json(p);
+    if (jsonx_valid(j, strlen(j)) == 0) { sys_exit(20); }
+    var a = default_alloc();
+    var got = jsonx_get_str_dec_a(a, j, "resource");
+    if (got == 0 || streq(got, resource) == 0) { sys_exit(20); }
+    return 1;
+}
+
+# `s` with each byte replaced by each of _sub, and each result passed to `f`.
+fn _sweep(which, s) {
+    var n = strlen(s);
+    var t = alloc(n + 1);
+    var i = 0;
+    while (i < n) {
+        var si = 0;
+        while (si < strlen(_sub)) {
+            memcpy(t, s, n);
+            store8(t + n, 0);
+            store8(t + i, load8(_sub + si));
+            if (which == 0) { _judge(t, "https://as.example.com", "files:read"); }
+            elif (which == 1) { _judge("https://mcp.example.com/mcp", t, "files:read"); }
+            else { _judge("https://mcp.example.com/mcp", "https://as.example.com", t); }
+            si = si + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+if (_judge("https://mcp.example.com/mcp", "https://as.example.com", "files:read") != 1) { sys_exit(10); }
+_sweep(0, "https://mcp.example.com:8443/a/mcp");
+_sweep(0, "http://127.0.0.1:8390/mcp");
+_sweep(1, "https://as.example.com/tenant");
+_sweep(2, "files:read");
+
+sys_exit(0);

@@ -1,9 +1,10 @@
 // The official TypeScript client against bote's conformance fixture, over every
 // transport the client has, in each era. The suite speaks HTTP alone, so this is what
 // puts a third-party client on stdio. Run it through scripts/conformance.sh.
-import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { Client, ClientCredentialsProvider, StreamableHTTPClientTransport, extractWWWAuthenticateParams, discoverOAuthProtectedResourceMetadata } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 
 const BIN = process.argv[2];
 let fails = 0;
@@ -73,6 +74,66 @@ async function exercise(label, transport, mode, want) {
   console.log(`${fails === before ? 'ok  ' : 'FAIL'} ${label.padEnd(20)} ${version}`);
 }
 
+// The whole of OAuth against a protected bote, through the client's own provider: bote
+// says no, names its metadata, the metadata names an authorization server, and a token
+// from there is let in. The authorization server is the smallest that can answer.
+async function oauth(mode) {
+  const label = `oauth/${mode}`;
+  const before = fails;
+  const asPort = 19530;
+  const port = mode === 'legacy' ? 19531 : 19532;
+  const issuer = `http://127.0.0.1:${asPort}`;
+  const resource = `http://127.0.0.1:${port}/mcp`;
+  const seen = [];
+  const as = createServer((req, res) => {
+    let body = '';
+    req.on('data', d => { body += d; });
+    req.on('end', () => {
+      seen.push({ url: req.url, body });
+      res.setHeader('Content-Type', 'application/json');
+      if (req.url === '/.well-known/oauth-authorization-server') {
+        res.end(JSON.stringify({ issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`,
+          response_types_supported: ['code'], grant_types_supported: ['client_credentials'],
+          token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'] }));
+      } else if (req.url === '/token') {
+        res.end(JSON.stringify({ access_token: 'fixture-token', token_type: 'Bearer', expires_in: 3600 }));
+      } else {
+        res.statusCode = 404;
+        res.end('{}');
+      }
+    });
+  });
+  await new Promise(r => as.listen(asPort, '127.0.0.1', r));
+  const server = spawn(BIN, ['auth', String(port), String(asPort)], { stdio: 'ignore' });
+  await listening(port);
+
+  const bare = await fetch(resource, { method: 'POST', body: '{}' });
+  ok(`${label} no token is a 401`, bare.status === 401, bare.status);
+  const params = extractWWWAuthenticateParams(bare);
+  ok(`${label} the 401 names the metadata`, params.resourceMetadataUrl && params.resourceMetadataUrl.href === `http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`, params);
+  ok(`${label} the 401 names the scope`, params.scope === 'mcp:read', params);
+  const wrong = await fetch(resource, { method: 'POST', body: '{}', headers: { Authorization: 'Bearer nope' } });
+  ok(`${label} a bad token gets invalid_token`, extractWWWAuthenticateParams(wrong).error === 'invalid_token', extractWWWAuthenticateParams(wrong));
+  const meta = await attempt(`${label} discover`, () => discoverOAuthProtectedResourceMetadata(resource));
+  ok(`${label} the document names this resource`, meta && meta.resource === resource, meta);
+  ok(`${label} the document names the server`, meta && meta.authorization_servers[0] === issuer, meta);
+  ok(`${label} the document names the scope`, meta && meta.scopes_supported[0] === 'mcp:read', meta);
+
+  const authProvider = new ClientCredentialsProvider({ clientId: 'fixture', clientSecret: 'secret', scope: 'mcp:read', expectedIssuer: issuer });
+  const c = new Client({ name: 'bote-conformance', version: '1.0.0' }, { capabilities: {}, versionNegotiation: { mode } });
+  c.onerror = () => {};
+  await attempt(`${label} connect`, () => c.connect(new StreamableHTTPClientTransport(new URL(resource), { authProvider })));
+  const r = await attempt(`${label} a call with the token`, () => c.callTool({ name: 'test_simple_text', arguments: {} }));
+  ok(`${label} the call went through`, r && r.content[0].text === 'This is a simple text response for testing.', r);
+  const token = seen.find(s => s.url === '/token');
+  ok(`${label} the client asked its token for this resource`, token && new URLSearchParams(token.body).get('resource') === resource, token);
+  const version = c.getNegotiatedProtocolVersion();
+  await attempt(`${label} close`, () => c.close());
+  server.kill();
+  await new Promise(r => as.close(r));
+  console.log(`${fails === before ? 'ok  ' : 'FAIL'} ${label.padEnd(20)} ${version}`);
+}
+
 const OLD = '2025-11-25';
 const NEW = '2026-07-28';
 for (const [mode, port, path] of [['http', 19520, '/mcp'], ['streamable', 19521, '/mcp'], ['bridge', 19522, '/']]) {
@@ -87,5 +148,7 @@ for (const [mode, port, path] of [['http', 19520, '/mcp'], ['streamable', 19521,
 const stdio = () => new StdioClientTransport({ command: BIN, args: [] });
 await exercise('stdio/legacy', stdio, 'legacy', OLD);
 await exercise('stdio/auto', stdio, 'auto', NEW);
+await oauth('legacy');
+await oauth('auto');
 console.log(`client: ${passes} passed, ${fails} failed`);
 process.exit(fails ? 1 : 0);
