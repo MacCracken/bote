@@ -196,8 +196,8 @@ a client that stops reading for `BOTE_SEND_TIMEOUT_MS` (default 30000) is droppe
 wedging the server. The Unix transport's receive deadline, `BOTE_UNIX_IDLE_MS`, is **off** by
 default, because a Unix client may legitimately keep its connection quiet between requests; set it
 to reap idle peers. `BOTE_WS_IDLE_MS` is the same for WebSocket. `BOTE_WEB_TIMEOUT_MS` (default 15000)
-bounds an outbound `web_fetch` or `web_search`, since every client waits on it. All take milliseconds,
-and `0` disables.
+bounds an outbound `web_fetch` or `web_search`, since every client waits on it; each is made in a child
+process, which is killed at that deadline, DNS lookup included. All take milliseconds, and `0` disables.
 
 ```sh
 BOTE_SEND_TIMEOUT_MS=10000 BOTE_UNIX_IDLE_MS=60000 ./build/bote unix /run/bote.sock
@@ -347,6 +347,7 @@ src/host.cyr               HostRegistry + SSRF guard (IPv4 + IPv6)
 src/libro_tools.cyr        Five built-in MCP tools over a libro chain
 src/fs_tools.cyr           fs_write / fs_read / fs_mkdir (BOTE_FS_ROOT-confined)
 src/web_tools.cyr          web_fetch / web_search (SearXNG)
+src/fetch.cyr              An outbound request made in a child, with a deadline
 src/transport_stdio.cyr    Line-oriented JSON-RPC over stdin/stdout
 src/transport_http.cyr     HTTP/1.1 server with middleware
 src/transport_unix.cyr     AF_UNIX line-oriented transport
@@ -360,7 +361,7 @@ src/main_common.cyr        Entry helpers (dispatcher, mode selection, env bearer
 Dependencies rehydrate into `lib/` (gitignored) via `cyrius deps`.
 Cross-project deps **libro and majra** are git-pinned via
 `[deps.<name>]` in `cyrius.cyml`. Two consumer bundles ship in `dist/`:
-`bote.cyr` (full, 35 modules) and `bote-core.cyr` (core 13,
+`bote.cyr` (full, 36 modules) and `bote-core.cyr` (core 13,
 transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md). Both state
 **cyrius ≥ 6.7.13** on the `# Minimum cyrius:` line near the top of each (`bote-core.cyr` alone still builds from 6.7.2);
 a repo that copies the core bundle rather than pinning it must also declare
@@ -370,18 +371,19 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 3886 total across sixteen files (+ a core-only drift smoke)
+### Tests — 4014 total across seventeen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 3886 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 4014 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 876 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/conformance.tcyr        # 218 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
-cyrius test tests/bote_auth.tcyr          # 73 — bearer + allowlist + JWT + PKCE validators
+cyrius test tests/bote_auth.tcyr          # 91 — bearer + allowlist + JWT + PKCE validators, the head check
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
+cyrius test tests/bote_fetch.tcyr         # 59 — a request made in a child: the record, the cap, the deadline, a real GET
 cyrius test tests/bote_fs_tools.tcyr      # 56 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 203 — host registry + SSRF guard (IPv4 + IPv6)
-cyrius test tests/bote_http_era.tcyr      # 1661 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
+cyrius test tests/bote_http_era.tcyr      # 1671 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
 cyrius test tests/bote_jwt.tcyr           # 376 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
@@ -389,8 +391,8 @@ cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals
 cyrius test tests/bote_transport_unix.tcyr # 76 — Unix transport: sockaddr, accept-error policy, backoff, deadlines, closed-peer write
-cyrius test tests/bote_web_tools.tcyr     # 66 — web_fetch / web_search + the SSRF guard (URL and resolved address)
-cyrius test tests/bote_ws.tcyr            # 50 — WebSocket config + wire-up + the send-deadline drop + scopes per frame + what an upgrade keeps
+cyrius test tests/bote_web_tools.tcyr     # 84 — web_fetch / web_search + the SSRF guard (URL and resolved address) + their records
+cyrius test tests/bote_ws.tcyr            # 73 — WebSocket config + wire-up + the send-deadline drop + scopes per frame + what an upgrade and a connection keep
 cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dist/bote-core.cyr
 ```
 

@@ -220,12 +220,13 @@ fn bote_prm_route(hc, p, method, path, allowed_origins) {
         bote_http_refuse(cfd, SK_WARN, transport, HTTP_FORBIDDEN, "Forbidden", "origin");
         return 1;
     }
+    # Past the Origin check, every reply carries the context's headers: the bridge's CORS.
     if (sandhi_server_find_header_a(a, buf, n, "Transfer-Encoding") != 0) {
-        bote_http_refuse(cfd, SK_WARN, transport, HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding");
+        bote_http_refuse_hdr(cfd, SK_WARN, transport, HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding", _he_extra(hc));
         return 1;
     }
     if (streq(method, "GET") == 0) {
-        bote_http_refuse_method(cfd, transport, "Allow: GET\r\n");
+        bote_http_refuse_method_hdr(cfd, transport, "Allow: GET\r\n", _he_extra(hc));
         return 1;
     }
     sandhi_server_send_response_a(a, cfd, HTTP_OK, "OK", "application/json",

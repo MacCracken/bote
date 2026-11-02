@@ -350,10 +350,6 @@ fn bote_main_port(arg, default_port) {
     return default_port;
 }
 
-# A millisecond count from the environment variable `name`: the value when
-# it is all digits (0 included, which disables the deadline), `cur` when the
-# variable is unset, and `cur` with a WARN when it is anything else.
-# _parse_uint is not used because it reads "0" and garbage alike as 0.
 # BOTE_JWT_CACHE and the like: a count, or `cur` with a WARN when it is not one.
 fn _bote_env_count(name, cur) {
     var v = getenv(name);
@@ -378,6 +374,10 @@ fn _bote_env_count(name, cur) {
     return cur;
 }
 
+# A millisecond count from the environment variable `name`: the value when
+# it is all digits (0 included, which disables the deadline), `cur` when the
+# variable is unset, and `cur` with a WARN when it is anything else.
+# _parse_uint is not used because it reads "0" and garbage alike as 0.
 fn _bote_env_ms(name, cur) {
     var v = getenv(name);
     if (v == 0) { return cur; }

@@ -101,6 +101,10 @@ fn _http_handle(config, cfd, buf, n) {
     # server sets only read deadlines on the connections it accepts.
     bote_conn_send_deadline(cfd);
     var a = bote_req_begin();
+    if (bote_http_head_nul(buf, n) == 1) {
+        bote_http_refuse(cfd, SK_WARN, "http", HTTP_BAD_REQUEST, "Bad Request", "nul_in_head");
+        return 0;
+    }
     var method = sandhi_server_get_method_a(a, buf, n);
     var path   = sandhi_server_get_path_a(a, buf, n);
     var hc[40];

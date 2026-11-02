@@ -146,7 +146,8 @@ src/
 ├── host.cyr                — HostRegistry + SSRF guard (IPv4 + IPv6)
 ├── libro_tools.cyr         — Five built-in MCP tools over a libro chain
 ├── fs_tools.cyr            — fs_write / fs_read / fs_mkdir MCP tools (BOTE_FS_ROOT-confined)
-├── web_tools.cyr           — web_fetch / web_search MCP tools (sandhi HTTP client)
+├── web_tools.cyr           — web_fetch / web_search MCP tools (sandhi HTTP client, in a child since 3.6.5)
+├── fetch.cyr               — an outbound request made in a child process, with a deadline, its reply read onto the arena (3.6.5)
 ├── http_era.cyr            — which era a POST is; 2026-07-28's headers, `Mcp-Param` included, and status codes (3.5.1)
 ├── oauth_metadata.cyr      — RFC 9728 Protected Resource Metadata, the challenge a 401 carries (3.6.0), and the 403 for a missing scope (3.6.3)
 ├── conn.cyr                — per-connection deadlines (3.4.3): send timeout on
@@ -180,10 +181,11 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
 tests/
 ├── bote.tcyr                  — 876 core assertions
 ├── conformance.tcyr           — 218 (JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28, by spec clause, via codec_process_message)
-├── bote_auth.tcyr             — 73 (bearer + allowlist + JWT + PKCE validators; 401 log lines; the 403)
+├── bote_auth.tcyr             — 91 (bearer + allowlist + JWT + PKCE validators; 401 log lines; the 403; the head check)
 ├── bote_content.tcyr          — 25 (content blocks + annotations)
+├── bote_fetch.tcyr            — 59 (a request made in a child: the record, the cap, the deadline, a real GET, no heap)
 ├── bote_fs_tools.tcyr         — 56 (fs_tools; refused-path log lines; control bytes read back as valid JSON)
-├── bote_http_era.tcyr         — 1661 (MCP 2026-07-28 on HTTP, on the real handlers over a socketpair; scopes and the 403)
+├── bote_http_era.tcyr         — 1671 (MCP 2026-07-28 on HTTP, on the real handlers over a socketpair; scopes and the 403)
 ├── bote_host.tcyr             — 203 (host registry + SSRF + resolved-address classifiers + the IPv6 parser vs cyrius's)
 ├── bote_jwt.tcyr              — 376 (JWT: HS256, RS256, ES256, JWK Sets, every claim, scopes, the cache, no heap)
 ├── bote_libro_tools.tcyr      — 73 (libro_tools; incl. the tampered-chain
@@ -193,10 +195,10 @@ tests/
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 53 (streamable HTTP / SSE)
 ├── bote_transport_unix.tcyr   — 76 (unix socket transport + accept policy + deadlines + closed-peer write)
-├── bote_web_tools.tcyr        — 66 (web_tools; URL + resolved-address SSRF guard)
-├── bote_ws.tcyr               — 50 (WebSocket; send-deadline drop; `-31403` per frame; what an upgrade keeps)
+├── bote_web_tools.tcyr        — 84 (web_tools; URL + resolved-address SSRF guard; the records their children write)
+├── bote_ws.tcyr               — 73 (WebSocket; send-deadline drop; `-31403` per frame; what an upgrade and a connection keep)
 ├── bote_core_only_smoke.tcyr  — drift guard (includes only dist/bote-core.cyr)
-└── bote.bcyr                  — 16 hot-path benchmarks
+└── bote.bcyr                  — 32 hot-path benchmarks
 
 fuzz/
 ├── codec_parse.fcyr
@@ -444,11 +446,11 @@ standing rules are in CLAUDE.md under Key Principles.
 |---|---|---|
 | Core unit tests | 876 | `tests/bote.tcyr` |
 | Protocol conformance | 218 | `tests/conformance.tcyr` — by spec clause, through `codec_process_message` (3.4.5) |
-| Module tests | 2792 | `tests/bote_auth.tcyr` (73) + `bote_content.tcyr` (25) + `bote_fs_tools.tcyr` (56) + `bote_host.tcyr` (203) + `bote_http_era.tcyr` (1661) + `bote_jwt.tcyr` (376) + `bote_libro_tools.tcyr` (73) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (76) + `bote_web_tools.tcyr` (66) + `bote_ws.tcyr` (50) |
-| **Total assertions** | **3886** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
-| Benchmarks | 30 | `tests/bote.bcyr` |
+| Module tests | 2920 | `tests/bote_auth.tcyr` (91) + `bote_content.tcyr` (25) + `bote_fetch.tcyr` (59) + `bote_fs_tools.tcyr` (56) + `bote_host.tcyr` (203) + `bote_http_era.tcyr` (1671) + `bote_jwt.tcyr` (376) + `bote_libro_tools.tcyr` (73) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (76) + `bote_web_tools.tcyr` (84) + `bote_ws.tcyr` (73) |
+| **Total assertions** | **4014** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
+| Benchmarks | 32 | `tests/bote.bcyr` |
 | Third-party conformance | 25 of 37, 21 of 30 | `scripts/conformance.sh`: the official suite's required lists for 2026-07-28 and 2025-11-25, and 410 checks of the official client, its OAuth flow with HS256, RS256 and ES256 and a step-up from a 403 included. By hand, because it installs from npm |
-| Fuzz harnesses | 10 | `fuzz/*.fcyr` |
+| Fuzz harnesses | 11 | `fuzz/*.fcyr` |
 
 All hot paths sub-10 µs on x86_64 (`AMD Ryzen 7 5800H`). Side-by-side
 with the Rust v0.92.0 baseline in

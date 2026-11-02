@@ -246,9 +246,22 @@ fn bote_http_refuse_hdr(cfd, level, transport, status, text, reason, extra) {
 # A 405. RFC 9110 15.5.6: it MUST name what the resource does allow, and `allow`
 # is that header, CRLF included.
 fn bote_http_refuse_method(cfd, transport, allow) {
+    return bote_http_refuse_method_hdr(cfd, transport, allow, 0);
+}
+
+# bote_http_refuse_method with `extra` response headers ahead of `allow`, or 0.
+fn bote_http_refuse_method_hdr(cfd, transport, allow, extra) {
+    var a = bote_req_alloc();
+    var hdrs = allow;
+    if (extra != 0) {
+        var sb = str_builder_new_a(a);
+        str_builder_add_cstr_a(a, sb, extra);
+        str_builder_add_cstr_a(a, sb, allow);
+        hdrs = str_data(str_builder_build_a(a, sb));
+    }
     bote_http_log_refusal(SK_DEBUG, transport, HTTP_METHOD_NOT_ALLOWED, "method");
-    sandhi_server_send_response_a(bote_req_alloc(), cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed",
-      "text/plain", "", 0, allow);
+    sandhi_server_send_response_a(a, cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed",
+      "text/plain", "", 0, hdrs);
     return HTTP_METHOD_NOT_ALLOWED;
 }
 
@@ -288,6 +301,38 @@ fn auth_bearer_check_hdr(cfd, buf, blen, validator_fp, validator_ctx, claims_out
     # 2.5.0: surface validator's return so transport can thread to handler.
     if (claims == token) { bote_req_note_token(token); }
     if (claims_out != 0) { store64(claims_out, claims); }
+    return 0;
+}
+
+# 1 when the request's head holds a NUL. RFC 9110 5.5: a recipient MUST refuse a field
+# value holding one or replace it. bote reads a value up to its NUL, and the stdlib's
+# WebSocket handshake to the end of its line, so the two would judge different bytes.
+#
+# The head ends at the first CRLF CRLF, or at `n` when there is none. One pass finds
+# whichever of that and a NUL comes first, eight bytes at a time where a word holds
+# neither a NUL nor a CR, as strlen reads: a third of what finding the end first and
+# then scanning to it cost (3.6.5's CHANGELOG has the measure).
+fn bote_http_head_nul(buf, n) {
+    var lo = 0x0101010101010101;
+    var hi = 0x8080808080808080;
+    var cr = 0x0D0D0D0D0D0D0D0D;
+    var i = 0;
+    while (i < n) {
+        var word = 0;
+        if (i + 8 <= n) {
+            var v = load64(buf + i);
+            var c = v ^ cr;
+            if (((((v - lo) & (v ^ 0xFFFFFFFFFFFFFFFF)) | ((c - lo) & (c ^ 0xFFFFFFFFFFFFFFFF))) & hi) == 0) { word = 1; }
+        }
+        if (word == 1) {
+            i = i + 8;
+        } else {
+            var b = load8(buf + i);
+            if (b == 0) { return 1; }
+            if (b == 13 && i + 4 <= n && load8(buf + i + 1) == 10 && load8(buf + i + 2) == 13 && load8(buf + i + 3) == 10) { return 0; }
+            i = i + 1;
+        }
+    }
     return 0;
 }
 

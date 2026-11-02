@@ -125,6 +125,18 @@ fn bote_req_note_token(token) {
     return token;
 }
 
+# bote_req_note_token, with the heap copy an earlier message of the same connection
+# already made of it, or 0. A connection that presents its token once, for every message
+# after, then keeps one copy, not one per message.
+fn bote_req_note_token_kept(token, kept) {
+    _bote_req_token = token;
+    _bote_req_kept = kept;
+    return token;
+}
+
+# The heap copy of this message's token a handler has been handed, or 0.
+fn bote_req_kept() { return _bote_req_kept; }
+
 # `claims` as a handler may have them, and a handler may keep them. Once for a message, so
 # a batch of calls makes one copy.
 fn bote_req_claims_kept(claims) {

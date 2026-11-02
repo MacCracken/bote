@@ -150,8 +150,17 @@ The primary security-relevant surface areas are:
   `web_search` is deliberately unguarded (its endpoint is the operator's
   `BOTE_SEARXNG_URL`). Since **3.4.15** both have a deadline
   (`BOTE_WEB_TIMEOUT_MS`, default 15 s), because every client waits on an outbound
-  call. It does not cover DNS: sandhi's resolver has no timeout yet, so a lost
-  reply can still stall the server.
+  call. Since **3.6.5** each request is made in a child process
+  (`src/fetch.cyr`), which the parent kills at that deadline, DNS included, and
+  which takes away what sandhi keeps on the heap for an `https://` request: about
+  175 KB each, which a client calling either tool could otherwise have grown the
+  server by for good. The parent reads back only the record the child writes,
+  bounded in size.
+- **Request heads** — since **3.6.5** a request whose head holds a NUL byte is
+  refused with a 400 on `http`, `streamable`, `bridge` and `ws`, before any header
+  is read (RFC 9110 §5.5). bote reads a value up to a NUL and the stdlib's
+  WebSocket handshake reads it to the end of its line, so the two would otherwise
+  judge different bytes: 3.6.4's bound on what an upgrade keeps was passed that way.
 - **Logging** — operational logs go through sakshi to stderr (or
   `BOTE_LOG_FILE`), never to stdout, which carries the stdio transport's
   JSON-RPC stream. No bearer token, JWT, request body, tool argument or full

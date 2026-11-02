@@ -589,17 +589,20 @@ fn jwt_verify_hs256(token, key, key_len) {
 # again is judged on the clock alone, by _jwt_window_ok, as it would be in full. A token
 # that fails is never stored, so a forged one costs what it did, plus its hash.
 #
-# Direct-mapped: a slot is picked by the digest, which a client cannot aim without a
-# preimage, and a token that lands on a taken slot replaces it. The table is allocated
-# when the first token is stored and never grows. A slot (48 B): +0 digest, +32 exp,
-# +40 nbf, -1 for either when absent. An empty slot is zero, and no token's digest is.
+# Direct-mapped: a slot is picked by the low bits of the digest, and a token that lands
+# on a taken slot replaces it. Only a token that verified is stored, so a client can aim
+# at a slot only with tokens the authorization server issued it, and what that costs
+# another token is one verify more. The table is allocated when the first token is stored
+# and never grows. A slot (48 B): +0 digest, +32 exp, +40 nbf, -1 for either when
+# absent. An empty slot is zero, and no token's digest is.
 
 var BOTE_JWT_CACHE_DEFAULT = 1024;
 var BOTE_JWT_CACHE_MAX = 65536;
 var BOTE_JWT_SLOT_BYTES = 48;
 
 # Remember up to `slots` tokens, rounded up to a power of two and at most
-# BOTE_JWT_CACHE_MAX, or none for 0. What was remembered is forgotten.
+# BOTE_JWT_CACHE_MAX, or none for 0. What was remembered is forgotten. Set it when the
+# handle is configured: a table this replaces is not reclaimed.
 fn jwt_secret_with_cache(s, slots) {
     var n = 0;
     if (slots > 0) {
@@ -621,8 +624,13 @@ fn _jwt_cache_slot(s, digest) {
     return load64(s + 48) + (load64(digest) & (load64(s + 40) - 1)) * BOTE_JWT_SLOT_BYTES;
 }
 
+# A token is remembered only when there is room: with none, it is verified again next time.
 fn _jwt_cache_put(s, digest, payload, plen) {
-    if (load64(s + 48) == 0) { store64(s + 48, alloc(load64(s + 40) * BOTE_JWT_SLOT_BYTES)); }
+    if (load64(s + 48) == 0) {
+        var t = alloc(load64(s + 40) * BOTE_JWT_SLOT_BYTES);
+        if (t == 0) { return 0; }
+        store64(s + 48, t);
+    }
     var e = _jwt_cache_slot(s, digest);
     memcpy(e, digest, 32);
     store64(e + 32, _jwt_time_claim(payload, plen, "exp"));

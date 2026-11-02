@@ -40,6 +40,7 @@ include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
 include "src/host.cyr"
+include "src/fetch.cyr"
 include "src/web_tools.cyr"
 
 # _t_txt: run _web_html_to_text over `src` and NUL-terminate into `dst`; return dst for streq.
@@ -123,6 +124,36 @@ fn _silent_port(out_fd) {
         p = p + 1;
     }
     return 0;
+}
+
+# A cursor over the record `rec`, in the 24 bytes at `cur`.
+fn _wr_cur(rec, cur) {
+    store64(cur, load64(rec));
+    store64(cur + 8, load64(rec + 8));
+    store64(cur + 16, 0);
+    return cur;
+}
+
+# web_fetch's result for the record its child would write.
+fn _wr_fetch(refused, host, addr, status, text) {
+    var r = _bf_rec_new();
+    bote_fetch_put_int(r, refused);
+    bote_fetch_put_str(r, host);
+    bote_fetch_put_str(r, addr);
+    bote_fetch_put_int(r, status);
+    if (status != 0 - 1) { bote_fetch_put_str(r, text); }
+    var c[24];
+    return _web_fetch_result(_wr_cur(r, &c));
+}
+
+# web_search's result for the record its child would write.
+fn _wr_search(found, status, text) {
+    var r = _bf_rec_new();
+    bote_fetch_put_int(r, found);
+    if (found == WEB_SEARCH_STATUS) { bote_fetch_put_int(r, status); }
+    if (found == WEB_SEARCH_DONE) { bote_fetch_put_str(r, text); }
+    var c[24];
+    return _web_search_result(_wr_cur(r, &c));
 }
 
 fn main() {
@@ -253,6 +284,32 @@ fn main() {
     _web_get_guarded("http://[2001:db8::2]/");
     assert_eq(sandhi_client_resolver_installed(), 0, "a stale guard hook is not treated as an embedder's (no self-recursion)");
     sandhi_client_clear_resolver();
+
+    # ================================================================
+    # 3.6.5 — what each tool makes of its child's record
+    # ================================================================
+    _lc_begin();
+    assert(_lc_has(_wr_fetch(SSRF_LOOPBACK, "rebind.test", "127.0.0.1", 0 - 1, 0), "SSRF guard: loopback, resolved address") == 1, "fetch record: a refused address");
+    assert(_lc_has(_lc_buf, "host=rebind.test addr=127.0.0.1") == 1, "fetch record: ...logged with its host and address");
+    assert_eq(_lc_level, SK_WARN, "fetch record: ...at WARN");
+    _lc_end();
+    assert(_lc_has(_wr_fetch(0, 0, 0, 0 - 1, 0), "could not reach the URL") == 1, "fetch record: no status is a transport error");
+    assert(_lc_has(_wr_fetch(SSRF_LOOPBACK, 0, 0, 200, "page"), "page") == 1, "fetch record: a refusal code with a status is not a refusal");
+    assert(_lc_has(_wr_fetch(0, 0, 0, 404, 0), "web_fetch: HTTP 404") == 1, "fetch record: a 404");
+    assert(_lc_has(_wr_fetch(0, 0, 0, 199, "x"), "web_fetch: HTTP 199") == 1, "fetch record: 199 is no success");
+    assert(_lc_has(_wr_fetch(0, 0, 0, 300, "x"), "web_fetch: HTTP 300") == 1, "fetch record: ...nor is 300");
+    var ft = _wr_fetch(0, 0, 0, 200, "hello there");
+    assert(_lc_has(ft, "hello there") == 1 && _lc_has(ft, "\"isError\":false") == 1, "fetch record: a 200's text");
+    assert(_lc_has(_wr_fetch(0, 0, 0, 299, "edge"), "edge") == 1, "fetch record: 299 is a success");
+    assert(_lc_has(_wr_fetch(0, 0, 0, 200, ""), "no readable text") == 1, "fetch record: an empty text");
+    assert(_lc_has(_wr_fetch(0, 0, 0, 200, 0), "no readable text") == 1, "fetch record: ...or none");
+    assert(_lc_has(_wr_search(WEB_SEARCH_UNREACHED, 0, 0), "could not reach the SearXNG endpoint") == 1, "search record: unreached");
+    assert(_lc_has(_wr_search(WEB_SEARCH_STATUS, 503, 0), "SearXNG returned HTTP 503") == 1, "search record: a status");
+    assert(_lc_has(_wr_search(WEB_SEARCH_UNPARSED, 0, 0), "could not parse") == 1, "search record: unparsed");
+    assert(_lc_has(_wr_search(WEB_SEARCH_NO_RESULTS, 0, 0), "no results array") == 1, "search record: no results array");
+    assert(_lc_has(_wr_search(WEB_SEARCH_DONE, 0, 0), "(no results)") == 1, "search record: nothing found");
+    var st = _wr_search(WEB_SEARCH_DONE, 0, "1. A title");
+    assert(_lc_has(st, "1. A title") == 1 && _lc_has(st, "\"isError\":false") == 1, "search record: the results");
 
     # ================================================================
     # 3.4.10 — real input schemas and annotations

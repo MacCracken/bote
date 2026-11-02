@@ -1,0 +1,222 @@
+# bote::fetch — an outbound request, made in a child process (3.6.5).
+#
+# sandhi's HTTP client gives the TLS stack the global heap, not the arena it was handed, so
+# every https:// request keeps about 175 KB that nothing frees: 179,000 B per request,
+# measured on cyrius 6.7.18 (sandhi 1.13.7), and filed in sandhi's repository as
+# 2026-11-02-bote-tls-connect-keeps-each-connection-on-the-heap.md. Its DNS lookup has no
+# deadline either, so a lost reply holds the serving loop. bote makes the request in a
+# child: what the child allocates goes when it exits, and the parent stops waiting at a
+# deadline of its own and ends it. The child answers with a record, which the parent
+# reads onto the request arena.
+#
+# A fork, a pipe and a reap cost about 145 µs, and a whole GET to a loopback server made
+# that way about 0.6 ms; a TLS handshake costs more.
+# Fork copies the calling thread alone, so this is for a single-threaded caller, which
+# every transport is until 3.7.x.
+#
+# On agnos the function runs in this process, as it did before: the target has no ppoll
+# and its waitpid takes other arguments.
+#
+# A record is what the child's function writes with bote_fetch_put_*, and the parent reads
+# back, in the same order, with bote_fetch_int and bote_fetch_str. Record (24 B): +0 data,
+# +8 len, +16 cap. Cursor (24 B): +0 data, +8 len, +16 offset.
+
+# Why the last bote_fetch_in_child failed, or 0.
+var _bote_fetch_why = 0;
+fn bote_fetch_why() { return _bote_fetch_why; }
+
+fn _bf_rec_new() {
+    var r = alloc(24);
+    store64(r, alloc(4096));
+    store64(r + 8, 0);
+    store64(r + 16, 4096);
+    return r;
+}
+
+# Room for `n` more bytes. In the child, on its own heap, which goes with it.
+fn _bf_room(r, n) {
+    var len = load64(r + 8);
+    var cap = load64(r + 16);
+    if (len + n <= cap) { return 0; }
+    while (cap < len + n) { cap = cap * 2; }
+    var d = alloc(cap);
+    memcpy(d, load64(r), len);
+    store64(r, d);
+    store64(r + 16, cap);
+    return 0;
+}
+
+fn bote_fetch_put_int(r, v) {
+    _bf_room(r, 8);
+    store64(load64(r) + load64(r + 8), v);
+    store64(r + 8, load64(r + 8) + 8);
+    return 0;
+}
+
+# `n` bytes from `p`, and a NUL after them, so the reader hands back a cstr in place.
+fn bote_fetch_put_bytes(r, p, n) {
+    bote_fetch_put_int(r, n);
+    _bf_room(r, n + 1);
+    var at = load64(r) + load64(r + 8);
+    memcpy(at, p, n);
+    store8(at + n, 0);
+    store64(r + 8, load64(r + 8) + n + 1);
+    return 0;
+}
+
+# A cstr, or 0, which reads back as 0.
+fn bote_fetch_put_str(r, s) {
+    if (s == 0) { return bote_fetch_put_int(r, 0 - 1); }
+    return bote_fetch_put_bytes(r, s, strlen(s));
+}
+
+# The next int, or 0 past the record's end.
+fn bote_fetch_int(c) {
+    var off = load64(c + 16);
+    if (off + 8 > load64(c + 8)) { return 0; }
+    store64(c + 16, off + 8);
+    return load64(load64(c) + off);
+}
+
+# The next cstr, in place, its length in *len_out when that is not 0; 0 for a 0, or past
+# the record's end.
+fn bote_fetch_str(c, len_out) {
+    var n = bote_fetch_int(c);
+    if (len_out != 0) { store64(len_out, 0); }
+    if (n < 0) { return 0; }
+    var off = load64(c + 16);
+    if (n > load64(c + 8) - off - 1) { return 0; }
+    store64(c + 16, off + n + 1);
+    if (len_out != 0) { store64(len_out, n); }
+    return load64(c) + off;
+}
+
+fn _bf_write_all(fd, p, n) {
+    var off = 0;
+    while (off < n) {
+        var w = sys_write(fd, p + off, n - off);
+        if (w == 0 - 4) { w = 0; }
+        elif (w <= 0) { return 0 - 1; }
+        off = off + w;
+    }
+    return 0;
+}
+
+#ifndef CYRIUS_TARGET_AGNOS
+# Readable within `ms`, or -1 for no deadline: >0 ready or hung up, 0 the time ran out.
+fn _bf_poll_in(fd, ms) {
+    var pfd[8];
+    store32(&pfd, fd);
+    store16(&pfd + 4, 1);   # POLLIN
+    store16(&pfd + 6, 0);
+    var ts[16];
+    var tsp = 0;
+    if (ms >= 0) {
+        store64(&ts, ms / 1000);
+        store64(&ts + 8, (ms % 1000) * 1000000);
+        tsp = &ts;
+    }
+    var r = sys_ppoll(&pfd, 1, tsp, 0, 8);
+    while (r == 0 - 4) { r = sys_ppoll(&pfd, 1, tsp, 0, 8); }
+    return r;
+}
+
+# Read exactly `n` bytes into `p` by the deadline `end` (clock_now_ms), or 0 for none.
+# 1, or 0 with the reason set.
+fn _bf_read_all(fd, p, n, end) {
+    var got = 0;
+    while (got < n) {
+        var ms = 0 - 1;
+        if (end != 0) {
+            ms = end - clock_now_ms();
+            if (ms <= 0) { _bote_fetch_why = "deadline"; return 0; }
+        }
+        var pr = _bf_poll_in(fd, ms);
+        if (pr == 0) { _bote_fetch_why = "deadline"; return 0; }
+        if (pr < 0) { _bote_fetch_why = "poll"; return 0; }
+        var r = sys_read(fd, p + got, n - got);
+        if (r == 0 - 4) { r = 0; }
+        elif (r <= 0) { _bote_fetch_why = "short reply"; return 0; }
+        got = got + r;
+    }
+    return 1;
+}
+
+# The child's side: run `fp(ctx, record)`, send the record, exit. Never returns.
+fn _bf_child(fp, ctx, wr) {
+    #ifdef CYRIUS_TARGET_LINUX
+    sys_prctl(1, SIGKILL, 0, 0, 0);    # PR_SET_PDEATHSIG: it ends with this process
+    #endif
+    var r = _bf_rec_new();
+    fncall2(fp, ctx, r);
+    var len[8];
+    store64(&len, load64(r + 8));
+    if (_bf_write_all(wr, &len, 8) == 0) { _bf_write_all(wr, load64(r), load64(r + 8)); }
+    sys_exit(0);
+    return 0;
+}
+#endif
+
+# Run `fp(ctx, record)` in a child and read the record it writes into the cursor `cur`, on
+# the request arena. At most `cap` bytes come back, and the parent waits `deadline_ms` at
+# the most, or for ever with 0; a child still running then is killed. 1, or 0 with
+# bote_fetch_why saying why.
+fn bote_fetch_in_child(fp, ctx, cap, deadline_ms, cur) {
+    _bote_fetch_why = 0;
+    store64(cur, 0);
+    store64(cur + 8, 0);
+    store64(cur + 16, 0);
+    #ifdef CYRIUS_TARGET_AGNOS
+    var ar = _bf_rec_new();
+    fncall2(fp, ctx, ar);
+    if (load64(ar + 8) > cap) { _bote_fetch_why = "too large"; return 0; }
+    store64(cur, load64(ar));
+    store64(cur + 8, load64(ar + 8));
+    return 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var fds[8];
+    if (sys_pipe(&fds) < 0) { _bote_fetch_why = "pipe"; return 0; }
+    var rd = load32(&fds);
+    var wr = load32(&fds + 4);
+    var pid = sys_fork();
+    if (pid < 0) {
+        sys_close(rd);
+        sys_close(wr);
+        _bote_fetch_why = "fork";
+        return 0;
+    }
+    if (pid == 0) {
+        sys_close(rd);
+        _bf_child(fp, ctx, wr);
+    }
+    sys_close(wr);
+    var end = 0;
+    if (deadline_ms > 0) { end = clock_now_ms() + deadline_ms; }
+    var ok = 0;
+    var len[8];
+    if (_bf_read_all(rd, &len, 8, end) == 1) {
+        var n = load64(&len);
+        if (n < 0 || n > cap) {
+            _bote_fetch_why = "too large";
+        } else {
+            # Every string in a record carries its own NUL, so nothing is added after it.
+            var buf = alloc_via(bote_req_alloc(), n + 1);
+            if (buf == 0) {
+                _bote_fetch_why = "memory";
+            } elif (_bf_read_all(rd, buf, n, end) == 1) {
+                store64(cur, buf);
+                store64(cur + 8, n);
+                ok = 1;
+            }
+        }
+    }
+    sys_close(rd);
+    if (ok == 0) { sys_kill(pid, SIGKILL); }
+    var st[8];
+    var w = sys_waitpid(pid, &st, 0);
+    while (w == 0 - 4) { w = sys_waitpid(pid, &st, 0); }
+    if (ok == 0 && _bote_fetch_why == 0) { _bote_fetch_why = "short reply"; }
+    return ok;
+    #endif
+}

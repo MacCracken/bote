@@ -1,0 +1,341 @@
+# bote_fetch.tcyr — src/fetch.cyr (3.6.5): an outbound request made in a child.
+#
+# The record a child writes and its parent reads back, the deadline, the cap, a child that
+# dies before it answers, and a real sandhi GET from a child to a loopback server this test
+# forks, with what each leaves on the parent's heap. Run: cyrius test tests/bote_fetch.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "lib/sakshi.cyr"
+include "lib/assert.cyr"
+
+include "src/log.cyr"
+include "src/protocol.cyr"
+include "src/fetch.cyr"
+
+# A child that writes one of each kind of field.
+fn _c_fields(ctx, rec) {
+    bote_fetch_put_int(rec, 42);
+    bote_fetch_put_str(rec, "hello");
+    bote_fetch_put_str(rec, 0);
+    bote_fetch_put_int(rec, 0 - 7);
+    bote_fetch_put_str(rec, "");
+    bote_fetch_put_bytes(rec, "a\0b", 3);
+    return 0;
+}
+
+# A child that allocates a megabyte and says how much it took.
+fn _c_greedy(ctx, rec) {
+    var before = alloc_used();
+    var p = alloc(1048576);
+    memset(p, 1, 1048576);
+    return bote_fetch_put_int(rec, alloc_used() - before);
+}
+
+# A child that writes `ctx` bytes.
+fn _c_big(ctx, rec) {
+    var p = alloc(ctx);
+    memset(p, 120, ctx);
+    return bote_fetch_put_bytes(rec, p, ctx);
+}
+
+fn _c_sleeps(ctx, rec) {
+    sleep_ms(ctx);
+    return bote_fetch_put_int(rec, 1);
+}
+
+fn _c_exits(ctx, rec) {
+    sys_exit(3);
+    return 0;
+}
+
+# A child that sets a global: the parent's copy does not change.
+var _flag = 0;
+fn _c_sets(ctx, rec) {
+    _flag = 99;
+    return bote_fetch_put_int(rec, _flag);
+}
+
+#ifndef CYRIUS_TARGET_AGNOS
+# 0 when this process has no child left, reaped or not.
+fn _children() {
+    var st[8];
+    var w = sys_waitpid(0 - 1, &st, 1);
+    if (w == 0 - 10) { return 0; }
+    return 1;
+}
+
+# ---- a loopback server, in a process of its own ----------------------------
+var _srv_port = 0;
+
+# Serve `count` connections on a free port of 18600-18699 with one fixed reply, in a
+# child. The port is in _srv_port; returns the server's pid, or 0.
+fn _serve(count) {
+    var p = 18600;
+    var lfd = 0 - 1;
+    while (p < 18700 && lfd < 0) {
+        var st, sfd = tcp_socket();
+        if (is_err_result(st) == 1) { return 0; }
+        var bt, bv = sock_bind(sfd, 0x0100007F, p);
+        if (is_err_result(bt) == 0) { lfd = sfd; } else { sock_close(sfd); p = p + 1; }
+    }
+    if (lfd < 0) { return 0; }
+    sock_listen(lfd, 16);
+    _srv_port = p;
+    var pid = sys_fork();
+    if (pid != 0) {
+        sock_close(lfd);
+        return pid;
+    }
+    var buf[2048];
+    var reply = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"keys\":[42]}";
+    var i = 0;
+    while (i < count) {
+        var at, cfd = sock_accept(lfd);
+        if (is_err_result(at) == 0) {
+            var rt, rn = sock_recv(cfd, &buf, 2048);
+            sock_send_all(cfd, reply, strlen(reply));
+            sock_close(cfd);
+        }
+        i = i + 1;
+    }
+    sys_exit(0);
+    return 0;
+}
+
+# The GET a child makes: `ctx` is the URL. The record: sandhi's error kind, the status,
+# the body.
+fn _c_get(url, rec) {
+    var a = bote_req_alloc();
+    var o = sandhi_http_options_new_a(a);
+    sandhi_http_options_total_ms(o, 3000);
+    sandhi_http_options_connect_ms(o, 3000);
+    sandhi_http_options_read_ms(o, 3000);
+    var r = sandhi_http_get_opts_a(a, url, 0, o);
+    bote_fetch_put_int(rec, sandhi_http_err_kind(r));
+    bote_fetch_put_int(rec, sandhi_http_status(r));
+    return bote_fetch_put_bytes(rec, sandhi_http_body(r), sandhi_http_body_len(r));
+}
+#endif
+
+fn main() {
+    alloc_init();
+    fl_init();
+
+    # ---------------- the record, read in this process ----------------
+    var rec = _bf_rec_new();
+    _c_fields(0, rec);
+    var c[24];
+    store64(&c, load64(rec));
+    store64(&c + 8, load64(rec + 8));
+    store64(&c + 16, 0);
+    assert_eq(bote_fetch_int(&c), 42, "record: an int");
+    var hl[8];
+    var h = bote_fetch_str(&c, &hl);
+    assert(h != 0 && streq(h, "hello") == 1 && load64(&hl) == 5, "record: a string, and its length");
+    assert_eq(bote_fetch_str(&c, &hl), 0, "record: a 0 string reads back as 0");
+    assert_eq(load64(&hl), 0, "record: ...of length 0");
+    assert_eq(bote_fetch_int(&c), 0 - 7, "record: a negative int");
+    var e = bote_fetch_str(&c, 0);
+    assert(e != 0 && load8(e) == 0, "record: an empty string is not a 0");
+    var ab = bote_fetch_str(&c, &hl);
+    assert(load64(&hl) == 3 && load8(ab + 1) == 0 && load8(ab + 2) == 98 && load8(ab + 3) == 0, "record: bytes with a NUL in them, and one after");
+    assert_eq(bote_fetch_int(&c), 0, "record: past the end, an int is 0");
+    assert_eq(bote_fetch_str(&c, 0), 0, "record: ...and a string is 0");
+    # A length that runs past the end, and one that is negative but not -1.
+    var lie = _bf_rec_new();
+    bote_fetch_put_int(lie, 100);
+    bote_fetch_put_int(lie, 7);
+    store64(&c, load64(lie));
+    store64(&c + 8, load64(lie + 8));
+    store64(&c + 16, 0);
+    assert_eq(bote_fetch_str(&c, 0), 0, "record: a string longer than what is left is refused");
+    var neg = _bf_rec_new();
+    bote_fetch_put_int(neg, 0 - 5);
+    store64(&c, load64(neg));
+    store64(&c + 8, load64(neg + 8));
+    store64(&c + 16, 0);
+    assert_eq(bote_fetch_str(&c, 0), 0, "record: a negative length reads as 0");
+    # The record grows past its first 4 KB.
+    var grow = _bf_rec_new();
+    var gi = 0;
+    while (gi < 2000) { bote_fetch_put_int(grow, gi); gi = gi + 1; }
+    store64(&c, load64(grow));
+    store64(&c + 8, load64(grow + 8));
+    store64(&c + 16, 0);
+    var gok = 1;
+    gi = 0;
+    while (gi < 2000) { if (bote_fetch_int(&c) != gi) { gok = 0; } gi = gi + 1; }
+    assert_eq(gok, 1, "record: 16,000 bytes, every int back in order");
+    # The end is the record's length, not the bytes behind it.
+    var two = _bf_rec_new();
+    bote_fetch_put_int(two, 42);
+    bote_fetch_put_int(two, 43);
+    store64(&c, load64(two));
+    store64(&c + 8, 8);
+    store64(&c + 16, 0);
+    assert_eq(bote_fetch_int(&c), 42, "record: the int inside its length");
+    assert_eq(bote_fetch_int(&c), 0, "record: ...and not the one behind it");
+    var cut = _bf_rec_new();
+    bote_fetch_put_str(cut, "hello");
+    store64(&c, load64(cut));
+    store64(&c + 8, load64(cut + 8) - 1);
+    store64(&c + 16, 0);
+    assert_eq(bote_fetch_str(&c, 0), 0, "record: a string whose NUL is past the length is refused");
+    store64(&c + 8, load64(cut + 8));
+    store64(&c + 16, 0);
+    assert(streq(bote_fetch_str(&c, 0), "hello") == 1, "record: ...and read with it");
+    # The NUL after a string is written, not left to what memory held.
+    var dirty = _bf_rec_new();
+    memset(load64(dirty), 255, 4096);
+    bote_fetch_put_str(dirty, "abc");
+    store64(&c, load64(dirty));
+    store64(&c + 8, load64(dirty + 8));
+    store64(&c + 16, 0);
+    var dv = bote_fetch_str(&c, 0);
+    assert(dv != 0 && strlen(dv) == 3, "record: a string ends at its own NUL over bytes that were not zero");
+
+    #ifndef CYRIUS_TARGET_AGNOS
+    # ---------------- a child ----------------
+    bote_req_begin();
+    var cur[24];
+    assert_eq(bote_fetch_in_child(&_c_fields, 0, 4096, 5000, &cur), 1, "child: answers");
+    assert_eq(bote_fetch_why(), 0, "child: ...with no reason to give");
+    assert_eq(bote_fetch_int(&cur), 42, "child: its int");
+    var ch = bote_fetch_str(&cur, 0);
+    assert(ch != 0 && streq(ch, "hello") == 1, "child: its string");
+    assert_eq(_children(), 0, "child: reaped");
+
+    bote_req_begin();
+    assert_eq(bote_fetch_in_child(&_c_sets, 0, 4096, 5000, &cur), 1, "child: a global it sets");
+    assert(bote_fetch_int(&cur) == 99 && _flag == 0, "child: ...is its own, not this process's");
+
+    # What a child allocates stays with it, and what the parent keeps is nothing.
+    bote_req_begin();
+    bote_fetch_in_child(&_c_greedy, 0, 4096, 5000, &cur);
+    assert(bote_fetch_int(&cur) >= 1048576, "child: allocates a megabyte");
+    bote_req_begin();
+    bote_fetch_in_child(&_c_greedy, 0, 4096, 5000, &cur);
+    var hb = alloc_used();
+    var hi = 0;
+    while (hi < 10) {
+        bote_req_begin();
+        bote_fetch_in_child(&_c_greedy, 0, 4096, 5000, &cur);
+        hi = hi + 1;
+    }
+    assert_eq(alloc_used() - hb, 0, "child heap: ten children of a megabyte each leave nothing here");
+    assert_eq(_children(), 0, "child: all ten reaped");
+
+    # The cap: a reply over it is refused, and the child is ended and reaped.
+    bote_req_begin();
+    assert_eq(bote_fetch_in_child(&_c_big, 200000, 100000, 5000, &cur), 0, "cap: a reply over it is refused");
+    assert(streq(bote_fetch_why(), "too large") == 1, "cap: ...as too large");
+    assert_eq(load64(&cur + 8), 0, "cap: ...with nothing in the cursor");
+    assert_eq(_children(), 0, "cap: the child is reaped");
+    bote_req_begin();
+    assert_eq(bote_fetch_in_child(&_c_big, 200000, 200100, 5000, &cur), 1, "cap: a reply at it is read, across many pipe writes");
+    var bl[8];
+    var bb = bote_fetch_str(&cur, &bl);
+    assert(load64(&bl) == 200000 && load8(bb) == 120 && load8(bb + 199999) == 120, "cap: ...every byte of it");
+    # 8 for the length, the bytes, and the NUL after them.
+    bote_req_begin();
+    assert_eq(bote_fetch_in_child(&_c_big, 200000, 200009, 5000, &cur), 1, "cap: a reply exactly at it is read");
+    bote_req_begin();
+    assert_eq(bote_fetch_in_child(&_c_big, 200000, 200008, 5000, &cur), 0, "cap: ...and one byte over is not");
+
+    # A deadline already past ends a read with nothing ready at once, and does not wait.
+    var dp[8];
+    sys_pipe(&dp);
+    var dbuf[8];
+    var d0 = clock_now_ms();
+    assert_eq(_bf_read_all(load32(&dp), &dbuf, 8, clock_now_ms() - 1), 0, "read: a deadline past is refused");
+    assert(streq(bote_fetch_why(), "deadline") == 1 && clock_now_ms() - d0 < 1000, "read: ...as the deadline, at once");
+    sys_write(load32(&dp + 4), "12345678", 8);
+    assert_eq(_bf_read_all(load32(&dp), &dbuf, 8, 0), 1, "read: no deadline reads what is there");
+    sys_close(load32(&dp + 4));
+    assert_eq(_bf_read_all(load32(&dp), &dbuf, 8, 0), 0, "read: a closed pipe is a short reply");
+    assert(streq(bote_fetch_why(), "short reply") == 1, "read: ...and says so");
+    sys_close(load32(&dp));
+
+    # The deadline: a child that would take 5 s is ended at 200 ms.
+    bote_req_begin();
+    var t0 = clock_now_ms();
+    assert_eq(bote_fetch_in_child(&_c_sleeps, 5000, 4096, 200, &cur), 0, "deadline: a slow child is refused");
+    var took = clock_now_ms() - t0;
+    assert(took >= 150 && took < 2000, "deadline: ...at the deadline");
+    assert(streq(bote_fetch_why(), "deadline") == 1, "deadline: ...and says so");
+    assert_eq(_children(), 0, "deadline: the child is killed and reaped");
+    bote_req_begin();
+    assert_eq(bote_fetch_in_child(&_c_sleeps, 50, 4096, 0, &cur), 1, "deadline: 0 waits as long as it takes");
+    bote_req_begin();
+    assert_eq(bote_fetch_in_child(&_c_sleeps, 50, 4096, 2000, &cur), 1, "deadline: a child inside it answers");
+
+    # A child that ends without a word.
+    bote_req_begin();
+    assert_eq(bote_fetch_in_child(&_c_exits, 0, 4096, 2000, &cur), 0, "short: a child that exits first is refused");
+    assert(streq(bote_fetch_why(), "short reply") == 1, "short: ...as a short reply");
+    assert_eq(_children(), 0, "short: reaped");
+    bote_req_begin();
+    assert_eq(bote_fetch_in_child(&_c_fields, 0, 4096, 2000, &cur), 1, "a reason is cleared by the next child that answers");
+    assert_eq(bote_fetch_why(), 0, "...to 0");
+
+    # ---------------- a real GET, from a child ----------------
+    var spid = _serve(13);
+    assert(spid > 0, "get: a loopback server");
+    if (spid > 0) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "http://127.0.0.1:");
+        str_builder_add_int(sb, _srv_port);
+        str_builder_add_cstr(sb, "/jwks.json");
+        var url = str_data(str_builder_build(sb));
+        bote_req_begin();
+        assert_eq(bote_fetch_in_child(&_c_get, url, 65536, 5000, &cur), 1, "get: answers");
+        assert_eq(bote_fetch_int(&cur), SANDHI_OK, "get: sandhi says ok");
+        assert_eq(bote_fetch_int(&cur), 200, "get: 200");
+        var body = bote_fetch_str(&cur, 0);
+        assert(body != 0 && streq(body, "{\"keys\":[42]}") == 1, "get: the body");
+        bote_req_begin();
+        bote_fetch_in_child(&_c_get, url, 65536, 5000, &cur);
+        var gb = alloc_used();
+        var gn = 0;
+        var gs = 0;
+        while (gn < 10) {
+            bote_req_begin();
+            if (bote_fetch_in_child(&_c_get, url, 65536, 5000, &cur) == 1) {
+                bote_fetch_int(&cur);
+                if (bote_fetch_int(&cur) == 200) { gs = gs + 1; }
+            }
+            gn = gn + 1;
+        }
+        assert_eq(gs, 10, "get: ten more, each a 200");
+        assert_eq(alloc_used() - gb, 0, "get heap: ten GETs leave nothing on this heap (sandhi kept 544 B each in this process)");
+        var sst[8];
+        sys_kill(spid, SIGKILL);
+        sys_waitpid(spid, &sst, 0);
+    }
+    assert_eq(_children(), 0, "get: no child left");
+    #endif
+
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit(rc);

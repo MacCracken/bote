@@ -72,6 +72,8 @@ include "src/jwt.cyr"
 include "src/pkce.cyr"
 # conn.cyr — per-connection send / idle deadlines every transport applies (3.4.3).
 include "src/conn.cyr"
+# fetch.cyr — an outbound request made in a child, for the web tools (3.6.5).
+include "src/fetch.cyr"
 include "src/http_era.cyr"
 include "src/oauth_metadata.cyr"
 include "src/transport_stdio.cyr"

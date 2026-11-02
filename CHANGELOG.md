@@ -18,6 +18,130 @@ have per release.
 
 _(empty)_
 
+## [3.6.5] — 2026-11-02 · Outbound requests in a child
+
+**The web tools make their requests in a child process.** sandhi's HTTP client gives the TLS stack the global heap, not the arena it
+was handed, so every `https://` request kept about 175 KB for the life of the process: 179,000 B measured, against 544 B for plain
+`http://`. `web_fetch` and `web_search` are tools a client calls, registered on `http`, `bridge`, `unix` and `stdio`, so a client could
+grow the server 175 KB at a time. A child takes what it allocated with it when it exits, and the parent kills it at
+`BOTE_WEB_TIMEOUT_MS`, which now bounds the DNS lookup sandhi gives no deadline. The parent reads back a record of what the tool needs,
+on the request arena, and keeps nothing of the request. Filed against sandhi, in its own repository, as
+`docs/development/issues/2026-11-02-bote-tls-connect-keeps-each-connection-on-the-heap.md`.
+
+**Four defects in 3.6.4 land ahead of it**, from an independent review of that release: a NUL in a header got past the WebSocket
+upgrade's bound; every WebSocket frame that called a handler copied the token again; a key outside base64 still kept heap; and the
+metadata document's 405 and Transfer-Encoding 400 carried no CORS on the bridge. A NUL anywhere in a request head is now refused on every
+HTTP-family transport, as RFC 9110 §5.5 allows.
+
+**Fetching `jwks_uri` moves to 3.6.6.** It was this patch's roadmap item, and it needs the same child: a refresh repeats its request for
+the life of the process, and an unknown `kid` lets a client ask for one. The child is a large item of its own, and the project's rule is
+never to batch two.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Added
+
+- **`src/fetch.cyr`**, in the full bundle, now 36 modules. `bote_fetch_in_child(fp, ctx, cap, deadline_ms, cur)` forks; the child runs
+  `fp(ctx, record)` and writes the record to a pipe; the parent reads at most `cap` bytes of it onto the request arena, kills a child
+  still running at the deadline (0 waits as long as it takes), and reaps every one. `bote_fetch_put_int`, `bote_fetch_put_str` and
+  `bote_fetch_put_bytes` write a record; `bote_fetch_int` and `bote_fetch_str` read it back in order, a string in place, and read 0 past its
+  end. `bote_fetch_why()` names a failure: `pipe`, `fork`, `poll`, `deadline`, `too large`, `memory` or `short reply`. On agnos the function runs
+  in this process. A fork copies only the calling thread, so this is for a single-threaded caller, which every transport is until 3.7.x.
+- **`bote_http_head_nul(buf, n)`**, eight bytes at a time, never past the head or `n`.
+- `bote_req_note_token_kept(token, kept)` and `bote_req_kept()`: a connection's later messages hand over the copy of the token its first
+  one made. `bote_http_refuse_method_hdr(cfd, transport, allow, extra)`, a 405 with extra headers.
+- A WARN, `outbound request did not finish`, naming the tool and why.
+- Benchmarks `http_head_nul` and `fetch_in_child_empty`.
+
+### Changed
+
+- **`web_fetch` and `web_search` run their request, and what they make of the reply, in a child.** `web_fetch`'s child does the guarded
+  GET and the HTML-to-text, `web_search`'s builds the URL, parses SearXNG's JSON and writes the results, and each sends back what the
+  parent needs: the guard's refusal, the status, the text. The parent logs and builds the result as before (`_web_fetch_result`,
+  `_web_search_result`), so every log line is where it was. `BOTE_WEB_TIMEOUT_MS` bounds the whole request now; it used to start after
+  the DNS lookup.
+- `_ws_upgrade_ok` checks the key as the handshake does: 22 bytes of base64 and `==` (`_ws_key_ok`).
+- `_bridge_with` is gone; its one use is `bote_http_refuse_method_hdr`.
+
+### Fixed
+
+- **A NUL in a header got past the WebSocket upgrade's bound.** `_ws_upgrade_ok` judged each value by `strlen`, which stops at a NUL,
+  and `ws_server_handshake` copies the line to its end, so `Connection: Upgrade` and a NUL and 60 KB kept 60,072 B refused and
+  61,600 B completed, and the review grew `bote ws` from 5.2 to 15.5 MB with 200 such requests. Every HTTP-family transport now refuses a
+  request whose head holds a NUL, with a 400 and a WARN, `nul_in_head`, before it reads a header.
+- **Every WebSocket frame that called a handler copied the token.** Each frame began a message, which forgets the copy the last one
+  made, so 100 calls of a 20 KB token kept 2,003,200 B; 3.6.3 kept 21,616 B. The first frame to hand a handler the token makes the one
+  copy, and every later frame hands over that one.
+- **A key outside base64 kept heap.** `_ws_upgrade_ok` checked only its length, and the handshake checks the alphabet after copying all
+  four headers: 64 B a request, or 320 B with a 256-byte `Connection`. It keeps nothing now.
+- **The metadata document's 405 and Transfer-Encoding 400 carried no CORS on the bridge**, so a page could not read them.
+- `_jwt_cache_put` stored whatever `alloc` returned. With nothing to store into, a token is now verified again next time.
+- Two comments: a client can aim at a cache slot with tokens the authorization server issued it, which costs another token one verify
+  more, and `jwt_secret_with_cache` does not reclaim a table it replaces. `_bote_env_count` sat between `_bote_env_ms` and its comment.
+
+### Security
+
+- **`web_fetch` and `web_search` over `https://` grew the server for good**, 175 KB a call, for any client allowed to call them. In a
+  child, the parent keeps none of it: 0 B per request measured, plain and TLS. What a call still keeps is what any handler call keeps,
+  its `args` and its result (roadmap 3.8.x).
+- **A DNS lookup no longer holds the server past `BOTE_WEB_TIMEOUT_MS`.** The child is killed at the deadline, whatever it is doing.
+- **A NUL in a request head is refused** on `http`, `streamable`, `bridge` and `ws` (RFC 9110 §5.5), because bote and the stdlib read a
+  value differently past one.
+- What is left: about 1.6 KB per completed WebSocket upgrade, all of it `ws_server_handshake`'s (filed at 3.6.4); a fork per outbound
+  request; and a forked request is not open to a threaded caller, which 3.7.x has to answer.
+
+### Tests
+
+- 4,014 assertions, from 3,886, on x86_64 and under `qemu-aarch64`. **`tests/bote_fetch.tcyr`**, new, has 59: the record and its bounds,
+  a NUL written over memory that was not zero, a child's globals its own, ten children of a megabyte each leaving nothing here, the cap
+  exactly at it and one byte over, a 5 s child killed at a 200 ms deadline, a child that exits first, a deadline already past, and a real
+  sandhi GET from a child to a loopback server the test forks: ten GETs, 0 heap bytes, every child reaped. `tests/bote_ws.tcyr` has 73,
+  from 50: 60 KB behind a NUL in `Connection`, `Upgrade` and the key, each refused with 0 heap bytes, all 255 bytes judged at either end of
+  the key, and one copy of a 20 KB token for 1, 10 or 100 handler calls, the 8 B each call's `args` keeps aside.
+  `tests/bote_http_era.tcyr` has 1,671, from 1,661: the NUL on `http`, `streamable` and `bridge`, and CORS on the metadata's 405 and 400.
+  `tests/bote_auth.tcyr` has 91, from 73: the head check at every offset of a head, aligned and not, through the word step and the bytes
+  after the last word. `tests/bote_web_tools.tcyr` has 84, from 66: what each tool makes of every record its child can write.
+- **`fuzz/http_head.fcyr`**, the eleventh harness: the head check against a byte loop over 20,000 random heads, with and without an end, a
+  NUL or none, cut anywhere and at eight alignments, and a NUL just past `n` never seen.
+- 77 mutants, 72 killed. The first round's 66 left four standing, and one test gap among the head check's, the bytes after the last word,
+  which now has its test. Of the four, one was code nothing read, a NUL after the record, now gone. One is the loop that resumes a partial
+  pipe write, which only a signal causes. One is `web_search`'s deadline: on a server that never answers, sandhi's own deadline inside the
+  child ends the request first, and only a DNS lookup that hangs, which a local test cannot make, tells the two apart; the helper's
+  deadline is tested on its own. The one-pass head check's 11 left two that change nothing a caller sees: a step of 7 after a clean word,
+  and a word read past `n` that can hide nothing inside it.
+- `scripts/transport-smoke.sh` sends a NUL in a header to each HTTP-family mode and gets a 400, and calls `web_search` against a loopback
+  SearXNG: its results, a 404, nothing written to the stdio wire, and a server that never answers given up at the 500 ms deadline.
+- stdio is byte-identical to 3.6.4 over 200,000 messages, and HTTP over 50 of 50. The official suite and client are where 3.6.4 left them:
+  128 passed and 45 failed checks on 2026-07-28, 54 and 10 on 2025-11-25, and 410 of 410 client checks.
+
+### Performance
+
+Interleaved A/B, 15 alternating rounds, pinned to one core, 3.6.4 against this tree, load about 3.7. Minimums, in ns:
+
+| Bench | 3.6.4 | 3.6.5 | Delta |
+|---|---|---|---|
+| `http_era_legacy` | 2,466 | 2,453 | −0.5% |
+| `http_era_modern` | 11,151 | 11,392 | +2.2% |
+| `dispatch_tools_call` | 2,147 | 2,189 | +2.0% |
+| `auth_bearer_check_set` | 766 | 752 | −1.8% |
+| `jwt_validate_audience`, an HS256 verify | 8,683 | 8,666 | −0.2% |
+| `jwt_cached_es256` | 2,475 | 2,520 | +1.8% |
+| `jwt_es256` | 10,421,000 | 10,429,000 | +0.1% |
+| `http_head_nul`, new | | 252 | |
+| `fetch_in_child_empty`, new | | 145,233 | |
+
+Three rows on code this patch did not touch moved with ranges that do not overlap: `codec_process_message` +5.0%, `validate_compiled_simple`
++5.1%, `jsonx_get_str_flat` +4.4%. **A control says layout:** 3.6.4 with never-called copies of 3.6.5's new functions, in the same places,
+moves them +4.4%, +4.6% and +4.9%, and 3.6.5 against that control is within ±1.3% on every row (12 rotating rounds, three binaries).
+
+**The head check every HTTP-family request now pays** is 252 ns for a 140-byte head. The first version found the end of the head with
+`sandhi_server_body_offset` and then scanned to it: 844 ns, 794 of them the search. The one pass stops at a NUL or at the first CRLF CRLF,
+whichever comes first, and costs 265 ns on the same head, a third.
+
+**A request made in a child** costs about 145 µs more than one made here, for the fork, the pipe and the reap of a child that sends nothing,
+and a whole GET to a loopback server made that way took about 0.6 ms, in a probe outside the repository. A TLS GET to a loopback server
+with a private CA took 17 ms in the same probe, so for `https://` the fork is under 1%. What it saves is the 179,000 B each such request kept.
+
 ## [3.6.4] — 2026-11-02 · Tokens already verified
 
 A token that passed is remembered, so a client that sends it again pays about 2.6 µs instead of the verify: 10.3 ms for ES256,
@@ -56,6 +180,14 @@ The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
   token, so a handler is handed its own copy as on HTTP. A token of 64 KB or more is refused with a 400, before the upgrade.
 
 ### Fixed
+
+> ⚠ **Corrected at 3.6.5.** Four claims in this entry were not true. "A refused upgrade now keeps nothing", here and under Security, failed
+> for a header holding a NUL: bote read each value up to it and the handshake copied the line to its end, so 60 KB behind a NUL still kept
+> 60,072 B refused and 61,600 B completed, and a key of 24 bytes outside base64 kept 64 B. "A connection keeps no byte of its token" held,
+> but every frame that called a handler made a copy of it: 100 calls of a 20 KB token kept 2 MB, where 3.6.3 kept one. "Every refusal past
+> the Origin check now carries the bridge's CORS" missed the metadata document's 405 and its Transfer-Encoding 400. And a client can aim
+> at a cache slot without a preimage, with tokens the authorization server issued it, at the cost of another token's verify. All are fixed
+> in 3.6.5, from an independent review of this release.
 
 - **The bridge's refusals reached no page.** Its 401, with no token or a refused one, and its 404, 405, 413 and four kinds of 400 went out
   without CORS headers, so a browser saw each as a network error: OAuth discovery could not start from the bridge. Every refusal past

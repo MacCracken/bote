@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.6.4 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.6.5 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
 > ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not. Every other table here is against 2025-11-25.
 
@@ -160,6 +160,7 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | **Built-in validators**: `auth_validator_allow_all` (dev), `auth_validator_allowlist` (vec membership) | `auth` | ✅ |
 | **`BOTE_BEARER_TOKENS` env var** wires an allowlist validator across all four HTTP-family transports at startup | `main::_bote_bearer_from_env` | ✅ (1.9.1) |
 | **HTTP body-length clamp** — `clen = min(clen, n - bo)` so a lying Content-Length can't make `memcpy` read past the request buffer | `transport_http`, `transport_streamable`, `bridge` | ✅ (1.5.1) |
+| A field value holding a NUL is refused or replaced (RFC 9110 §5.5) | `auth::bote_http_head_nul`, first in every HTTP-family handler | ✅ (3.6.5) a 400 on `http`, `streamable`, `bridge` and `ws`, before a header is read |
 | **SSRF guard for outbound URL fetches** — IPv4 + IPv6 blocklists for loopback / private / link-local / cloud-metadata | `host::ssrf_check` | ✅ (1.8.0 / 1.9.1) |
 | **JWT verifier** (RFC 7519 / 7515) — `alg` read as an exact JSON field (not a substring scan), constant-time HMAC compare, each segment strict base64url on the request arena, `exp` and `nbf` enforced *after* the signature verifies with no leeway, a malformed one rejects, an absent one accepts unless an audience is set, which requires `exp`; `auth_validator_jwt_hs256` plugs into the bearer middleware, and the binary uses it with `BOTE_JWT_SECRET` | `jwt::jwt_verify_hs256` | ✅ (2.2.0; `exp` + exact `alg` at 3.2.0; `nbf`, `aud` and `iss` at 3.6.1) |
 | **RFC 7636 PKCE-S256** — `pkce_code_verifier` (CSPRNG) + `pkce_code_challenge_s256` | `pkce` | ✅ (2.3.0; ships in `dist/bote.cyr` since 3.2.0) |
@@ -217,8 +218,8 @@ clients see them in `tools/list` immediately.
 | Tool | Purpose | Guard |
 |---|---|---|
 | `fs_write` / `fs_read` / `fs_mkdir` | File operations | Root-confined to `BOTE_FS_ROOT` (default `.`); absolute and `..` paths refused |
-| `web_fetch` | GET a URL and strip HTML to readable text | `http` / `https` only, 64 KiB cap, control bytes dropped |
-| `web_search` | Query a SearXNG JSON endpoint | `BOTE_SEARXNG_URL` — self-hostable, no third-party key |
+| `web_fetch` | GET a URL and strip HTML to readable text | `http` / `https` only, the SSRF guard on the URL and the resolved address, 64 KiB cap, control bytes dropped; in a child killed at `BOTE_WEB_TIMEOUT_MS` (3.6.5) |
+| `web_search` | Query a SearXNG JSON endpoint | `BOTE_SEARXNG_URL` — self-hostable, no third-party key; in a child killed at `BOTE_WEB_TIMEOUT_MS` (3.6.5) |
 
 All three families are opt-in via `*_tools_register()` for library consumers and
 registered by default in the binaries.

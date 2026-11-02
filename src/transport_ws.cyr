@@ -138,6 +138,29 @@ var _ws_frame_buf = 0;
 # per upgrade is then about 1.6 KB, which only the stdlib can give back.
 var BOTE_WS_CONNECTION_MAX = 256;
 
+# 1 when `c` is a byte of the base64 alphabet, RFC 4648 4.
+fn _ws_b64_char(c) {
+    if (c >= 65 && c <= 90) { return 1; }
+    if (c >= 97 && c <= 122) { return 1; }
+    if (c >= 48 && c <= 57) { return 1; }
+    if (c == 43 || c == 47) { return 1; }
+    return 0;
+}
+
+# 1 when `key` is the base64 of 16 bytes, RFC 6455 4.1: 22 of the alphabet and `==`.
+fn _ws_key_ok(key) {
+    if (strlen(key) != 24) { return 0; }
+    var i = 0;
+    while (i < 22) {
+        if (_ws_b64_char(load8(key + i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    if (load8(key + 22) != 61 || load8(key + 23) != 61) { return 0; }
+    return 1;
+}
+
+# The head holds no NUL by now (bote_http_head_nul), so each value read here is the
+# whole of the line the handshake will copy.
 fn _ws_upgrade_ok(buf, n) {
     var a = bote_req_alloc();
     var up = sandhi_server_find_header_a(a, buf, n, "Upgrade");
@@ -146,14 +169,15 @@ fn _ws_upgrade_ok(buf, n) {
     var key = sandhi_server_find_header_a(a, buf, n, "Sec-WebSocket-Key");
     if (up == 0 || cn == 0 || ver == 0 || key == 0) { return 0; }
     if (streq(up, "websocket") == 0 && streq(up, "WebSocket") == 0) { return 0; }
-    if (streq(ver, "13") == 0 || strlen(key) != 24) { return 0; }
+    if (streq(ver, "13") == 0 || _ws_key_ok(key) == 0) { return 0; }
     if (strlen(cn) > BOTE_WS_CONNECTION_MAX) { return 0; }
     return 1;
 }
 
 # The token a connection presented, for its frames, and how long one may be. One
 # connection at a time is served, so one buffer serves them all, and a connection that
-# ends leaves nothing on the heap. A handler is handed a copy (bote_req_claims_kept).
+# ends leaves nothing on the heap. A handler is handed a copy (bote_req_claims_kept), one
+# per connection.
 var BOTE_WS_TOKEN_MAX = 65536;
 var _ws_token_buf = 0;
 
@@ -192,6 +216,10 @@ fn _bote_ws_handler(config, cfd, buf, n) {
     # good, and with it every other client of this single-threaded loop.
     bote_conn_send_deadline(cfd);
     var a = bote_req_begin();
+    if (bote_http_head_nul(buf, n) == 1) {
+        bote_http_refuse(cfd, SK_WARN, "ws", HTTP_BAD_REQUEST, "Bad Request", "nul_in_head");
+        return 0;
+    }
     var method = sandhi_server_get_method_a(a, buf, n);
     var path   = sandhi_server_get_path_a(a, buf, n);
 
@@ -276,13 +304,16 @@ fn _bote_ws_handler(config, cfd, buf, n) {
     sock_set_nodelay(cfd, 1);
 
     # Each frame is one JSON-RPC message. Loop until peer closes or the
-    # socket errors out (ws_server_recv returns 0).
+    # socket errors out (ws_server_recv returns 0). The first frame to hand a handler
+    # the token makes its one heap copy, and every later frame hands over that one.
+    var ws_kept = 0;
     while (1 == 1) {
         a = bote_req_begin();
-        if (ws_token == 1) { bote_req_note_token(ws_claims); }
+        if (ws_token == 1) { bote_req_note_token_kept(ws_claims, ws_kept); }
         var msg = _bote_ws_recv(ws);
         if (msg == 0) { return 0; }
         var resp = codec_process_message_a(a, msg, ws_config_dispatcher(config), ws_claims);
+        if (ws_token == 1) { ws_kept = bote_req_kept(); }
         if (resp != 0) {
             # 3.4.3: a failed frame write (the send deadline firing, or the
             # peer gone) leaves the stream desynchronised mid-frame, so the

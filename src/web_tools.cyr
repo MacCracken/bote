@@ -344,6 +344,41 @@ fn _web_get_guarded(url) {
     return r;
 }
 
+# ---- in a child (3.6.5) ---------------------------------------------------
+# Each tool's request, and what it makes of the reply, runs in a child (src/fetch.cyr):
+# sandhi keeps about 175 KB on the heap for every https:// request, and a child takes it
+# away when it exits. The child answers with a record, and the parent logs and builds the
+# result from it, so the guard's refusal is logged here as it always was.
+
+# What a request that did not finish says, as a WARN naming why.
+fn _web_child_failed(tool) {
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_WARN, "outbound request did not finish");
+    bote_log_str(&ln, "tool", tool);
+    bote_log_str(&ln, "reason", bote_fetch_why());
+    bote_log_emit(&ln);
+    return 0;
+}
+
+# web_fetch's child: the guarded GET of `url`, then its readable text. The record: the
+# guard's refusal code, host and address; the status, -1 when the request failed; the text,
+# or 0 when the status is no 2xx.
+fn _web_fetch_child(url, rec) {
+    var r = _web_get_guarded(url);
+    bote_fetch_put_int(rec, _web_refused);
+    bote_fetch_put_str(rec, _web_refused_host);
+    bote_fetch_put_str(rec, _web_refused_addr);
+    if (r == 0) { return bote_fetch_put_int(rec, 0 - 1); }
+    var status = sandhi_http_status(r);
+    bote_fetch_put_int(rec, status);
+    if ((status < 200) || (status >= 300)) { return bote_fetch_put_str(rec, 0); }
+    var blen = sandhi_http_body_len(r);
+    if (blen > WEB_BODY_CAP) { blen = WEB_BODY_CAP; }
+    var out = alloc(WEB_FETCH_CAP + 1);
+    _web_html_to_text(sandhi_http_body(r), blen, out, WEB_FETCH_CAP);
+    return bote_fetch_put_str(rec, out);
+}
+
 # ---- web_fetch ------------------------------------------------------------
 # web_fetch {url} -> readable text of the page. http/https only; HTML stripped; capped at WEB_FETCH_CAP.
 fn web_fetch_handler(args, claims) {
@@ -371,36 +406,44 @@ fn web_fetch_handler(args, claims) {
         str_builder_add_cstr(sbr, ")");
         return _web_err(str_data(str_builder_build(sbr)));
     }
-    var r = _web_get_guarded(url);
-    if (r == 0 && _web_refused != 0) {
+    var cur[24];
+    if (bote_fetch_in_child(&_web_fetch_child, url, WEB_FETCH_CAP + 2 * strlen(url) + 256, BOTE_WEB_TIMEOUT_MS, &cur) == 0) {
+        _web_child_failed("web_fetch");
+        return _web_err("web_fetch: could not reach the URL (transport error)");
+    }
+    return _web_fetch_result(&cur);
+}
+
+# web_fetch's result from its child's record.
+fn _web_fetch_result(cur) {
+    var refused = bote_fetch_int(cur);
+    var rhost = bote_fetch_str(cur, 0);
+    var raddr = bote_fetch_str(cur, 0);
+    var status = bote_fetch_int(cur);
+    var text = bote_fetch_str(cur, 0);
+    if (status == 0 - 1 && refused != 0) {
         # The name resolved to an address the guard refused (3.4.4).
         var gl[BOTE_LOG_LINE_BYTES];
         bote_log_line(&gl, SK_WARN, "web_fetch refused by the SSRF guard (resolved address)");
-        bote_log_str(&gl, "reason", ssrf_reason(_web_refused));
-        bote_log_str(&gl, "host", _web_refused_host);
-        bote_log_str(&gl, "addr", _web_refused_addr);
+        bote_log_str(&gl, "reason", ssrf_reason(refused));
+        bote_log_str(&gl, "host", rhost);
+        bote_log_str(&gl, "addr", raddr);
         bote_log_emit(&gl);
         var sbg = str_builder_new();
         str_builder_add_cstr(sbg, "web_fetch: refused (SSRF guard: ");
-        str_builder_add_cstr(sbg, ssrf_reason(_web_refused));
+        str_builder_add_cstr(sbg, ssrf_reason(refused));
         str_builder_add_cstr(sbg, ", resolved address)");
         return _web_err(str_data(str_builder_build(sbg)));
     }
-    if (r == 0) { return _web_err("web_fetch: could not reach the URL (transport error)"); }
-    var status = sandhi_http_status(r);
+    if (status == 0 - 1) { return _web_err("web_fetch: could not reach the URL (transport error)"); }
     if ((status < 200) || (status >= 300)) {
         var sb = str_builder_new();
         str_builder_add_cstr(sb, "web_fetch: HTTP ");
         str_builder_add_int(sb, status);
         return _web_err(str_data(str_builder_build(sb)));
     }
-    var body = sandhi_http_body(r);
-    var blen = sandhi_http_body_len(r);
-    if (blen > WEB_BODY_CAP) { blen = WEB_BODY_CAP; }
-    var out = alloc_via(bote_req_alloc(), WEB_FETCH_CAP + 1);
-    _web_html_to_text(body, blen, out, WEB_FETCH_CAP);
-    if (load8(out) == 0) { return _web_ok("(the page returned no readable text)"); }
-    return _web_ok(out);
+    if (text == 0 || load8(text) == 0) { return _web_ok("(the page returned no readable text)"); }
+    return _web_ok(text);
 }
 
 # ---- web_search -----------------------------------------------------------
@@ -412,16 +455,19 @@ fn _web_searxng_base() {
     return b;
 }
 
-# web_search {query, count?} -> the top results from the configured SearXNG (title · url · snippet). Sovereign:
-# no third-party key, no silent default — an unconfigured endpoint is reported, not faked.
-fn web_search_handler(args, claims) {
-    var q = jsonx_get_str(args, "query");
-    if (q == 0) { return _web_err("web_search: missing 'query'"); }
-    var base = _web_searxng_base();
-    if (base == 0) { return _web_err("web_search: no search backend configured (set BOTE_SEARXNG_URL to a SearXNG instance)"); }
-    var count = _web_arg_number(args, "count");
-    if (count <= 0) { count = 5; }
-    if (count > WEB_SEARCH_MAX) { count = WEB_SEARCH_MAX; }
+# What web_search's child found, the record's first int.
+var WEB_SEARCH_DONE = 0;
+var WEB_SEARCH_UNREACHED = 1;
+var WEB_SEARCH_STATUS = 2;
+var WEB_SEARCH_UNPARSED = 3;
+var WEB_SEARCH_NO_RESULTS = 4;
+
+# web_search's child: `ctx` is {query, base, count}. The record: what it found, then the
+# status for WEB_SEARCH_STATUS, or the results' text, 0 for none, for WEB_SEARCH_DONE.
+fn _web_search_child(ctx, rec) {
+    var q = load64(ctx);
+    var base = load64(ctx + 8);
+    var count = load64(ctx + 16);
 
     # build <base>/search?q=<enc>&format=json  (trim one trailing '/' on the base)
     var bl = strlen(base);
@@ -436,13 +482,11 @@ fn web_search_handler(args, claims) {
     var url = str_data(str_builder_build(sbu));
 
     var r = _web_get(url);
-    if (r == 0) { return _web_err("web_search: could not reach the SearXNG endpoint (transport error)"); }
+    if (r == 0) { return bote_fetch_put_int(rec, WEB_SEARCH_UNREACHED); }
     var status = sandhi_http_status(r);
     if ((status < 200) || (status >= 300)) {
-        var sbe = str_builder_new();
-        str_builder_add_cstr(sbe, "web_search: SearXNG returned HTTP ");
-        str_builder_add_int(sbe, status);
-        return _web_err(str_data(str_builder_build(sbe)));
+        bote_fetch_put_int(rec, WEB_SEARCH_STATUS);
+        return bote_fetch_put_int(rec, status);
     }
     # parse {"results":[{title,url,content},...]} with bayan
     # 3.2.0: bayan 1.3.0 (folded into cyrius 6.5.1) renamed the buf+len typed
@@ -451,9 +495,9 @@ fn web_search_handler(args, claims) {
     # against the 6.5.x stdlib failed with `refusing to emit binary with 1
     # reachable undefined function(s)`.
     var v = bayan_json_v_parse_buf(sandhi_http_body(r), sandhi_http_body_len(r));
-    if (v == 0) { return _web_err("web_search: could not parse the SearXNG response"); }
+    if (v == 0) { return bote_fetch_put_int(rec, WEB_SEARCH_UNPARSED); }
     var results = bayan_json_v_obj_get_by_cstr(v, "results");
-    if (results == 0) { return _web_err("web_search: SearXNG response had no results array"); }
+    if (results == 0) { return bote_fetch_put_int(rec, WEB_SEARCH_NO_RESULTS); }
     var n = bayan_json_v_arr_len(results);
     var sb = str_builder_new();
     var shown = 0;
@@ -475,8 +519,48 @@ fn web_search_handler(args, claims) {
         }
         i = i + 1;
     }
-    if (shown == 0) { return _web_ok("(no results)"); }
-    return _web_ok(str_data(str_builder_build(sb)));
+    bote_fetch_put_int(rec, WEB_SEARCH_DONE);
+    if (shown == 0) { return bote_fetch_put_str(rec, 0); }
+    return bote_fetch_put_str(rec, str_data(str_builder_build(sb)));
+}
+
+# web_search {query, count?} -> the top results from the configured SearXNG (title · url · snippet). Sovereign:
+# no third-party key, no silent default — an unconfigured endpoint is reported, not faked.
+fn web_search_handler(args, claims) {
+    var q = jsonx_get_str(args, "query");
+    if (q == 0) { return _web_err("web_search: missing 'query'"); }
+    var base = _web_searxng_base();
+    if (base == 0) { return _web_err("web_search: no search backend configured (set BOTE_SEARXNG_URL to a SearXNG instance)"); }
+    var count = _web_arg_number(args, "count");
+    if (count <= 0) { count = 5; }
+    if (count > WEB_SEARCH_MAX) { count = WEB_SEARCH_MAX; }
+    var ctx[24];
+    store64(&ctx, q);
+    store64(&ctx + 8, base);
+    store64(&ctx + 16, count);
+    var cur[24];
+    if (bote_fetch_in_child(&_web_search_child, &ctx, WEB_BODY_CAP + 4096, BOTE_WEB_TIMEOUT_MS, &cur) == 0) {
+        _web_child_failed("web_search");
+        return _web_err("web_search: could not reach the SearXNG endpoint (transport error)");
+    }
+    return _web_search_result(&cur);
+}
+
+# web_search's result from its child's record.
+fn _web_search_result(cur) {
+    var found = bote_fetch_int(cur);
+    if (found == WEB_SEARCH_UNREACHED) { return _web_err("web_search: could not reach the SearXNG endpoint (transport error)"); }
+    if (found == WEB_SEARCH_STATUS) {
+        var sbe = str_builder_new();
+        str_builder_add_cstr(sbe, "web_search: SearXNG returned HTTP ");
+        str_builder_add_int(sbe, bote_fetch_int(cur));
+        return _web_err(str_data(str_builder_build(sbe)));
+    }
+    if (found == WEB_SEARCH_UNPARSED) { return _web_err("web_search: could not parse the SearXNG response"); }
+    if (found == WEB_SEARCH_NO_RESULTS) { return _web_err("web_search: SearXNG response had no results array"); }
+    var text = bote_fetch_str(cur, 0);
+    if (text == 0) { return _web_ok("(no results)"); }
+    return _web_ok(text);
 }
 
 # _web_json_field: the cstr value of string field `key` on bayan object value `item`, or 0.

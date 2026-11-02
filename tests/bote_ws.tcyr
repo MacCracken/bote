@@ -100,7 +100,10 @@ fn _wx_tool(args, claims) {
 }
 
 # What a client sending `frames` copies of `msg`, with the upgrade request `req`, reads back.
-fn _wx_conn(cfg, req, msg, frames) {
+fn _wx_conn(cfg, req, msg, frames) { return _wx_conn_n(cfg, req, strlen(req), msg, frames); }
+
+# _wx_conn with the request's length given, for one that holds a NUL.
+fn _wx_conn_n(cfg, req, rn, msg, frames) {
     var p[16];
     sys_socketpair(1, 1, 0, &p);
     var sa = load32(&p);
@@ -114,7 +117,7 @@ fn _wx_conn(cfg, req, msg, frames) {
     }
     sock_shutdown(sb, 1);
     bote_req_begin();
-    _bote_ws_handler(cfg, sa, req, strlen(req));
+    _bote_ws_handler(cfg, sa, req, rn);
     sys_close(sa);
     var n = sys_read(sb, _wx_got, 65535);
     var got = 0;
@@ -150,15 +153,46 @@ fn _cat_ws(head, pad) {
 }
 
 # Heap per connection, over 10 connections after one to warm up.
-fn _wx_heap(cfg, req, msg, frames) {
-    _wx_conn(cfg, req, msg, frames);
+fn _wx_heap(cfg, req, msg, frames) { return _wx_heap_n(cfg, req, strlen(req), msg, frames); }
+
+fn _wx_heap_n(cfg, req, rn, msg, frames) {
+    _wx_conn_n(cfg, req, rn, msg, frames);
     var before = alloc_used();
     var i = 0;
     while (i < 10) {
-        _wx_conn(cfg, req, msg, frames);
+        _wx_conn_n(cfg, req, rn, msg, frames);
         i = i + 1;
     }
     return (alloc_used() - before) / 10;
+}
+
+# `head`, then a NUL, then `pad` bytes of x, then CRLF: a header line whose value a
+# strlen ends at the NUL. Its length is in _wx_nul_len.
+var _wx_nul_len = 0;
+fn _wx_nul_line(head, pad) {
+    var n = strlen(head);
+    var out = alloc(n + pad + 4);
+    memcpy(out, head, n);
+    store8(out + n, 0);
+    memset(out + n + 1, 120, pad);
+    memcpy(out + n + 1 + pad, "\r\n", 3);
+    _wx_nul_len = n + 1 + pad + 2;
+    return out;
+}
+
+# An upgrade request of `before`, the NUL line, and `after`, by length; its length is in
+# _wx_nul_len.
+fn _wx_nul_req(before, nul_head, pad, after) {
+    var line = _wx_nul_line(nul_head, pad);
+    var ll = _wx_nul_len;
+    var bl = strlen(before);
+    var al = strlen(after);
+    var out = alloc(bl + ll + al + 1);
+    memcpy(out, before, bl);
+    memcpy(out + bl, line, ll);
+    memcpy(out + bl + ll, after, al + 1);
+    _wx_nul_len = bl + ll + al;
+    return out;
 }
 
 # What a client sending `frames` calls of the tool, with the token `tok`, reads back.
@@ -404,6 +438,94 @@ fn main() {
     store8(huge + 70000, 0);
     var toolong = _wx_conn(scfg, _wx_upgrade(huge, ""), list, 1);
     assert(_wx_has(toolong, "HTTP/1.1 400") == 1 && _wx_has(toolong, "101 Switching") == 0, "ws: a token too long to keep is refused before the upgrade");
+
+    # 3.6.5: a NUL in a header. bote read each value up to its NUL, and ws_server's
+    # handshake copies it to the end of its line, so 60 KB behind a NUL passed the bound
+    # and was kept. RFC 9110 5.5 lets a recipient refuse any field value holding one.
+    var up_line = "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n";
+    var rest = "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n";
+    var ncr = _wx_nul_req(up_line, "Connection: Upgrade", 60000, rest);
+    var ncn = _wx_nul_len;
+    var ncg = _wx_conn_n(scfg, ncr, ncn, list, 1);
+    assert(_wx_has(ncg, "HTTP/1.1 400") == 1 && _wx_has(ncg, "101 Switching") == 0, "ws: 60 KB behind a NUL in Connection is refused");
+    assert_eq(_wx_heap_n(scfg, ncr, ncn, list, 1), 0, "ws heap: ...and keeps nothing");
+    var nur = _wx_nul_req("GET /mcp HTTP/1.1\r\nHost: x\r\n", "Upgrade: websocket", 60000,
+      "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n");
+    var nun = _wx_nul_len;
+    assert(_wx_has(_wx_conn_n(scfg, nur, nun, list, 1), "HTTP/1.1 400") == 1, "ws: 60 KB behind a NUL in Upgrade is refused");
+    assert_eq(_wx_heap_n(scfg, nur, nun, list, 1), 0, "ws heap: ...and keeps nothing (a completed upgrade kept 61,600 B)");
+    var nkr = _wx_nul_req("GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n",
+      "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", 60000, "Sec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n");
+    var nkn = _wx_nul_len;
+    assert(_wx_has(_wx_conn_n(scfg, nkr, nkn, list, 1), "HTTP/1.1 400") == 1, "ws: 60 KB behind a NUL in the key is refused");
+    assert_eq(_wx_heap_n(scfg, nkr, nkn, list, 1), 0, "ws heap: ...and keeps nothing");
+    var nor = _wx_nul_req("GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n", "X-Note: a", 1, rest);
+    assert(_wx_has(_wx_conn_n(scfg, nor, _wx_nul_len, list, 1), "HTTP/1.1 400") == 1, "ws: a NUL in any header is refused");
+
+    # The key is the base64 of 16 bytes, which the handshake checks after it has copied
+    # every header; it is checked here first.
+    var bang = "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: !!!!!!!!!!!!!!!!!!!!!!==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n";
+    assert(_wx_has(_wx_conn(scfg, bang, list, 1), "HTTP/1.1 400") == 1, "ws: a key outside base64 is refused");
+    assert_eq(_wx_heap(scfg, bang, list, 1), 0, "ws heap: ...and keeps nothing (64 B before)");
+    var bang256 = str_builder_new();
+    str_builder_add_cstr(bang256, "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n");
+    str_builder_add_cstr(bang256, c256);
+    str_builder_add_cstr(bang256, "Sec-WebSocket-Key: !!!!!!!!!!!!!!!!!!!!!!==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n");
+    assert_eq(_wx_heap(scfg, str_data(str_builder_build(bang256)), list, 1), 0, "ws heap: ...with a 256-byte Connection too (320 B before)");
+    var nopad = "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=x\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n";
+    assert(_wx_has(_wx_conn(scfg, nopad, list, 1), "HTTP/1.1 400") == 1, "ws: a key not ending == is refused");
+    var b64sym = "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ab+/ab+/ab+/ab+/ab+/aA==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n";
+    assert(_wx_has(_wx_conn(scfg, b64sym, list, 1), "101 Switching") == 1, "ws: a key using + and / upgrades");
+    var key_z = "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: zZ09zZ09zZ09zZ09zZ09zZ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n";
+    assert(_wx_has(_wx_conn(scfg, key_z, list, 1), "101 Switching") == 1, "ws: a key at the ends of each range upgrades");
+    # Every byte, first and last of the 22, against RFC 4648's alphabet.
+    var kb = alloc(25);
+    var kwrong = 0;
+    var kc = 1;
+    while (kc < 256) {
+        var want = 0;
+        if ((kc >= 65 && kc <= 90) || (kc >= 97 && kc <= 122) || (kc >= 48 && kc <= 57) || kc == 43 || kc == 47) { want = 1; }
+        memcpy(kb, "AAAAAAAAAAAAAAAAAAAAAA==", 25);
+        store8(kb, kc);
+        if (_ws_key_ok(kb) != want) { kwrong = kwrong + 1; }
+        memcpy(kb, "AAAAAAAAAAAAAAAAAAAAAA==", 25);
+        store8(kb + 21, kc);
+        if (_ws_key_ok(kb) != want) { kwrong = kwrong + 1; }
+        kc = kc + 1;
+    }
+    assert_eq(kwrong, 0, "ws key: each of 255 bytes, first and last, judged as base64 is");
+    assert_eq(_ws_key_ok("AAAAAAAAAAAAAAAAAAAAAA=A"), 0, "ws key: the last byte must be =");
+    assert_eq(_ws_key_ok("AAAAAAAAAAAAAAAAAAAAAAA="), 0, "ws key: ...and the one before it");
+    assert_eq(_ws_key_ok("AAAAAAAAAAAAAAAAAAAAAA=="), 1, "ws key: 22 and ==");
+    assert_eq(_ws_key_ok("AAAAAAAAAAAAAAAAAAAAAA==A"), 0, "ws key: 25 bytes");
+
+    # A connection keeps one copy of its token, made the first time a handler is handed
+    # it, however many frames call one. 3.6.4 made a copy per frame: 2 MB for 100 calls
+    # of a 20 KB token.
+    var freg = tool_registry_new();
+    registry_register(freg, tool_def_new("t_free", "F", schema_new("object", 0, vec_new())));
+    var fdisp = dispatcher_new(freg);
+    dispatcher_handle(fdisp, "t_free", &_wx_tool);
+    var fcfg = ws_config_new("/mcp", 0x0100007F, 8393);
+    store64(fcfg + 40, fdisp);
+    ws_config_with_bearer_validator(fcfg, &_wx_tok, 0);
+    var call = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"t_free\"}}";
+    _wx_runs = 0;
+    var called = _wx_conn(fcfg, _wx_upgrade(big, ""), call, 3);
+    assert(_wx_has(called, "\"content\":[]") == 1 && _wx_runs == 3, "ws: three calls on one connection are served");
+    var h1 = _wx_heap(fcfg, _wx_upgrade(big, ""), call, 1);
+    var h10 = _wx_heap(fcfg, _wx_upgrade(big, ""), call, 10);
+    var h100 = _wx_heap(fcfg, _wx_upgrade(big, ""), call, 100);
+    assert(h1 > hs_keep + 20000 && h1 < hs_keep + 20100, "ws heap: one call keeps the handshake's bytes and one copy of the token");
+    # What each later call keeps is its `args`, which a handler may keep (roadmap 3.8.x).
+    assert(h10 > h1 && h10 - h1 <= 9 * 16, "ws heap: nine more calls keep their args and no token");
+    assert_eq(h100 - h1, 11 * (h10 - h1), "ws heap: ...and a hundred keep eleven times that");
+    _wx_kept = 0;
+    _wx_conn(fcfg, _wx_upgrade("token-a", ""), call, 2);
+    var kept_a = _wx_kept;
+    _wx_kept = 0;
+    _wx_conn(fcfg, _wx_upgrade("token-b", ""), call, 1);
+    assert(kept_a != 0 && streq(kept_a, "token-a") == 1 && streq(_wx_kept, "token-b") == 1, "ws: each connection's handlers get its own token, and a kept one outlives it");
     #endif
 
     return assert_summary();

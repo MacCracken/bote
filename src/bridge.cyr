@@ -232,15 +232,6 @@ fn _bridge_send_health(cfd, allowed_origins, request_origin) {
 # BridgeConfig now carries the dispatcher in the +24 slot (see
 # bridge_config_with_dispatcher below). We pass the config as ctx.
 
-# `a` then `b`, on the request arena.
-fn _bridge_with(a, b) {
-    var ra = bote_req_alloc();
-    var sb = str_builder_new_a(ra);
-    str_builder_add_cstr_a(ra, sb, a);
-    str_builder_add_cstr_a(ra, sb, b);
-    return str_data(str_builder_build_a(ra, sb));
-}
-
 fn _bridge_handle(config, cfd, buf, n) {
     # 3.4.3: bound every write to this client (src/conn.cyr).
     bote_conn_send_deadline(cfd);
@@ -248,6 +239,10 @@ fn _bridge_handle(config, cfd, buf, n) {
     var dispatcher      = bridge_config_dispatcher(config);
 
     var a = bote_req_begin();
+    if (bote_http_head_nul(buf, n) == 1) {
+        bote_http_refuse(cfd, SK_WARN, "bridge", HTTP_BAD_REQUEST, "Bad Request", "nul_in_head");
+        return 0;
+    }
     var method = sandhi_server_get_method_a(a, buf, n);
     var path   = sandhi_server_get_path_a(a, buf, n);
     var origin = sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Origin");
@@ -279,7 +274,7 @@ fn _bridge_handle(config, cfd, buf, n) {
     }
     # Anything other than POST is rejected.
     if (streq(method, "POST") == 0) {
-        bote_http_refuse_method(cfd, "bridge", _bridge_with(cors, "Allow: POST, GET, OPTIONS\r\n"));
+        bote_http_refuse_method_hdr(cfd, "bridge", "Allow: POST, GET, OPTIONS\r\n", cors);
         return 0;
     }
     # Only "/" is the bridge endpoint.

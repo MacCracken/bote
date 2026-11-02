@@ -37,6 +37,7 @@ include "src/jwt.cyr"
 include "tests/fixtures/jwt_vectors.cyr"
 include "src/http_era.cyr"
 include "src/oauth_metadata.cyr"
+include "src/fetch.cyr"
 
 # ================================================================
 # Globals — preallocated state shared by benchmark callbacks
@@ -121,6 +122,17 @@ fn b_jwt_es256() {
     return auth_validator_jwt(JV_ES_GOOD, _b_jwks_secret);
 }
 fn b_http_era_params() { return _b_era(_b_param_dispatcher, _b_era_params, _b_era_params + _b_era_params_at); }
+
+# What every HTTP-family request pays to be judged for a NUL in its head (3.6.5).
+fn b_http_head_nul() { return bote_http_head_nul(_b_era_modern, _b_era_modern_at); }
+
+# A request made in a child, less the request: the fork, the pipe and the reap (3.6.5).
+fn _b_child_nop(ctx, rec) { return 0; }
+fn b_fetch_in_child_empty() {
+    bote_req_begin();
+    var cur[24];
+    return bote_fetch_in_child(&_b_child_nop, 0, 64, 5000, &cur);
+}
 
 fn b_dispatch_initialize() {
     return dispatcher_dispatch(_b_dispatcher, _b_init_req, 0);
@@ -481,6 +493,12 @@ fn main() {
     var b30 = bench_new("jwt_forged_hs256_cache_off");
     bench_run(b30, &b_jwt_forged_cache_off, 10000);
     vec_push(benches, b30);
+    var b31 = bench_new("http_head_nul");
+    bench_run(b31, &b_http_head_nul, 100000);
+    vec_push(benches, b31);
+    var b32 = bench_new("fetch_in_child_empty");
+    bench_run(b32, &b_fetch_in_child_empty, 500);
+    vec_push(benches, b32);
 
     bench_report_all(benches);
     return 0;

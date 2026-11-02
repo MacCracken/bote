@@ -1,0 +1,106 @@
+# Fuzz: bote_http_head_nul (3.6.5) finds a NUL in a request's head exactly where a byte
+# loop does, at every length and alignment, and never reads past `n`.
+#
+# Every HTTP-family transport runs it first, and a miss is a header whose value one reader
+# stops at and another does not: 3.6.4's bound on what a WebSocket upgrade keeps was passed
+# that way. Two properties, each with its own exit code:
+#
+#   10   over random heads, with and without the CRLF CRLF that ends them, a NUL or none
+#        dropped anywhere, a length cut anywhere and a start at each of eight alignments,
+#        it agrees with a byte loop over the same span;
+#   20   a NUL just past `n`, with no NUL before it, is never seen.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "lib/sakshi.cyr"
+
+include "src/log.cyr"
+include "src/protocol.cyr"
+include "src/auth.cyr"
+
+alloc_init();
+
+# A small, fixed generator: the run is the same every time.
+var _rng = 88172645463325252;
+fn _rand() {
+    _rng = _rng ^ (_rng << 13);
+    _rng = _rng ^ (_rng >> 7);
+    _rng = _rng ^ (_rng << 17);
+    if (_rng < 0) { return 0 - _rng; }
+    return _rng;
+}
+
+# The reference: the head is up to the first CRLF CRLF inside n, or all of n.
+fn _ref(buf, n) {
+    var end = n;
+    var i = 0;
+    while (i + 4 <= n) {
+        if (load8(buf + i) == 13 && load8(buf + i + 1) == 10 && load8(buf + i + 2) == 13 && load8(buf + i + 3) == 10) {
+            end = i + 4;
+            i = n;
+        }
+        i = i + 1;
+    }
+    var j = 0;
+    while (j < end) {
+        if (load8(buf + j) == 0) { return 1; }
+        j = j + 1;
+    }
+    return 0;
+}
+
+var cap = 600;
+var mem = alloc(cap + 16);
+var round = 0;
+while (round < 20000) {
+    var off = _rand() % 8;
+    var buf = mem + off;
+    var len = 1 + _rand() % 500;
+    var i = 0;
+    while (i < len) {
+        # Printable bytes, with CR and LF often enough to end a head somewhere.
+        var r = _rand() % 40;
+        var b = 32 + _rand() % 95;
+        if (r == 0) { b = 13; }
+        if (r == 1) { b = 10; }
+        store8(buf + i, b);
+        i = i + 1;
+    }
+    if (_rand() % 3 == 0) {
+        var at = _rand() % (len - 3 + 4);
+        if (at + 4 <= len) { memcpy(buf + at, "\r\n\r\n", 4); }
+    }
+    if (_rand() % 2 == 0) { store8(buf + _rand() % len, 0); }
+    store8(buf + len, 0);
+    var n = len;
+    if (_rand() % 4 == 0) { n = _rand() % (len + 1); }
+    if (bote_http_head_nul(buf, n) != _ref(buf, n)) { sys_exit(10); }
+    # A NUL at buf[n] and none before it: not seen.
+    if (_ref(buf, n) == 0 && n < len) {
+        var saved = load8(buf + n);
+        store8(buf + n, 0);
+        if (bote_http_head_nul(buf, n) != 0) { sys_exit(20); }
+        store8(buf + n, saved);
+    }
+    round = round + 1;
+}
+
+sys_exit(0);

@@ -30,7 +30,7 @@ revision's required list is features bote lacks. Each has a place below.
 
 ## Next patch
 
-**3.6.5 — Fetching `jwks_uri`.** Item 1 of 3.6.x below.
+**3.6.6 — Fetching `jwks_uri`.** Item 1 of 3.6.x below, made with `bote_fetch_in_child`, which 3.6.5 added for the web tools.
 
 ## 3.5.x — MCP 2026-07-28, dual-era
 
@@ -62,8 +62,13 @@ publishes its metadata, checks a token's audience for HS256, RS256 and ES256, an
 a `403` a client can step up from. What is left is below. Authorization as a whole is optional, so this applies
 when an operator turns auth on.
 
-1. **Fetching `jwks_uri`.** Keys come from a file, and rotating them means a restart with the new set in place. Fetching
-   them needs the SSRF guard and a cache, and has to survive the authorization server being down.
+1. **Fetching `jwks_uri`.** Keys come from a file, and rotating them means a restart with the new set in place. What 3.6.5
+   measured decides the shape: sandhi keeps about 175 KB on the heap for every `https://` request and gives DNS no deadline, so
+   the fetch is made in a child (`bote_fetch_in_child`), which bounds both. The URL is the operator's, so the SSRF guard, which
+   would refuse an authorization server on the same network, does not apply; `https://` does, with `http://` to a loopback
+   address only, and no redirect is followed. Fetched at startup, again when the set is old or a token names a `kid` it does
+   not hold, never more often than a cooldown, backing off while the authorization server is down and keeping the last good
+   set. A set that changed clears the verified-token cache, or a removed key's tokens would still be judged from it.
 2. **Scopes beyond `tools/call`.** `prompts/get` and `resources/read` are not gated, and the spec leaves which
    operation needs which scope to the server. Needs a way to declare one on a prompt or a template.
 3. **A token that expires during a WebSocket connection.** `ws` checks a token once, at the upgrade, so it keeps working
@@ -88,7 +93,8 @@ that feed it, and `subscriptions/listen` is such a stream. **Large: small bites.
    (`bote_req_alloc`), the token it holds for a handler (`bote_req_note_token`), `_fs_read_buf`,
    `_ws_frame_buf`, `_ws_token_buf`, `_unix_buf`. sandhi's worker arena is fixed-size and fails when full, so it needs its
    grow option or a large reply crashes. The verified-token cache is shared and unlocked, and needs a lock
-   or a table per worker.
+   or a table per worker. `bote_fetch_in_child` forks, and a fork copies only the thread that calls it, with any lock
+   another thread held still held: the outbound requests need sandhi's arena fix upstream by then, or a process of their own.
 3. `subscriptions/listen`, with `toolsListChanged`, `promptsListChanged`, `resourcesListChanged` and
    `resourceSubscriptions`, `notifications/subscriptions/acknowledged`, and
    `io.modelcontextprotocol/subscriptionId` tagging. Then `notifications/resources/updated`.
@@ -197,11 +203,20 @@ None planned. Any one of these would:
 
 ## Upstream
 
-No open blockers. To file, all found by the 2026-11-01 audit or earlier, and none blocking:
+No open blockers. Filed, each in its project's `docs/development/issues/`:
+
+- **sandhi keeps every TLS connection on the global heap** (sandhi, `2026-11-02-bote-tls-connect-keeps-each-connection-on-the-heap.md`):
+  about 175 KB per `https://` request, whatever allocator the caller gave. bote makes its outbound requests in a child since
+  3.6.5, which keeps it off bote's heap. It reaches bote when a cyrius release folds the sandhi that fixes it.
+- **`ws_server_handshake` keeps the client's headers on the heap** (cyrius, `2026-11-02-bote-ws-server-handshake-keeps-client-headers-on-heap.md`),
+  about 1.6 KB per completed upgrade. bote bounds what reaches it.
+
+To file, all found by the 2026-11-01 audit or earlier, and none blocking:
 
 - **sandhi — DNS has no deadline.** `_SANDHI_RESOLVE_TIMEOUT_MS` is reserved and unused, and the request
-  deadline starts after the resolve, so a lost DNS reply can still hang `web_fetch` and every client
-  behind it. bote's deadlines cannot reach it.
+  deadline starts after the resolve, so a lost DNS reply hangs the request. Since 3.6.5 the web tools'
+  requests are made in a child, which the parent ends at `BOTE_WEB_TIMEOUT_MS`, so it no longer holds bote;
+  any other sandhi client is exposed. The stdlib's `net_resolve_ipv4` has a deadline, two tries of 2 s.
 - **sandhi — `Transfer-Encoding : chunked`** (a space before the colon) is not recognised, where RFC 9112
   §5.1 says 400. `sandhi_server_content_length` reads a malformed value as 0, the same as absent; bote
   works around that one with `bote_http_clen_bad`. `sandhi_url_parse` has no userinfo handling.
@@ -225,4 +240,5 @@ No open blockers. To file, all found by the 2026-11-01 audit or earlier, and non
 
 bote's six toolchain filings are archived in the cyrius repo (`docs/development/issues/archived/`) and
 indexed in [resolved-lang-issues.md](../resolved-lang-issues.md). New bote-side issues go under
-`docs/development/issues/`, and toolchain issues are filed in the cyrius repo.
+`docs/development/issues/`. Toolchain and stdlib issues are filed in the cyrius repo, and sandhi's in the sandhi repo,
+whose source cyrius folds into `lib/sandhi.cyr`.

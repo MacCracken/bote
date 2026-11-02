@@ -18,7 +18,10 @@
 #   - BOTE_TOOL_SCOPES answers a token without a scope with a 403 that names it,
 #     and refuses to start on a name it cannot honour (3.6.3);
 #   - a token seen twice is judged from the cache the second time, BOTE_JWT_CACHE=0
-#     turns that off, and the token never reaches the log (3.6.4).
+#     turns that off, and the token never reaches the log (3.6.4);
+#   - web_search, made in a child, returns a loopback SearXNG's results and its
+#     status, writes nothing to the stdio wire, and gives up on a server that never
+#     answers by BOTE_WEB_TIMEOUT_MS (3.6.5).
 # Needs curl and python3. CI runs it as the "Transport smoke" step.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -355,6 +358,19 @@ while 1:
     d+=c
 print(d.split(b"\r\n")[0].decode())' "$INIT")
 echo "$r" | grep -q ' 400 ' || err "a NUL in a body was not refused: $r"
+# A NUL in a header, on each HTTP-family mode, ws included: RFC 9110 5.5 (3.6.5).
+for p in 18390 18391 18392 18393; do
+  r=$(python3 -I -c 'import socket,sys
+s=socket.create_connection(("127.0.0.1",int(sys.argv[1])),timeout=3)
+s.sendall(b"GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\0" + b"x"*20000 + b"\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+d=b""
+while 1:
+    c=s.recv(4096)
+    if not c: break
+    d+=c
+print(d.split(b"\r\n")[0].decode())' "$p")
+  echo "$r" | grep -q ' 400 ' || err "$p: a NUL in a header was not refused: $r"
+done
 # MCP 2026-07-28 over stdio, and a legacy client on the same binary (3.5.0).
 MM='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
 r=$(printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{$MM}}" "$INIT" "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\",\"params\":{$MM}}" \
@@ -395,6 +411,33 @@ c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H 'Authorization: Bearer t
 # Bearer auth asked for and not configured is a refusal to start, not auth off.
 rc=0; BOTE_BEARER_TOKENS=, timeout 5 $B http 18397 2> "$L/nobearer.held" || rc=$?
 [ "$rc" -eq 2 ] || err "BOTE_BEARER_TOKENS=, started anyway (rc=$rc)"
+# web_search makes its request in a child (3.6.5): against a loopback SearXNG, its
+# results, a status, and a server that never answers, which the deadline ends.
+sx="$L/searx"; mkdir -p "$sx"
+printf '%s' '{"results":[{"title":"Bote smoke","url":"https://example.org/a","content":"a snippet"}]}' > "$sx/search"
+python3 -I -m http.server 18380 --bind 127.0.0.1 --directory "$sx" > /dev/null 2>&1 & pids+=($!)
+python3 -I -c 'import socket
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", 18381)); s.listen(8)
+held=[]
+while 1:
+    held.append(s.accept()[0])' > /dev/null 2>&1 & pids+=($!)
+wait_port 18380 || err "searx: the loopback server did not start"
+wait_port 18381 || err "searx: the silent server did not start"
+wscall() { # base env...
+  local base="$1"; shift
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"web_search","arguments":{"query":"bote"}}}' \
+    | env BOTE_SEARXNG_URL="$base" "$@" timeout 10 $B stdio 2>> "$L/searx.held"
+}
+r=$(wscall http://127.0.0.1:18380)
+echo "$r" | grep -q 'Bote smoke' && echo "$r" | grep -q 'a snippet' || err "web_search through a child: $r"
+[ "$(printf '%s\n' "$r" | wc -l)" -eq 1 ] || err "web_search's child wrote to the wire: $r"
+r=$(wscall http://127.0.0.1:18380/nope)
+echo "$r" | grep -q 'SearXNG returned HTTP 404' || err "web_search on a 404: $r"
+t0=$(date +%s%N)
+r=$(wscall http://127.0.0.1:18381 BOTE_WEB_TIMEOUT_MS=500)
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+echo "$r" | grep -q 'could not reach the SearXNG endpoint' || err "web_search on a silent server: $r"
+[ "$ms" -lt 3000 ] || err "web_search on a silent server took $ms ms, past its 500 ms deadline"
 
 for f in "$L"/*.err; do grep -q 'transport failed' "$f" && err "$(basename "$f"): $(grep 'transport failed' "$f")"; done
 [ $fail -eq 0 ] || exit 1

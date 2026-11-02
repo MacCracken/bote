@@ -359,6 +359,83 @@ fn main() {
     assert(c_kept != load64(&c_slot), "one message: a handler gets a copy");
     assert(streq(c_kept, "on-the-arena") == 1, "one message: ...of the token");
 
+    # 3.6.5: a connection's later messages hand over the copy its first one made.
+    var tokx = "tok-x";
+    bote_req_begin();
+    bote_req_note_token_kept(tokx, 0);
+    assert_eq(bote_req_kept(), 0, "kept: none before a handler is handed the token");
+    var k1 = bote_req_claims_kept(tokx);
+    assert(k1 != tokx && streq(k1, "tok-x") == 1 && bote_req_kept() == k1, "kept: the first copy is noted");
+    bote_req_begin();
+    assert_eq(bote_req_kept(), 0, "kept: a new message starts with none");
+    bote_req_note_token_kept(tokx, k1);
+    var ku = alloc_used();
+    assert_eq(bote_req_claims_kept(tokx), k1, "kept: a later message hands over that copy");
+    assert_eq(alloc_used(), ku, "kept: ...and makes no other");
+    bote_req_note_token(tokx);
+    assert_eq(bote_req_kept(), 0, "kept: bote_req_note_token starts with none");
+
+    # 3.6.5: bote_http_head_nul finds a NUL at every offset of a head, through the word
+    # loop and the tail, aligned or not, and never in the body or past `n`.
+    var hb = "GET / HTTP/1.1\r\nHost: x\r\nX-A: abcdefghijklmnopq\r\n\r\nbody bytes";
+    var hl = strlen(hb);
+    var he = strstr(hb, "\r\n\r\n") + 4;
+    var hbuf = alloc(hl + 16);
+    assert_eq(bote_http_head_nul(hb, hl), 0, "head nul: none");
+    var off = 0;
+    while (off < 4) {
+        var hd = hbuf + off;
+        var missed = 0;
+        var wrong = 0;
+        var pos = 0;
+        while (pos < hl) {
+            memcpy(hd, hb, hl + 1);
+            store8(hd + pos, 0);
+            var got = bote_http_head_nul(hd, hl);
+            if (pos < he && got != 1) { missed = missed + 1; }
+            if (pos >= he && got != 0) { wrong = wrong + 1; }
+            pos = pos + 1;
+        }
+        assert_eq(missed, 0, "head nul: found at every offset of the head");
+        assert_eq(wrong, 0, "head nul: and never in the body");
+        off = off + 3;
+    }
+    var nterm = "GET / HTTP/1.1\r\nHost: x";
+    memcpy(hbuf, nterm, strlen(nterm) + 1);
+    assert_eq(bote_http_head_nul(hbuf, strlen(nterm)), 0, "head nul: a head with no end, and no NUL in it");
+    store8(hbuf + 9, 0);
+    assert_eq(bote_http_head_nul(hbuf, strlen(nterm)), 1, "head nul: a head with no end, a NUL in it");
+    assert_eq(bote_http_head_nul(hbuf, 9), 0, "head nul: not read past n");
+    assert_eq(bote_http_head_nul(hbuf, 0), 0, "head nul: an empty request");
+    # 23 bytes and no end: the word loop reads 16 of them and the byte loop the 7 after.
+    var ti = 16;
+    var tmiss = 0;
+    while (ti < 23) {
+        memcpy(hbuf, nterm, strlen(nterm) + 1);
+        store8(hbuf + ti, 0);
+        if (bote_http_head_nul(hbuf, 23) != 1) { tmiss = tmiss + 1; }
+        ti = ti + 1;
+    }
+    assert_eq(tmiss, 0, "head nul: found in each of the bytes past the last word");
+
+    #ifndef CYRIUS_TARGET_AGNOS
+    var mp[16];
+    sys_socketpair(1, 1, 0, &mp);
+    bote_req_begin();
+    bote_http_refuse_method_hdr(load32(&mp), "t", "Allow: GET\r\n", "X-A: b\r\n");
+    var mb = alloc(1024);
+    var mn = sys_read(load32(&mp + 4), mb, 1023);
+    store8(mb + mn, 0);
+    assert(strstr(mb, "405") > 0 && strstr(mb, "X-A: b\r\n") > 0 && strstr(mb, "Allow: GET\r\n") > 0, "method hdr: a 405 with the headers and Allow");
+    bote_req_begin();
+    bote_http_refuse_method(load32(&mp), "t", "Allow: GET\r\n");
+    mn = sys_read(load32(&mp + 4), mb, 1023);
+    store8(mb + mn, 0);
+    assert(strstr(mb, "Allow: GET\r\n") > 0 && strstr(mb, "X-A") < 0, "method: a 405 with Allow alone");
+    sys_close(load32(&mp));
+    sys_close(load32(&mp + 4));
+    #endif
+
     return assert_summary();
 }
 
