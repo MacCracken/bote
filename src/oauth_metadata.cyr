@@ -12,6 +12,9 @@
 # bote is the resource server and not the authorization server. It names the servers
 # that issue its tokens and takes no part in the flow.
 #
+# A token that lacks a tool's scope is answered here too, with the same metadata in its
+# challenge: bote_http_scope_gate. The check itself is the dispatcher's.
+#
 # The document and the challenge a 401 carries are built once, here, so a request
 # allocates nothing for them. A bearer validator is what enforces a token: configuring
 # this says where to get one and requires nothing.
@@ -57,18 +60,6 @@ fn _prm_host_at(url) {
     return at;
 }
 
-# 1 when `s` is an RFC 6749 scope-token. The same set keeps it safe in a quoted parameter.
-fn _prm_scope_ok(s) {
-    if (s == 0 || load8(s) == 0) { return 0; }
-    var i = 0;
-    while (load8(s + i) != 0) {
-        var c = load8(s + i);
-        if (c < 33 || c > 126 || c == 34 || c == 92) { return 0; }
-        i = i + 1;
-    }
-    return 1;
-}
-
 # Why these cannot be published, as a message, or 0 when they can. A refresh token is
 # not a resource requirement, so MCP says to leave `offline_access` out. Public, so a
 # caller can say why before it builds one.
@@ -89,7 +80,7 @@ fn bote_prm_check(resource, servers, scopes) {
         i = 0;
         while (i < vec_len(scopes)) {
             var sc = vec_get(scopes, i);
-            if (_prm_scope_ok(sc) == 0) { return "a scope must be a non-empty token with no space, quote or backslash"; }
+            if (bote_scope_token_ok(sc) == 0) { return "a scope must be a non-empty token with no space, quote or backslash"; }
             if (streq(sc, "offline_access") == 1) { return "offline_access is not a resource's to require"; }
             i = i + 1;
         }
@@ -101,11 +92,12 @@ fn bote_prm_check(resource, servers, scopes) {
 # ProtectedResource — built once, read by every request
 # ================================================================
 #
-# Layout (32 bytes):
+# Layout (40 bytes):
 #   +0  path       cstr, where the document is served
 #   +8  json       cstr, the document
 #   +16 json_len
 #   +24 challenge  cstr, what a 401 says after `Bearer`
+#   +32 metadata   cstr, the `resource_metadata` parameter, for a 403 to use
 
 # RFC 9728 §3.1: the well-known path, then the resource's path, with a lone `/` gone.
 fn _prm_path(resource) {
@@ -134,7 +126,7 @@ fn _prm_add_array(sb, key, v) {
 }
 
 # `resource_metadata` must be absolute, and its scheme and host are the identifier's.
-fn _prm_challenge(resource, path, scopes) {
+fn _prm_metadata(resource, path) {
     var hostlen = _prm_host_at(resource);
     while (load8(resource + hostlen) != 0 && load8(resource + hostlen) != 47) { hostlen = hostlen + 1; }
     var origin = alloc(hostlen + 1);
@@ -145,6 +137,12 @@ fn _prm_challenge(resource, path, scopes) {
     str_builder_add_cstr(sb, origin);
     str_builder_add_cstr(sb, path);
     str_builder_add_cstr(sb, "\"");
+    return str_data(str_builder_build(sb));
+}
+
+fn _prm_challenge(metadata, scopes) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, metadata);
     if (scopes != 0 && vec_len(scopes) > 0) {
         str_builder_add_cstr(sb, ", scope=\"");
         var i = 0;
@@ -178,11 +176,13 @@ fn bote_prm_new(resource, servers, scopes, name) {
     }
     str_builder_add_cstr(sb, "}");
     var json = str_data(str_builder_build(sb));
-    var p = alloc(32);
+    var metadata = _prm_metadata(resource, path);
+    var p = alloc(40);
     store64(p, path);
     store64(p + 8, json);
     store64(p + 16, strlen(json));
-    store64(p + 24, _prm_challenge(resource, path, scopes));
+    store64(p + 24, _prm_challenge(metadata, scopes));
+    store64(p + 32, metadata);
     return p;
 }
 
@@ -193,6 +193,12 @@ fn bote_prm_json(p) { return load64(p + 8); }
 fn bote_prm_challenge(p) {
     if (p == 0) { return 0; }
     return load64(p + 24);
+}
+
+# The `resource_metadata` parameter, or 0 with none configured.
+fn bote_prm_metadata(p) {
+    if (p == 0) { return 0; }
+    return load64(p + 32);
 }
 
 # ================================================================
@@ -224,5 +230,32 @@ fn bote_prm_route(hc, p, method, path, allowed_origins) {
     }
     sandhi_server_send_response_a(a, cfd, HTTP_OK, "OK", "application/json",
       bote_prm_json(p), load64(p + 16), _he_extra(hc));
+    return 1;
+}
+
+# ================================================================
+# A token that lacks a scope
+# ================================================================
+
+# Answer a tools/call this token may not make with a 403, ahead of the dispatcher, which
+# has no status to send. 1 when it has been answered. A batch is the dispatcher's alone:
+# one message cannot carry two statuses, and that is why the check lives there as well as
+# here. A body that is no JSON is the codec's to refuse, and a notification gets no reply.
+fn bote_http_scope_gate(hc, dispatcher, body, claims, p) {
+    if (claims == 0) { return 0; }
+    if (jsonx_valid(body, strlen(body)) == 0 || jsonx_has(body, "id") == 0) { return 0; }
+    var a = bote_req_alloc();
+    var method = jsonx_get_str_dec_a(a, body, "method");
+    if (method == 0 || streq(method, "tools/call") == 0) { return 0; }
+    var params = jsonx_get_raw_a(a, body, "params");
+    var name = jsonx_get_str_dec_a(a, params, "name");
+    if (name == 0) { return 0; }
+    var scopes = dispatcher_scopes_missing(dispatcher, name, claims);
+    if (scopes == 0) { return 0; }
+    var plen = strlen(params);
+    _dsp_record_refusal(dispatcher, name, params, plen, _jx_find_value_pos(params, plen, "caller_id"),
+      _dsp_named_msg_a(a, "insufficient scope for tool: ", name, 0));
+    bote_http_log_refusal(SK_WARN, _he_transport(hc), HTTP_FORBIDDEN, "insufficient_scope");
+    auth_send_insufficient_scope(_he_cfd(hc), scopes, bote_prm_metadata(p), _he_extra(hc));
     return 1;
 }

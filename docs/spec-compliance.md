@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.6.2 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.6.3 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
 > ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not. Every other table here is against 2025-11-25.
 
@@ -74,7 +74,7 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | An `x-mcp-header` that breaks the rules makes the tool invalid | ✅ (3.5.2) registration refuses it, since a client would drop the tool: an empty or non-token name, a type other than string, integer or boolean, a repeat ignoring case, or anywhere but a chain of `properties` keys |
 | Integers mirrored in a header stay in the safe range | ✅ (3.5.2) a value past ±(2^53 − 1) is refused with `-32020`, even with its header |
 | `-32021` for a missing client capability | ⏳ no request bote serves needs one yet; capabilities are required and not otherwise read |
-| A third-party client | ✅ (3.5.3) `@modelcontextprotocol/client` 2.4.0 connects and uses every capability bote has, 266 checks on `http`, `streamable` and stdio in both eras and `bridge` in the modern one, and (3.6.0 to 3.6.2) its whole OAuth flow, with HS256, RS256 and ES256 tokens from a mock authorization server. `./scripts/conformance.sh` repeats it |
+| A third-party client | ✅ (3.5.3) `@modelcontextprotocol/client` 2.4.0 connects and uses every capability bote has, 410 checks on `http`, `streamable` and stdio in both eras and `bridge` in the modern one, and (3.6.0 to 3.6.3) its whole OAuth flow, with HS256, RS256 and ES256 tokens from a mock authorization server, and a step-up from a 403 it makes on its own. `./scripts/conformance.sh` repeats it |
 | `@modelcontextprotocol/conformance`, by its frozen requirement list | ⏳ (3.5.3) **25 of 37** on 2026-07-28, **21 of 30** on 2025-11-25, the same on `http` and `streamable`. What fails is a feature bote lacks: `InputRequiredResult`, progress, sampling and elicitation, logging, subscriptions. `tests/fixtures/conformance-expected-<revision>.yaml` lists each, and why |
 | `subscriptions/listen` and the rest of its notifications | ⏳ roadmap 3.7.x |
 
@@ -168,7 +168,9 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | OAuth 2.0 Protected Resource Metadata (RFC 9728): a document at `/.well-known/oauth-protected-resource` + the resource's path, with `resource` and at least one authorization server, readable with no token | `oauth_metadata` | ✅ (3.6.0) on `http`, `streamable` and `bridge`, from `bote_prm_new` or `BOTE_RESOURCE_URL` + `BOTE_AUTH_SERVERS` + `BOTE_AUTH_SCOPES`. `resource` is the operator's and never comes from a request (RFC 9728 §7.3). `scopes_supported`, `bearer_methods_supported` and `resource_name` go with it; `offline_access` is refused |
 | `resource_metadata` and `scope` in the `WWW-Authenticate` of a 401, and `error="invalid_token"` when a token was refused | `auth::auth_bearer_check_c` | ✅ (3.6.0), which meets both of MCP's discovery mechanisms at once. The official TypeScript client completes its OAuth flow on this, in both eras |
 | A server validates that a token was issued for it (RFC 8707, MCP Token Handling) | `jwt::auth_validator_jwt_hs256` | ✅ (3.6.1) with an audience set on the JwtSecret, `aud` must name it, as a string or in an array, compared after JSON decoding; `exp` must be present; `iss` must be one of the issuers set. With none set, a token that names an audience is refused, as RFC 7519 §4.1.3 asks. `BOTE_JWT_SECRET` sets this from `BOTE_RESOURCE_URL` and `BOTE_AUTH_SERVERS`. Another validator must do this itself: bote cannot see into one |
-| `403` with `error="insufficient_scope"` | — | ⏳ roadmap 3.6.x |
+| `403` with `error="insufficient_scope"`, `scope` naming every scope the operation needs, and `resource_metadata` (RFC 6750 §3.1, MCP Scope Challenge Handling) | `oauth_metadata::bote_http_scope_gate`, `auth::auth_send_insufficient_scope` | ✅ (3.6.3) for a lone `tools/call` on `http`, `streamable` and `bridge`, on both eras. The official TypeScript client steps up on it and retries, on HS256, RS256 and ES256. `error_description` is optional and not sent |
+| A scope a tool requires is enforced wherever the tool can be reached | `dispatch::dispatcher_scopes_missing` | ✅ (3.6.3) in the dispatcher, so a batch element and a WebSocket frame are refused too, with `-31403`, a code outside the range JSON-RPC reserves. `prompts/get` and `resources/read` are not gated: roadmap 3.6.x |
+| A server accounts for scope hierarchies | `jwt::jwt_scope_rule`, `BOTE_SCOPE_IMPLIES` | ✅ (3.6.3) rules chain, each followed once, so a cycle ends. A validator an embedder supplies accounts for its own |
 
 ## Transports
 

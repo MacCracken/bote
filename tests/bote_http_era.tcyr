@@ -68,6 +68,27 @@ fn h_claims(args, claims) {
 }
 fn _allow(token, ctx) { return "the-claims"; }
 fn _deny(token, ctx) { return 0; }
+# Validators and a scope check for 3.6.3: the token is the list of what it holds.
+fn _tok(token, ctx) { return token; }
+fn _holds(claims, scope, ctx) { return strstr(claims, scope) >= 0; }
+
+# A required scope 200 bytes long, told apart by `i`.
+fn _scope_200(i) {
+    var out = alloc(201);
+    memset(out, 120, 200);
+    store8(out + 200, 0);
+    store8(out, 65 + i / 26);
+    store8(out + 1, 65 + i % 26);
+    return out;
+}
+
+var _audited = 0;
+var _aud_ev = 0;
+fn _aud(ctx, ev) {
+    _audited = _audited + 1;
+    _aud_ev = ev;
+    return 0;
+}
 
 fn _mk_d() {
     var reg = tool_registry_new();
@@ -85,6 +106,17 @@ fn _mk_d() {
     vec_push(pp, schema_prop_new("flag", "{\"type\":\"boolean\",\"x-mcp-header\":\"Flag\"}"));
     vec_push(pp, schema_prop_new("a", "{\"type\":\"object\",\"properties\":{\"b\":{\"type\":\"string\",\"x-mcp-header\":\"Deep\"}}}"));
     registry_register(reg, tool_def_new("t_param", "Param", schema_new("object", pp, vec_new())));
+    var two = vec_new();
+    vec_push(two, "files:read");
+    vec_push(two, "files:write");
+    registry_register(reg, tool_def_with_required_scopes(tool_def_new("t_scoped", "Scoped", schema_new("object", 0, vec_new())), two));
+    var many = vec_new();
+    var mi = 0;
+    while (mi < 64) {
+        vec_push(many, _scope_200(mi));
+        mi = mi + 1;
+    }
+    registry_register(reg, tool_def_with_required_scopes(tool_def_new("t_many", "Many", schema_new("object", 0, vec_new())), many));
     # A map's hash is seeded per process. A null key looks in slot 0 and crashes only
     # if a key sits there, about one run in four with this many tools, so a missing
     # guard passes three runs of four. Fill the slot, and every run is that run.
@@ -101,6 +133,8 @@ fn _mk_d() {
     dispatcher_handle(d, "t_param", &h_ok);
     dispatcher_handle(d, "t_claims", &h_claims);
     dispatcher_handle(d, "t_int", &h_ok);
+    dispatcher_handle(d, "t_scoped", &h_claims);
+    dispatcher_handle(d, "t_many", &h_claims);
     dispatcher_register_prompt(d, prompt_def_new("p_one", "One", vec_new()), &h_prompt);
     dispatcher_register_prompt(d, prompt_def_new("t_param", "Shares a tool's name", vec_new()), &h_prompt);
     dispatcher_register_resource(d, resource_def_new("res://a", "a", "A", "text/plain"), &h_res);
@@ -374,6 +408,148 @@ fn _metadata(k, prm) {
     assert_eq(_st(k, _get("GET", _WK, "")) == 200, 0, _nm(k, "metadata: not served unless configured"));
     _t(k, _raw("POST", _mh("tools/list", 0), _mb("tools/list", "")), 401, "", "no token, no metadata");
     assert(_has(_head, "WWW-Authenticate: Bearer realm=\"mcp\"\r\n"), _nm(k, "challenge: the plain one"));
+    _prm_bearer(k, 0, 0);
+    return 0;
+}
+
+fn _d_of(k) {
+    if (k == 0) { return http_config_dispatcher(_http_cfg); }
+    if (k == 1) { return streamable_config_dispatcher(_strm_cfg); }
+    return bridge_config_dispatcher(_brg_cfg);
+}
+
+fn _ah(tok) { return _cat3("Authorization: Bearer ", tok, "\r\n"); }
+
+# A modern tools/call of `tool` with the token `tok`, and `extra` beside its name.
+fn _mc_x(tool, tok, extra) {
+    return _raw("POST", _cat3(_mh("tools/call", tool), _ah(tok), ""), _mb("tools/call", _cat3(",\"name\":\"", tool, _cat3("\"", extra, ""))));
+}
+fn _mc(tool, tok) { return _mc_x(tool, tok, ""); }
+
+# The same on the legacy path, in `params`.
+fn _lc_body(tool, extra) {
+    return _cat3("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"", tool, _cat3("\"", extra, "}}"));
+}
+fn _lc(tool, tok) { return _raw("POST", _ah(tok), _lc_body(tool, "")); }
+
+var _CH403 = "WWW-Authenticate: Bearer error=\"insufficient_scope\", scope=\"files:read files:write\", resource_metadata=\"https://mcp.example.com/.well-known/oauth-protected-resource/mcp\"\r\n";
+
+# `raw` is refused 403, and no handler ran.
+fn _t403(k, raw, name) {
+    _seen_claims = 0;
+    _t(k, raw, 403, "", name);
+    assert_eq(_seen_claims, 0, _nm(k, _cat3(name, ": no handler ran", "")));
+    return 0;
+}
+
+fn _scopes(k, prm) {
+    var d = _d_of(k);
+    _prm_set(k, prm);
+    _prm_bearer(k, &_tok, 0);
+    dispatcher_set_scope_check(d, &_holds, 0);
+    # A session is another check, ahead of a legacy request that passes this one.
+    var st = 0;
+    if (k == 0) {
+        st = http_config_session_store(_http_cfg);
+        http_config_with_session_store(_http_cfg, 0);
+    }
+    if (k == 1) {
+        st = streamable_config_session_store(_strm_cfg);
+        streamable_config_with_session_store(_strm_cfg, 0);
+    }
+
+    # The 403, on both paths.
+    _t403(k, _mc("t_scoped", "files:read"), "scope: one of two");
+    assert(_has(_head, _CH403), _nm(k, "scope: the challenge, every scope in it"));
+    assert_eq(strlen(_body), 0, _nm(k, "scope: an empty body, like the 401"));
+    assert(_has(_head, "HTTP/1.1 403 Forbidden\r\n"), _nm(k, "scope: Forbidden"));
+    _t403(k, _mc("t_scoped", "files:write"), "scope: the other of two");
+    _t403(k, _mc("t_scoped", "nothing"), "scope: neither");
+    _t403(k, _lc("t_scoped", "files:read"), "scope: legacy");
+    assert(_has(_head, _CH403), _nm(k, "scope: legacy, the same challenge"));
+    _t403(k, _raw("POST", _ah("nothing"), _lc_body("t\\u005fscoped", "")), "scope: an escaped name is the name");
+    _t403(k, _raw("POST", _ah("nothing"), "  {\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/\\u0063all\",\"params\":{\"name\":\"t_scoped\"}}"), "scope: an escaped method, and leading space");
+    _t403(k, _raw("POST", _ah("nothing"), _lc_body("t_scoped", ",\"arguments\":{\"n\":\"not what a schema wants\"}")), "scope: ahead of the arguments");
+    _t403(k, _raw("POST", _ah("nothing"), _lc_body("t_scoped", ",\"version\":\"9.9\"")), "scope: ahead of the version");
+
+    # What goes through.
+    _seen_claims = 0;
+    _t(k, _mc("t_scoped", "files:read,files:write"), 200, "", "scope: both held");
+    assert(_seen_claims != 0 && streq(_seen_claims, "files:read,files:write") == 1, _nm(k, "scope: the handler sees the claims"));
+    _t(k, _mc("t_echo", "nothing"), 200, "", "scope: a tool that asks for none");
+    _t(k, _raw("POST", _cat3(_mh("tools/list", 0), _ah("nothing"), ""), _mb("tools/list", "")), 200, "", "scope: not a tool call");
+    assert_eq(_st(k, _raw("POST", _ah("nothing"), _lc_body("t_nope", ""))) == 403, 0, _nm(k, "scope: an unknown tool is the dispatcher's"));
+    assert_eq(_st(k, _raw("POST", _ah("nothing"), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"prompts/get\",\"params\":{\"name\":\"t_scoped\"}}")) == 403, 0, _nm(k, "scope: another method that happens to name the tool"));
+    assert_eq(_st(k, _raw("POST", _ah("nothing"), _lb("tools/call"))) == 403, 0, _nm(k, "scope: no params"));
+    assert_eq(_st(k, _raw("POST", _ah("nothing"), "{\"jsonrpc\":\"2.0\",\"id\":7,\"params\":{\"name\":\"t_scoped\"}}")) == 403, 0, _nm(k, "scope: no method"));
+    assert_eq(_st(k, _raw("POST", _ah("nothing"), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":5,\"params\":{\"name\":\"t_scoped\"}}")) == 403, 0, _nm(k, "scope: a method that is no string"));
+    assert_eq(_st(k, _raw("POST", _ah("nothing"), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":[\"t_scoped\"]}")) == 403, 0, _nm(k, "scope: params that are no object"));
+    assert_eq(_st(k, _raw("POST", _ah("nothing"), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":5}}")) == 403, 0, _nm(k, "scope: a name that is no string"));
+    assert_eq(_st(k, _raw("POST", _ah("nothing"), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"t_scoped\"}")) == 403, 0, _nm(k, "scope: a body that is no JSON is the codec's"));
+    _seen_claims = 0;
+    assert_eq(_st(k, _raw("POST", _ah("nothing"), "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"t_scoped\"}}")) == 403, 0, _nm(k, "scope: a notification gets no reply, and so no 403"));
+    assert_eq(_seen_claims, 0, _nm(k, "scope: ...and runs nothing"));
+
+    # A repeated key is read one way by everything: never the tool under the wrong check.
+    _seen_claims = 0;
+    _run(k, _raw("POST", _ah("nothing"), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"t_echo\",\"name\":\"t_scoped\"}}"));
+    assert_eq(_seen_claims, 0, _nm(k, "scope: a repeated name"));
+    _run(k, _raw("POST", _ah("nothing"), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"method\":\"tools/list\",\"params\":{\"name\":\"t_scoped\"}}"));
+    assert_eq(_seen_claims, 0, _nm(k, "scope: a repeated method"));
+
+    # A batch has no status of its own, so the dispatcher refuses the element.
+    _seen_claims = 0;
+    var batch = _cat3("[", _lc_body("t_scoped", ""), _cat3(",", _lc_body("t_echo", ""), "]"));
+    _run(k, _raw("POST", _ah("nothing"), batch));
+    assert_eq(_status, 200, _nm(k, "scope: a batch is a 200"));
+    assert(_has(_body, "\"code\":-31403"), _nm(k, "scope: its element is refused"));
+    assert(_has(_body, "insufficient scope for tool: t_scoped"), _nm(k, "scope: ...naming the tool"));
+    assert(_has(_body, "\"result\""), _nm(k, "scope: the other element still runs"));
+    assert_eq(_seen_claims, 0, _nm(k, "scope: ...and the refused one did not"));
+    _run(k, _raw("POST", _ah("files:read,files:write"), batch));
+    assert(_seen_claims != 0, _nm(k, "scope: a batch with the scopes runs"));
+
+    # A refused call is a call: the trail sees it, on the gate's path too.
+    dispatcher_set_audit(d, audit_sink_new(&_aud, 0));
+    _audited = 0;
+    _run(k, _raw("POST", _ah("nothing"), _lc_body("t_scoped", ",\"caller_id\":\"c9\"")));
+    assert_eq(_audited, 1, _nm(k, "scope: audited, once"));
+    assert(streq(tool_call_event_tool_name(_aud_ev), "t_scoped") == 1, _nm(k, "scope: the tool"));
+    assert_eq(tool_call_event_success(_aud_ev), 0, _nm(k, "scope: as a failure"));
+    assert(streq(tool_call_event_caller_id(_aud_ev), "c9") == 1, _nm(k, "scope: the caller"));
+    assert(streq(tool_call_event_error(_aud_ev), "insufficient scope for tool: t_scoped") == 1, _nm(k, "scope: why"));
+    dispatcher_set_audit(d, 0);
+
+    # Scopes required and nothing to read them: closed.
+    dispatcher_set_scope_check(d, 0, 0);
+    _t403(k, _mc("t_scoped", "files:read,files:write"), "scope: no checker is no scope");
+    _t(k, _mc("t_echo", "nothing"), 200, "", "scope: no checker, a tool that asks for none");
+    dispatcher_set_scope_check(d, &_holds, 0);
+
+    # Nothing configured to point at.
+    _prm_set(k, 0);
+    _t403(k, _mc("t_scoped", "nothing"), "scope: no metadata");
+    assert(_has(_head, "WWW-Authenticate: Bearer error=\"insufficient_scope\", scope=\"files:read files:write\"\r\n"), _nm(k, "scope: no resource_metadata to name"));
+    _prm_set(k, prm);
+
+    # No byte stays, whatever a client makes long, or however many scopes a tool asks for.
+    var long = _rep("x", 60000);
+    var arg = _cat3(",\"arguments\":{\"a\":\"", long, "\"}");
+    assert_eq(_heap_per(k, _mc("t_scoped", long)), 0, _nm(k, "heap: a 403 for a 60 KB token"));
+    assert_eq(_heap_per(k, _lc("t_scoped", long)), 0, _nm(k, "heap: ...on the legacy path"));
+    assert_eq(_heap_per(k, _mc("t_many", "x")), 0, _nm(k, "heap: a 403 naming 64 long scopes"));
+    assert_eq(_heap_per(k, _mc_x("t_scoped", "x", arg)), 0, _nm(k, "heap: a 403 with 60 KB of arguments"));
+    assert_eq(_heap_per(k, _raw("POST", _ah("x"), _lc_body("t_scoped", _cat3(",\"caller_id\":\"", long, "\"")))), 0, _nm(k, "heap: a 403 with a 60 KB caller_id"));
+    assert_eq(_heap_per(k, _raw("POST", _ah("x"), _cat3("[", _lc_body("t_scoped", arg), "]"))), 0, _nm(k, "heap: a batch element"));
+    assert_eq(_heap_per(k, _raw("POST", _ah(long), _cat3("[", _lc_body("t_many", ""), "]"))), 0, _nm(k, "heap: a batch element, a 60 KB token"));
+    # A token keeps a byte only when a handler is handed it.
+    assert_eq(_heap_per(k, _raw("POST", _cat3(_mh("tools/list", 0), _ah(long), ""), _mb("tools/list", ""))), 0, _nm(k, "heap: a 60 KB token no handler sees"));
+    assert_eq(_heap_per(k, _raw("POST", _ah(long), _lb("tools/list"))), 0, _nm(k, "heap: ...on the legacy path"));
+
+    if (k == 0) { http_config_with_session_store(_http_cfg, st); }
+    if (k == 1) { streamable_config_with_session_store(_strm_cfg, st); }
+    dispatcher_set_scope_check(d, 0, 0);
+    _prm_set(k, 0);
     _prm_bearer(k, 0, 0);
     return 0;
 }
@@ -822,6 +998,20 @@ fn main() {
     _metadata(0, prm);
     _metadata(1, prm);
     _metadata(2, prm);
+    _scopes(0, prm);
+    _scopes(1, prm);
+    _scopes(2, prm);
+
+    # A 403 still reaches a page: the bridge's CORS headers go out with it.
+    _prm_bearer(2, &_tok, 0);
+    dispatcher_set_scope_check(_d_of(2), &_holds, 0);
+    _run(2, _raw("POST", _cat3(_ah("nothing"), "Origin: http://localhost\r\n", ""), _lc_body("t_scoped", "")));
+    assert_eq(_status, 403, "bridge: a 403 from an allowed Origin");
+    assert(_has(_head, "Access-Control-Allow-Origin: http://localhost\r\n"), "bridge: ...carries CORS");
+    assert(_has(_head, "WWW-Authenticate: Bearer error=\"insufficient_scope\""), "bridge: ...and the challenge");
+    assert(_has(_head, "Access-Control-Expose-Headers: WWW-Authenticate\r\n"), "bridge: ...which a page may read");
+    dispatcher_set_scope_check(_d_of(2), 0, 0);
+    _prm_bearer(2, 0, 0);
     # A listed Origin reads the document, on the bridge with CORS.
     _prm_set(2, prm);
     _run(2, _get("GET", _WK, "Origin: http://localhost\r\n"));

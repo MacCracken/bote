@@ -223,6 +223,18 @@ fn _expect_code(d, msg, code, name) {
     return v;
 }
 
+# _expect_code, on behalf of a token: `claims`.
+fn _expect_code_c(d, msg, claims, code, name) {
+    var s = codec_process_message(msg, d, claims);
+    _last = s;
+    _conform(s);
+    var v = _parse(s);
+    var c = _code(v);
+    if (c != code) { _show(s); }
+    assert_eq(c, code, name);
+    return v;
+}
+
 # Send `msg` and assert there is no response at all.
 fn _expect_none(d, msg, name) {
     var s = codec_process_message(msg, d, 0);
@@ -876,6 +888,19 @@ fn main() {
 
     var esc_key = _expect_result(md, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"\\u005fmeta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}", "M74 an escaped _meta key");
     _expect(_is_modern(_result(esc_key)), "M75 ...selects this revision, as the key it decodes to");
+
+    # A token without a tool's scope (3.6.3). HTTP answers a lone call with a 403, in
+    # bote_http_era.tcyr; this is the wire where there is no status to send. -31403 is
+    # outside what JSON-RPC reserves and what MCP does, as MCP asks of a code it does not define.
+    var sc_d = _mk();
+    var sc_v = vec_new();
+    vec_push(sc_v, "files:write");
+    registry_register(dispatcher_registry(sc_d), tool_def_with_required_scopes(tool_def_new("test_sc", "Scoped", schema_new("object", 0, vec_new())), sc_v));
+    dispatcher_handle(sc_d, "test_sc", &h_ok);
+    var sc_call = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"test_sc\"}}";
+    _expect_code_c(sc_d, sc_call, "a-token", 0 - 31403, "M90 a legacy call with no scope, and nothing to read one");
+    _expect_code_c(sc_d, _m(1, "tools/call", ",\"name\":\"test_sc\""), "a-token", 0 - 31403, "M91 ...and a modern call");
+    _expect_result(sc_d, sc_call, "M92 with no token in play, as on stdio, the tool runs");
 
     # Bytes: a message of this revision leaves nothing on the heap.
     var disc_msg = _m(1, "server/discover", "");

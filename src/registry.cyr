@@ -102,7 +102,7 @@ fn schema_prop_value(p) { return load64(p + 8); }
 # ToolDef
 # ================================================================
 #
-# Layout (72 bytes):
+# Layout (80 bytes):
 #   +0  name         cstr
 #   +8  description  cstr
 #   +16 input_schema ptr to ToolSchema
@@ -112,6 +112,7 @@ fn schema_prop_value(p) { return load64(p + 8); }
 #   +48 compiled     ptr to CompiledSchema or 0 (set by tool_def_with_compiled)
 #   +56 profiles     vec of cstr tags or 0 (set by tool_def_with_profiles)
 #   +64 param_headers vec of ParamHeader or 0 (read from the schema at registration)
+#   +72 required_scopes vec of cstr or 0 (all of them, for a token to call this tool)
 #
 # Profiles are opaque consumer-defined tags (e.g. "security", "web", "full")
 # used to expose curated tool subsets via a `profile` filter on tools/list.
@@ -119,7 +120,7 @@ fn schema_prop_value(p) { return load64(p + 8); }
 # (profiles == 0) is in no profile. See _build_tools_list_result_a in dispatch.
 
 fn tool_def_new(name, description, input_schema) {
-    var d = alloc(72);
+    var d = alloc(80);
     store64(d, name);
     store64(d + 8, description);
     store64(d + 16, input_schema);
@@ -129,6 +130,7 @@ fn tool_def_new(name, description, input_schema) {
     store64(d + 48, 0);
     store64(d + 56, 0);
     store64(d + 64, 0);
+    store64(d + 72, 0);
     return d;
 }
 
@@ -137,6 +139,7 @@ fn tool_def_with_deprecated(d, msg) { store64(d + 32, msg); return d; }
 fn tool_def_with_annotations(d, ann) { store64(d + 40, ann); return d; }
 fn tool_def_with_compiled(d, c) { store64(d + 48, c); return d; }
 fn tool_def_with_profiles(d, profiles) { store64(d + 56, profiles); return d; }
+fn tool_def_with_required_scopes(d, scopes) { store64(d + 72, scopes); return d; }
 
 fn tool_def_name(d) { return load64(d); }
 fn tool_def_description(d) { return load64(d + 8); }
@@ -147,6 +150,7 @@ fn tool_def_annotations(d) { return load64(d + 40); }
 fn tool_def_compiled(d) { return load64(d + 48); }
 fn tool_def_profiles(d) { return load64(d + 56); }
 fn tool_def_param_headers(d) { return load64(d + 64); }
+fn tool_def_required_scopes(d) { return load64(d + 72); }
 
 # Exact-match membership: 1 if `profile` (non-null) is one of the tool's
 # profile tags, else 0. A null profile or an untagged tool returns 0.
@@ -417,6 +421,19 @@ fn _reg_scan_tool(tool_def, out) {
     return 0;
 }
 
+# 1 when `s` is an RFC 6749 §3.3 scope-token. A scope goes out inside a quoted header
+# parameter, and this is what keeps one from ending it.
+fn bote_scope_token_ok(s) {
+    if (s == 0 || load8(s) == 0) { return 0; }
+    var i = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c < 33 || c > 126 || c == 34 || c == 92) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 # Why `tool_def` cannot be registered, as a message, or 0 when it can (3.4.8).
 #
 # - The name follows the MCP tools spec's guidance. Every consumer's names
@@ -428,6 +445,7 @@ fn _reg_scan_tool(tool_def, out) {
 # - Each property schema is valid JSON (an object or a boolean), and each
 #   property and each required entry has a name.
 # - Each `x-mcp-header` keeps the rules of MCP 2026-07-28.
+# - Each required scope is a scope-token.
 #
 # Public, so a consumer can check a definition before it registers one.
 fn registry_check_tool_def(tool_def) {
@@ -461,6 +479,14 @@ fn registry_check_tool_def(tool_def) {
             var rq = vec_get(req, j);
             if (rq == 0 || strlen(rq) == 0) { return "an inputSchema required entry is empty"; }
             j = j + 1;
+        }
+    }
+    var scopes = tool_def_required_scopes(tool_def);
+    if (scopes != 0) {
+        var k = 0;
+        while (k < vec_len(scopes)) {
+            if (bote_scope_token_ok(vec_get(scopes, k)) == 0) { return "a required scope must be a non-empty token with no space, quote or backslash"; }
+            k = k + 1;
         }
     }
     return _reg_scan_tool(tool_def, vec_new());

@@ -30,7 +30,7 @@ revision's required list is features bote lacks. Each has a place below.
 
 ## Next patch
 
-**3.6.3 — `403` with `insufficient_scope`.** The last item of 3.6.x. A defect found in 3.6.2 lands ahead of it.
+**3.6.4 — A cache of verified tokens.** Item 1 of 3.6.x below. A defect found in 3.6.3 lands ahead of it.
 
 ## 3.5.x — MCP 2026-07-28, dual-era
 
@@ -58,18 +58,20 @@ Run `./scripts/conformance.sh` at any release that touches the protocol. It need
 ## 3.6.x — Authorization on HTTP
 
 bote is a resource server with bearer auth, and it meets the 2026-07-28 authorization spec's `MUST`s: it
-publishes its metadata and checks a token's audience, for HS256, RS256 and ES256. What is left is below.
-Authorization as a whole is optional, so this applies when an operator turns auth on.
+publishes its metadata, checks a token's audience for HS256, RS256 and ES256, and answers a missing scope with
+a `403` a client can step up from. What is left is below. Authorization as a whole is optional, so this applies
+when an operator turns auth on.
 
-1. **`403` with `error="insufficient_scope"`** when a token lacks a scope, with `scope` and `resource_metadata`
-   in the challenge. A validator's return is opaque to bote, so bote cannot yet see what a token grants, and a
-   scope hierarchy is the server's to account for.
-2. **What a verify costs.** ES256 takes about 10.5 ms and RS256 about 1.3 ms, on the single loop, for a good token and
+1. **What a verify costs.** ES256 takes about 10.5 ms and RS256 about 1.3 ms, on the single loop, for a good token and
    a forged one alike, so about 100 forged tokens a second occupy a server that takes ES256. A cache of tokens
    already verified, bounded and keyed by hash, would give legitimate traffic that time back. A forged token
    stays expensive until threaded dispatch (3.7.x), so a server on the internet wants a rate limit in front.
-3. **Fetching `jwks_uri`.** Keys come from a file, and rotating them means a restart with the new set in place. Fetching
+2. **Fetching `jwks_uri`.** Keys come from a file, and rotating them means a restart with the new set in place. Fetching
    them needs the SSRF guard and a cache, and has to survive the authorization server being down.
+3. **Scopes beyond `tools/call`.** `prompts/get` and `resources/read` are not gated, and the spec leaves which
+   operation needs which scope to the server. Needs a way to declare one on a prompt or a template.
+4. **A token that expires during a WebSocket connection.** `ws` checks a token once, at the upgrade, so it keeps working
+   past its `exp`. `ws` is no MCP transport, so the spec does not ask for this. Check `exp` per frame, or end the connection.
 
 ## 3.7.x — Threaded dispatch and `subscriptions/listen`
 

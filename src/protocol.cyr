@@ -88,11 +88,37 @@ fn bote_req_alloc() {
     return _bote_req_al;
 }
 
+# The token an accepted request presented, on the arena, and its copy on the heap once
+# a handler has been handed one. A refused call must keep nothing, so that copy waits.
+var _bote_req_token = 0;
+var _bote_req_kept = 0;
+
 # Start a message: whatever the previous one left on the arena is gone.
 fn bote_req_begin() {
     var al = bote_req_alloc();
     reset_via(al);
+    _bote_req_token = 0;
+    _bote_req_kept = 0;
     return al;
+}
+
+# `token` is on the arena and is this message's claims.
+fn bote_req_note_token(token) {
+    _bote_req_token = token;
+    _bote_req_kept = 0;
+    return token;
+}
+
+# `claims` as a handler may have them, and a handler may keep them. Once for a message, so
+# a batch of calls makes one copy.
+fn bote_req_claims_kept(claims) {
+    if (claims == 0 || claims != _bote_req_token) { return claims; }
+    if (_bote_req_kept == 0) {
+        var n = strlen(claims) + 1;
+        _bote_req_kept = alloc(n);
+        memcpy(_bote_req_kept, claims, n);
+    }
+    return _bote_req_kept;
 }
 
 fn resp_success_a(a, id, result) {

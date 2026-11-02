@@ -100,6 +100,12 @@ fn _lc_has(hay, needle) {
     return 0;
 }
 
+fn _one_scope(s) {
+    var v = vec_new();
+    vec_push(v, s);
+    return v;
+}
+
 fn main() {
     alloc_init();
 
@@ -271,6 +277,40 @@ fn main() {
     bote_req_begin();
     auth_bearer_extract(big_req, big_n);
     assert(streq(load64(&keep_slot), "kept-token") == 1, "arena: claims a handler may keep survive the next message");
+
+    # ---- 3.6.3: the 403, and how long a token lasts ----
+    #ifndef CYRIUS_TARGET_AGNOS
+    var fs = vec_new();
+    vec_push(fs, "files:read");
+    vec_push(fs, "files:write");
+    var fsp[16];
+    sys_socketpair(1, 1, 0, &fsp);
+    bote_req_begin();
+    assert_eq(auth_send_insufficient_scope(load32(&fsp), fs, "resource_metadata=\"https://x/.wk\"", "X-A: b\r\n"), 0, "403: sent");
+    var fsb = alloc(1024);
+    var fsn = sys_read(load32(&fsp + 4), fsb, 1023);
+    store8(fsb + fsn, 0);
+    assert(strstr(fsb, "HTTP/1.1 403 Forbidden\r\n") == 0, "403: the status");
+    assert(strstr(fsb, "\r\nWWW-Authenticate: Bearer error=\"insufficient_scope\", scope=\"files:read files:write\", resource_metadata=\"https://x/.wk\"\r\nX-A: b\r\n") > 0, "403: the challenge, then what else was asked");
+    assert(strstr(fsb, "Content-Length: 0\r\n") > 0, "403: no body");
+    bote_req_begin();
+    auth_send_insufficient_scope(load32(&fsp), _one_scope("s"), 0, 0);
+    fsn = sys_read(load32(&fsp + 4), fsb, 1023);
+    store8(fsb + fsn, 0);
+    assert(strstr(fsb, "WWW-Authenticate: Bearer error=\"insufficient_scope\", scope=\"s\"\r\n") > 0, "403: no metadata, no extra");
+    sys_close(load32(&fsp));
+    sys_close(load32(&fsp + 4));
+    #endif
+
+    var c_req = _make_req("Bearer on-the-arena");
+    var c_slot[8];
+    bote_req_begin();
+    var c_used = alloc_used();
+    assert_eq(auth_bearer_check_c(0, c_req, strlen(c_req), &auth_validator_allow_all, 0, &c_slot, 0), 0, "one message: accepted");
+    assert_eq(alloc_used(), c_used, "one message: the token stays on the arena");
+    var c_kept = bote_req_claims_kept(load64(&c_slot));
+    assert(c_kept != load64(&c_slot), "one message: a handler gets a copy");
+    assert(streq(c_kept, "on-the-arena") == 1, "one message: ...of the token");
 
     return assert_summary();
 }

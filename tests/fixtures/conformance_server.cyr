@@ -237,6 +237,10 @@ fn main() {
         }
         jwt_secret_with_audience(jwt, resource);
         jwt_secret_with_issuers(jwt, servers);
+        var write = vec_new();
+        vec_push(write, "mcp:write");
+        dispatcher_register_tool(d, tool_def_with_required_scopes(tool_def_new("test_needs_scope", "Needs mcp:write", schema_new("object", 0, vec_new())), write), &t_simple);
+        dispatcher_set_scope_check(d, &jwt_scope_check, jwt_scope_rule(jwt_scope_rules_new(), "mcp:admin", "mcp:write"));
         var acfg = http_config_new("/mcp", INADDR_LOOPBACK(), port);
         http_config_with_bearer_validator(acfg, &auth_validator_jwt, jwt);
         http_config_with_resource_metadata(acfg, bote_prm_new(resource, servers, scopes, "fixture"));

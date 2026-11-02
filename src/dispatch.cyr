@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.6.2"; }
+fn _bote_server_version() { return "3.6.3"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -115,8 +115,10 @@ fn validate_tool_name(name) {
 #                           advertises at initialize, or 0 for bote's own.
 #   +80 server_version        cstr — the matching `serverInfo.version`, or 0.
 #                           Set together via dispatcher_set_server_info.
+#   +88 scope_check           fn ptr (claims, scope, ctx) → 1 when held, or 0.
+#   +96 scope_ctx             passed to it. Set via dispatcher_set_scope_check.
 fn dispatcher_new(reg) {
-    var d = alloc(88);
+    var d = alloc(104);
     store64(d, reg);
     store64(d + 8, map_new());
     store64(d + 16, map_new());
@@ -128,6 +130,8 @@ fn dispatcher_new(reg) {
     store64(d + 64, 0);
     store64(d + 72, 0);
     store64(d + 80, 0);
+    store64(d + 88, 0);
+    store64(d + 96, 0);
     return d;
 }
 
@@ -159,6 +163,15 @@ fn dispatcher_server_version(d) { return load64(d + 80); }
 fn dispatcher_set_server_info(d, name, version) {
     store64(d + 72, name);
     store64(d + 80, version);
+    return d;
+}
+
+# Who can say what a token grants. Claims are opaque to bote, so what reads them is
+# supplied: jwt_scope_check for a JWT, and for anything else the validator's author.
+# A broader scope that implies a narrower one is this function's to account for.
+fn dispatcher_set_scope_check(d, fp, ctx) {
+    store64(d + 88, fp);
+    store64(d + 96, ctx);
     return d;
 }
 
@@ -1088,6 +1101,30 @@ fn _dsp_modern_response(a, d, method, resp) {
     return resp_success_a(a, resp_id(resp), _dsp_modern_result(a, d, method, result));
 }
 
+# What a call gets where HTTP's 403 is out of reach: a batch element, a WebSocket frame.
+# Outside the JSON-RPC reserved range, as MCP asks of a code it does not define.
+var BOTE_RPC_INSUFFICIENT_SCOPE = 0 - 31403;
+
+# The scopes the tool `name` requires, when `claims` does not hold them all, or 0 when
+# it may run. With no token in play there is nothing to compare: claims are 0 on stdio,
+# which takes its credentials from the environment, and with no validator set. A
+# tool that requires a scope with nothing to read it is refused, not waved through.
+fn dispatcher_scopes_missing(d, name, claims) {
+    if (claims == 0) { return 0; }
+    var t = registry_get(dispatcher_registry(d), name);
+    if (t == 0) { return 0; }
+    var req = tool_def_required_scopes(t);
+    if (req == 0 || vec_len(req) == 0) { return 0; }
+    var fp = load64(d + 88);
+    if (fp == 0) { return req; }
+    var i = 0;
+    while (i < vec_len(req)) {
+        if (fncall3(fp, claims, vec_get(req, i), load64(d + 96)) != 1) { return req; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Named, because HTTP sends this one -32602 as a 400.
 var DSP_CAPS_MISSING = "io.modelcontextprotocol/clientCapabilities is required and must be an object";
 
@@ -1162,6 +1199,15 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
         if (name == 0 || strlen(name) == 0) {
             var ne = bote_err_new_a(a, BOTE_ERR_INVALID_PARAMS, "", "missing or empty 'name' field");
             return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(ne)), str_data(bote_err_format_a(a, ne)));
+        }
+
+        # Ahead of everything else about the call: a token that may not run this tool
+        # learns nothing about its arguments. HTTP answers this with a 403 before it
+        # gets here, and this is what a batch and a WebSocket reach.
+        if (dispatcher_scopes_missing(d, name, claims) != 0) {
+            var smsg = _dsp_named_msg_a(a, "insufficient scope for tool: ", name, 0);
+            _dsp_record_refusal(d, name, params, plen, load64(pos + 24), smsg);
+            return resp_error_a(a, id, BOTE_RPC_INSUFFICIENT_SCOPE, smsg);
         }
 
         # Optional: version negotiation
@@ -1259,7 +1305,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
         # JSON, or a result carrying isError — is audited and published as
         # a failure.
         var fail_slot[8];
-        var result = _dsp_coerce_result(name, fncall2(fp, args, claims), &fail_slot);
+        var result = _dsp_coerce_result(name, fncall2(fp, args, bote_req_claims_kept(claims)), &fail_slot);
         var no_result = load64(&fail_slot);
         if (audit_on == 1 || events_on == 1) {
             var dur_ms = (clock_now_ns() - t_start) / 1000000;
@@ -1347,7 +1393,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
         }
         # Past every refusal: a handler may keep what it is handed.
         pargs = _slice_cstr(default_alloc(), pargs, 0, strlen(pargs));
-        var presult = fncall2(phandler, pargs, claims);
+        var presult = fncall2(phandler, pargs, bote_req_claims_kept(claims));
         if (presult == 0) { presult = "{\"messages\":[]}"; }
         return _dsp_checked_result(a, id, presult);
     }
@@ -1380,7 +1426,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
         }
         # Past every refusal: a handler may keep what it is handed.
         ruri = _slice_cstr(default_alloc(), ruri, 0, strlen(ruri));
-        var rresult = fncall2(rhandler, ruri, claims);
+        var rresult = fncall2(rhandler, ruri, bote_req_claims_kept(claims));
         if (rresult == 0) { rresult = "{\"contents\":[]}"; }
         return _dsp_checked_result(a, id, rresult);
     }
@@ -1402,7 +1448,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
             return resp_error_a(a, id, 0 - 32602, "completion/complete params must be an object");
         }
         var cparams = _slice_cstr(default_alloc(), params, 0, strlen(params));
-        var cresult = fncall2(dispatcher_completion(d), cparams, claims);
+        var cresult = fncall2(dispatcher_completion(d), cparams, bote_req_claims_kept(claims));
         if (cresult == 0) { cresult = "{\"completion\":{\"values\":[]}}"; }
         return _dsp_checked_result(a, id, cresult);
     }

@@ -144,6 +144,7 @@ fn main() {
     # open roadmap decision, not something a consolidation changes.)
     if (streq(mode, "streamable") == 1) {
         var sdisp = bote_dispatcher_with_echo();
+        if (bote_main_scopes_from_env(sdisp, mode, bearer_fp == &auth_validator_jwt) < 0) { return 2; }
         # Server→client notification wiring. A SessionStore gives each
         # client a per-session outbound buffer; the client-notification
         # EventSink pushes notifications/tools/list_changed into those
@@ -168,6 +169,7 @@ fn main() {
     }
     if (streq(mode, "ws") == 1) {
         var wdisp = bote_dispatcher_with_echo();
+        if (bote_main_scopes_from_env(wdisp, mode, bearer_fp == &auth_validator_jwt) < 0) { return 2; }
         var wport = 8393;
         if (arg != 0) { wport = bote_main_port(arg, 8393); }
         var wcfg = ws_config_new("/mcp", INADDR_LOOPBACK(), wport);
@@ -194,6 +196,7 @@ fn main() {
     # Web tools (web_fetch / web_search). Additive; see src/web_tools.cyr.
     # web_search targets the SearXNG instance at BOTE_SEARXNG_URL (unset -> reported, not faked).
     web_tools_register(dispatcher);
+    if (bote_main_scopes_from_env(dispatcher, mode, bearer_fp == &auth_validator_jwt) < 0) { return 2; }
 
     if (streq(mode, "http") == 1) {
         var port = 8390;

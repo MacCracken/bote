@@ -126,9 +126,12 @@ async function oauth(mode, alg) {
           response_types_supported: ['code'], grant_types_supported: ['client_credentials'],
           token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'] }));
       } else if (req.url === '/token') {
-        // RFC 8707: the audience of the token is the resource the client asked for.
-        const aud = new URLSearchParams(body).get('resource');
-        res.end(JSON.stringify({ access_token: jwt(alg, { iss: issuer, aud, sub: 'fixture', exp: soon }), token_type: 'Bearer', expires_in: 3600 }));
+        // RFC 8707: the audience of the token is the resource the client asked for, and
+        // it holds the scope the client asked for: a step-up has to ask.
+        const form = new URLSearchParams(body);
+        const aud = form.get('resource');
+        const scope = form.get('scope') || '';
+        res.end(JSON.stringify({ access_token: jwt(alg, { iss: issuer, aud, sub: 'fixture', exp: soon, scope }), token_type: 'Bearer', expires_in: 3600, scope }));
       } else {
         res.statusCode = 404;
         res.end('{}');
@@ -183,6 +186,24 @@ async function oauth(mode, alg) {
     ok(`${label} accepted: ${name}`, r.status === 200, r.status);
   }
 
+  // What a token holds, as bote reads it. `test_needs_scope` asks for mcp:write, and
+  // mcp:admin implies that.
+  const call = JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'test_needs_scope' } });
+  const scoped = [['no scope', 403, { ...good }], ['another scope', 403, { ...good, scope: 'mcp:read' }],
+    ['a scope that starts the same', 403, { ...good, scope: 'mcp:write-all' }], ['another case', 403, { ...good, scope: 'MCP:WRITE' }],
+    ['the scope', 200, { ...good, scope: 'mcp:read mcp:write' }], ['a broader scope', 200, { ...good, scope: 'mcp:admin' }],
+    ['scp as an array', 200, { ...good, scp: ['mcp:read', 'mcp:write'] }], ['scp as a string', 200, { ...good, scp: 'mcp:write' }]];
+  for (const [name, status, claims] of scoped) {
+    const s = await fetch(resource, { method: 'POST', body: call, headers: headers(jwt(alg, claims)) });
+    ok(`${label} ${name} is a ${status}`, s.status === status, s.status);
+    if (status === 403) {
+      const w = extractWWWAuthenticateParams(s);
+      ok(`${label} ${name} says insufficient_scope`, w.error === 'insufficient_scope', w);
+      ok(`${label} ${name} names what it needs`, w.scope === 'mcp:write', w);
+      ok(`${label} ${name} names the metadata`, w.resourceMetadataUrl && w.resourceMetadataUrl.href === params.resourceMetadataUrl.href, w);
+    }
+  }
+
   const authProvider = new ClientCredentialsProvider({ clientId: 'fixture', clientSecret: 'secret', scope: 'mcp:read', expectedIssuer: issuer });
   const c = new Client({ name: 'bote-conformance', version: '1.0.0' }, { capabilities: {}, versionNegotiation: { mode } });
   c.onerror = () => {};
@@ -191,6 +212,18 @@ async function oauth(mode, alg) {
   ok(`${label} the call went through`, r && r.content[0].text === 'This is a simple text response for testing.', r);
   const token = seen.find(s => s.url === '/token');
   ok(`${label} the client asked its token for this resource`, token && new URLSearchParams(token.body).get('resource') === resource, token);
+
+  // Step up: the client holds mcp:read, the call gets a 403 naming mcp:write, and the
+  // client's own code asks for both and retries, with nothing here telling it to.
+  const earlier = seen.filter(s => s.url === '/token').length;
+  const up = await attempt(`${label} a call that needs more`, () => c.callTool({ name: 'test_needs_scope', arguments: {} }));
+  ok(`${label} ran after the step-up`, up && up.content[0].text === 'This is a simple text response for testing.', up);
+  const asked = seen.filter(s => s.url === '/token');
+  ok(`${label} one more token`, asked.length === earlier + 1, asked.length - earlier);
+  const wanted = asked.length ? new URLSearchParams(asked[asked.length - 1].body).get('scope') : null;
+  ok(`${label} asked for both scopes at once`, wanted && wanted.split(' ').sort().join(' ') === 'mcp:read mcp:write', wanted);
+  const again = await attempt(`${label} the same call again`, () => c.callTool({ name: 'test_needs_scope', arguments: {} }));
+  ok(`${label} needs no further token`, again && seen.filter(s => s.url === '/token').length === asked.length, seen.length);
   const version = c.getNegotiatedProtocolVersion();
   await attempt(`${label} close`, () => c.close());
   server.kill();

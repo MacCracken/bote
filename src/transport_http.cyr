@@ -161,6 +161,7 @@ fn _http_handle(config, cfd, buf, n) {
     var mreq[8];
     var era = bote_http_era(&hc, body, http_config_require_protocol(config), http_config_dispatcher(config), &mreq);
     if (era == BOTE_HTTP_REFUSED) { return 0; }
+    if (bote_http_scope_gate(&hc, http_config_dispatcher(config), body, load64(&claims_slot), prm) != 0) { return 0; }
     if (era == BOTE_HTTP_MODERN) {
         return bote_http_serve_modern(&hc, load64(&mreq), http_config_dispatcher(config), load64(&claims_slot));
     }

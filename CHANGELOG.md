@@ -18,6 +18,124 @@ have per release.
 
 _(empty)_
 
+## [3.6.3] — 2026-11-01 · `403` with `insufficient_scope`
+
+A tool can now require scopes, and a token that lacks one gets the `403` MCP describes, naming every scope the tool needs and
+where to read the metadata. That is what lets a client ask for more: **the official TypeScript client steps up on it with no help**,
+requesting the union of its scopes and the server's and retrying, on HS256, RS256 and ES256 in both eras. This is the last
+item of 3.6.x's first list.
+
+**The check is the dispatcher's, and HTTP's 403 runs ahead of it.** A check in the transport alone would be walked around by a
+JSON-RPC batch, which has no status of its own, and would miss WebSocket. So a batch element and a frame are refused by the same
+code with `-31403`, and fuzzing asserts that no substitution of a request reaches a scoped tool without its scope.
+
+**A defect fixed ahead of it:** every request a validator accepted kept its token on the heap. See Fixed.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Added
+
+- **`tool_def_with_required_scopes(def, scopes)`**, a vec of scope names, and `tool_def_required_scopes`. A token must hold all of them.
+  Registration refuses one that is not an RFC 6749 scope-token: `bote_scope_token_ok`, which the metadata check now shares.
+- **`dispatcher_set_scope_check(d, fp, ctx)`**, with `fp(claims, scope, ctx)` returning 1 for a scope held, and
+  **`dispatcher_scopes_missing(d, name, claims)`**. Claims are opaque to bote, so what reads them is supplied. A refused call is
+  answered ahead of its version and arguments, so it learns nothing about them, and is audited and published as a failed call.
+- **`bote_http_scope_gate`** on `http`, `streamable` and `bridge`, both eras: a lone `tools/call` the token may not make gets a `403`
+  with `WWW-Authenticate: Bearer error="insufficient_scope", scope="…", resource_metadata="…"` (`auth_send_insufficient_scope`), logged
+  at WARN with `reason=insufficient_scope`. `resource_metadata` is left out when none is configured, and `error_description`, which is
+  optional, is not sent. A notification gets no reply, so it gets no 403 either.
+- **`jwt_scope_check(claims, scope, rules)`** reads a verified JWT's scopes: `scope`, space-separated (RFC 9068 §2.2.3), or `scp` as a
+  string or an array when `scope` is absent. Matching is exact and case-sensitive, so `files:read` is not `files:read-all`. What is not
+  a JWT grants nothing. **`jwt_scope_rules_new()`** and **`jwt_scope_rule(rules, broad, narrow)`** say what a broader scope implies,
+  which MCP says a server must account for. Rules chain, and each is followed once, so a cycle ends and a dense set stays quadratic.
+- **`BOTE_TOOL_SCOPES`** (`tool=scope scope,tool=scope`) and **`BOTE_SCOPE_IMPLIES`** (`broad=narrow narrow,…`) in the binary. A name
+  no tool has stops the server, because a typo must not leave a tool open, and so do scopes with no JWT verifier, a malformed entry
+  and a scope that is no token. stdio and the Unix socket take no token, so there they change nothing, and bote logs a WARN saying so.
+- `bote_req_note_token` and `bote_req_claims_kept`, which hold a token on the request arena until a handler is handed it. `bote_prm_metadata`.
+- Benchmarks `scope_gate_open`, `scope_check_jwt` and `dispatch_tools_call_scoped`.
+
+### Changed
+
+- **`auth_bearer_check_c` leaves a token that is the claims on the request arena**, for the message. The dispatcher copies it when
+  a handler is about to be handed it, once a message. `auth_bearer_check` still returns claims that outlive the message, which the
+  WebSocket transport relies on. An embedder that keeps claims from `auth_bearer_check_c` past the message calls `bote_req_claims_kept`.
+- **`-31403` (`BOTE_RPC_INSUFFICIENT_SCOPE`)** is where HTTP's 403 cannot reach. MCP reserves `-32020` to `-32099` for codes it defines
+  and asks that other new codes sit outside JSON-RPC's reserved `-32768` to `-32000`, so it is outside both.
+- ToolDef grows to 80 B, the Dispatcher to 104 B and ProtectedResource to 40 B, each by appended fields. Their constructors allocate them.
+- Scopes gate `tools/call` only. `prompts/get` and `resources/read` are on the roadmap.
+
+### Fixed
+
+- **Every request a validator accepted kept its token on the heap**, since the request arena arrived at 3.4.15. A token was copied for
+  a handler before anything knew one would run, so a refused call, a `tools/list` and a 403 each kept a kilobyte or so for a JWT, and a
+  60 KB token kept 60 KB a request. It took a valid token to reach. A token now reaches the heap only when a handler is handed it, and
+  `tests/bote_http_era.tcyr` asserts 0 B per message for those paths on all three transports, with a 60 KB token.
+- **A page on another origin could not read `WWW-Authenticate` from the bridge.** CORS hides a response header unless it is exposed, so a
+  browser client could see neither the 401's challenge, since 3.6.0, nor the 403's. The bridge now sends `Access-Control-Expose-Headers: WWW-Authenticate`.
+
+### Security
+
+- **A tool that requires a scope with nothing configured to read one is refused, not waved through.** With no claims, as on stdio,
+  there is nothing to compare and the tool runs.
+- **The gate and the dispatcher read a message one way**, through the one key scanner: `fuzz/oauth_metadata.fcyr` substitutes every byte
+  of single, repeated-key, escaped, modern and batch calls, runs the gate and then the codec as a transport does, and fails if the
+  scoped tool ever runs. A repeated `name` or `method` is tested on all three transports.
+- **A WebSocket checks its token once, at the upgrade**, so a token that expires keeps its connection, and its scopes with it. On the roadmap.
+
+### Tests
+
+- 3,755 assertions, from 3,345, on x86_64 and under `qemu-aarch64`. `tests/bote_http_era.tcyr` has 1,646, from 1,372: every status on
+  all three transports, a batch, a notification, a repeated key, an escaped name and method, the audit record, fail-closed with no
+  checker, CORS on the bridge's 403, and 0 heap bytes per message with a 60 KB token, 60 KB of arguments or caller id, and a tool
+  naming 64 scopes of 200 bytes. `tests/bote_jwt.tcyr` has 290, from 228; `tests/bote.tcyr` 876, from 819; `tests/bote_auth.tcyr` 64,
+  from 55; `tests/bote_ws.tcyr` 29, from 24, with frames on the real handler; `tests/conformance.tcyr` 218, from 215.
+- 86 mutants: 84 killed and 2 left out as equivalent: the gate's early return with no token, which only saves time, and a guard on a byte
+  before a payload, which no test can place. Six survived the first run. Two were test gaps, a second token in one message and a body
+  with no `method`, which now crashed the mutant, and two were checks a later one already made, which are gone.
+- `fuzz/jwt.fcyr` checks scope matching against a plain split, and rules against a transitive closure on every directed graph of four scopes.
+- The official client: 410 checks, from 266. The mock authorization server issues the scope the client asks for, a token is refused
+  for no scope, another scope, a longer one and another case, and accepted for the scope, a broader one and `scp` either way.
+- `scripts/transport-smoke.sh` runs the binary with `BOTE_TOOL_SCOPES`: the 403 and its challenge, a held and an implied scope, a batch
+  element, the log line with no token in it, seven ways of refusing to start, and stdio serving with its WARN.
+- stdio is byte-identical to 3.6.2 over 200,000 differential-fuzz messages, and HTTP on 50 of 50.
+
+### Performance
+
+Interleaved A/B, 15 alternating rounds, pinned to one core, 3.6.2 against this tree, on a quiet machine (load about 2). Minimums, in
+ns:
+
+| Bench | 3.6.2 | 3.6.3 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 3,899 | 3,973 | +1.9% |
+| `dispatch_tools_call` | 2,113 | 2,114 | 0.0% |
+| `http_era_legacy` | 2,421 | 2,407 | −0.6% |
+| `http_era_modern` | 11,173 | 11,065 | −1.0% |
+| `auth_bearer_check_set` | 804 | 748 | −7.0% |
+| `jwt_validate_audience`, HS256 | 8,726 | 8,627 | −1.1% |
+| `dispatch_tools_list` | 1,625 | 1,826 | +12.4% |
+| `codec_serialize_response` | 174 | 188 | +8.0% |
+| `dispatch_tools_call_result` | 1,860 | 1,965 | +5.6% |
+| `dispatch_initialize` | 1,674 | 1,754 | +4.8% |
+
+**The last four are where code sits in the binary, not what it does.** None runs a line this patch added, and their ranges did not
+overlap, so it was worth finding out. Bisected by file, 3.6.3's `registry.cyr` alone moved them. 3.6.2 with **never-called copies**
+of the new registry functions, the same bytes in the same place and no other change, reproduced it: `dispatch_tools_list` +8.9%,
+`codec_serialize_response` +6.8%, `dispatch_tools_call_result` +6.5%, `dispatch_initialize` +4.0%. Larger structs alone, the new bench
+setup alone and moving the `protocol.cyr` additions each changed nothing, and dead functions padded into `protocol.cyr` swing
+`jsonx_get_str_flat` and `codec_parse_request` by about 7.6%. These sub-2 µs benches carry a few percent of layout either way, and a delta
+under 10% on one of them is no finding without a control like this. `auth_bearer_check_set` is the one real change: it no longer copies the token.
+
+**What scopes cost**, from the same run:
+
+| Path | Per request |
+|---|---|
+| `scope_gate_open`: the gate on a token's `tools/call` of a tool that asks for none | 2.2 µs |
+| `scope_check_jwt`: one scope read from a JWT, reached through a rule | 1.5 µs |
+| `dispatch_tools_call_scoped`: a call holding both of a tool's two scopes | 5.4 µs, against 2.1 µs with none |
+
+A request with no token pays one compare. Against a real HTTP request of about 230 µs, the gate is 1%. An allowed call to a tool that
+names two scopes reads the token four times on HTTP, twice in the gate and twice in the dispatcher, about 8 µs together.
+
 ## [3.6.2] — 2026-11-01 · RS256 and ES256, from a JWK Set
 
 Most authorization servers sign with a private key, so 3.6.1's audience check reached few of them. bote now verifies RS256 and

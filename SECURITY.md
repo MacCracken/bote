@@ -79,6 +79,16 @@ The primary security-relevant surface areas are:
   credentials to reach. Put a rate limit in front of a server that takes tokens from the internet.
   ES256 also has two spellings of every signature, so a token's text cannot key a revocation list
   there: use `jti`.
+- **Scopes** — since **3.6.3** a tool can require scopes, and a token lacking any of them gets a
+  `403` with `error="insufficient_scope"`. The dispatcher holds the check, and HTTP's 403 is a
+  courtesy ahead of it: a transport-only check would be walked around by a JSON-RPC batch and would
+  miss WebSocket, so a batch element or a frame gets `-31403` from the same code. Fuzzing asserts no
+  substitution of a request reaches a scoped tool without its scope. A tool that requires a scope
+  with nothing configured to read one is refused, not waved through, and a name in
+  `BOTE_TOOL_SCOPES` that matches no tool stops the server. With no token in play there is nothing to
+  compare, so scopes do not apply on stdio or the Unix socket, and bote logs a WARN there. Scopes
+  gate `tools/call` only. A WebSocket checks its token once, at the upgrade, so a token that
+  expires keeps its connection.
 - **Memory** — `alloc` never frees, so what a request leaves on the heap stays for
   the life of the process. Since **3.4.15** everything bote allocates to answer a
   message goes on a request arena that the next message rewinds, including
@@ -88,6 +98,10 @@ The primary security-relevant surface areas are:
   client. That was only true for short values until **3.5.1**:
   through 3.4.15 a long `id`, method, name, URI or cursor retained 61 to 577 KB per
   refused request, and through 3.5.0 a long `MCP-Protocol-Version` retained 84 KB.
+  Through **3.6.2** every request an operator's validator accepted kept its token, a
+  kilobyte or so for a JWT, and a 60 KB token kept 60 KB per request: it was copied for a
+  handler before anything knew one would run. That took a valid token to reach. A token now
+  reaches the heap only when a handler is handed it.
   A valid tool, prompt, resource or completion call still leaves
   what its handler is handed and whatever the handler allocates, because the 2.0
   handler ABI lets a handler keep them (roadmap 3.8.x). On a server without auth,

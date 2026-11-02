@@ -159,6 +159,31 @@ fn auth_send_challenge(cfd, params, refused) {
     return 0;
 }
 
+# A 403 for a token that lacks a scope (RFC 6750 §3.1, MCP's scope challenge): every
+# scope in `scopes` is named, so a client asks once. `metadata` is the
+# `resource_metadata` parameter or 0, and `extra` further response headers or 0.
+fn auth_send_insufficient_scope(cfd, scopes, metadata, extra) {
+    var ra = bote_req_alloc();
+    var sb = str_builder_new_a(ra);
+    str_builder_add_cstr_a(ra, sb, "WWW-Authenticate: Bearer error=\"insufficient_scope\", scope=\"");
+    var i = 0;
+    while (i < vec_len(scopes)) {
+        if (i > 0) { str_builder_add_cstr_a(ra, sb, " "); }
+        str_builder_add_cstr_a(ra, sb, vec_get(scopes, i));
+        i = i + 1;
+    }
+    str_builder_add_cstr_a(ra, sb, "\"");
+    if (metadata != 0) {
+        str_builder_add_cstr_a(ra, sb, ", ");
+        str_builder_add_cstr_a(ra, sb, metadata);
+    }
+    str_builder_add_cstr_a(ra, sb, "\r\n");
+    if (extra != 0) { str_builder_add_cstr_a(ra, sb, extra); }
+    sandhi_server_send_response_a(ra, cfd, HTTP_FORBIDDEN, "Forbidden",
+      "text/plain", "", 0, str_data(str_builder_build_a(ra, sb)));
+    return 0;
+}
+
 # ================================================================
 # Middleware entry — call from each transport handler.
 #
@@ -209,10 +234,15 @@ fn bote_http_refuse_method(cfd, transport, allow) {
 
 fn auth_bearer_check(cfd, buf, blen, validator_fp, validator_ctx, claims_out) {
     if (validator_fp == 0) { return 0; }    # auth disabled
-    return auth_bearer_check_c(cfd, buf, blen, validator_fp, validator_ctx, claims_out, 0);
+    var rc = auth_bearer_check_c(cfd, buf, blen, validator_fp, validator_ctx, claims_out, 0);
+    if (rc == 0 && claims_out != 0) { store64(claims_out, bote_req_claims_kept(load64(claims_out))); }
+    return rc;
 }
 
-# auth_bearer_check, with `challenge` after `Bearer` on a 401: bote_prm_challenge.
+# auth_bearer_check, with `challenge` after `Bearer` on a 401: bote_prm_challenge. For one
+# message: claims that are the token stay on the arena until the dispatcher hands them
+# to a handler, so a request refused after this keeps nothing. auth_bearer_check is for
+# what holds claims across messages.
 fn auth_bearer_check_c(cfd, buf, blen, validator_fp, validator_ctx, claims_out, challenge) {
     if (validator_fp == 0) { return 0; }    # auth disabled
 
@@ -231,13 +261,7 @@ fn auth_bearer_check_c(cfd, buf, blen, validator_fp, validator_ctx, claims_out, 
         return HTTP_UNAUTHORIZED;
     }
     # 2.5.0: surface validator's return so transport can thread to handler.
-    # A handler may keep its claims, so a validator that returns the token
-    # gets it copied off the request arena.
-    if (claims == token) {
-        var kept = alloc(strlen(token) + 1);
-        memcpy(kept, token, strlen(token) + 1);
-        claims = kept;
-    }
+    if (claims == token) { bote_req_note_token(token); }
     if (claims_out != 0) { store64(claims_out, claims); }
     return 0;
 }

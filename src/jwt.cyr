@@ -40,8 +40,8 @@
 #
 # NOT validated: `sub`, `jti`, `client_id`, and RFC 9068's `typ`, which many
 # authorization servers do not set: a token of another kind is stopped by `aud`.
-# `scope` is the next step. Returns 1 on valid, 0 on any failure. The validator
-# returns the original token cstr, as opaque "claims" for handlers.
+# Returns 1 on valid, 0 on any failure. The validator returns the original token
+# cstr, as opaque "claims" for handlers, and jwt_scope_check reads scopes from that.
 
 # The shortest key RFC 7518 §3.2 allows HS256: the size of the hash output.
 var BOTE_JWT_MIN_KEY = 32;
@@ -666,3 +666,107 @@ fn auth_validator_jwt(token, jwt_secret) {
 
 # The name this had when HS256 was all it did.
 fn auth_validator_jwt_hs256(token, jwt_secret) { return auth_validator_jwt(token, jwt_secret); }
+
+# ================================================================
+# Scopes
+# ================================================================
+#
+# A scope check with the signature dispatcher_set_scope_check takes. RFC 9068 §2.2.3 puts a
+# token's scopes in `scope`, space-separated. Some authorization servers use `scp`, as
+# that or as an array, so that is read when `scope` is absent. Matching is exact:
+# RFC 6749 §3.3 makes a scope case-sensitive, and `files:read` is not `files:read-all`.
+#
+# `rules` holds what a broader scope implies, which MCP says a server must account for,
+# or is 0. It is a flat vec of broad, narrow: jwt_scope_rules_new, jwt_scope_rule.
+
+fn jwt_scope_rules_new() { return vec_new(); }
+
+fn jwt_scope_rule(rules, broad, narrow) {
+    vec_push(rules, broad);
+    vec_push(rules, narrow);
+    return rules;
+}
+
+# 1 when the space-separated `list` holds exactly `want`.
+fn _jwt_list_has(list, want) {
+    var wl = strlen(want);
+    var i = 0;
+    while (load8(list + i) != 0) {
+        while (load8(list + i) == 32) { i = i + 1; }
+        var s = i;
+        while (load8(list + i) != 0 && load8(list + i) != 32) { i = i + 1; }
+        if (i - s == wl && wl > 0 && memeq(list + s, want, wl) == 1) { return 1; }
+    }
+    return 0;
+}
+
+# What the token grants, space-separated, or 0. An array element holding a space is
+# dropped, so that it cannot read as two.
+fn _jwt_granted_a(a, payload, plen) {
+    var pos = _jx_find_value_pos(payload, plen, "scope");
+    if (pos == 0 - 1) { pos = _jx_find_value_pos(payload, plen, "scp"); }
+    if (pos == 0 - 1) { return 0; }
+    if (load8(payload + pos) != 91) { return _jx_str_dec_at_a(a, payload, plen, pos); }
+    var out = alloc_via(a, plen + 1);
+    var n = 0;
+    var i = _jx_skip_ws(payload, plen, pos + 1);
+    while (i < plen && load8(payload + i) != 93) {
+        var one = _jx_str_dec_at_a(a, payload, plen, i);
+        if (one != 0 && strchr(one, 32) == 0 - 1) {
+            var ol = strlen(one);
+            memcpy(out + n, one, ol);
+            store8(out + n + ol, 32);
+            n = n + ol + 1;
+        }
+        i = _jx_array_next(payload, plen, i);
+    }
+    store8(out + n, 0);
+    return out;
+}
+
+# 1 when `list` holds `want`, or a scope the rules say implies it. Rules chain, and each
+# is followed once, so that a cycle ends and a dense set stays quadratic.
+fn _jwt_scope_held(a, list, want, rules) {
+    if (_jwt_list_has(list, want) == 1) { return 1; }
+    if (rules == 0) { return 0; }
+    var n = vec_len(rules) / 2;
+    var seen = alloc_via(a, n + 1);
+    memset(seen, 0, n + 1);
+    var wanted = alloc_via(a, (n + 1) * 8);
+    store64(wanted, want);
+    var next = 0;
+    var end = 1;
+    while (next < end) {
+        var w = load64(wanted + next * 8);
+        next = next + 1;
+        var i = 0;
+        while (i < n) {
+            if (load8(seen + i) == 0 && streq(vec_get(rules, i * 2 + 1), w) == 1) {
+                store8(seen + i, 1);
+                var broad = vec_get(rules, i * 2);
+                if (_jwt_list_has(list, broad) == 1) { return 1; }
+                store64(wanted + end * 8, broad);
+                end = end + 1;
+            }
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# 1 when the JWT `claims`, which a validator has already verified, grants `scope`. What
+# is not a JWT grants nothing.
+fn jwt_scope_check(claims, scope, rules) {
+    if (claims == 0 || scope == 0) { return 0; }
+    var tlen = strlen(claims);
+    var dot1 = _jwt_dot(claims, tlen, 0);
+    if (dot1 <= 0) { return 0; }
+    var dot2 = _jwt_dot(claims, tlen, dot1 + 1);
+    var a = bote_req_alloc();
+    var plen[8];
+    var payload = _jwt_b64u_a(a, claims + dot1 + 1, dot2 - dot1 - 1, &plen);
+    if (payload == 0) { return 0; }
+    var list = _jwt_granted_a(a, payload, load64(&plen));
+    if (list == 0) { return 0; }
+    return _jwt_scope_held(a, list, scope, rules);
+}

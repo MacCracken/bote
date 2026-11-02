@@ -3,7 +3,11 @@
 #
 #   10  whatever bote_prm_check accepts cannot leave its parameter: the challenge is one
 #       line, with exactly the quotes bote wrote;
-#   20  and the document is valid JSON that reads back as what was configured.
+#   20  the document is valid JSON that reads back as what was configured;
+#   30  a tool that requires a scope runs for no token without it, on any substitution of
+#       a request: a gate that reads a body one way and a dispatcher that reads it
+#       another is how a check like this is walked around;
+#   40  and refusing such a call leaves nothing on the heap.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -110,5 +114,61 @@ _sweep(0, "https://mcp.example.com:8443/a/mcp");
 _sweep(0, "http://127.0.0.1:8390/mcp");
 _sweep(1, "https://as.example.com/tenant");
 _sweep(2, "files:read");
+
+var _ran = 0;
+fn _h_scoped(args, claims) {
+    _ran = _ran + 1;
+    return "{\"content\":[]}";
+}
+fn _never(claims, scope, ctx) { return 0; }
+
+var sreg = tool_registry_new();
+var sneed = vec_new();
+vec_push(sneed, "files:write");
+registry_register(sreg, tool_def_with_required_scopes(tool_def_new("s", "Scoped", schema_new("object", 0, vec_new())), sneed));
+var sd = dispatcher_new(sreg);
+dispatcher_handle(sd, "s", &_h_scoped);
+dispatcher_set_scope_check(sd, &_never, 0);
+
+var gate_seeds = vec_new();
+vec_push(gate_seeds, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"s\",\"arguments\":{\"a\":1}}}");
+vec_push(gate_seeds, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"\\u0073\",\"name\":\"s\"}}");
+vec_push(gate_seeds, "[{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"s\"}},{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"s\"}}]");
+vec_push(gate_seeds, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}},\"name\":\"s\"}}");
+var gate_subs = "\x01\t\n \"'\\/{}[]:,su0A\xC3\xFF";
+var gate_buf = alloc(4096);
+
+fn _gate_sweep() {
+    var si = 0;
+    while (si < vec_len(gate_seeds)) {
+        var seed = vec_get(gate_seeds, si);
+        var n = strlen(seed);
+        var i = 0;
+        while (i < n) {
+            var bi = 0;
+            while (bi < strlen(gate_subs)) {
+                memcpy(gate_buf, seed, n);
+                store8(gate_buf + i, load8(gate_subs + bi));
+                store8(gate_buf + n, 0);
+                var a = bote_req_begin();
+                var hc[40];
+                bote_http_ctx(&hc, 0 - 1, "fuzz", gate_buf, n, 0);
+                if (bote_http_scope_gate(&hc, sd, gate_buf, "a-token", 0) == 0) {
+                    codec_process_message_a(a, gate_buf, sd, "a-token");
+                }
+                if (_ran != 0) { sys_exit(30); }
+                bi = bi + 1;
+            }
+            i = i + 1;
+        }
+        si = si + 1;
+    }
+    return 0;
+}
+
+_gate_sweep();
+var gate_used = alloc_used();
+_gate_sweep();
+if (alloc_used() != gate_used) { sys_exit(40); }
 
 sys_exit(0);

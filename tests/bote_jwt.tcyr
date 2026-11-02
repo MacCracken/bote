@@ -177,6 +177,55 @@ fn _with_suffix(text, suffix) {
     return str_cstr(str_builder_build(sb));
 }
 
+fn _scope_name(i) {
+    var out = alloc(4);
+    store8(out, 115);
+    store8(out + 1, 65 + i);
+    store8(out + 2, 0);
+    return out;
+}
+
+fn _str_rep(s, n) {
+    var sl = strlen(s);
+    var out = alloc(sl * n + 1);
+    var i = 0;
+    while (i < n) {
+        memcpy(out + i * sl, s, sl);
+        i = i + 1;
+    }
+    store8(out + sl * n, 0);
+    return out;
+}
+
+# A token whose payload is `payload`, for what reads a token already verified.
+fn _unsigned(payload) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base64url_encode(_HDR, strlen(_HDR)));
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_cstr(sb, base64url_encode(payload, strlen(payload)));
+    str_builder_add_cstr(sb, ".c2ln");
+    return str_cstr(str_builder_build(sb));
+}
+
+fn _grants(payload, scope) { return jwt_scope_check(_unsigned(payload), scope, 0); }
+
+fn _in(rules, granted, scope) {
+    return jwt_scope_check(_unsigned(_cat(_cat("{\"scope\":\"", granted), "\"}")), scope, rules);
+}
+
+fn _scope_heap(tok, scope, rules) {
+    bote_req_begin();
+    jwt_scope_check(tok, scope, rules);
+    var before = alloc_used();
+    var i = 0;
+    while (i < 20) {
+        bote_req_begin();
+        jwt_scope_check(tok, scope, rules);
+        i = i + 1;
+    }
+    return (alloc_used() - before) / 20;
+}
+
 fn main() {
     alloc_init();
 
@@ -654,6 +703,101 @@ fn main() {
     assert(&jwt_verify_hs256 != 0, "verify fp addressable");
     assert(&auth_validator_jwt_hs256 != 0, "validator fp addressable");
     assert(&jwt_secret_new != 0, "secret_new fp addressable");
+
+    # ---- 3.6.3: what a token grants ----
+    assert_eq(_grants("{\"scope\":\"files:read\"}", "files:read"), 1, "scope: alone");
+    assert_eq(_grants("{\"scope\":\"a files:read b\"}", "files:read"), 1, "scope: in the middle");
+    assert_eq(_grants("{\"scope\":\"files:read b\"}", "files:read"), 1, "scope: first");
+    assert_eq(_grants("{\"scope\":\"a files:read\"}", "files:read"), 1, "scope: last");
+    assert_eq(_grants("{\"scope\":\"  a   files:read  \"}", "files:read"), 1, "scope: runs of spaces");
+    assert_eq(_grants("{\"scope\":\"files\\u003aread\"}", "files:read"), 1, "scope: as the string decodes");
+    assert_eq(_grants("{\"scope\":\"a b\"}", "files:read"), 0, "scope: not there");
+    assert_eq(_grants("{\"scope\":\"files:read-all\"}", "files:read"), 0, "scope: a longer scope is not it");
+    assert_eq(_grants("{\"scope\":\"files:read\"}", "files:read-all"), 0, "scope: nor is a shorter one");
+    assert_eq(_grants("{\"scope\":\"xfiles:read\"}", "files:read"), 0, "scope: nor one that ends in it");
+    assert_eq(_grants("{\"scope\":\"FILES:READ\"}", "files:read"), 0, "scope: case counts");
+    assert_eq(_grants("{\"scope\":\"\"}", "files:read"), 0, "scope: an empty list");
+    assert_eq(_grants("{\"scope\":\"   \"}", "files:read"), 0, "scope: all spaces");
+    assert_eq(_grants("{\"scope\":\"\"}", ""), 0, "scope: nothing asked of nothing");
+    assert_eq(_grants("{\"scope\":\"a\"}", ""), 0, "scope: an empty scope is never held");
+    assert_eq(_grants("{\"scope\":\"a \"}", ""), 0, "scope: ...nor after a space");
+    assert_eq(_grants("{\"scope\":\"   \"}", ""), 0, "scope: ...nor among spaces");
+    assert_eq(_grants("{\"sub\":\"x\"}", "files:read"), 0, "scope: no claim");
+    assert_eq(_grants("{\"scope\":5}", "5"), 0, "scope: a number");
+    assert_eq(_grants("{\"scope\":null}", "null"), 0, "scope: null");
+    assert_eq(_grants("{\"scope\":true}", "true"), 0, "scope: a boolean");
+    assert_eq(_grants("{\"scope\":{\"a\":1}}", "a"), 0, "scope: an object");
+    assert_eq(_grants("{\"nested\":{\"scope\":\"files:read\"}}", "files:read"), 0, "scope: a nested claim is no claim");
+    assert_eq(_grants("[\"scope\",\"files:read\"]", "files:read"), 0, "scope: a payload that is no object");
+
+    assert_eq(_grants("{\"scp\":\"a files:read\"}", "files:read"), 1, "scp: a string");
+    assert_eq(_grants("{\"scp\":[\"a\",\"files:read\"]}", "files:read"), 1, "scp: an array");
+    assert_eq(_grants("{\"scp\":[ \"a\" , \"files:read\" ]}", "files:read"), 1, "scp: an array with spaces");
+    assert_eq(_grants("{\"scope\":[\"files:read\"]}", "files:read"), 1, "scope: an array");
+    assert_eq(_grants("{\"scp\":[\"files\\u003aread\"]}", "files:read"), 1, "scp: an element as it decodes");
+    assert_eq(_grants("{\"scp\":[]}", "files:read"), 0, "scp: empty");
+    assert_eq(_grants("{\"scp\":[\"a\",5,null,\"b\"]}", "b"), 1, "scp: other values are stepped over");
+    assert_eq(_grants("{\"scp\":[5]}", "5"), 0, "scp: a number is no scope");
+    assert_eq(_grants("{\"scp\":[[\"files:read\"]]}", "files:read"), 0, "scp: a nested array is no scope");
+    assert_eq(_grants("{\"scp\":[\"a files:read\"]}", "files:read"), 0, "scp: an element with a space does not read as two");
+    assert_eq(_grants("{\"scope\":\"a\",\"scp\":\"files:read\"}", "files:read"), 0, "scope wins over scp");
+
+    assert_eq(jwt_scope_check("not-a-jwt", "files:read", 0), 0, "scope: an opaque token grants nothing");
+    assert_eq(jwt_scope_check("files:read", "files:read", 0), 0, "scope: ...whatever it says");
+    assert_eq(jwt_scope_check("a.b", "b", 0), 0, "scope: one dot");
+    assert_eq(jwt_scope_check("a..c", "c", 0), 0, "scope: no payload");
+    assert_eq(jwt_scope_check(_cat(".", _cat(base64url_encode("{\"scope\":\"c\"}", 13), ".c")), "c", 0), 0, "scope: no header");
+    assert_eq(jwt_scope_check("a.!!!.c", "c", 0), 0, "scope: a payload that does not decode");
+    assert_eq(jwt_scope_check(0, "a", 0), 0, "scope: no claims");
+    assert_eq(jwt_scope_check(_unsigned("{\"scope\":\"a\"}"), 0, 0), 0, "scope: no scope asked");
+
+    # A broader scope implies a narrower one, however far down.
+    var rules = jwt_scope_rules_new();
+    jwt_scope_rule(rules, "admin", "files:write");
+    jwt_scope_rule(rules, "files:write", "files:read");
+    jwt_scope_rule(rules, "other", "misc");
+    assert_eq(_in(rules, "files:write", "files:read"), 1, "implied: one step");
+    assert_eq(_in(rules, "admin", "files:read"), 1, "implied: two");
+    assert_eq(_in(rules, "files:read", "files:read"), 1, "implied: named outright");
+    assert_eq(_in(rules, "files:read", "files:write"), 0, "implied: never upward");
+    assert_eq(_in(rules, "files:read", "admin"), 0, "implied: nor two up");
+    assert_eq(_in(rules, "other", "files:read"), 0, "implied: not sideways");
+    assert_eq(_in(rules, "admin", "misc"), 0, "implied: not from another chain");
+    assert_eq(_in(rules, "admin-ish", "files:read"), 0, "implied: the broad scope matches exactly");
+    assert_eq(_in(jwt_scope_rules_new(), "admin", "files:read"), 0, "implied: no rules");
+    var cyc = jwt_scope_rules_new();
+    jwt_scope_rule(cyc, "a", "b");
+    jwt_scope_rule(cyc, "b", "c");
+    jwt_scope_rule(cyc, "c", "a");
+    jwt_scope_rule(cyc, "d", "d");
+    assert_eq(_in(cyc, "c", "a"), 1, "implied: around a cycle");
+    assert_eq(_in(cyc, "z", "a"), 0, "implied: a cycle ends");
+    assert_eq(_in(cyc, "z", "d"), 0, "implied: a rule that points at itself ends");
+    # A rule set an operator wrote badly: every scope implies every other. Each rule is
+    # followed once; following them as paths would not finish.
+    var dense = jwt_scope_rules_new();
+    var di = 0;
+    while (di < 24) {
+        var dj = 0;
+        while (dj < 24) {
+            jwt_scope_rule(dense, _scope_name(di), _scope_name(dj));
+            dj = dj + 1;
+        }
+        di = di + 1;
+    }
+    var dt0 = clock_now_ms();
+    assert_eq(_in(dense, "nothing", _scope_name(3)), 0, "implied: a dense set, with no answer");
+    assert(clock_now_ms() - dt0 < 2000, "implied: ...is quick");
+    assert_eq(_in(dense, _scope_name(23), _scope_name(3)), 1, "implied: a dense set, with one");
+
+    # Nothing stays, however long the list or how many rules it walks.
+    var long = _str_rep("s ", 30000);
+    var longtok = _unsigned(_cat(_cat("{\"scope\":\"", long), "\"}"));
+    assert_eq(_scope_heap(longtok, "files:read", 0), 0, "scope heap: a 60 KB list");
+    assert_eq(_scope_heap(longtok, _scope_name(3), dense), 0, "scope heap: every rule of a dense set");
+    var arrtok = _unsigned(_cat(_cat("{\"scp\":[", _str_rep("\"s\",", 12000)), "\"t\"]}"));
+    assert_eq(_scope_heap(arrtok, "files:read", 0), 0, "scope heap: a long array");
+    assert_eq(_scope_heap("not-a-jwt", "files:read", 0), 0, "scope heap: no JWT");
 
     return assert_summary();
 }

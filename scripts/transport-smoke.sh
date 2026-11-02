@@ -14,7 +14,9 @@
 #     and names the step and errno (3.4.12);
 #   - a hostile Origin gets 403 on every HTTP-family mode, a listed one passes,
 #     an empty BOTE_BEARER_TOKENS refuses to start, and the fs tools stay in
-#     their root through a symlink and do not hang on a FIFO (3.4.15).
+#     their root through a symlink and do not hang on a FIFO (3.4.15);
+#   - BOTE_TOOL_SCOPES answers a token without a scope with a 403 that names it,
+#     and refuses to start on a name it cannot honour (3.6.3).
 # Needs curl and python3. CI runs it as the "Transport smoke" step.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -224,6 +226,50 @@ bad_t=$(jwt '{"aud":"http://127.0.0.1:18399/mcp","iss":"https://evil.example.com
 c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H "Authorization: Bearer $bad_t" -d "$INIT" http://127.0.0.1:18399/mcp)
 [ "$c" = "401" ] || err "a token from another issuer answered $c, not 401"
 grep -q "$JKEY" "$L/jwt.err" && err "the JWT key reached a log"
+
+# Required scopes, on the real binary: a 403 naming the scope, the same on a token that
+# holds it or a broader one, and a refusal to start on anything that would leave a tool
+# open. The token never reaches a log.
+SURL=http://127.0.0.1:18386/mcp
+SENV=(BOTE_RESOURCE_URL=$SURL BOTE_AUTH_SERVERS=https://as.example.com BOTE_JWT_SECRET=$JKEY)
+env "${SENV[@]}" BOTE_LOG=debug BOTE_TOOL_SCOPES='bote_echo=files:write' BOTE_SCOPE_IMPLIES='admin=files:write' \
+  bash -c "exec $B http 18386" 2> "$L/scopes.err" &
+pids+=($!)
+wait_port 18386 || err "nothing listening on 18386"
+CALL='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"bote_echo","arguments":{"message":"hi"}}}'
+stok() { jwt "{\"aud\":\"$SURL\",\"iss\":\"https://as.example.com\",\"exp\":4102444800,$1}"; }
+poor=$(stok '"scope":"files:read"')
+h=$(curl -s -D - -o /dev/null "${H[@]}" -H "Authorization: Bearer $poor" -d "$CALL" $SURL)
+echo "$h" | sed -n 1p | grep -q ' 403 ' || err "a token without the scope: $h"
+echo "$h" | grep -qi 'error="insufficient_scope", scope="files:write", resource_metadata="http://127.0.0.1:18386/.well-known/oauth-protected-resource/mcp"' \
+  || err "the 403 does not name the scope and the metadata: $h"
+c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H "Authorization: Bearer $(stok '"scope":"a files:write"')" -d "$CALL" $SURL)
+[ "$c" = "200" ] || err "a token with the scope answered $c, not 200"
+c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H "Authorization: Bearer $(stok '"scope":"admin"')" -d "$CALL" $SURL)
+[ "$c" = "200" ] || err "a broader scope answered $c, not 200"
+c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H "Authorization: Bearer $poor" -d "$LIST" $SURL)
+[ "$c" = "200" ] || err "a token without the scope could not list tools: $c"
+curl -s "${H[@]}" -H "Authorization: Bearer $poor" -d "[$CALL]" $SURL | grep -q '"code":-31403' || err "a batch element was not refused with -31403"
+grep -q 'status=403 reason=insufficient_scope' "$L/scopes.err" || err "a 403 for a scope was not logged"
+grep -q "$poor" "$L/scopes.err" && err "a token reached a log"
+srefused() { # why expected-log env...
+  local why=$1 want=$2; shift 2
+  local rc=0
+  env "$@" timeout 5 $B http 18385 2> "$L/scopes-refused.held" || rc=$?
+  [ "$rc" -eq 2 ] || err "$why: rc=$rc, not 2"
+  grep -q "$want" "$L/scopes-refused.held" || err "$why: no reason: $(cat "$L/scopes-refused.held")"
+}
+srefused "a scope on a tool that does not exist" 'tool=nope' "${SENV[@]}" BOTE_TOOL_SCOPES=nope=files:write
+srefused "scopes with no verifier" 'needs BOTE_JWT_SECRET' BOTE_TOOL_SCOPES=bote_echo=files:write
+srefused "scopes on a token list" 'needs BOTE_JWT_SECRET' BOTE_BEARER_TOKENS=tok BOTE_TOOL_SCOPES=bote_echo=files:write
+srefused "an entry with no =" 'entries are tool=scope' "${SENV[@]}" BOTE_TOOL_SCOPES=bote_echo
+srefused "an empty scope" 'BOTE_TOOL_SCOPES refused' "${SENV[@]}" BOTE_TOOL_SCOPES=bote_echo=
+srefused "a scope that is no token" 'BOTE_TOOL_SCOPES refused' "${SENV[@]}" 'BOTE_TOOL_SCOPES=bote_echo=a"b'
+srefused "a rule with no =" 'entries are broad=narrow' "${SENV[@]}" BOTE_TOOL_SCOPES=bote_echo=a BOTE_SCOPE_IMPLIES=admin
+echo "$LIST" | env BOTE_TOOL_SCOPES=bote_echo=files:write timeout 5 $B stdio 2> "$L/scopes-stdio.held" | grep -q '"tools"' \
+  || err "stdio stopped serving with BOTE_TOOL_SCOPES set"
+grep -q 'no effect here' "$L/scopes-stdio.held" || err "stdio did not say scopes have no effect on it"
+
 rc=0; BOTE_JWT_SECRET=short BOTE_RESOURCE_URL=http://127.0.0.1:18399/mcp BOTE_AUTH_SERVERS=https://as.example.com timeout 5 $B http 18388 2> "$L/jwt-short.held" || rc=$?
 [ "$rc" -eq 2 ] || err "a short JWT key: rc=$rc, not 2"
 rc=0; BOTE_JWT_SECRET=$JKEY timeout 5 $B http 18388 2> "$L/jwt-noaud.held" || rc=$?

@@ -106,6 +106,46 @@ fn test_audit_log(ctx, event) {
     return 0;
 }
 fn _audit_reset() { _audit_events = vec_new(); return 0; }
+# 3.6.3: every kind of handler, recording the claims it was handed.
+var _kc_seen = 0;
+fn h_kc_tool(args, claims) { _kc_seen = claims; return "{\"content\":[]}"; }
+fn h_kc_prompt(args, claims) { _kc_seen = claims; return "{\"messages\":[]}"; }
+fn h_kc_res(uri, claims) { _kc_seen = claims; return "{\"contents\":[]}"; }
+fn h_kc_complete(params, claims) { _kc_seen = claims; return "{\"completion\":{\"values\":[]}}"; }
+
+# 1 when a handler reached by `method` with `params` gets a copy of a token on the arena.
+fn _kc_copied(d, method, params) {
+    var al = bote_req_begin();
+    var tok = alloc_via(al, 8);
+    memcpy(tok, "tok-abc", 8);
+    bote_req_note_token(tok);
+    _kc_seen = 0;
+    dispatcher_dispatch_a(al, d, req_with_params(req_new("1", method), params), tok);
+    if (_kc_seen == 0 || _kc_seen == tok) { return 0; }
+    return streq(_kc_seen, "tok-abc");
+}
+
+# 3.6.3: a scope check that counts its calls through `ctx`, and one that says 2.
+var _scope_calls = 0;
+fn _sc_has(claims, scope, ctx) {
+    if (ctx != 0) { store64(ctx, load64(ctx) + 1); }
+    return strstr(claims, scope) >= 0;
+}
+fn _sc_two(claims, scope, ctx) { return 2; }
+var _sc_runs = 0;
+fn h_sc(args, claims) {
+    _sc_runs = _sc_runs + 1;
+    return "{\"content\":[]}";
+}
+fn _sc_call(d, tool, extra, claims) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"");
+    str_builder_add_cstr(sb, tool);
+    str_builder_add_cstr(sb, "\"");
+    str_builder_add_cstr(sb, extra);
+    str_builder_add_cstr(sb, "}}");
+    return codec_process_message(str_data(str_builder_build(sb)), d, claims);
+}
 # A tool handler that returns nothing (3.4.5: a failed call).
 fn h_none_t(args, claims) { return 0; }
 # 3.4.8: a handler reporting its own failure, and one returning broken JSON.
@@ -2611,6 +2651,121 @@ fn main() {
         sock_close(load64(&hfd_slot));
     }
     sakshi_set_level(SK_INFO);
+
+    # ---- 3.6.3: required scopes ----
+    assert_eq(bote_scope_token_ok("a"), 1, "scope token: one byte");
+    assert_eq(bote_scope_token_ok("files:read"), 1, "scope token: a usual one");
+    assert_eq(bote_scope_token_ok("!#[]~"), 1, "scope token: both ends of what RFC 6749 allows");
+    assert_eq(bote_scope_token_ok(0), 0, "scope token: none");
+    assert_eq(bote_scope_token_ok(""), 0, "scope token: empty");
+    assert_eq(bote_scope_token_ok("a b"), 0, "scope token: a space");
+    assert_eq(bote_scope_token_ok("a\"b"), 0, "scope token: a quote");
+    assert_eq(bote_scope_token_ok("a\\b"), 0, "scope token: a backslash");
+    assert_eq(bote_scope_token_ok("a\tb"), 0, "scope token: a control byte");
+    assert_eq(bote_scope_token_ok("\x7F"), 0, "scope token: DEL");
+    assert_eq(bote_scope_token_ok("\xC3\xA9"), 0, "scope token: non-ASCII");
+    var sc_bare = tool_def_new("sc_bare", "x", schema_new("object", 0, vec_new()));
+    assert_eq(tool_def_required_scopes(sc_bare), 0, "scopes: none by default");
+    var sc_bad = vec_new();
+    vec_push(sc_bad, "good");
+    vec_push(sc_bad, "not good");
+    var sc_reg = tool_registry_new();
+    var sc_badt = tool_def_with_required_scopes(tool_def_new("sc_badt", "x", schema_new("object", 0, vec_new())), sc_bad);
+    assert(registry_check_tool_def(sc_badt) != 0, "scopes: a bad one is refused");
+    assert(strstr(registry_check_tool_def(sc_badt), "required scope") >= 0, "scopes: ...and says why");
+    assert(registry_register(sc_reg, sc_badt) != 0, "scopes: registration refuses it");
+    assert_eq(registry_get(sc_reg, "sc_badt"), 0, "scopes: ...and holds nothing");
+    var sc_two = vec_new();
+    vec_push(sc_two, "s:a");
+    vec_push(sc_two, "s:b");
+    assert_eq(registry_register(sc_reg, tool_def_with_required_scopes(tool_def_new("sc_t", "x", schema_new("object", 0, vec_new())), sc_two)), 0, "scopes: good ones register");
+    assert_eq(registry_register(sc_reg, tool_def_with_required_scopes(tool_def_new("sc_e", "x", schema_new("object", 0, vec_new())), vec_new())), 0, "scopes: an empty list registers");
+    assert_eq(registry_register(sc_reg, sc_bare), 0, "scopes: so does none");
+    assert_eq(vec_len(tool_def_required_scopes(registry_get(sc_reg, "sc_t"))), 2, "scopes: kept");
+    var sc_d = dispatcher_new(sc_reg);
+    dispatcher_handle(sc_d, "sc_t", &h_sc);
+    dispatcher_handle(sc_d, "sc_e", &h_sc);
+    dispatcher_handle(sc_d, "sc_bare", &h_sc);
+    assert_eq(dispatcher_scopes_missing(sc_d, "sc_t", 0), 0, "missing: no claims, no check");
+    assert_eq(dispatcher_scopes_missing(sc_d, "sc_nope", "s:a s:b"), 0, "missing: no such tool");
+    assert_eq(dispatcher_scopes_missing(sc_d, "sc_bare", "x"), 0, "missing: a tool that asks for none");
+    assert_eq(dispatcher_scopes_missing(sc_d, "sc_e", "x"), 0, "missing: an empty list asks for none");
+    assert_eq(dispatcher_scopes_missing(sc_d, "sc_t", "s:a s:b"), sc_two, "missing: no checker is closed");
+    var sc_n[8];
+    store64(&sc_n, 0);
+    dispatcher_set_scope_check(sc_d, &_sc_has, &sc_n);
+    assert_eq(dispatcher_scopes_missing(sc_d, "sc_t", "s:a s:b"), 0, "missing: both held");
+    assert_eq(load64(&sc_n), 2, "missing: each asked of the checker, with its ctx");
+    assert_eq(dispatcher_scopes_missing(sc_d, "sc_t", "s:a"), sc_two, "missing: the first alone");
+    assert_eq(dispatcher_scopes_missing(sc_d, "sc_t", "s:b"), sc_two, "missing: the second alone");
+    dispatcher_set_scope_check(sc_d, &_sc_two, 0);
+    assert_eq(dispatcher_scopes_missing(sc_d, "sc_t", "s:a s:b"), sc_two, "missing: only a 1 is held");
+    dispatcher_set_scope_check(sc_d, &_sc_has, 0);
+
+    _sc_runs = 0;
+    var sc_r = _sc_call(sc_d, "sc_t", "", "s:a");
+    assert(strstr(sc_r, "\"code\":-31403") >= 0, "refused: -31403");
+    assert(strstr(sc_r, "insufficient scope for tool: sc_t") >= 0, "refused: names the tool");
+    assert_eq(_sc_runs, 0, "refused: no handler");
+    sc_r = _sc_call(sc_d, "sc_t", ",\"version\":\"9\",\"arguments\":5", "s:a");
+    assert(strstr(sc_r, "\"code\":-31403") >= 0, "refused: ahead of the version and the arguments");
+    sc_r = _sc_call(sc_d, "sc_t", "", "s:a s:b");
+    assert(strstr(sc_r, "\"result\"") >= 0, "held: runs");
+    assert_eq(_sc_runs, 1, "held: once");
+    sc_r = _sc_call(sc_d, "sc_t", "", 0);
+    assert(strstr(sc_r, "\"result\"") >= 0, "no claims: stdio runs it");
+    sc_r = _sc_call(sc_d, "sc_nope", "", "x");
+    assert(strstr(sc_r, "\"code\":-32602") >= 0, "refused: an unknown tool is still that");
+    _ev_reset(); _audit_reset();
+    dispatcher_set_audit(sc_d, audit_sink_new(&test_audit_log, 0));
+    dispatcher_set_events(sc_d, event_sink_new(&test_event_publish, 0));
+    _sc_call(sc_d, "sc_t", ",\"caller_id\":\"c1\"", "s:a");
+    assert_eq(vec_len(_audit_events), 1, "refused: audited");
+    assert(streq(tool_call_event_caller_id(vec_get(_audit_events, 0)), "c1") == 1, "refused: with its caller");
+    assert_eq(tool_call_event_success(vec_get(_audit_events, 0)), 0, "refused: a failure");
+    assert_eq(vec_len(_ev_topics), 1, "refused: published");
+    assert(streq(vec_get(_ev_topics, 0), "bote/tool/failed") == 1, "refused: on the failed topic");
+    dispatcher_set_audit(sc_d, 0);
+    dispatcher_set_events(sc_d, 0);
+
+    # A token the arena holds reaches the heap only for a handler, once for a message.
+    var sc_al = bote_req_begin();
+    var sc_tok = alloc_via(sc_al, 8);
+    memcpy(sc_tok, "tok-abc", 8);
+    assert_eq(bote_req_claims_kept(0), 0, "kept: no claims");
+    assert_eq(bote_req_claims_kept("other"), "other", "kept: claims that are no token pass through");
+    assert_eq(bote_req_claims_kept(sc_tok), sc_tok, "kept: nothing noted, nothing copied");
+    bote_req_note_token(sc_tok);
+    var sc_used = alloc_used();
+    var sc_k1 = bote_req_claims_kept(sc_tok);
+    assert(sc_k1 != sc_tok, "kept: a copy");
+    assert(streq(sc_k1, "tok-abc") == 1, "kept: the same bytes");
+    var sc_grew = alloc_used() - sc_used;
+    assert_eq(bote_req_claims_kept(sc_tok), sc_k1, "kept: one copy a message");
+    assert_eq(alloc_used() - sc_used, sc_grew, "kept: ...and no second allocation");
+    bote_req_begin();
+    assert(streq(sc_k1, "tok-abc") == 1, "kept: outlives the message");
+    assert_eq(bote_req_claims_kept(sc_tok), sc_tok, "kept: forgotten when the next message starts");
+    var sc_al2 = bote_req_begin();
+    var sc_t1 = alloc_via(sc_al2, 8);
+    memcpy(sc_t1, "tok-one", 8);
+    var sc_t2 = alloc_via(sc_al2, 8);
+    memcpy(sc_t2, "tok-two", 8);
+    bote_req_note_token(sc_t1);
+    bote_req_claims_kept(sc_t1);
+    bote_req_note_token(sc_t2);
+    assert(streq(bote_req_claims_kept(sc_t2), "tok-two") == 1, "kept: a second token is never handed the first one's copy");
+    var kc_reg = tool_registry_new();
+    registry_register(kc_reg, tool_def_new("kc_t", "x", schema_new("object", 0, vec_new())));
+    var kc_d = dispatcher_new(kc_reg);
+    dispatcher_handle(kc_d, "kc_t", &h_kc_tool);
+    dispatcher_register_prompt(kc_d, prompt_def_new("kc_p", "x", vec_new()), &h_kc_prompt);
+    dispatcher_register_resource(kc_d, resource_def_new("kc://r", "r", "R", "text/plain"), &h_kc_res);
+    dispatcher_set_completion(kc_d, &h_kc_complete);
+    assert_eq(_kc_copied(kc_d, "tools/call", "{\"name\":\"kc_t\"}"), 1, "kept: a tool gets a copy");
+    assert_eq(_kc_copied(kc_d, "prompts/get", "{\"name\":\"kc_p\"}"), 1, "kept: a prompt gets a copy");
+    assert_eq(_kc_copied(kc_d, "resources/read", "{\"uri\":\"kc://r\"}"), 1, "kept: a resource gets a copy");
+    assert_eq(_kc_copied(kc_d, "completion/complete", "{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"kc_p\"},\"argument\":{\"name\":\"a\",\"value\":\"b\"}}"), 1, "kept: a completion gets a copy");
 
     return assert_summary();
 }

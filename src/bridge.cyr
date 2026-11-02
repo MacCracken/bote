@@ -214,6 +214,8 @@ fn _bridge_cors_headers(allowed_origins, request_origin) {
     str_builder_add_cstr_a(a, sb, acao);
     str_builder_add_cstr_a(a, sb, "\r\nVary: Origin\r\nAccess-Control-Allow-Methods: POST, GET, OPTIONS\r\n");
     str_builder_add_cstr_a(a, sb, "Access-Control-Allow-Headers: content-type, authorization\r\n");
+    # A page reads a response header only if told it may, and a 401 or 403 says nothing else.
+    str_builder_add_cstr_a(a, sb, "Access-Control-Expose-Headers: WWW-Authenticate\r\n");
     return str_data(str_builder_build_a(a, sb));
 }
 
@@ -322,6 +324,7 @@ fn _bridge_handle(config, cfd, buf, n) {
     var mreq[8];
     var era = bote_http_era(&hc, body, 0, dispatcher, &mreq);
     if (era == BOTE_HTTP_REFUSED) { return 0; }
+    if (bote_http_scope_gate(&hc, dispatcher, body, load64(&claims_slot), prm) != 0) { return 0; }
     if (era == BOTE_HTTP_MODERN) {
         return bote_http_serve_modern(&hc, load64(&mreq), dispatcher, load64(&claims_slot));
     }

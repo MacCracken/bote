@@ -7,8 +7,10 @@
 #       has one spelling, and a signature covers all of it;
 #   30  nothing a token holds, signed or not, crashes the claim reads;
 #   40  refusing a token leaves nothing on the heap;
-#   50  and a JWK Set of any bytes neither crashes the loader nor loads a key from a
-#       set the check refused.
+#   50  a JWK Set of any bytes neither crashes the loader nor loads a key from a set the
+#       check refused;
+#   60  a scope is held exactly when a plain split of the list holds it, and a chain of
+#       rules reaches what a transitive closure says, on every graph of four scopes.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -193,5 +195,116 @@ fn _jwks_sweep(set) {
 }
 _jwks_sweep(JV_JWKS_ONE_EC);
 _jwks_sweep(JV_JWKS_ONE_RSA);
+
+# 1 when splitting `list` on spaces gives `want`.
+fn _split_holds(list, want) {
+    var n = strlen(list);
+    var w = alloc_via(bote_req_alloc(), n + 1);
+    var s = 0;
+    var i = 0;
+    while (i <= n) {
+        if (i == n || load8(list + i) == 32) {
+            memcpy(w, list + s, i - s);
+            store8(w + i - s, 0);
+            if (i > s && streq(w, want) == 1) { return 1; }
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _scope_case(tok, want) {
+    var a = bote_req_begin();
+    var got = jwt_scope_check(tok, want, 0);
+    var dot1 = _jwt_dot(tok, strlen(tok), 0);
+    var dot2 = _jwt_dot(tok, strlen(tok), dot1 + 1);
+    var plen[8];
+    var payload = _jwt_b64u_a(a, tok + dot1 + 1, dot2 - dot1 - 1, &plen);
+    var list = _jwt_granted_a(a, payload, load64(&plen));
+    var expect = 0;
+    if (list != 0) { expect = _split_holds(list, want); }
+    if (got != expect) { sys_exit(60); }
+    return 0;
+}
+
+var sc_seed = "{\"scope\":\" a ab  files:read files \",\"scp\":[\"b\",\"c d\",5,{\"e\":1},\"f\"]}";
+var sc_scp = "{\"sub\":\"x\",\"scp\":[\"b\",\"c d\",5,{\"e\":1},\"f\",[\"g\"]]}";
+fn _scope_sweep(seed) {
+    var n = strlen(seed);
+    var i = 0;
+    while (i < n) {
+        var si = 0;
+        while (si < strlen(_sub)) {
+            memcpy(_buf, seed, n);
+            store8(_buf + n, 0);
+            store8(_buf + i, load8(_sub + si));
+            var tok = _mint(_buf);
+            _scope_case(tok, "a");
+            _scope_case(tok, "ab");
+            _scope_case(tok, "files");
+            _scope_case(tok, "files:read");
+            _scope_case(tok, "b");
+            _scope_case(tok, "c");
+            _scope_case(tok, "f");
+            si = si + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+_scope_sweep(sc_seed);
+_scope_sweep(sc_scp);
+
+# Every directed graph on four scopes, against a closure worked out another way.
+var sc_names = vec_new();
+vec_push(sc_names, "p");
+vec_push(sc_names, "q");
+vec_push(sc_names, "r");
+vec_push(sc_names, "t");
+var graph = 0;
+while (graph < 4096) {
+    var rules = jwt_scope_rules_new();
+    var reach = alloc(16);
+    var bit = 0;
+    var gb = 0;
+    while (gb < 4) {
+        var gn2 = 0;
+        while (gn2 < 4) {
+            if (gb != gn2) {
+                if ((graph >> bit) & 1 == 1) {
+                    jwt_scope_rule(rules, vec_get(sc_names, gb), vec_get(sc_names, gn2));
+                    store8(reach + gb * 4 + gn2, 1);
+                }
+                bit = bit + 1;
+            }
+            gn2 = gn2 + 1;
+        }
+        store8(reach + gb * 4 + gb, 1);
+        gb = gb + 1;
+    }
+    var k = 0;
+    while (k < 4) {
+        var ri = 0;
+        while (ri < 16) {
+            var ra = ri / 4;
+            var rb = ri % 4;
+            if (load8(reach + ra * 4 + k) == 1 && load8(reach + k * 4 + rb) == 1) { store8(reach + ri, 1); }
+            ri = ri + 1;
+        }
+        k = k + 1;
+    }
+    var from = 0;
+    while (from < 4) {
+        var to = 0;
+        while (to < 4) {
+            var al = bote_req_begin();
+            if (_jwt_scope_held(al, vec_get(sc_names, from), vec_get(sc_names, to), rules) != load8(reach + from * 4 + to)) { sys_exit(60); }
+            to = to + 1;
+        }
+        from = from + 1;
+    }
+    graph = graph + 1;
+}
 
 sys_exit(0);

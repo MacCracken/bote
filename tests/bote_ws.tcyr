@@ -88,6 +88,49 @@ fn _wx_client_frame(dst, payload) {
     return 6 + n;
 }
 
+# 3.6.3: the token is the list of what it holds.
+fn _wx_tok(token, ctx) { return token; }
+fn _wx_holds(claims, scope, ctx) { return strstr(claims, scope) >= 0; }
+var _wx_runs = 0;
+fn _wx_tool(args, claims) {
+    _wx_runs = _wx_runs + 1;
+    return "{\"content\":[]}";
+}
+
+# What a client sending `frames` calls of the tool, with the token `tok`, reads back.
+fn _wx_session(cfg, tok, frames) {
+    var p[16];
+    sys_socketpair(1, 1, 0, &p);
+    var sa = load32(&p);
+    var sb = load32(&p + 4);
+    var f = alloc(256);
+    var fl = _wx_client_frame(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"t_s\"}}");
+    var i = 0;
+    while (i < frames) {
+        sock_send_all(sb, f, fl);
+        i = i + 1;
+    }
+    sock_shutdown(sb, 1);
+    var rq = str_builder_new();
+    str_builder_add_cstr(rq, "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer ");
+    str_builder_add_cstr(rq, tok);
+    str_builder_add_cstr(rq, "\r\n\r\n");
+    var req = str_data(str_builder_build(rq));
+    bote_req_begin();
+    _bote_ws_handler(cfg, sa, req, strlen(req));
+    sys_close(sa);
+    var got = alloc(4096);
+    var n = 0;
+    var r = sys_read(sb, got, 4095);
+    while (r > 0) {
+        n = n + r;
+        r = sys_read(sb, got + n, 4095 - n);
+    }
+    sys_close(sb);
+    store8(got + n, 0);
+    return got;
+}
+
 fn main() {
     alloc_init();
     fl_init();
@@ -193,6 +236,27 @@ fn main() {
     assert(xgv > 0 && _wx_has(xgot, "101 Switching Protocols") == 1, "the handshake completed before the flood was dropped");
     sys_close(xa);
     sys_close(xb);
+
+    # ---------------- 3.6.3: a frame has no status of its own ----------------
+    # The check is the dispatcher's here, on the claims of the upgrade, and those must
+    # outlive the arena each later frame rewinds: the second call below is what shows it.
+    var sc = vec_new();
+    vec_push(sc, "files:read");
+    var sreg = tool_registry_new();
+    registry_register(sreg, tool_def_with_required_scopes(tool_def_new("t_s", "S", schema_new("object", 0, vec_new())), sc));
+    var sdisp = dispatcher_new(sreg);
+    dispatcher_handle(sdisp, "t_s", &_wx_tool);
+    dispatcher_set_scope_check(sdisp, &_wx_holds, 0);
+    var scfg = ws_config_new("/mcp", 0x0100007F, 8393);
+    store64(scfg + 40, sdisp);
+    ws_config_with_bearer_validator(scfg, &_wx_tok, 0);
+    var spoor = _wx_session(scfg, "nothing", 1);
+    assert(_wx_has(spoor, "101 Switching Protocols") == 1, "ws scope: the upgrade is accepted");
+    assert(_wx_has(spoor, "\"code\":-31403") == 1, "ws scope: the call is refused in the frame");
+    assert_eq(_wx_runs, 0, "ws scope: and no handler ran");
+    var srich = _wx_session(scfg, "files:read", 3);
+    assert_eq(_wx_runs, 3, "ws scope: every frame of a token with the scope runs");
+    assert(_wx_has(srich, "-31403") == 0, "ws scope: and none is refused");
     #endif
 
     return assert_summary();

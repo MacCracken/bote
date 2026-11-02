@@ -149,6 +149,27 @@ A signature check is the slowest thing a request does. ES256 costs about 10.5 ms
 for a forged token as much as a good one, on one thread. Put a rate limit ahead of a server that
 takes tokens from the internet.
 
+To ask for a scope before a tool runs, name it. Only a JWT says what it grants, so this needs one of
+the two verifiers above:
+
+```sh
+BOTE_TOOL_SCOPES="fs_write=files:write,web_fetch=net:read net:write" \
+BOTE_SCOPE_IMPLIES="admin=files:write net:read,files:write=files:read" \
+BOTE_JWKS_FILE="/etc/bote/jwks.json" \
+BOTE_RESOURCE_URL="https://mcp.example.com/mcp" \
+BOTE_AUTH_SERVERS="https://auth.example.com" ./build/bote http 8390
+# A token that lacks a tool's scopes → 403 with error="insufficient_scope", naming all of them
+```
+
+A token needs every scope a tool names. Its scopes come from the `scope` claim, or from `scp`, as a string
+or an array, and they match exactly. `BOTE_SCOPE_IMPLIES` says what a broader scope covers, and chains. The
+403 is what lets a client ask for more: the official TypeScript client requests the union and retries on its
+own. A call inside a batch, or on a WebSocket, has no status of its own and gets JSON-RPC error `-31403`.
+
+A name no tool has stops the server, because a typo must not leave a tool open, and so do scopes with no JWT
+verifier. stdio and the Unix socket take no token, so scopes change nothing there, and bote logs a WARN.
+Scopes cover `tools/call`. Prompts and resources are not gated yet.
+
 ### Browsers
 
 An HTTP-family transport refuses a present `Origin` with 403 unless it is on the list, and the list is
@@ -340,19 +361,19 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 3345 total across sixteen files (+ a core-only drift smoke)
+### Tests — 3755 total across sixteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 3345 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 3755 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 819 — core protocol/dispatch/codec/schema/session/transports
-cyrius test tests/conformance.tcyr        # 215 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
-cyrius test tests/bote_auth.tcyr          # 55 — bearer + allowlist + JWT + PKCE validators
+cyrius test tests/bote.tcyr               # 876 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/conformance.tcyr        # 218 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
+cyrius test tests/bote_auth.tcyr          # 64 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 56 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 203 — host registry + SSRF guard (IPv4 + IPv6)
-cyrius test tests/bote_http_era.tcyr      # 1372 — MCP 2026-07-28 on HTTP, on the real handlers
-cyrius test tests/bote_jwt.tcyr           # 228 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement
+cyrius test tests/bote_http_era.tcyr      # 1646 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
+cyrius test tests/bote_jwt.tcyr           # 290 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
@@ -360,7 +381,7 @@ cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals
 cyrius test tests/bote_transport_unix.tcyr # 76 — Unix transport: sockaddr, accept-error policy, backoff, deadlines, closed-peer write
 cyrius test tests/bote_web_tools.tcyr     # 66 — web_fetch / web_search + the SSRF guard (URL and resolved address)
-cyrius test tests/bote_ws.tcyr            # 24 — WebSocket config + wire-up + the send-deadline drop
+cyrius test tests/bote_ws.tcyr            # 29 — WebSocket config + wire-up + the send-deadline drop + scopes per frame
 cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dist/bote-core.cyr
 ```
 
