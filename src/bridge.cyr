@@ -232,6 +232,15 @@ fn _bridge_send_health(cfd, allowed_origins, request_origin) {
 # BridgeConfig now carries the dispatcher in the +24 slot (see
 # bridge_config_with_dispatcher below). We pass the config as ctx.
 
+# `a` then `b`, on the request arena.
+fn _bridge_with(a, b) {
+    var ra = bote_req_alloc();
+    var sb = str_builder_new_a(ra);
+    str_builder_add_cstr_a(ra, sb, a);
+    str_builder_add_cstr_a(ra, sb, b);
+    return str_data(str_builder_build_a(ra, sb));
+}
+
 fn _bridge_handle(config, cfd, buf, n) {
     # 3.4.3: bound every write to this client (src/conn.cyr).
     bote_conn_send_deadline(cfd);
@@ -265,45 +274,45 @@ fn _bridge_handle(config, cfd, buf, n) {
             _bridge_send_health(cfd, allowed_origins, origin);
             return 0;
         }
-        bote_http_refuse(cfd, SK_DEBUG, "bridge", HTTP_NOT_FOUND, "Not Found", "path");
+        bote_http_refuse_hdr(cfd, SK_DEBUG, "bridge", HTTP_NOT_FOUND, "Not Found", "path", cors);
         return 0;
     }
     # Anything other than POST is rejected.
     if (streq(method, "POST") == 0) {
-        bote_http_refuse_method(cfd, "bridge", "Allow: POST, GET, OPTIONS\r\n");
+        bote_http_refuse_method(cfd, "bridge", _bridge_with(cors, "Allow: POST, GET, OPTIONS\r\n"));
         return 0;
     }
     # Only "/" is the bridge endpoint.
     if (streq(sandhi_server_path_only_a(bote_req_alloc(), path), "/") == 0) {
-        bote_http_refuse(cfd, SK_DEBUG, "bridge", HTTP_NOT_FOUND, "Not Found", "path");
+        bote_http_refuse_hdr(cfd, SK_DEBUG, "bridge", HTTP_NOT_FOUND, "Not Found", "path", cors);
         return 0;
     }
 
     # Reject ambiguous Transfer-Encoding (HTTP smuggling guard, RFC 9112)
     if (sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Transfer-Encoding") != 0) {
-        bote_http_refuse(cfd, SK_WARN, "bridge", HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding"); return 0;
+        bote_http_refuse_hdr(cfd, SK_WARN, "bridge", HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding", cors); return 0;
     }
     # Bearer auth (no-op when no validator configured)
     var claims_slot[8]; store64(&claims_slot, 0);
-    if (auth_bearer_check_c(cfd, buf, n,
+    if (auth_bearer_check_hdr(cfd, buf, n,
         bridge_config_bearer_validator(config),
         bridge_config_bearer_ctx(config),
-        &claims_slot, bote_prm_challenge(prm)) != 0) { return 0; }
+        &claims_slot, bote_prm_challenge(prm), cors) != 0) { return 0; }
 
     # 413 cap on oversized declared bodies (audit M1). 60 KB headroom
     # keeps us inside the 64 KB recv buffer with room for headers.
     if (bote_http_clen_bad(buf, n) == 1) {
-        bote_http_refuse(cfd, SK_WARN, "bridge", HTTP_BAD_REQUEST, "Bad Request", "content_length");
+        bote_http_refuse_hdr(cfd, SK_WARN, "bridge", HTTP_BAD_REQUEST, "Bad Request", "content_length", cors);
         return 0;
     }
     var declared_clen = sandhi_server_content_length(buf, n);
     if (declared_clen > 61440) {
-        bote_http_refuse(cfd, SK_WARN, "bridge", HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large", "payload_too_large"); return 0;
+        bote_http_refuse_hdr(cfd, SK_WARN, "bridge", HTTP_PAYLOAD_TOO_LARGE, "Payload Too Large", "payload_too_large", cors); return 0;
     }
 
     var body_off = sandhi_server_body_offset(buf, n);
     if (body_off < 0 || body_off > n) {
-        bote_http_refuse(cfd, SK_DEBUG, "bridge", HTTP_BAD_REQUEST, "Bad Request", "malformed_request");
+        bote_http_refuse_hdr(cfd, SK_DEBUG, "bridge", HTTP_BAD_REQUEST, "Bad Request", "malformed_request", cors);
         return 0;
     }
     var clen = sandhi_server_content_length(buf, n);
@@ -315,7 +324,7 @@ fn _bridge_handle(config, cfd, buf, n) {
     # A NUL would end the message early, and whatever follows it would go
     # unread by the syntax check.
     if (strlen(body) != clen) {
-        bote_http_refuse(cfd, SK_WARN, "bridge", HTTP_BAD_REQUEST, "Bad Request", "nul_in_body");
+        bote_http_refuse_hdr(cfd, SK_WARN, "bridge", HTTP_BAD_REQUEST, "Bad Request", "nul_in_body", cors);
         return 0;
     }
 

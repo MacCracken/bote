@@ -132,6 +132,31 @@ fn _ws_check_protocol(cfd, buf, blen, config) {
 # bytes from a peer cost 1 MiB, once per connection.
 var _ws_frame_buf = 0;
 
+# The headers ws_server_handshake reads, judged here first, on the arena: it copies each
+# to the heap before it decides, so a long one would be kept for good, a refused upgrade's
+# too. Its own rules, and a bound on `Connection`, the one it leaves free. What it keeps
+# per upgrade is then about 1.6 KB, which only the stdlib can give back.
+var BOTE_WS_CONNECTION_MAX = 256;
+
+fn _ws_upgrade_ok(buf, n) {
+    var a = bote_req_alloc();
+    var up = sandhi_server_find_header_a(a, buf, n, "Upgrade");
+    var cn = sandhi_server_find_header_a(a, buf, n, "Connection");
+    var ver = sandhi_server_find_header_a(a, buf, n, "Sec-WebSocket-Version");
+    var key = sandhi_server_find_header_a(a, buf, n, "Sec-WebSocket-Key");
+    if (up == 0 || cn == 0 || ver == 0 || key == 0) { return 0; }
+    if (streq(up, "websocket") == 0 && streq(up, "WebSocket") == 0) { return 0; }
+    if (streq(ver, "13") == 0 || strlen(key) != 24) { return 0; }
+    if (strlen(cn) > BOTE_WS_CONNECTION_MAX) { return 0; }
+    return 1;
+}
+
+# The token a connection presented, for its frames, and how long one may be. One
+# connection at a time is served, so one buffer serves them all, and a connection that
+# ends leaves nothing on the heap. A handler is handed a copy (bote_req_claims_kept).
+var BOTE_WS_TOKEN_MAX = 65536;
+var _ws_token_buf = 0;
+
 # The next data frame as a cstr, in _ws_frame_buf, valid until the next call.
 # 0 when the peer closed, a frame broke a bound, or the socket failed.
 fn _bote_ws_recv(ws) {
@@ -185,18 +210,36 @@ fn _bote_ws_handler(config, cfd, buf, n) {
         bote_http_refuse(cfd, SK_WARN, "ws", HTTP_BAD_REQUEST, "Bad Request", "transfer_encoding"); return 0;
     }
     var claims_slot[8]; store64(&claims_slot, 0);
-    if (auth_bearer_check(cfd, buf, n,
+    if (auth_bearer_check_c(cfd, buf, n,
         ws_config_bearer_validator(config),
         ws_config_bearer_ctx(config),
-        &claims_slot) != 0) { return 0; }
+        &claims_slot, 0) != 0) { return 0; }
     if (_ws_check_protocol(cfd, buf, n, config) != 0) { return 0; }
+    if (_ws_upgrade_ok(buf, n) == 0) {
+        bote_http_refuse(cfd, SK_DEBUG, "ws", HTTP_BAD_REQUEST, "Bad Request", "ws_handshake");
+        return 0;
+    }
+    # Past every refusal but the handshake's: the token moves off the arena, which each
+    # frame rewinds.
+    var ws_claims = load64(&claims_slot);
+    var ws_token = 0;
+    if (ws_claims != 0 && ws_claims == bote_req_token()) {
+        var tl = strlen(ws_claims);
+        if (tl >= BOTE_WS_TOKEN_MAX) {
+            bote_http_refuse(cfd, SK_WARN, "ws", HTTP_BAD_REQUEST, "Bad Request", "token_size");
+            return 0;
+        }
+        if (_ws_token_buf == 0) { _ws_token_buf = alloc(BOTE_WS_TOKEN_MAX); }
+        memcpy(_ws_token_buf, ws_claims, tl + 1);
+        ws_claims = _ws_token_buf;
+        ws_token = 1;
+    }
 
     var ws = ws_server_handshake(cfd, buf, n);
     if (ws == 0) {
         bote_http_refuse(cfd, SK_DEBUG, "ws", HTTP_BAD_REQUEST, "Bad Request", "ws_handshake");
         return 0;
     }
-    var ws_claims = load64(&claims_slot);
 
     # ⚠ 3.3.7 — REPLACE the inherited receive deadline before entering the
     # frame loop. This is a bug fix, not a tuning knob.
@@ -236,6 +279,7 @@ fn _bote_ws_handler(config, cfd, buf, n) {
     # socket errors out (ws_server_recv returns 0).
     while (1 == 1) {
         a = bote_req_begin();
+        if (ws_token == 1) { bote_req_note_token(ws_claims); }
         var msg = _bote_ws_recv(ws);
         if (msg == 0) { return 0; }
         var resp = codec_process_message_a(a, msg, ws_config_dispatcher(config), ws_claims);

@@ -88,6 +88,19 @@ fn bote_req_alloc() {
     return _bote_req_al;
 }
 
+# 1 when `s` is an RFC 6749 §3.3 scope-token. A scope goes out inside a quoted header
+# parameter, and this is what keeps one from ending it.
+fn bote_scope_token_ok(s) {
+    if (s == 0 || load8(s) == 0) { return 0; }
+    var i = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c < 33 || c > 126 || c == 34 || c == 92) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 # The token an accepted request presented, on the arena, and its copy on the heap once
 # a handler has been handed one. A refused call must keep nothing, so that copy waits.
 var _bote_req_token = 0;
@@ -101,6 +114,9 @@ fn bote_req_begin() {
     _bote_req_kept = 0;
     return al;
 }
+
+# The token noted for this message, or 0.
+fn bote_req_token() { return _bote_req_token; }
 
 # `token` is on the arena and is this message's claims.
 fn bote_req_note_token(token) {

@@ -92,9 +92,73 @@ fn _wx_client_frame(dst, payload) {
 fn _wx_tok(token, ctx) { return token; }
 fn _wx_holds(claims, scope, ctx) { return strstr(claims, scope) >= 0; }
 var _wx_runs = 0;
+var _wx_kept = 0;
 fn _wx_tool(args, claims) {
     _wx_runs = _wx_runs + 1;
+    if (_wx_kept == 0) { _wx_kept = claims; }
     return "{\"content\":[]}";
+}
+
+# What a client sending `frames` copies of `msg`, with the upgrade request `req`, reads back.
+fn _wx_conn(cfg, req, msg, frames) {
+    var p[16];
+    sys_socketpair(1, 1, 0, &p);
+    var sa = load32(&p);
+    var sb = load32(&p + 4);
+    if (_wx_frame == 0) { _wx_frame = alloc(256); }
+    var fl = _wx_client_frame(_wx_frame, msg);
+    var i = 0;
+    while (i < frames) {
+        sock_send_all(sb, _wx_frame, fl);
+        i = i + 1;
+    }
+    sock_shutdown(sb, 1);
+    bote_req_begin();
+    _bote_ws_handler(cfg, sa, req, strlen(req));
+    sys_close(sa);
+    var n = sys_read(sb, _wx_got, 65535);
+    var got = 0;
+    while (n > 0) {
+        got = got + n;
+        n = sys_read(sb, _wx_got + got, 65535 - got);
+    }
+    sys_close(sb);
+    store8(_wx_got + got, 0);
+    return _wx_got;
+}
+
+fn _wx_upgrade(tok, extra) {
+    var rq = str_builder_new();
+    str_builder_add_cstr(rq, "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer ");
+    str_builder_add_cstr(rq, tok);
+    str_builder_add_cstr(rq, "\r\n");
+    str_builder_add_cstr(rq, extra);
+    str_builder_add_cstr(rq, "\r\n");
+    return str_data(str_builder_build(rq));
+}
+
+var _wx_got = 0;
+var _wx_frame = 0;
+
+fn _cat_ws(head, pad) {
+    var n = strlen(head);
+    var out = alloc(n + pad + 3);
+    memcpy(out, head, n);
+    memset(out + n, 120, pad);
+    memcpy(out + n + pad, "\r\n", 3);
+    return out;
+}
+
+# Heap per connection, over 10 connections after one to warm up.
+fn _wx_heap(cfg, req, msg, frames) {
+    _wx_conn(cfg, req, msg, frames);
+    var before = alloc_used();
+    var i = 0;
+    while (i < 10) {
+        _wx_conn(cfg, req, msg, frames);
+        i = i + 1;
+    }
+    return (alloc_used() - before) / 10;
 }
 
 # What a client sending `frames` calls of the tool, with the token `tok`, reads back.
@@ -257,6 +321,89 @@ fn main() {
     var srich = _wx_session(scfg, "files:read", 3);
     assert_eq(_wx_runs, 3, "ws scope: every frame of a token with the scope runs");
     assert(_wx_has(srich, "-31403") == 0, "ws scope: and none is refused");
+    _wx_session(scfg, "files:read-other-token", 1);
+    assert(_wx_kept != 0 && streq(_wx_kept, "files:read") == 1, "ws: claims a handler kept are its own, after the next connection reuses the buffer");
+
+    # 3.6.4: a connection keeps its token where the next one reuses it, not on the heap.
+    _wx_got = alloc(65536);
+    var big = alloc(20001);
+    memset(big, 120, 20000);
+    store8(big + 20000, 0);
+    var list = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}";
+    var refused = _wx_conn(scfg, _wx_upgrade(big, "MCP-Protocol-Version: 1900-01-01\r\n"), list, 1);
+    assert(_wx_has(refused, "HTTP/1.1 400") == 1, "ws heap: a version it does not speak is refused");
+    assert_eq(_wx_heap(scfg, _wx_upgrade(big, "MCP-Protocol-Version: 1900-01-01\r\n"), list, 1), 0, "ws heap: ...and keeps none of a 20 KB token it took");
+    var listed = _wx_conn(scfg, _wx_upgrade(big, ""), list, 3);
+    assert(_wx_has(listed, "\"tools\"") == 1, "ws heap: a connection of three frames is served");
+    # What ws_server's own handshake keeps, which is not bote's to free (a cyrius issue).
+    var hs_req = _wx_upgrade(big, "");
+    var hsp[16];
+    sys_socketpair(1, 1, 0, &hsp);
+    ws_server_handshake(load32(&hsp), hs_req, strlen(hs_req));
+    var hs0 = alloc_used();
+    ws_server_handshake(load32(&hsp), hs_req, strlen(hs_req));
+    var hs_keep = alloc_used() - hs0;
+    sys_close(load32(&hsp));
+    sys_close(load32(&hsp + 4));
+    var conn_keep = _wx_heap(scfg, _wx_upgrade(big, ""), list, 3);
+    assert(hs_keep > 0 && conn_keep == hs_keep, "ws heap: a connection keeps what ws_server's handshake keeps, and nothing of bote's");
+    # The headers that handshake copies to the heap are bounded first, so a long one is
+    # refused on the arena, where it was kept for good before.
+    var lc = str_builder_new();
+    str_builder_add_cstr(lc, "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n");
+    str_builder_add_cstr(lc, _cat_ws("Connection: Upgrade, ", 60000));
+    str_builder_add_cstr(lc, "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n");
+    var lreq = str_data(str_builder_build(lc));
+    assert(_wx_has(_wx_conn(scfg, lreq, list, 1), "HTTP/1.1 400") == 1, "ws: a 60 KB Connection header is refused");
+    assert_eq(_wx_heap(scfg, lreq, list, 1), 0, "ws heap: ...and keeps nothing");
+    var lu = str_builder_new();
+    str_builder_add_cstr(lu, "GET /mcp HTTP/1.1\r\nHost: x\r\n");
+    str_builder_add_cstr(lu, _cat_ws("Upgrade: websocket", 60000));
+    str_builder_add_cstr(lu, "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n");
+    var ureq = str_data(str_builder_build(lu));
+    assert(_wx_has(_wx_conn(scfg, ureq, list, 1), "HTTP/1.1 400") == 1, "ws: a 60 KB Upgrade header is refused");
+    assert_eq(_wx_heap(scfg, ureq, list, 1), 0, "ws heap: ...and keeps nothing");
+    var lv = str_builder_new();
+    str_builder_add_cstr(lv, "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n");
+    str_builder_add_cstr(lv, _cat_ws("Sec-WebSocket-Version: 13", 60000));
+    str_builder_add_cstr(lv, "Authorization: Bearer t\r\n\r\n");
+    var vreq = str_data(str_builder_build(lv));
+    assert(_wx_has(_wx_conn(scfg, vreq, list, 1), "HTTP/1.1 400") == 1, "ws: a 60 KB version header is refused");
+    assert_eq(_wx_heap(scfg, vreq, list, 1), 0, "ws heap: ...and keeps nothing");
+    var lk = str_builder_new();
+    str_builder_add_cstr(lk, "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n");
+    str_builder_add_cstr(lk, _cat_ws("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", 60000));
+    str_builder_add_cstr(lk, "Sec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n");
+    var kreq = str_data(str_builder_build(lk));
+    assert(_wx_has(_wx_conn(scfg, kreq, list, 1), "HTTP/1.1 400") == 1, "ws: a 60 KB key is refused");
+    assert_eq(_wx_heap(scfg, kreq, list, 1), 0, "ws heap: ...and keeps nothing");
+    var c256 = _cat_ws("Connection: Upgrade", 256 - 7);
+    var c257 = _cat_ws("Connection: Upgrade", 257 - 7);
+    var r256 = str_builder_new();
+    str_builder_add_cstr(r256, "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n");
+    str_builder_add_cstr(r256, c256);
+    str_builder_add_cstr(r256, "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n");
+    assert(_wx_has(_wx_conn(scfg, str_data(str_builder_build(r256)), list, 1), "101 Switching") == 1, "ws: a Connection header of 256 bytes upgrades");
+    var r257 = str_builder_new();
+    str_builder_add_cstr(r257, "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n");
+    str_builder_add_cstr(r257, c257);
+    str_builder_add_cstr(r257, "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n");
+    assert(_wx_has(_wx_conn(scfg, str_data(str_builder_build(r257)), list, 1), "HTTP/1.1 400") == 1, "ws: ...and 257 does not");
+    var nokey = "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n";
+    assert(_wx_has(_wx_conn(scfg, nokey, list, 1), "HTTP/1.1 400") == 1, "ws: no key, refused here as the handshake would");
+    var v12 = "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 12\r\nAuthorization: Bearer t\r\n\r\n";
+    assert(_wx_has(_wx_conn(scfg, v12, list, 1), "HTTP/1.1 400") == 1, "ws: another version, refused");
+    var short_key = "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n";
+    assert(_wx_has(_wx_conn(scfg, short_key, list, 1), "HTTP/1.1 400") == 1, "ws: a short key, refused");
+    var wsup = "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n";
+    assert(_wx_has(_wx_conn(scfg, wsup, list, 1), "101 Switching") == 1, "ws: Upgrade: WebSocket, as the handshake takes it");
+    var hup = "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: h2c\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n";
+    assert(_wx_has(_wx_conn(scfg, hup, list, 1), "HTTP/1.1 400") == 1, "ws: another protocol, refused");
+    var huge = alloc(70001);
+    memset(huge, 120, 70000);
+    store8(huge + 70000, 0);
+    var toolong = _wx_conn(scfg, _wx_upgrade(huge, ""), list, 1);
+    assert(_wx_has(toolong, "HTTP/1.1 400") == 1 && _wx_has(toolong, "101 Switching") == 0, "ws: a token too long to keep is refused before the upgrade");
     #endif
 
     return assert_summary();

@@ -1012,6 +1012,45 @@ fn main() {
     assert(_has(_head, "Access-Control-Expose-Headers: WWW-Authenticate\r\n"), "bridge: ...which a page may read");
     dispatcher_set_scope_check(_d_of(2), 0, 0);
     _prm_bearer(2, 0, 0);
+
+    # 3.6.4: every refusal past the Origin check carries CORS, the 401 first among them:
+    # without it a page sees a network error, and OAuth discovery never starts.
+    var bo = "Origin: http://localhost\r\n";
+    var acao = "Access-Control-Allow-Origin: http://localhost\r\n";
+    var expose = "Access-Control-Expose-Headers: WWW-Authenticate\r\n";
+    _prm_bearer(2, &_deny, 0);
+    _run(2, _raw("POST", bo, _lb("tools/list")));
+    assert(_status == 401 && _has(_head, acao) && _has(_head, expose), "bridge: a 401 with no token reaches a page");
+    assert(_has(_head, "WWW-Authenticate: Bearer realm=\"mcp\"\r\n"), "bridge: ...with its challenge");
+    _run(2, _raw("POST", _cat3(bo, "Authorization: Bearer nope\r\n", ""), _lb("tools/list")));
+    assert(_status == 401 && _has(_head, acao) && _has(_head, "error=\"invalid_token\""), "bridge: a refused token's 401 too");
+    _prm_set(2, prm);
+    _run(2, _raw("POST", bo, _lb("tools/list")));
+    assert(_status == 401 && _has(_head, acao) && _has(_head, "resource_metadata="), "bridge: ...and with metadata configured");
+    _prm_set(2, 0);
+    _prm_bearer(2, 0, 0);
+    _run(2, _get("POST", "/nope", bo));
+    assert(_status == 404 && _has(_head, acao), "bridge: a 404 reaches a page");
+    _run(2, _get("GET", "/nope", bo));
+    assert(_status == 404 && _has(_head, acao), "bridge: a GET 404 too");
+    _run(2, _get("PUT", "/", bo));
+    assert(_status == 405 && _has(_head, acao) && _has(_head, "Allow: POST, GET, OPTIONS\r\n"), "bridge: a 405, with Allow");
+    _run(2, _raw("POST", _cat3(bo, "Transfer-Encoding: chunked\r\n", ""), _lb("tools/list")));
+    assert(_status == 400 && _has(_head, acao), "bridge: a Transfer-Encoding 400");
+    _run(2, _get("POST", "/", _cat3(bo, "Content-Length: 12x\r\n", "")));
+    assert(_status == 400 && _has(_head, acao), "bridge: a bad Content-Length");
+    _run(2, _get("POST", "/", _cat3(bo, "Content-Length: 900000\r\n", "")));
+    assert(_status == 413 && _has(_head, acao), "bridge: a 413");
+    _run(2, "POST / HTTP/1.1\r\nHost: x\r\nOrigin: http://localhost\r\nContent-Length: 2\r\n");
+    assert(_status == 400 && _has(_head, acao), "bridge: a request with no end to its headers");
+    _run(2, _get("POST", "/nope", "Origin: https://evil.example\r\n"));
+    assert(_status == 403 && _has(_head, "Access-Control-Allow-Origin") == 0, "bridge: an Origin it refuses gets no CORS");
+    _run(0, _get("POST", "/nope", bo));
+    assert(_has(_head, "Access-Control-Allow-Origin") == 0, "http: no CORS on its refusals, which is the bridge's alone");
+    assert_eq(_heap_per(2, _get("PUT", "/", bo)), 0, "bridge heap: a 405 with CORS");
+    _prm_bearer(2, &_deny, 0);
+    assert_eq(_heap_per(2, _raw("POST", _cat3(bo, "Authorization: Bearer ", _cat3(_rep("x", 60000), "\r\n", "")), _lb("tools/list"))), 0, "bridge heap: a 401 with CORS, a 60 KB token");
+    _prm_bearer(2, 0, 0);
     # A listed Origin reads the document, on the bridge with CORS.
     _prm_set(2, prm);
     _run(2, _get("GET", _WK, "Origin: http://localhost\r\n"));

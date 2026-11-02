@@ -167,6 +167,14 @@ fn _bote_jwt_from_env(out_fp, out_ctx) {
     }
     jwt_secret_with_audience(s, url);
     jwt_secret_with_issuers(s, _split_csv_tokens(getenv("BOTE_AUTH_SERVERS")));
+    var slots = _bote_env_count("BOTE_JWT_CACHE", BOTE_JWT_CACHE_DEFAULT);
+    jwt_secret_with_cache(s, slots);
+    if (slots != BOTE_JWT_CACHE_DEFAULT) {
+        var cl[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&cl, SK_INFO, "verified tokens remembered");
+        bote_log_int(&cl, "slots", jwt_secret_cache_slots(s));
+        bote_log_emit(&cl);
+    }
     store64(out_fp, &auth_validator_jwt);
     store64(out_ctx, s);
     bote_log_info("jwt auth enabled");
@@ -228,6 +236,7 @@ fn bote_main_scopes_from_env(d, mode, jwt_on) {
         i = i + 1;
     }
     var ent = _split_csv_tokens(tools);
+    var seen = vec_new();
     i = 0;
     while (i < vec_len(ent)) {
         var t = vec_get(ent, i);
@@ -239,6 +248,19 @@ fn bote_main_scopes_from_env(d, mode, jwt_on) {
         store8(t + teq, 0);
         var def = registry_get(dispatcher_registry(d), t);
         var ln[BOTE_LOG_LINE_BYTES];
+        # A second entry would replace the first, and which of the two an operator meant
+        # is not bote's to guess: a lost scope is a tool left open.
+        var si = 0;
+        while (si < vec_len(seen)) {
+            if (streq(vec_get(seen, si), t) == 1) {
+                bote_log_line(&ln, SK_ERROR, "BOTE_TOOL_SCOPES names a tool twice");
+                bote_log_str(&ln, "tool", t);
+                bote_log_emit(&ln);
+                return 0 - 1;
+            }
+            si = si + 1;
+        }
+        vec_push(seen, t);
         if (def == 0) {
             bote_log_line(&ln, SK_ERROR, "BOTE_TOOL_SCOPES names no tool this mode serves");
             bote_log_str(&ln, "tool", t);
@@ -332,6 +354,30 @@ fn bote_main_port(arg, default_port) {
 # it is all digits (0 included, which disables the deadline), `cur` when the
 # variable is unset, and `cur` with a WARN when it is anything else.
 # _parse_uint is not used because it reads "0" and garbage alike as 0.
+# BOTE_JWT_CACHE and the like: a count, or `cur` with a WARN when it is not one.
+fn _bote_env_count(name, cur) {
+    var v = getenv(name);
+    if (v == 0) { return cur; }
+    var n = 0;
+    var i = 0;
+    var ok = 1;
+    if (load8(v) == 0) { ok = 0; }
+    while (load8(v + i) != 0) {
+        var c = load8(v + i);
+        if (c < 48 || c > 57 || i >= 9) { ok = 0; }
+        else { n = n * 10 + (c - 48); }
+        i = i + 1;
+    }
+    if (ok == 1) { return n; }
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_WARN, "not a count; keeping the default");
+    bote_log_str(&ln, "var", name);
+    bote_log_str(&ln, "value", v);
+    bote_log_int(&ln, "default", cur);
+    bote_log_emit(&ln);
+    return cur;
+}
+
 fn _bote_env_ms(name, cur) {
     var v = getenv(name);
     if (v == 0) { return cur; }

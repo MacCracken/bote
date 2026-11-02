@@ -226,6 +226,83 @@ fn _scope_heap(tok, scope, rules) {
     return (alloc_used() - before) / 20;
 }
 
+# 3.6.4: a clock the tests set, and what a token verified from the cache logs.
+var _tc_now = 0;
+var _tc_reads = 0;
+fn _tc_clock() {
+    _tc_reads = _tc_reads + 1;
+    return _tc_now;
+}
+
+# A good token whose digest lands in the first `below` of `slots` slots.
+fn _tc_landing(slots, below) {
+    var k = 0;
+    while (k < 100000) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "{\"aud\":\"https://mcp.example.com/mcp\",\"iss\":\"https://as.example.com\",\"exp\":1800000100,\"jti\":");
+        str_builder_add_int(sb, k);
+        str_builder_add_cstr(sb, "}");
+        var t = _mint_hs256(_HDR, str_data(str_builder_build(sb)), _KEY);
+        var dg[32];
+        sha256(t, strlen(t), &dg);
+        if ((load64(&dg) & (slots - 1)) < below) { return t; }
+        k = k + 1;
+    }
+    return 0;
+}
+var _tc_log = 0;
+var _tc_lines = 0;
+fn _tc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 200) { n = 200; }
+    memcpy(_tc_log, msg, n);
+    store8(_tc_log + n, 0);
+    _tc_lines = _tc_lines + 1;
+    return 0;
+}
+
+# Claims for this audience and issuer, with `exp` and `nbf`, either left out for -1.
+fn _tc_payload(exp, nbf) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"aud\":\"");
+    str_builder_add_cstr(sb, _AUD);
+    str_builder_add_cstr(sb, "\",\"iss\":\"");
+    str_builder_add_cstr(sb, _ISS);
+    str_builder_add_cstr(sb, "\"");
+    if (exp != 0 - 1) {
+        str_builder_add_cstr(sb, ",\"exp\":");
+        str_builder_add_int(sb, exp);
+    }
+    if (nbf != 0 - 1) {
+        str_builder_add_cstr(sb, ",\"nbf\":");
+        str_builder_add_int(sb, nbf);
+    }
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
+fn _tc_secret(slots) {
+    var s = jwt_secret_with_audience(jwt_secret_new(_KEY), _AUD);
+    var iss = vec_new();
+    vec_push(iss, _ISS);
+    jwt_secret_with_issuers(s, iss);
+    return jwt_secret_with_cache(s, slots);
+}
+
+fn _tc_ok(s, tok) {
+    if (auth_validator_jwt(tok, s) == tok) { return 1; }
+    return 0;
+}
+
+# `tok` with byte `at` changed.
+fn _tc_flip(tok, at) {
+    var n = strlen(tok);
+    var t = alloc(n + 1);
+    memcpy(t, tok, n + 1);
+    if (load8(t + at) == 65) { store8(t + at, 66); } else { store8(t + at, 65); }
+    return t;
+}
+
 fn main() {
     alloc_init();
 
@@ -627,7 +704,7 @@ fn main() {
     assert_eq(jwt_verify_hs256(_mint_hs256(_HDR, str_data(str_builder_build(nsb)), _KEY), _KEY, strlen(_KEY)), 1, "nbf: now is allowed, RFC 7519 4.1.5");
     assert_eq(jwt_verify_hs256(_mint_hs256(_HDR, "{\"nbf\":\"1000\"}", _KEY), _KEY, strlen(_KEY)), 0, "nbf: a string");
     assert_eq(jwt_verify_hs256(_mint_hs256(_HDR, "{\"nbf\":null}", _KEY), _KEY, strlen(_KEY)), 0, "nbf: null");
-    assert_eq(_jwt_nbf_ok("{}", 2), 1, "nbf: absent");
+    assert_eq(jwt_verify_hs256(_mint_hs256(_HDR, "{}", _KEY), _KEY, strlen(_KEY)), 1, "nbf: absent");
 
     # ---- the audience: a token for this server, and no other ----
     assert_eq(_aud_ok("\"aud\":\"https://mcp.example.com/mcp\","), 1, "aud: a string");
@@ -798,6 +875,207 @@ fn main() {
     var arrtok = _unsigned(_cat(_cat("{\"scp\":[", _str_rep("\"s\",", 12000)), "\"t\"]}"));
     assert_eq(_scope_heap(arrtok, "files:read", 0), 0, "scope heap: a long array");
     assert_eq(_scope_heap("not-a-jwt", "files:read", 0), 0, "scope heap: no JWT");
+
+    # ---- 3.6.4: tokens already verified ----
+    assert_eq(jwt_secret_cache_slots(jwt_secret_new(_KEY)), 1024, "cache: on by default");
+    assert_eq(jwt_secret_cache_slots(jwt_secret_from_jwks(JV_JWKS)), 1024, "cache: on for a JWK Set too");
+    assert_eq(jwt_secret_cache_slots(jwt_secret_with_cache(jwt_secret_new(_KEY), 0)), 0, "cache: off");
+    assert_eq(jwt_secret_cache_slots(jwt_secret_with_cache(jwt_secret_new(_KEY), 1)), 1, "cache: one slot");
+    assert_eq(jwt_secret_cache_slots(jwt_secret_with_cache(jwt_secret_new(_KEY), 3)), 4, "cache: rounded up to a power of two");
+    assert_eq(jwt_secret_cache_slots(jwt_secret_with_cache(jwt_secret_new(_KEY), 1024)), 1024, "cache: a power of two is kept");
+    assert_eq(jwt_secret_cache_slots(jwt_secret_with_cache(jwt_secret_new(_KEY), 1025)), 2048, "cache: ...and one over goes up");
+    assert_eq(jwt_secret_cache_slots(jwt_secret_with_cache(jwt_secret_new(_KEY), 1048576)), 65536, "cache: at most BOTE_JWT_CACHE_MAX");
+    assert_eq(jwt_secret_cache_slots(jwt_secret_with_cache(jwt_secret_new(_KEY), 0 - 5)), 0, "cache: a negative count is none");
+
+    _bote_jwt_clock = &_tc_clock;
+    _tc_now = 1800000000;
+    var t0 = _tc_now;
+    var cs = _tc_secret(1024);
+    var us = _tc_secret(0);
+    var good = _mint_hs256(_HDR, _tc_payload(t0 + 100, 0 - 1), _KEY);
+    assert_eq(_tc_ok(cs, good), 1, "cache: a good token");
+    assert_eq(jwt_secret_cache_misses(cs), 1, "cache: ...verified in full");
+    assert_eq(jwt_secret_cache_hits(cs), 0, "cache: ...the first time");
+    assert_eq(_tc_ok(cs, good), 1, "cache: the same token again");
+    assert_eq(jwt_secret_cache_hits(cs), 1, "cache: ...from the cache");
+    assert_eq(jwt_secret_cache_misses(cs), 1, "cache: ...with no second verify");
+    var copy = _with_suffix(good, "");
+    assert_eq(_tc_ok(cs, copy), 1, "cache: the same text at another address");
+    assert_eq(jwt_secret_cache_hits(cs), 2, "cache: ...is the same token");
+    var gl = strlen(good);
+    var dot1 = _jwt_dot(good, gl, 0);
+    var dot2 = _jwt_dot(good, gl, dot1 + 1);
+    var flips = 0;
+    var fi = 0;
+    while (fi < gl) {
+        if (fi != dot1 && fi != dot2) {
+            if (_tc_ok(cs, _tc_flip(good, fi)) == 1) { flips = flips + 1; }
+        }
+        fi = fi + 1;
+    }
+    assert_eq(flips, 0, "cache: no byte of a remembered token can change and pass");
+    assert_eq(jwt_secret_cache_hits(cs), 2, "cache: ...and none of those was judged from it");
+    assert_eq(jwt_secret_cache_misses(cs), gl - 1, "cache: ...each verified in full");
+    var forged = _tc_flip(good, gl - 2);
+    assert_eq(_tc_ok(cs, forged), 0, "cache: a forged token");
+    assert_eq(_tc_ok(cs, forged), 0, "cache: ...is refused again");
+    assert_eq(jwt_secret_cache_misses(cs), gl + 1, "cache: ...and verified again: a refusal is never remembered");
+
+    # The clock, on both sides of each boundary, and the uncached path agreeing each time.
+    _tc_now = t0 + 99;
+    assert_eq(_tc_ok(cs, good), 1, "cache: a second before exp");
+    assert_eq(_tc_ok(us, good), 1, "no cache: a second before exp");
+    _tc_now = t0 + 100;
+    assert_eq(_tc_ok(cs, good), 0, "cache: at exp, refused");
+    assert_eq(_tc_ok(us, good), 0, "no cache: at exp, refused");
+    _tc_now = t0 + 5000;
+    assert_eq(_tc_ok(cs, good), 0, "cache: past exp");
+    _tc_now = t0 + 10;
+    assert_eq(_tc_ok(cs, good), 1, "cache: a clock set back takes it again, as a verify would");
+    _tc_now = 0;
+    assert_eq(_tc_ok(cs, good), 1, "cache: an unknown clock skips the window");
+    assert_eq(_tc_ok(us, good), 1, "no cache: so does a verify");
+    var nb0 = _mint_hs256(_HDR, _tc_payload(t0 + 100, t0 + 60), _KEY);
+    assert_eq(_tc_ok(cs, nb0), 1, "cache: an unknown clock lets an nbf through");
+    assert_eq(_tc_ok(cs, nb0), 1, "cache: ...remembered");
+    assert_eq(_tc_ok(us, nb0), 1, "no cache: the same");
+    var badexp = _mint_hs256(_HDR, "{\"aud\":\"https://mcp.example.com/mcp\",\"iss\":\"https://as.example.com\",\"exp\":\"1800000100\"}", _KEY);
+    assert_eq(_tc_ok(cs, badexp) + _tc_ok(us, badexp), 0, "cache: a malformed exp is refused even with no clock");
+    _tc_now = t0;
+    var nb = _mint_hs256(_HDR, _tc_payload(t0 + 100, t0 + 50), _KEY);
+    assert_eq(_tc_ok(cs, nb), 0, "cache: before nbf, refused");
+    _tc_now = t0 + 50;
+    var nbm = jwt_secret_cache_misses(cs);
+    assert_eq(_tc_ok(cs, nb), 1, "cache: at nbf");
+    assert_eq(jwt_secret_cache_misses(cs), nbm + 1, "cache: ...the refusal before was not remembered");
+    _tc_now = t0 + 49;
+    assert_eq(_tc_ok(cs, nb), 0, "cache: a clock set back before nbf");
+    assert_eq(_tc_ok(us, nb), 0, "no cache: the same");
+    _tc_now = t0;
+    var bare = jwt_secret_new(_KEY);
+    var noexp = _mint_hs256(_HDR, "{\"sub\":\"x\"}", _KEY);
+    _tc_reads = 0;
+    assert_eq(_tc_ok(bare, noexp), 1, "cache: a token with no exp, on a handle with no audience");
+    _tc_now = t0 + 999999999;
+    assert_eq(_tc_ok(bare, noexp), 1, "cache: ...stays good, as it would verified");
+    assert_eq(jwt_secret_cache_hits(bare), 1, "cache: ...from the cache");
+    assert_eq(_tc_reads, 0, "cache: a token with neither exp nor nbf reads no clock, verified or remembered");
+    _tc_now = t0;
+    _tc_reads = 0;
+    _tc_ok(cs, good);
+    assert_eq(_tc_reads, 1, "cache: a remembered token reads the clock once");
+    _tc_ok(us, good);
+    assert_eq(_tc_reads, 2, "no cache: a verify reads it once too");
+
+    # The stored digest is compared whole: changed at either end, the slot is no match.
+    var gdg[32];
+    sha256(good, strlen(good), &gdg);
+    var gslot = _jwt_cache_slot(cs, &gdg);
+    var gm = jwt_secret_cache_misses(cs);
+    store8(gslot + 31, load8(gslot + 31) ^ 1);
+    assert_eq(_tc_ok(cs, good), 1, "cache: a slot whose last digest byte differs");
+    assert_eq(jwt_secret_cache_misses(cs), gm + 1, "cache: ...is verified in full");
+    store8(gslot, load8(gslot) ^ 1);
+    assert_eq(_tc_ok(cs, good), 1, "cache: ...and its first");
+    assert_eq(jwt_secret_cache_misses(cs), gm + 2, "cache: ...verified in full too");
+
+    # What changes a verdict forgets what was judged.
+    _tc_now = t0;
+    var ca = _tc_secret(1024);
+    assert_eq(_tc_ok(ca, good), 1, "cache: before a change");
+    jwt_secret_with_audience(ca, "https://other.example.com/mcp");
+    assert_eq(_tc_ok(ca, good), 0, "cache: another audience is not fooled by the cache");
+    jwt_secret_with_audience(ca, _AUD);
+    assert_eq(_tc_ok(ca, good), 1, "cache: back to this audience");
+    var evil = vec_new();
+    vec_push(evil, "https://evil.example.com");
+    jwt_secret_with_issuers(ca, evil);
+    assert_eq(_tc_ok(ca, good), 0, "cache: another issuer list is not fooled either");
+    var iss_ok = vec_new();
+    vec_push(iss_ok, _ISS);
+    jwt_secret_with_issuers(ca, iss_ok);
+    assert_eq(_tc_ok(ca, good) + _tc_ok(ca, good), 2, "cache: this issuer again, remembered");
+    var cm = jwt_secret_cache_misses(ca);
+    jwt_secret_with_cache(ca, 8);
+    assert_eq(_tc_ok(ca, good), 1, "cache: resized");
+    assert_eq(jwt_secret_cache_misses(ca), cm + 1, "cache: ...forgets what it held");
+    jwt_secret_with_cache(ca, 4096);
+    assert_eq(_tc_ok(ca, good) + _tc_ok(ca, good), 2, "cache: grown past the table it had");
+    # A token on one of the first 8 of 1024 slots would land on the same slot of an old table
+    # read with the new size of 8: a resize that kept the table would answer from it.
+    var low = _tc_landing(1024, 8);
+    assert(low != 0, "cache: a token for the first slots");
+    var rz = _tc_secret(1024);
+    assert_eq(_tc_ok(rz, low) + _tc_ok(rz, low), 2, "cache: remembered on a low slot");
+    jwt_secret_with_cache(rz, 8);
+    var rzm = jwt_secret_cache_misses(rz);
+    assert_eq(_tc_ok(rz, low), 1, "cache: resized to 8");
+    assert_eq(jwt_secret_cache_misses(rz), rzm + 1, "cache: ...the old table is not read");
+
+    # A good signature on a token for someone else is never remembered.
+    var other_aud = _mint_hs256(_HDR, "{\"aud\":\"https://other.example.com/mcp\",\"iss\":\"https://as.example.com\",\"exp\":1800000100}", _KEY);
+    var other_iss = _mint_hs256(_HDR, "{\"aud\":\"https://mcp.example.com/mcp\",\"iss\":\"https://evil.example.com\",\"exp\":1800000100}", _KEY);
+    assert_eq(_tc_ok(cs, other_aud) + _tc_ok(cs, other_aud), 0, "cache: another audience, twice");
+    assert_eq(_tc_ok(cs, other_iss) + _tc_ok(cs, other_iss), 0, "cache: another issuer, twice");
+
+    # One slot: tokens take turns, and a token never borrows the one that is there.
+    var one = _tc_secret(1);
+    var ta = _mint_hs256(_HDR, _tc_payload(t0 + 100, 0 - 1), _KEY);
+    var tb = _mint_hs256(_HDR, _tc_payload(t0 + 200, 0 - 1), _KEY);
+    assert_eq(_tc_ok(one, ta) + _tc_ok(one, tb) + _tc_ok(one, ta) + _tc_ok(one, ta), 4, "one slot: both tokens, in turn");
+    assert_eq(jwt_secret_cache_misses(one), 3, "one slot: each replaces the other");
+    assert_eq(jwt_secret_cache_hits(one), 1, "one slot: ...and the last is remembered");
+    assert_eq(_tc_ok(one, _tc_flip(ta, strlen(ta) - 2)), 0, "one slot: a forgery lands on the slot and is still verified");
+    # Two tokens on two slots are both remembered.
+    var two = _tc_secret(1024);
+    var adg[32];
+    var bdg[32];
+    sha256(ta, strlen(ta), &adg);
+    sha256(tb, strlen(tb), &bdg);
+    assert((load64(&adg) & 1023) != (load64(&bdg) & 1023), "cache: two tokens on two slots");
+    assert_eq(_tc_ok(two, ta) + _tc_ok(two, tb) + _tc_ok(two, ta) + _tc_ok(two, tb), 4, "cache: ...both good");
+    assert_eq(jwt_secret_cache_hits(two), 2, "cache: ...and both remembered");
+    var off = _tc_secret(0);
+    _tc_ok(off, good);
+    _tc_ok(off, good);
+    assert_eq(jwt_secret_cache_hits(off) + jwt_secret_cache_misses(off), 0, "cache: off counts nothing");
+
+    # Public keys: what it is for.
+    var ks = _jwks_secret();
+    var es1 = clock_now_ns();
+    assert(auth_validator_jwt(JV_ES_GOOD, ks) != 0, "cache: an ES256 token");
+    var es2 = clock_now_ns();
+    assert(auth_validator_jwt(JV_ES_GOOD, ks) != 0, "cache: ...again");
+    var es3 = clock_now_ns();
+    assert_eq(jwt_secret_cache_hits(ks), 1, "cache: ...from the cache");
+    assert(es3 - es2 < (es2 - es1) / 10, "cache: ...in under a tenth of the time");
+    assert(auth_validator_jwt(JV_RS_GOOD, ks) != 0 && auth_validator_jwt(JV_RS_GOOD, ks) != 0, "cache: RS256 too");
+    assert_eq(jwt_secret_cache_hits(ks), 2, "cache: ...from the cache");
+
+    # A TRACE line says a token came from the cache, and never which.
+    _tc_log = alloc(256);
+    var lvl = sakshi_get_level();
+    sakshi_set_emit_hook(&_tc_hook);
+    sakshi_set_level(SK_TRACE);
+    _tc_lines = 0;
+    _tc_ok(cs, forged);
+    var miss_lines = _tc_lines;
+    _tc_now = t0;
+    _tc_ok(cs, good);
+    sakshi_clear_emit_hook();
+    sakshi_set_level(lvl);
+    assert_eq(miss_lines, 0, "cache log: nothing on a miss");
+    assert(strstr(_tc_log, "jwt verified from the cache") >= 0, "cache log: a hit is a TRACE line");
+    assert(strstr(_tc_log, "eyJ") < 0, "cache log: ...with no token in it");
+
+    # Nothing stays: a hit, a miss, and the hash of a 60 KB token.
+    assert_eq(_heap_per(good, cs), 0, "cache heap: a hit");
+    assert_eq(_heap_per(forged, cs), 0, "cache heap: a miss");
+    var big = _mint_hs256(_HDR, _cat(_cat("{\"aud\":\"https://mcp.example.com/mcp\",\"iss\":\"https://as.example.com\",\"exp\":1800000100,\"pad\":\"", _str_rep("x", 45000)), "\"}"), _KEY);
+    assert(strlen(big) > 60000, "cache heap: a token over 60 KB");
+    assert_eq(_heap_per(big, cs), 0, "cache heap: its hit");
+    assert_eq(_heap_per(_tc_flip(big, strlen(big) - 2), cs), 0, "cache heap: a forgery of it");
+    _bote_jwt_clock = 0;
 
     return assert_summary();
 }

@@ -18,6 +18,117 @@ have per release.
 
 _(empty)_
 
+## [3.6.4] — 2026-11-02 · Tokens already verified
+
+A token that passed is remembered, so a client that sends it again pays about 2.6 µs instead of the verify: 10.3 ms for ES256,
+1.26 ms for RS256, 8.7 µs for HS256. **The cache can only answer what a verify would.** It is keyed by the SHA-256 of the token's whole
+text, which is all the signature covered, and holds the token's `exp` and `nbf`, which are judged again on the clock each time, by the
+same function a verify uses. Everything else the verify decided depends on that text and the handle's settings, and changing the
+audience or the issuers forgets everything. A token that failed is never stored, so a forged one costs what it did, plus its hash.
+
+**Four defects in 3.6.3 land ahead of it**, from an independent review of that release: the bridge's 401 carried no CORS headers, a tool
+named twice in `BOTE_TOOL_SCOPES` lost its first scopes, a WebSocket upgrade kept its token on the heap, and a scope set after registration
+could end the 403's header. **The review led to a fifth, older one:** cyrius's WebSocket handshake copies the client's headers to the heap
+before it judges them, so a refused upgrade with a 60 KB header kept 60 KB. See Security.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Added
+
+- **`jwt_secret_with_cache(s, slots)`**, on by default at 1024 tokens: a power of two up to 65,536 (`BOTE_JWT_CACHE_MAX`), or 0 for none.
+  `jwt_secret_cache_slots`, `jwt_secret_cache_hits` and `jwt_secret_cache_misses` say what it did, and a token judged from it is a TRACE
+  line, `jwt verified from the cache`, with nothing of the token in it. Direct-mapped by the digest, which a client cannot aim without a
+  preimage. The table, 48 B a slot, is allocated when the first token is stored and never grows.
+- **`BOTE_JWT_CACHE`** in the binary, logged at INFO when it is not the default. A value that is not a count keeps the default, with a WARN.
+- `bote_http_refuse_hdr`, `auth_send_challenge_hdr` and `auth_bearer_check_hdr`, the senders with extra response headers, which the
+  bridge uses for its CORS. `bote_req_token()`.
+- `_bote_jwt_clock`, the clock the time checks read, so a test can put a token on either side of its `exp` and `nbf`. 0 is the wall clock.
+- Benchmarks `jwt_cached_hs256`, `jwt_cached_es256`, `jwt_forged_hs256_cache_on` and `jwt_forged_hs256_cache_off`. `jwt_validate_audience`,
+  `jwt_rs256` and `jwt_es256` run with the cache off, so they still measure a verify.
+
+### Changed
+
+- **One window check for a verify and for a remembered token**: `_jwt_time_claim` reads `exp` and `nbf`, and `_jwt_window_ok` judges both
+  against one clock read, with none for a token that has neither. `_jwt_exp_ok` and `_jwt_nbf_ok` are gone.
+- JwtSecret grows to 72 B by appended fields, and `jwt_secret_new` allocates it.
+- `bote_scope_token_ok` moves to `src/protocol.cyr`, ahead of everything that uses it, the 403's sender included.
+- The WebSocket transport keeps a connection's token in `_ws_token_buf`, which the next connection reuses, and marks it as each frame's
+  token, so a handler is handed its own copy as on HTTP. A token of 64 KB or more is refused with a 400, before the upgrade.
+
+### Fixed
+
+- **The bridge's refusals reached no page.** Its 401, with no token or a refused one, and its 404, 405, 413 and four kinds of 400 went out
+  without CORS headers, so a browser saw each as a network error: OAuth discovery could not start from the bridge. Every refusal past
+  the Origin check now carries the bridge's CORS, `Access-Control-Expose-Headers: WWW-Authenticate` included.
+- **A tool named twice in `BOTE_TOOL_SCOPES` kept only its last entry.** `fs_write=files:write admin,fs_write=x` left `fs_write` to a token
+  holding `x`, and the review wrote a file that way. A second entry for a tool now stops the server.
+- **A WebSocket upgrade kept its token on the heap**, through `auth_bearer_check`, before its version check and handshake ran, and every
+  connection kept its copy for good. A refused upgrade now keeps nothing, and a connection keeps no byte of its token.
+- **A scope that is no scope-token could end the 403's header.** Registration refuses one, but one set on a tool after registration was
+  written as it stood. The 403 now leaves out what is not a scope-token, and `scope` with it when none is.
+
+### Security
+
+- **cyrius's WebSocket handshake kept client headers on the heap.** `ws_server_handshake` copies `Upgrade`, `Connection`,
+  `Sec-WebSocket-Version` and `Sec-WebSocket-Key` to the heap before it judges them, so on `bote ws`, which takes no token by default,
+  any client could grow the heap by about 60 KB a request: a refused upgrade with a 60 KB `Upgrade` header kept 60,064 B, and a completed
+  one with a 60 KB `Connection` header 61,608 B. bote now reads the four on its request arena first, refuses unless the handshake's own
+  rules hold, and bounds `Connection` to 256 bytes, so a refused upgrade keeps nothing. A completed one still keeps about 1.6 KB, all of it
+  the handshake's, which bote cannot free from its side. Filed against cyrius as
+  `docs/development/issues/2026-11-02-bote-ws-server-handshake-keeps-client-headers-on-heap.md`, with an arena variant proposed.
+- **The cache revokes nothing, and neither did bote before it.** A token stays good until its `exp`, so keep access tokens short-lived.
+- **The cache is single-threaded state**, like the request arena. Threaded dispatch (3.7.x) has to lock it or keep one per worker.
+- A forged token still costs a full verify on the single loop: about 10.3 ms for ES256. Put a rate limit in front of a server on the internet.
+
+### Tests
+
+- 3,886 assertions, from 3,755, on x86_64 and under `qemu-aarch64`. `tests/bote_jwt.tcyr` has 376, from 290: the cache against an uncached
+  handle at each side of `exp` and `nbf`, a clock set back, an unknown clock, every byte of a remembered token changed, a refusal never
+  remembered, tokens for another audience or issuer, changed settings and resizes forgetting, one slot shared, a stored digest corrupted at
+  either end, the clock read once, the TRACE line, and 0 heap bytes for a hit and a miss of a 60 KB token. `tests/bote_ws.tcyr` has 50, from
+  29: 0 heap bytes for a refused upgrade and for a connection beyond what the handshake keeps, each long handshake header refused, the
+  `Connection` bound at 256 and 257, and a handler's kept claims surviving the next connection. `tests/bote_http_era.tcyr` has 1,661, from
+  1,646, with CORS on each of the bridge's refusals; `tests/bote_auth.tcyr` 73, from 64.
+- 67 mutants, all killed. The first run of the cache's 41 left 9 standing. Four were test gaps, among them an unknown clock with `nbf`, a
+  malformed `exp` with no clock, and a resize that kept the table; one was the early return that saves a clock read, now a counted test. The
+  other four could not be observed: a slot's in-use flag, the table's zeroing, and two helpers only tests still called. Those are gone.
+  The defect fixes' 31 left 2, a long version header and a long key, which only a heap row tells apart.
+- `fuzz/jwt.fcyr` checks a cache of 4 slots against none on every byte change of a token, each asked twice, across a clock that crosses
+  `exp` and `nbf`, goes back and reads 0, and fails unless the cache was used.
+- `scripts/transport-smoke.sh` sends one token three times and finds two TRACE lines and neither the token nor the key, none with
+  `BOTE_JWT_CACHE=0`, the size line for 8 and the WARN for `lots`, and a tool named twice stopping the server.
+
+### Performance
+
+Interleaved A/B, 15 alternating rounds, pinned to one core, 3.6.3 against this tree, load about 2.5. Minimums, in ns:
+
+| Bench | 3.6.3 | 3.6.4 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 3,970 | 3,990 | +0.5% |
+| `dispatch_tools_call` | 2,111 | 2,111 | 0.0% |
+| `http_era_legacy` | 2,411 | 2,433 | +0.9% |
+| `http_era_modern` | 11,106 | 11,001 | −0.9% |
+| `auth_bearer_check_set` | 748 | 755 | +0.9% |
+| `jwt_validate_audience`, an HS256 verify | 8,622 | 8,615 | −0.1% |
+| `jwt_rs256` | 1,260,000 | 1,259,000 | −0.1% |
+| `jwt_es256` | 10,265,000 | 10,255,000 | −0.1% |
+
+The short benches moved by layout as 3.6.3 showed they do, −8.8% to +3.3% on code this patch did not touch.
+
+**What a token costs now**, from the same run:
+
+| Token | Verified | Remembered | |
+|---|---|---|---|
+| ES256 | 10.26 ms | 2.57 µs | 4,000 times less |
+| RS256 | 1.26 ms | the same lookup, not timed on its own; its token is longer, so a little more to hash | |
+| HS256 | 8.6 µs | 2.56 µs | 3.4 times less |
+| HS256, forged | 3.26 µs | 4.40 µs | +1.13 µs: the hash and the lookup |
+
+A hit is the token's SHA-256 and one clock read, the second a `clock_gettime` syscall of about 1.35 µs on this host. A server taking
+ES256 tokens went from about 97 requests a second on one thread to as many as the rest of a request allows, for clients it has seen
+before. The A/B caught one regression on the way: the refactor read the clock for `nbf` even when a token had none, which cost every
+verify 1.4 µs (8.7 → 10.1 µs) until a verify read the clock once.
+
 ## [3.6.3] — 2026-11-01 · `403` with `insufficient_scope`
 
 A tool can now require scopes, and a token that lacks one gets the `403` MCP describes, naming every scope the tool needs and
@@ -65,6 +176,11 @@ The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
 - Scopes gate `tools/call` only. `prompts/get` and `resources/read` are on the roadmap.
 
 ### Fixed
+
+> ⚠ **Corrected at 3.6.4.** Two lines below were not true. The bridge's 401 carried no CORS headers at all, so exposing
+> `WWW-Authenticate` reached the 403 alone, and a page still could not start OAuth from a 401. And "a token now reaches the heap only
+> when a handler is handed it" held for HTTP, not WebSocket: an upgrade copied its token before its own checks, and every connection
+> kept its copy. Both are fixed in 3.6.4, with two more an independent review found.
 
 - **Every request a validator accepted kept its token on the heap**, since the request arena arrived at 3.4.15. A token was copied for
   a handler before anything knew one would run, so a refused call, a `tools/list` and a 403 each kept a kilobyte or so for a JWT, and a

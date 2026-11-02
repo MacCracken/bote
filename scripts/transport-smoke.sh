@@ -16,7 +16,9 @@
 #     an empty BOTE_BEARER_TOKENS refuses to start, and the fs tools stay in
 #     their root through a symlink and do not hang on a FIFO (3.4.15);
 #   - BOTE_TOOL_SCOPES answers a token without a scope with a 403 that names it,
-#     and refuses to start on a name it cannot honour (3.6.3).
+#     and refuses to start on a name it cannot honour (3.6.3);
+#   - a token seen twice is judged from the cache the second time, BOTE_JWT_CACHE=0
+#     turns that off, and the token never reaches the log (3.6.4).
 # Needs curl and python3. CI runs it as the "Transport smoke" step.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -227,6 +229,34 @@ c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H "Authorization: Bearer $
 [ "$c" = "401" ] || err "a token from another issuer answered $c, not 401"
 grep -q "$JKEY" "$L/jwt.err" && err "the JWT key reached a log"
 
+# Tokens already verified: the second request of a token is judged from the cache, at
+# TRACE, with neither the token nor its claims in the line.
+CURL4=http://127.0.0.1:18384/mcp
+ctok=$(jwt '{"aud":"http://127.0.0.1:18384/mcp","iss":"https://as.example.com","exp":4102444800}')
+cache_run() { # name expected-hit-lines env...
+  local name=$1 want=$2; shift 2
+  env "$@" BOTE_LOG=trace BOTE_RESOURCE_URL=$CURL4 BOTE_AUTH_SERVERS=https://as.example.com BOTE_JWT_SECRET=$JKEY \
+    bash -c "exec $B http 18384" 2> "$L/cache-$name.err" &
+  local pid=$!
+  wait_port 18384 || err "cache $name: nothing listening on 18384"
+  for _ in 1 2 3; do
+    c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H "Authorization: Bearer $ctok" -d "$INIT" $CURL4)
+    [ "$c" = "200" ] || err "cache $name: a good token answered $c"
+  done
+  kill $pid 2>/dev/null; wait $pid 2>/dev/null
+  local got
+  got=$(grep -c 'jwt verified from the cache' "$L/cache-$name.err")
+  [ "$got" = "$want" ] || err "cache $name: $got requests judged from the cache, not $want"
+  grep -q "$ctok" "$L/cache-$name.err" && err "cache $name: the token reached a log"
+  grep -q "$JKEY" "$L/cache-$name.err" && err "cache $name: the key reached a log"
+}
+cache_run default 2
+cache_run off 0 BOTE_JWT_CACHE=0
+cache_run sized 2 BOTE_JWT_CACHE=8
+grep -q 'verified tokens remembered.*slots=8' "$L/cache-sized.err" || err "a cache size was not logged at startup"
+cache_run garbage 2 BOTE_JWT_CACHE=lots
+grep -q 'not a count; keeping the default.*var=BOTE_JWT_CACHE' "$L/cache-garbage.err" || err "BOTE_JWT_CACHE=lots was not called out"
+
 # Required scopes, on the real binary: a 403 naming the scope, the same on a token that
 # holds it or a broader one, and a refusal to start on anything that would leave a tool
 # open. The token never reaches a log.
@@ -266,6 +296,7 @@ srefused "an entry with no =" 'entries are tool=scope' "${SENV[@]}" BOTE_TOOL_SC
 srefused "an empty scope" 'BOTE_TOOL_SCOPES refused' "${SENV[@]}" BOTE_TOOL_SCOPES=bote_echo=
 srefused "a scope that is no token" 'BOTE_TOOL_SCOPES refused' "${SENV[@]}" 'BOTE_TOOL_SCOPES=bote_echo=a"b'
 srefused "a rule with no =" 'entries are broad=narrow' "${SENV[@]}" BOTE_TOOL_SCOPES=bote_echo=a BOTE_SCOPE_IMPLIES=admin
+srefused "a tool named twice" 'names a tool twice.*tool=bote_echo' "${SENV[@]}" 'BOTE_TOOL_SCOPES=bote_echo=files:write admin,bote_echo=x'
 echo "$LIST" | env BOTE_TOOL_SCOPES=bote_echo=files:write timeout 5 $B stdio 2> "$L/scopes-stdio.held" | grep -q '"tools"' \
   || err "stdio stopped serving with BOTE_TOOL_SCOPES set"
 grep -q 'no effect here' "$L/scopes-stdio.held" || err "stdio did not say scopes have no effect on it"

@@ -30,7 +30,7 @@ revision's required list is features bote lacks. Each has a place below.
 
 ## Next patch
 
-**3.6.4 — A cache of verified tokens.** Item 1 of 3.6.x below. A defect found in 3.6.3 lands ahead of it.
+**3.6.5 — Fetching `jwks_uri`.** Item 1 of 3.6.x below.
 
 ## 3.5.x — MCP 2026-07-28, dual-era
 
@@ -62,16 +62,19 @@ publishes its metadata, checks a token's audience for HS256, RS256 and ES256, an
 a `403` a client can step up from. What is left is below. Authorization as a whole is optional, so this applies
 when an operator turns auth on.
 
-1. **What a verify costs.** ES256 takes about 10.5 ms and RS256 about 1.3 ms, on the single loop, for a good token and
-   a forged one alike, so about 100 forged tokens a second occupy a server that takes ES256. A cache of tokens
-   already verified, bounded and keyed by hash, would give legitimate traffic that time back. A forged token
-   stays expensive until threaded dispatch (3.7.x), so a server on the internet wants a rate limit in front.
-2. **Fetching `jwks_uri`.** Keys come from a file, and rotating them means a restart with the new set in place. Fetching
+1. **Fetching `jwks_uri`.** Keys come from a file, and rotating them means a restart with the new set in place. Fetching
    them needs the SSRF guard and a cache, and has to survive the authorization server being down.
-3. **Scopes beyond `tools/call`.** `prompts/get` and `resources/read` are not gated, and the spec leaves which
+2. **Scopes beyond `tools/call`.** `prompts/get` and `resources/read` are not gated, and the spec leaves which
    operation needs which scope to the server. Needs a way to declare one on a prompt or a template.
-4. **A token that expires during a WebSocket connection.** `ws` checks a token once, at the upgrade, so it keeps working
-   past its `exp`. `ws` is no MCP transport, so the spec does not ask for this. Check `exp` per frame, or end the connection.
+3. **A token that expires during a WebSocket connection.** `ws` checks a token once, at the upgrade, so it keeps working
+   past its `exp`. `ws` is no MCP transport, so the spec does not ask for this. Since tokens are remembered, a check on
+   every frame costs about 2.6 µs, so check `exp` per frame, or end the connection.
+4. **What a WebSocket connection keeps.** About 1.6 KB per completed upgrade, all of it `ws_server_handshake`'s, filed against
+   cyrius as `2026-11-02-bote-ws-server-handshake-keeps-client-headers-on-heap.md`. bote bounds the headers it copies, so a
+   refused upgrade keeps nothing; an arena variant upstream would make a connection keep nothing either.
+5. **A forged token's cost.** A token that failed is not remembered, so forged ES256 tokens still cost about 10.5 ms
+   each on the single loop. Threaded dispatch (3.7.x) moves that off the loop; until then a server on the internet wants
+   a rate limit in front.
 
 ## 3.7.x — Threaded dispatch and `subscriptions/listen`
 
@@ -82,8 +85,10 @@ that feed it, and `subscriptions/listen` is such a stream. **Large: small bites.
    handler. This also ends one slow client holding every other client, which the send deadline
    (per write, not per response) cannot do on its own.
 2. Per-worker state. Today's process-wide buffers become per-worker: the request arena
-   (`bote_req_alloc`), `_fs_read_buf`, `_ws_frame_buf`, `_unix_buf`. sandhi's worker arena is fixed-size
-   and fails when full, so it needs its grow option or a large reply crashes.
+   (`bote_req_alloc`), the token it holds for a handler (`bote_req_note_token`), `_fs_read_buf`,
+   `_ws_frame_buf`, `_ws_token_buf`, `_unix_buf`. sandhi's worker arena is fixed-size and fails when full, so it needs its
+   grow option or a large reply crashes. The verified-token cache is shared and unlocked, and needs a lock
+   or a table per worker.
 3. `subscriptions/listen`, with `toolsListChanged`, `promptsListChanged`, `resourcesListChanged` and
    `resourceSubscriptions`, `notifications/subscriptions/acknowledged`, and
    `io.modelcontextprotocol/subscriptionId` tagging. Then `notifications/resources/updated`.

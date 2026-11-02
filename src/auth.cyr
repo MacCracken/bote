@@ -146,7 +146,10 @@ fn auth_send_unauthorized(cfd, realm) {
 
 # A 401 with `params` after `Bearer`, or `realm="mcp"` when it is 0. RFC 6750 §3.1: a
 # token that was refused gets an error code, and a request with none does not.
-fn auth_send_challenge(cfd, params, refused) {
+fn auth_send_challenge(cfd, params, refused) { return auth_send_challenge_hdr(cfd, params, refused, 0); }
+
+# auth_send_challenge with `extra` response headers after the challenge, or 0.
+fn auth_send_challenge_hdr(cfd, params, refused, extra) {
     var ra = bote_req_alloc();
     var sb = str_builder_new_a(ra);
     str_builder_add_cstr_a(ra, sb, "WWW-Authenticate: Bearer ");
@@ -154,6 +157,7 @@ fn auth_send_challenge(cfd, params, refused) {
     else { str_builder_add_cstr_a(ra, sb, params); }
     if (refused == 1) { str_builder_add_cstr_a(ra, sb, ", error=\"invalid_token\""); }
     str_builder_add_cstr_a(ra, sb, "\r\n");
+    if (extra != 0) { str_builder_add_cstr_a(ra, sb, extra); }
     sandhi_server_send_response_a(ra, cfd, HTTP_UNAUTHORIZED, "Unauthorized",
       "text/plain", "", 0, str_data(str_builder_build_a(ra, sb)));
     return 0;
@@ -161,18 +165,25 @@ fn auth_send_challenge(cfd, params, refused) {
 
 # A 403 for a token that lacks a scope (RFC 6750 §3.1, MCP's scope challenge): every
 # scope in `scopes` is named, so a client asks once. `metadata` is the
-# `resource_metadata` parameter or 0, and `extra` further response headers or 0.
+# `resource_metadata` parameter or 0, and `extra` further response headers or 0. A
+# scope that is no scope-token is left out, and `scope` with it when none is one:
+# registration refuses those, but one set on a tool after it must not end the header.
 fn auth_send_insufficient_scope(cfd, scopes, metadata, extra) {
     var ra = bote_req_alloc();
     var sb = str_builder_new_a(ra);
-    str_builder_add_cstr_a(ra, sb, "WWW-Authenticate: Bearer error=\"insufficient_scope\", scope=\"");
+    str_builder_add_cstr_a(ra, sb, "WWW-Authenticate: Bearer error=\"insufficient_scope\"");
+    var named = 0;
     var i = 0;
     while (i < vec_len(scopes)) {
-        if (i > 0) { str_builder_add_cstr_a(ra, sb, " "); }
-        str_builder_add_cstr_a(ra, sb, vec_get(scopes, i));
+        if (bote_scope_token_ok(vec_get(scopes, i)) == 1) {
+            if (named == 0) { str_builder_add_cstr_a(ra, sb, ", scope=\""); }
+            else { str_builder_add_cstr_a(ra, sb, " "); }
+            str_builder_add_cstr_a(ra, sb, vec_get(scopes, i));
+            named = named + 1;
+        }
         i = i + 1;
     }
-    str_builder_add_cstr_a(ra, sb, "\"");
+    if (named > 0) { str_builder_add_cstr_a(ra, sb, "\""); }
     if (metadata != 0) {
         str_builder_add_cstr_a(ra, sb, ", ");
         str_builder_add_cstr_a(ra, sb, metadata);
@@ -223,6 +234,15 @@ fn bote_http_refuse(cfd, level, transport, status, text, reason) {
     return status;
 }
 
+# bote_http_refuse with `extra` response headers, CRLF-terminated, or 0: the bridge's
+# CORS, without which a page reads a refusal as a network error.
+fn bote_http_refuse_hdr(cfd, level, transport, status, text, reason, extra) {
+    if (extra == 0) { return bote_http_refuse(cfd, level, transport, status, text, reason); }
+    bote_http_log_refusal(level, transport, status, reason);
+    sandhi_server_send_response_a(bote_req_alloc(), cfd, status, text, "text/plain", "", 0, extra);
+    return status;
+}
+
 # A 405. RFC 9110 15.5.6: it MUST name what the resource does allow, and `allow`
 # is that header, CRLF included.
 fn bote_http_refuse_method(cfd, transport, allow) {
@@ -244,6 +264,11 @@ fn auth_bearer_check(cfd, buf, blen, validator_fp, validator_ctx, claims_out) {
 # to a handler, so a request refused after this keeps nothing. auth_bearer_check is for
 # what holds claims across messages.
 fn auth_bearer_check_c(cfd, buf, blen, validator_fp, validator_ctx, claims_out, challenge) {
+    return auth_bearer_check_hdr(cfd, buf, blen, validator_fp, validator_ctx, claims_out, challenge, 0);
+}
+
+# auth_bearer_check_c with `extra` headers on the 401, or 0.
+fn auth_bearer_check_hdr(cfd, buf, blen, validator_fp, validator_ctx, claims_out, challenge, extra) {
     if (validator_fp == 0) { return 0; }    # auth disabled
 
     # 3.4.0: each rejection is a WARN line naming why. The token is never
@@ -251,13 +276,13 @@ fn auth_bearer_check_c(cfd, buf, blen, validator_fp, validator_ctx, claims_out, 
     var token = auth_bearer_extract(buf, blen);
     if (token == 0) {
         _auth_log_rejected("missing_token");
-        auth_send_challenge(cfd, challenge, 0);
+        auth_send_challenge_hdr(cfd, challenge, 0, extra);
         return HTTP_UNAUTHORIZED;
     }
     var claims = fncall2(validator_fp, token, validator_ctx);
     if (claims == 0) {
         _auth_log_rejected("invalid_token");
-        auth_send_challenge(cfd, challenge, 1);
+        auth_send_challenge_hdr(cfd, challenge, 1, extra);
         return HTTP_UNAUTHORIZED;
     }
     # 2.5.0: surface validator's return so transport can thread to handler.

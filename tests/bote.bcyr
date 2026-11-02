@@ -200,6 +200,31 @@ fn b_auth_bearer_check_set() {
 # ================================================================
 
 var _b_scope_token = 0;
+var _b_jwt_cached = 0;
+var _b_jwks_cached = 0;
+var _b_jwt_forged = 0;
+
+# A token seen before, judged from the cache.
+fn b_jwt_cached_hs256() {
+    bote_req_begin();
+    return auth_validator_jwt(_b_jwt_token, _b_jwt_cached);
+}
+
+fn b_jwt_cached_es256() {
+    bote_req_begin();
+    return auth_validator_jwt(JV_ES_GOOD, _b_jwks_cached);
+}
+
+# A forged HS256 token with the cache on: a verify, plus the hash and the lookup.
+fn b_jwt_forged_cache_on() {
+    bote_req_begin();
+    return auth_validator_jwt(_b_jwt_forged, _b_jwt_cached);
+}
+
+fn b_jwt_forged_cache_off() {
+    bote_req_begin();
+    return auth_validator_jwt(_b_jwt_forged, _b_jwt_secret);
+}
 var _b_scope_rules = 0;
 var _b_scoped_dispatcher = 0;
 var _b_scoped_req = 0;
@@ -297,11 +322,21 @@ fn _bench_setup() {
     str_builder_add_cstr(jtb, ".");
     str_builder_add_cstr(jtb, base64url_encode(jmac, 32));
     _b_jwt_token = str_data(str_builder_build(jtb));
-    _b_jwt_secret = jwt_secret_with_audience(jwt_secret_new(jkey), "https://mcp.example.com/mcp");
+    # These two keep measuring a verify, as they did before tokens were remembered.
+    _b_jwt_secret = jwt_secret_with_cache(jwt_secret_with_audience(jwt_secret_new(jkey), "https://mcp.example.com/mcp"), 0);
     var jis = vec_new();
     vec_push(jis, "https://as.example.com");
     jwt_secret_with_issuers(_b_jwt_secret, jis);
-    _b_jwks_secret = jwt_secret_with_audience(jwt_secret_from_jwks(JV_JWKS), JV_AUD);
+    _b_jwks_secret = jwt_secret_with_cache(jwt_secret_with_audience(jwt_secret_from_jwks(JV_JWKS), JV_AUD), 0);
+    _b_jwt_cached = jwt_secret_with_audience(jwt_secret_new(jkey), "https://mcp.example.com/mcp");
+    jwt_secret_with_issuers(_b_jwt_cached, jis);
+    _b_jwks_cached = jwt_secret_with_audience(jwt_secret_from_jwks(JV_JWKS), JV_AUD);
+    auth_validator_jwt(_b_jwt_token, _b_jwt_cached);
+    auth_validator_jwt(JV_ES_GOOD, _b_jwks_cached);
+    var fl = strlen(_b_jwt_token);
+    _b_jwt_forged = alloc(fl + 1);
+    memcpy(_b_jwt_forged, _b_jwt_token, fl + 1);
+    store8(_b_jwt_forged + fl - 2, 65 + (load8(_b_jwt_forged + fl - 2) == 65));
     _b_auth_allowed = vec_new();
     vec_push(_b_auth_allowed, "tok-A");
     vec_push(_b_auth_allowed, "tok-B");
@@ -434,6 +469,18 @@ fn main() {
     var b26 = bench_new("dispatch_tools_call_scoped");
     bench_run(b26, &b_dispatch_tools_call_scoped, 10000);
     vec_push(benches, b26);
+    var b27 = bench_new("jwt_cached_hs256");
+    bench_run(b27, &b_jwt_cached_hs256, 10000);
+    vec_push(benches, b27);
+    var b28 = bench_new("jwt_cached_es256");
+    bench_run(b28, &b_jwt_cached_es256, 10000);
+    vec_push(benches, b28);
+    var b29 = bench_new("jwt_forged_hs256_cache_on");
+    bench_run(b29, &b_jwt_forged_cache_on, 10000);
+    vec_push(benches, b29);
+    var b30 = bench_new("jwt_forged_hs256_cache_off");
+    bench_run(b30, &b_jwt_forged_cache_off, 10000);
+    vec_push(benches, b30);
 
     bench_report_all(benches);
     return 0;

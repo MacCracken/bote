@@ -149,6 +149,15 @@ A signature check is the slowest thing a request does. ES256 costs about 10.5 ms
 for a forged token as much as a good one, on one thread. Put a rate limit ahead of a server that
 takes tokens from the internet.
 
+A token that passed is remembered, so a client that sends the same token again pays about 2.6 µs, on
+any algorithm, instead of the verify. It is judged again on its `exp` and `nbf` each time, and a token
+that failed is never remembered, so a forged one still costs the full verify. The server remembers 1024
+tokens by default:
+
+```sh
+BOTE_JWT_CACHE=4096   # tokens remembered, a power of two up to 65536; 0 turns it off
+```
+
 To ask for a scope before a tool runs, name it. Only a JWT says what it grants, so this needs one of
 the two verifiers above:
 
@@ -361,19 +370,19 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 3755 total across sixteen files (+ a core-only drift smoke)
+### Tests — 3886 total across sixteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 3755 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 3886 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 876 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/conformance.tcyr        # 218 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
-cyrius test tests/bote_auth.tcyr          # 64 — bearer + allowlist + JWT + PKCE validators
+cyrius test tests/bote_auth.tcyr          # 73 — bearer + allowlist + JWT + PKCE validators
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 56 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 203 — host registry + SSRF guard (IPv4 + IPv6)
-cyrius test tests/bote_http_era.tcyr      # 1646 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
-cyrius test tests/bote_jwt.tcyr           # 290 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes
+cyrius test tests/bote_http_era.tcyr      # 1661 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
+cyrius test tests/bote_jwt.tcyr           # 376 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
@@ -381,7 +390,7 @@ cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals
 cyrius test tests/bote_transport_unix.tcyr # 76 — Unix transport: sockaddr, accept-error policy, backoff, deadlines, closed-peer write
 cyrius test tests/bote_web_tools.tcyr     # 66 — web_fetch / web_search + the SSRF guard (URL and resolved address)
-cyrius test tests/bote_ws.tcyr            # 29 — WebSocket config + wire-up + the send-deadline drop + scopes per frame
+cyrius test tests/bote_ws.tcyr            # 50 — WebSocket config + wire-up + the send-deadline drop + scopes per frame + what an upgrade keeps
 cyrius test tests/bote_core_only_smoke.tcyr  # drift guard — includes only dist/bote-core.cyr
 ```
 

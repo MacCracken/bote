@@ -10,7 +10,11 @@
 #   50  a JWK Set of any bytes neither crashes the loader nor loads a key from a set the
 #       check refused;
 #   60  a scope is held exactly when a plain split of the list holds it, and a chain of
-#       rules reaches what a transitive closure says, on every graph of four scopes.
+#       rules reaches what a transitive closure says, on every graph of four scopes;
+#   70  a handle that remembers verified tokens, small enough that they collide, and one
+#       that does not agree on every token at every moment: good ones and every byte
+#       change of one, each asked twice, on a clock that crosses `exp` and `nbf`, goes
+#       back, and reads 0.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -306,5 +310,81 @@ while (graph < 4096) {
     }
     graph = graph + 1;
 }
+
+var _fz_now = 0;
+fn _fz_clock() { return _fz_now; }
+
+fn _fz_pair_secret(slots) {
+    var p = jwt_secret_with_audience(jwt_secret_new(_KEY), _AUD);
+    var pi = vec_new();
+    vec_push(pi, "https://as.example.com");
+    jwt_secret_with_issuers(p, pi);
+    return jwt_secret_with_cache(p, slots);
+}
+
+fn _fz_window(exp, nbf) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"aud\":\"https://mcp.example.com/mcp\",\"iss\":\"https://as.example.com\"");
+    if (exp != 0 - 1) { str_builder_add_cstr(sb, ",\"exp\":"); str_builder_add_int(sb, exp); }
+    if (nbf != 0 - 1) { str_builder_add_cstr(sb, ",\"nbf\":"); str_builder_add_int(sb, nbf); }
+    str_builder_add_cstr(sb, "}");
+    return _mint(str_data(str_builder_build(sb)));
+}
+
+_bote_jwt_clock = &_fz_clock;
+var cpair = _fz_pair_secret(4);
+var upair = _fz_pair_secret(0);
+var t0 = 1800000000;
+var wtoks = vec_new();
+vec_push(wtoks, _fz_window(t0 + 10, 0 - 1));
+vec_push(wtoks, _fz_window(t0 + 10, t0 + 5));
+vec_push(wtoks, _fz_window(t0 + 3, 0 - 1));
+vec_push(wtoks, _fz_window(t0 + 30, t0));
+vec_push(wtoks, _fz_window(0 - 1, 0 - 1));
+vec_push(wtoks, _fz_window(t0 + 20, t0 + 20));
+var times = vec_new();
+vec_push(times, t0); vec_push(times, t0 + 4); vec_push(times, t0 + 5); vec_push(times, t0 + 9);
+vec_push(times, t0 + 10); vec_push(times, t0 + 11); vec_push(times, t0 - 1); vec_push(times, 0);
+vec_push(times, t0 + 20); vec_push(times, t0 + 6);
+
+fn _fz_agree(tok) {
+    var k = 0;
+    while (k < 2) {
+        bote_req_begin();
+        var c = auth_validator_jwt(tok, cpair) != 0;
+        bote_req_begin();
+        var u = auth_validator_jwt(tok, upair) != 0;
+        if (c != u) { sys_exit(70); }
+        k = k + 1;
+    }
+    return 0;
+}
+
+var wseed = vec_get(wtoks, 0);
+var wn = strlen(wseed);
+var wmut = alloc(wn + 1);
+var ti = 0;
+while (ti < vec_len(times)) {
+    _fz_now = vec_get(times, ti);
+    var wi = 0;
+    while (wi < vec_len(wtoks)) {
+        _fz_agree(vec_get(wtoks, wi));
+        wi = wi + 1;
+    }
+    var mi = 0;
+    while (mi < wn) {
+        var ms = 0;
+        while (ms < strlen(_sub)) {
+            memcpy(wmut, wseed, wn + 1);
+            store8(wmut + mi, load8(_sub + ms));
+            _fz_agree(wmut);
+            ms = ms + 1;
+        }
+        mi = mi + 1;
+    }
+    ti = ti + 1;
+}
+if (jwt_secret_cache_hits(cpair) < 100) { sys_exit(70); }
+_bote_jwt_clock = 0;
 
 sys_exit(0);

@@ -79,6 +79,19 @@ The primary security-relevant surface areas are:
   credentials to reach. Put a rate limit in front of a server that takes tokens from the internet.
   ES256 also has two spellings of every signature, so a token's text cannot key a revocation list
   there: use `jti`.
+- **Tokens already verified** — since **3.6.4** a token that passed is remembered by the SHA-256 of
+  its whole text, with its `exp` and `nbf`, and judged again on the clock each time it returns, by
+  the same rules: the cache can only answer what the verify would. Changing the audience or the
+  issuers forgets everything. A token that failed is never stored, so a forged token costs what it
+  did, and the cache gives that time back to legitimate clients only. bote revokes nothing, cache or
+  not: a token stays good until its `exp`, so keep access tokens short-lived. `BOTE_JWT_CACHE=0`
+  turns the cache off.
+- **WebSocket upgrades** — cyrius's `ws_server_handshake` copies four of the client's headers to the
+  heap before it judges them, and through **3.6.3** a refused upgrade with a 60 KB header kept 60 KB,
+  with no token needed on `bote ws`. Since **3.6.4** bote judges those headers on its request arena
+  first, by the handshake's own rules and with `Connection` at most 256 bytes, so a refused upgrade
+  keeps nothing. A completed one keeps about 1.6 KB, all of it the handshake's: a client that can
+  connect can still grow the heap by that much a connection, and only an upstream fix ends it.
 - **Scopes** — since **3.6.3** a tool can require scopes, and a token lacking any of them gets a
   `403` with `error="insufficient_scope"`. The dispatcher holds the check, and HTTP's 403 is a
   courtesy ahead of it: a transport-only check would be walked around by a JSON-RPC batch and would
