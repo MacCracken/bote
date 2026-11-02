@@ -69,6 +69,16 @@ The primary security-relevant surface areas are:
   arena. A validator an embedder supplies has to check the audience itself. HS256 means the
   key is shared with the authorization server, so anyone holding it can mint a token for
   this server.
+- **Public keys** — since **3.6.2** RS256 and ES256 tokens verify against a JWK Set the operator
+  supplies. Algorithm confusion cannot happen here by construction: a key has one algorithm, a
+  token's `alg` only selects among keys of it, a verifier holds a shared secret or public keys and
+  never both, and a public key never reaches the HMAC. Nothing in a token can supply a key:
+  `jwk`, `jku`, `x5u` and `x5c` are not read, and `crit` is refused. A set holding a private key
+  stops the server. The cost is real and is the attack: a verify takes about 10.5 ms for ES256 and
+  1.3 ms for RS256 on one thread, for a forged token as much as a good one, and it needs no
+  credentials to reach. Put a rate limit in front of a server that takes tokens from the internet.
+  ES256 also has two spellings of every signature, so a token's text cannot key a revocation list
+  there: use `jti`.
 - **Memory** — `alloc` never frees, so what a request leaves on the heap stays for
   the life of the process. Since **3.4.15** everything bote allocates to answer a
   message goes on a request arena that the next message rewinds, including

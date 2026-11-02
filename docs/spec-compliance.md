@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.6.1 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.6.2 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
 > ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not. Every other table here is against 2025-11-25.
 
@@ -74,7 +74,7 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | An `x-mcp-header` that breaks the rules makes the tool invalid | ✅ (3.5.2) registration refuses it, since a client would drop the tool: an empty or non-token name, a type other than string, integer or boolean, a repeat ignoring case, or anywhere but a chain of `properties` keys |
 | Integers mirrored in a header stay in the safe range | ✅ (3.5.2) a value past ±(2^53 − 1) is refused with `-32020`, even with its header |
 | `-32021` for a missing client capability | ⏳ no request bote serves needs one yet; capabilities are required and not otherwise read |
-| A third-party client | ✅ (3.5.3) `@modelcontextprotocol/client` 2.4.0 connects and uses every capability bote has, 158 checks on `http`, `streamable` and stdio in both eras and `bridge` in the modern one, and (3.6.0, 3.6.1) its whole OAuth flow, with real JWTs from a mock authorization server. `./scripts/conformance.sh` repeats it |
+| A third-party client | ✅ (3.5.3) `@modelcontextprotocol/client` 2.4.0 connects and uses every capability bote has, 266 checks on `http`, `streamable` and stdio in both eras and `bridge` in the modern one, and (3.6.0 to 3.6.2) its whole OAuth flow, with HS256, RS256 and ES256 tokens from a mock authorization server. `./scripts/conformance.sh` repeats it |
 | `@modelcontextprotocol/conformance`, by its frozen requirement list | ⏳ (3.5.3) **25 of 37** on 2026-07-28, **21 of 30** on 2025-11-25, the same on `http` and `streamable`. What fails is a feature bote lacks: `InputRequiredResult`, progress, sampling and elicitation, logging, subscriptions. `tests/fixtures/conformance-expected-<revision>.yaml` lists each, and why |
 | `subscriptions/listen` and the rest of its notifications | ⏳ roadmap 3.7.x |
 
@@ -161,10 +161,10 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | **`BOTE_BEARER_TOKENS` env var** wires an allowlist validator across all four HTTP-family transports at startup | `main::_bote_bearer_from_env` | ✅ (1.9.1) |
 | **HTTP body-length clamp** — `clen = min(clen, n - bo)` so a lying Content-Length can't make `memcpy` read past the request buffer | `transport_http`, `transport_streamable`, `bridge` | ✅ (1.5.1) |
 | **SSRF guard for outbound URL fetches** — IPv4 + IPv6 blocklists for loopback / private / link-local / cloud-metadata | `host::ssrf_check` | ✅ (1.8.0 / 1.9.1) |
-| **JWT HS256 verifier** (RFC 7519 / 7515) — `alg` read as an exact JSON field (not a substring scan), constant-time HMAC compare, each segment strict base64url on the request arena, `exp` and `nbf` enforced *after* the signature verifies with no leeway, a malformed one rejects, an absent one accepts unless an audience is set, which requires `exp`; `auth_validator_jwt_hs256` plugs into the bearer middleware, and the binary uses it with `BOTE_JWT_SECRET` | `jwt::jwt_verify_hs256` | ✅ (2.2.0; `exp` + exact `alg` at 3.2.0; `nbf`, `aud` and `iss` at 3.6.1) |
+| **JWT verifier** (RFC 7519 / 7515) — `alg` read as an exact JSON field (not a substring scan), constant-time HMAC compare, each segment strict base64url on the request arena, `exp` and `nbf` enforced *after* the signature verifies with no leeway, a malformed one rejects, an absent one accepts unless an audience is set, which requires `exp`; `auth_validator_jwt_hs256` plugs into the bearer middleware, and the binary uses it with `BOTE_JWT_SECRET` | `jwt::jwt_verify_hs256` | ✅ (2.2.0; `exp` + exact `alg` at 3.2.0; `nbf`, `aud` and `iss` at 3.6.1) |
 | **RFC 7636 PKCE-S256** — `pkce_code_verifier` (CSPRNG) + `pkce_code_challenge_s256` | `pkce` | ✅ (2.3.0; ships in `dist/bote.cyr` since 3.2.0) |
 | **Pluggable sandbox runner** — fn-pointer + ctx adapter for tool handlers (kavach-shaped), noop default, error envelope on a null runner | `sandbox::sandbox_run` | ✅ (2.1.0; ships in `dist/bote.cyr` since **3.3.13** — before that it was in `src/` only and reached no consumer). Not in `dist/bote-core.cyr` |
-| Asymmetric JWT (RS256 / ES256) | — | ⏳ roadmap 3.6.x |
+| Asymmetric JWT (RS256, ES256), keys from a JWK Set | `jwt::jwt_secret_from_jwks` | ✅ (3.6.2) `BOTE_JWKS_FILE`. A key has one algorithm (RFC 8725 §3.1), `kid` picks among the operator's keys, `crit` is refused, and `jwk`, `jku`, `x5u` and `x5c` are never read. Checked against RFC 7515 A.2 and A.3 and tokens Node signed. Not fetched from `jwks_uri` |
 | OAuth 2.0 Protected Resource Metadata (RFC 9728): a document at `/.well-known/oauth-protected-resource` + the resource's path, with `resource` and at least one authorization server, readable with no token | `oauth_metadata` | ✅ (3.6.0) on `http`, `streamable` and `bridge`, from `bote_prm_new` or `BOTE_RESOURCE_URL` + `BOTE_AUTH_SERVERS` + `BOTE_AUTH_SCOPES`. `resource` is the operator's and never comes from a request (RFC 9728 §7.3). `scopes_supported`, `bearer_methods_supported` and `resource_name` go with it; `offline_access` is refused |
 | `resource_metadata` and `scope` in the `WWW-Authenticate` of a 401, and `error="invalid_token"` when a token was refused | `auth::auth_bearer_check_c` | ✅ (3.6.0), which meets both of MCP's discovery mechanisms at once. The official TypeScript client completes its OAuth flow on this, in both eras |
 | A server validates that a token was issued for it (RFC 8707, MCP Token Handling) | `jwt::auth_validator_jwt_hs256` | ✅ (3.6.1) with an audience set on the JwtSecret, `aud` must name it, as a string or in an array, compared after JSON decoding; `exp` must be present; `iss` must be one of the issuers set. With none set, a token that names an audience is refused, as RFC 7519 §4.1.3 asks. `BOTE_JWT_SECRET` sets this from `BOTE_RESOURCE_URL` and `BOTE_AUTH_SERVERS`. Another validator must do this itself: bote cannot see into one |
@@ -288,7 +288,7 @@ registered by default in the binaries.
 | Content blocks + annotations | **25** | `tests/bote_content.tcyr` |
 | `fs_tools` path safety + root confinement + control bytes as valid JSON + schemas and annotations; decoded names, truncation, fs_mkdir | **56** | `tests/bote_fs_tools.tcyr` |
 | HostRegistry + IPv4 / IPv6 SSRF (URL and resolved address; each 3.4.7 range named) + the IPv6 parser against cyrius's + hot-reload | **203** | `tests/bote_host.tcyr` |
-| JWT HS256 — signature, exact `alg`, `exp`, `nbf`, `aud`, `iss`, one spelling of a token, no heap (mutation-proven) | **126** | `tests/bote_jwt.tcyr` |
+| JWT — HS256, RS256, ES256, JWK Sets, exact `alg`, `crit`, `exp`, `nbf`, `aud`, `iss`, algorithm confusion, no heap (mutation-proven) | **228** | `tests/bote_jwt.tcyr` |
 | `libro_tools` incl. tampered-chain decode + populated-chain proof + CallToolResults, the retention guard, RFC 3339 timestamps, schemas, integers as validated, audit identity | **73** | `tests/bote_libro_tools.tcyr` |
 | Operational logging over sakshi | **50** | `tests/bote_log.tcyr` |
 | RFC 7636 PKCE-S256 | **17** | `tests/bote_pkce.tcyr` |

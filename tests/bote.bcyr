@@ -34,6 +34,7 @@ include "src/stream.cyr"
 include "src/session.cyr"
 include "src/auth.cyr"
 include "src/jwt.cyr"
+include "tests/fixtures/jwt_vectors.cyr"
 include "src/http_era.cyr"
 
 # ================================================================
@@ -86,6 +87,7 @@ var _b_result_dispatcher = 0;
 var _b_param_dispatcher = 0;
 var _b_jwt_token = 0;
 var _b_jwt_secret = 0;
+var _b_jwks_secret = 0;
 
 # ================================================================
 # Benchmark callbacks (no-arg functions, called by bench_run)
@@ -107,7 +109,15 @@ fn b_resource_template_match() {
 }
 fn b_jwt_validate_audience() {
     bote_req_begin();
-    return auth_validator_jwt_hs256(_b_jwt_token, _b_jwt_secret);
+    return auth_validator_jwt(_b_jwt_token, _b_jwt_secret);
+}
+fn b_jwt_rs256() {
+    bote_req_begin();
+    return auth_validator_jwt(JV_RS_GOOD, _b_jwks_secret);
+}
+fn b_jwt_es256() {
+    bote_req_begin();
+    return auth_validator_jwt(JV_ES_GOOD, _b_jwks_secret);
 }
 fn b_http_era_params() { return _b_era(_b_param_dispatcher, _b_era_params, _b_era_params + _b_era_params_at); }
 
@@ -263,6 +273,7 @@ fn _bench_setup() {
     var jis = vec_new();
     vec_push(jis, "https://as.example.com");
     jwt_secret_with_issuers(_b_jwt_secret, jis);
+    _b_jwks_secret = jwt_secret_with_audience(jwt_secret_from_jwks(JV_JWKS), JV_AUD);
     _b_auth_allowed = vec_new();
     vec_push(_b_auth_allowed, "tok-A");
     vec_push(_b_auth_allowed, "tok-B");
@@ -359,6 +370,12 @@ fn main() {
     var b21 = bench_new("jwt_validate_audience");
     bench_run(b21, &b_jwt_validate_audience, 10000);
     vec_push(benches, b21);
+    var b22 = bench_new("jwt_rs256");
+    bench_run(b22, &b_jwt_rs256, 200);
+    vec_push(benches, b22);
+    var b23 = bench_new("jwt_es256");
+    bench_run(b23, &b_jwt_es256, 50);
+    vec_push(benches, b23);
 
     bench_report_all(benches);
     return 0;

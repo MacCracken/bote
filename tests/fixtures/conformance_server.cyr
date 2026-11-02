@@ -6,8 +6,9 @@
 #   conformance-server http [port]        HTTP, with sessions, default 8395
 #   conformance-server streamable [port]  Streamable HTTP, with sessions, default 8396
 #   conformance-server bridge [port]      the bridge, default 8397
-#   conformance-server auth <port> <as>   HTTP that wants a token, naming the authorization
-#                                         server on port <as>
+#   conformance-server auth <port> <as> [jwks]
+#                                         HTTP that wants a token, naming the authorization
+#                                         server on port <as>: HS256, or the keys in a JWK Set
 #   conformance-server                    stdio
 #
 # A scenario that needs what bote lacks stays failing here on purpose, and
@@ -230,10 +231,14 @@ fn main() {
         vec_push(scopes, "mcp:read");
         var resource = _cat("http://127.0.0.1:", arg, "/mcp");
         var jwt = jwt_secret_new("conformance-fixture-secret-32-bytes!");
+        if (argc() > 4) {
+            var jl[8];
+            jwt = jwt_secret_from_jwks(file_read_whole_max(argv(4), BOTE_JWKS_MAX, &jl));
+        }
         jwt_secret_with_audience(jwt, resource);
         jwt_secret_with_issuers(jwt, servers);
         var acfg = http_config_new("/mcp", INADDR_LOOPBACK(), port);
-        http_config_with_bearer_validator(acfg, &auth_validator_jwt_hs256, jwt);
+        http_config_with_bearer_validator(acfg, &auth_validator_jwt, jwt);
         http_config_with_resource_metadata(acfg, bote_prm_new(resource, servers, scopes, "fixture"));
         return transport_http_run(d, acfg);
     }

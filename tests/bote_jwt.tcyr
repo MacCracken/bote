@@ -27,6 +27,7 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/jwt.cyr"
+include "tests/fixtures/jwt_vectors.cyr"
 
 # ================================================================
 # HS256 token minting — 3.2.0
@@ -51,6 +52,62 @@ fn _mint_hs256(hdr_json, payload_json, key) {
     str_builder_add_cstr(sb2, ".");
     str_builder_add_cstr(sb2, base64url_encode(mac, 32));
     return str_cstr(str_builder_build(sb2));
+}
+
+# A JwtSecret on the full vector set, for this audience and issuer.
+fn _jwks_secret() {
+    var s = jwt_secret_from_jwks(JV_JWKS);
+    jwt_secret_with_audience(s, JV_AUD);
+    var iss = vec_new();
+    vec_push(iss, JV_ISS);
+    jwt_secret_with_issuers(s, iss);
+    return s;
+}
+
+fn _taken(token, s) {
+    bote_req_begin();
+    if (auth_validator_jwt(token, s) != 0) { return 1; }
+    return 0;
+}
+
+# A JWK Set holding the one key `jwk`.
+fn _set_of(jwk) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"keys\":[");
+    str_builder_add_cstr(sb, jwk);
+    str_builder_add_cstr(sb, "]}");
+    return str_data(str_builder_build(sb));
+}
+
+# A set of `jwk` beside a good key, so that only a refusal, and not a skip, is an error.
+fn _set_with_good(jwk) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"keys\":[");
+    str_builder_add_cstr(sb, JV_JWK_RSA);
+    str_builder_add_cstr(sb, ",");
+    str_builder_add_cstr(sb, jwk);
+    str_builder_add_cstr(sb, "]}");
+    return str_data(str_builder_build(sb));
+}
+
+# How many keys a set loads.
+fn _loaded(jwk) {
+    var s = jwt_secret_from_jwks(_set_with_good(jwk));
+    if (s == 0) { return 0 - 1; }
+    return vec_len(jwt_secret_keys(s));
+}
+
+# 1 when the published JWS verifies under the published key: A.2 and A.3 are expired, so
+# this stops at the signature.
+fn _rfc_sig(jwks, jws, alg) {
+    var s = jwt_secret_from_jwks(jwks);
+    var keys = jwt_secret_keys(s);
+    var k = vec_get(keys, 0);
+    var tlen = strlen(jws);
+    var dot2 = tlen - 1;
+    while (load8(jws + dot2) != 46) { dot2 = dot2 - 1; }
+    assert_eq(_jwt_key_alg(k), alg, "rfc: the key's algorithm");
+    return _jwt_pk_ok(bote_req_alloc(), jws, dot2, tlen, k);
 }
 
 # Build `{"sub":"a","exp":<secs>}` for a computed expiry.
@@ -344,6 +401,140 @@ fn main() {
     assert_eq(jwt_b64u_decode("", 0, &bl), 0, "decode: nothing");
     var nul = jwt_b64u_decode("QQBC", 4, &bl);
     assert(nul != 0 && load64(&bl) == 3 && load8(nul + 1) == 0 && load8(nul + 2) == 66, "decode: a NUL inside is a byte");
+
+    # ---- RS256 and ES256 ----
+    # RFC 7515's own examples, as published.
+    assert_eq(_rfc_sig(JV_RFC_RS_JWKS, JV_RFC_RS_JWS, BOTE_JWT_RS256), 1, "rfc: A.2 RS256 verifies");
+    assert_eq(_rfc_sig(JV_RFC_ES_JWKS, JV_RFC_ES_JWS, BOTE_JWT_ES256), 1, "rfc: A.3 ES256 verifies");
+    assert_eq(auth_validator_jwt(JV_RFC_RS_JWS, jwt_secret_from_jwks(JV_RFC_RS_JWKS)), 0, "rfc: A.2 expired in 2011, which the whole path sees");
+
+    var js = _jwks_secret();
+    assert_eq(vec_len(jwt_secret_keys(js)), 6, "jwks: six keys");
+    assert_eq(jwt_secret_data(js), 0, "jwks: no shared secret in the same handle");
+    assert_eq(_taken(JV_RS_GOOD, js), 1, "RS256: a token signed by Node");
+    assert_eq(_taken(JV_ES_GOOD, js), 1, "ES256: a token signed by Node");
+    assert_eq(_taken(JV_RS3072, js), 1, "RS256: 3072 bits");
+    assert_eq(_taken(JV_RS4096, js), 1, "RS256: 4096 bits");
+    assert_eq(_taken(JV_RS_UNKNOWN_KID, js), 0, "RS256: a kid nobody has");
+    assert_eq(_taken(JV_ES_UNKNOWN_KID, js), 0, "ES256: a kid nobody has");
+    assert_eq(_taken(JV_RS_NUMBER_KID, js), 0, "RS256: a kid that is no string");
+    assert_eq(_taken(JV_ES_NUMBER_KID, js), 0, "ES256: a kid that is no string");
+    assert_eq(_taken(JV_RS_OTHER_KEY, js), 0, "RS256: signed by another key");
+    assert_eq(_taken(JV_ES_OTHER_KEY, js), 0, "ES256: signed by another key");
+    assert_eq(_taken(JV_RS_OTHER_AUD, js), 0, "RS256: a good signature for another server");
+    assert_eq(_taken(JV_ES_OTHER_AUD, js), 0, "ES256: a good signature for another server");
+    assert_eq(_taken(JV_RS_OTHER_ISS, js), 0, "RS256: another issuer");
+    assert_eq(_taken(JV_ES_OTHER_ISS, js), 0, "ES256: another issuer");
+    assert_eq(_taken(JV_RS_EXPIRED, js), 0, "RS256: expired");
+    assert_eq(_taken(JV_ES_EXPIRED, js), 0, "ES256: expired");
+    assert_eq(_taken(JV_RS_FUTURE, js), 0, "RS256: not yet valid");
+    assert_eq(_taken(JV_ES_FUTURE, js), 0, "ES256: not yet valid");
+    assert_eq(_taken(JV_RS_CRIT, js), 0, "RS256: crit is refused, RFC 7515 4.1.11");
+    assert_eq(_taken(JV_ES_CRIT, js), 0, "ES256: crit is refused");
+    assert_eq(_taken(JV_RS_LOWER_ALG, js), 0, "RS256: alg is case-sensitive");
+    assert_eq(_taken(JV_ES_LOWER_ALG, js), 0, "ES256: alg is case-sensitive");
+
+    # No kid: one key of that alg picks itself, and two never get a try each.
+    assert_eq(_taken(JV_RS_NO_KID, js), 0, "kid: none, with several RSA keys");
+    assert_eq(_taken(JV_ES_NO_KID, js), 0, "kid: none, with several EC keys");
+    assert_eq(_taken(JV_RS_NO_KID_LAST, js), 0, "kid: none, signed by the last RSA key, which no try-each may reach");
+    assert_eq(_taken(JV_ES_NO_KID_LAST, js), 0, "kid: none, signed by the last EC key");
+    var one_r = jwt_secret_from_jwks(JV_JWKS_ONE_RSA);
+    jwt_secret_with_audience(one_r, JV_AUD);
+    assert_eq(_taken(JV_RS_NO_KID, one_r), 1, "kid: none, with one RSA key");
+    assert_eq(_taken(JV_ES_NO_KID, one_r), 0, "kid: none, and no key of that alg");
+    assert_eq(_taken(JV_RS_GOOD, one_r), 0, "kid: named, and the key has none to match");
+    var one_e = jwt_secret_from_jwks(JV_JWKS_ONE_EC);
+    jwt_secret_with_audience(one_e, JV_AUD);
+    assert_eq(_taken(JV_ES_NO_KID, one_e), 1, "kid: none, with one EC key");
+
+    # Algorithm confusion. A key has one algorithm, and a public key never reaches the HMAC.
+    assert_eq(_taken(JV_RS_AS_ES, js), 0, "confusion: an RSA key under alg ES256");
+    assert_eq(_taken(JV_ES_AS_RS, js), 0, "confusion: an EC key under alg RS256");
+    assert_eq(_taken(JV_HS_WITH_N, js), 0, "confusion: HS256 keyed with the RSA modulus");
+    assert_eq(_taken(JV_HS_WITH_PEM, js), 0, "confusion: HS256 keyed with the public key's PEM");
+    assert_eq(_taken(JV_RS_GOOD, _for_audience()), 0, "confusion: a shared-secret verifier takes no RS256");
+    assert_eq(_taken(JV_ES_GOOD, _for_audience()), 0, "confusion: nor ES256");
+    assert_eq(_taken(_mint_hs256(_HDR, _claims("\"aud\":\"https://mcp.example.com/mcp\",\"iss\":\"https://as.example.com\","), _KEY), js), 0, "confusion: a public-key verifier takes no HS256");
+    var none_t = _cat("eyJhbGciOiJub25lIn0.", _cat(base64url_encode("{}", 2), "."));
+    assert_eq(_taken(none_t, js), 0, "confusion: alg none");
+
+    # ES256's edges. All-zero is the forgery of CVE-2022-21449.
+    assert_eq(_taken(JV_ES_ZERO_SIG, js), 0, "ES256: r = s = 0");
+    assert_eq(_taken(JV_ES_R_IS_N, js), 0, "ES256: r = n");
+    assert_eq(_taken(JV_ES_S_IS_N, js), 0, "ES256: s = n");
+    assert_eq(_taken(JV_ES_SHORT_SIG, js), 0, "ES256: 63 bytes");
+    assert_eq(_taken(JV_ES_LONG_SIG, js), 0, "ES256: 65 bytes");
+    assert_eq(_taken(JV_ES_DER_SIG, js), 0, "ES256: DER, which is not JWS");
+    assert_eq(_taken(JV_RS_LONG_SIG, js), 0, "RS256: a correct signature with a byte after it");
+    assert_eq(_taken(JV_RS_SHORT_SIG, js), 0, "RS256: cut short");
+    var bang_rs = _with_suffix(JV_RS_GOOD, "");
+    store8(bang_rs + strlen(bang_rs) - 1, 33);
+    assert_eq(_taken(bang_rs, js), 0, "RS256: a signature that is no base64url");
+    var bang_es = _with_suffix(JV_ES_GOOD, "");
+    store8(bang_es + strlen(bang_es) - 1, 33);
+    assert_eq(_taken(bang_es, js), 0, "ES256: a signature that is no base64url");
+    # No key at all is not an empty key: HMAC under "" is something anyone can compute.
+    var empty_t = _mint_hs256(_HDR, "{}", "");
+    assert_eq(_taken(empty_t, jwt_secret_new(0)), 0, "keyless: a handle with no key verifies nothing");
+    assert_eq(_taken(empty_t, jwt_secret_new("")), 0, "keyless: nor one with an empty key");
+    assert_eq(jwt_verify_hs256(empty_t, "", 0), 0, "keyless: verify, an empty key");
+    # Not a bug and not a choice: (r, n - s) is a valid signature, and JWS has no rule
+    # against it. It is why a token's text cannot key a revocation list under ES256.
+    assert_eq(_taken(JV_ES_OTHER_S, js), 1, "ES256: the second spelling verifies, as the math says");
+
+    # What a key set may hold.
+    assert_eq(jwt_jwks_check(JV_JWKS), 0, "jwks: the good set");
+    assert(jwt_jwks_check(0) != 0, "jwks refused: nothing");
+    assert(jwt_jwks_check("nope") != 0, "jwks refused: not JSON");
+    assert(jwt_jwks_check("[]") != 0, "jwks refused: not an object");
+    assert(jwt_jwks_check("{}") != 0, "jwks refused: no keys");
+    assert(jwt_jwks_check("{\"keys\":{}}") != 0, "jwks refused: keys is no array");
+    assert(jwt_jwks_check(_cat(_cat("{\"keys\":{\"a\":", JV_JWK_RSA), "}}")) != 0, "jwks refused: a usable key, in an object");
+    assert(jwt_jwks_check(_cat(_cat("{\"keys\":[", JV_JWK_RSA), "],}")) != 0, "jwks refused: a usable key, in JSON that is not valid");
+    assert(jwt_jwks_check("{\"keys\":[]}") != 0, "jwks refused: an empty set");
+    assert(jwt_jwks_check(_set_of(JV_JWK_RSA_1024)) != 0, "jwks refused: nothing usable, 1024 bits");
+    assert(jwt_jwks_check(_set_of(JV_JWK_PRIVATE_RSA)) != 0, "jwks refused: an RSA private key");
+    assert(jwt_jwks_check(_set_of(JV_JWK_PRIVATE_EC)) != 0, "jwks refused: an EC private key");
+    assert(jwt_jwks_check(_set_of(JV_JWK_PRIVATE_P)) != 0, "jwks refused: a private prime");
+    assert(jwt_jwks_check(_set_of(JV_JWK_OCT)) != 0, "jwks refused: a shared secret");
+    assert(jwt_jwks_check(_set_with_good(JV_JWK_PRIVATE_RSA)) != 0, "jwks refused: a private key beside a good one");
+    assert(jwt_jwks_check(_set_with_good(JV_JWK_OCT)) != 0, "jwks refused: a shared secret beside a good key");
+    assert(jwt_jwks_check(_set_with_good(JV_JWK_PRIVATE_EC)) != 0, "jwks refused: an EC private key beside a good key");
+    assert(jwt_jwks_check(_set_with_good(JV_JWK_PRIVATE_P)) != 0, "jwks refused: a private prime beside a good key");
+    assert_eq(jwt_secret_from_jwks(_set_of(JV_JWK_PRIVATE_EC)), 0, "jwks: from_jwks refuses what the check refuses");
+    var dup = "{\"kty\":\"EC\",\"crv\":\"P-256\",\"kid\":\"same\",\"x\":\"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU\",\"y\":\"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0\"}";
+    var dup2 = _cat(_cat("{\"keys\":[", dup), _cat(",", _cat(dup, "]}")));
+    assert(jwt_jwks_check(dup2) != 0, "jwks refused: two keys with one kid");
+    assert_eq(_loaded(JV_JWK_RSA_1024), 1, "jwks skips: 1024 bits");
+    assert_eq(_loaded(JV_JWK_RSA_2047), 1, "jwks skips: 2047 bits");
+    assert_eq(_loaded(JV_JWK_RSA_HUGE), 1, "jwks skips: past what sigil holds");
+    assert_eq(_loaded(JV_JWK_RSA_E3), 1, "jwks skips: e = 3");
+    assert_eq(_loaded(JV_JWK_RSA_EVEN), 1, "jwks skips: an even modulus");
+    assert_eq(_loaded(JV_JWK_RSA_LEADING_ZERO), 1, "jwks skips: a modulus with a leading zero");
+    assert_eq(_loaded(JV_JWK_EC_OFF_CURVE), 1, "jwks skips: a point off the curve");
+    assert_eq(_loaded(JV_JWK_EC_SHORT), 1, "jwks skips: a short coordinate");
+    assert_eq(_loaded(JV_JWK_EC_LONG), 1, "jwks skips: a coordinate with a byte after it");
+    assert_eq(_loaded(JV_JWK_EC_CURVE_NAME), 1, "jwks skips: 32-byte coordinates on another curve");
+    assert_eq(_loaded(JV_JWK_RSA_PS256), 1, "jwks skips: a good RSA key for another algorithm");
+    assert_eq(_loaded(JV_JWK_EC_P384), 1, "jwks skips: P-384");
+    assert_eq(_loaded(JV_JWK_ED25519), 1, "jwks skips: Ed25519");
+    assert_eq(_loaded("{\"kty\":\"EC\",\"crv\":\"P-256\",\"use\":\"enc\",\"x\":\"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU\",\"y\":\"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0\"}"), 1, "jwks skips: an encryption key");
+    assert_eq(_loaded("{\"kty\":\"EC\",\"crv\":\"P-256\",\"alg\":\"ES384\",\"x\":\"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU\",\"y\":\"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0\"}"), 1, "jwks skips: another algorithm on an EC key");
+    assert_eq(_loaded("{\"kty\":\"RSA\",\"alg\":\"PS256\",\"n\":\"AQAB\",\"e\":\"AQAB\"}"), 1, "jwks skips: another algorithm on an RSA key");
+    assert_eq(_loaded("{\"crv\":\"P-256\"}"), 1, "jwks skips: no kty");
+    assert_eq(_loaded("5"), 1, "jwks skips: what is no object");
+
+    # A public-key refusal keeps nothing either, and a good token keeps nothing here.
+    var bad_rs = _with_suffix(JV_RS_GOOD, "");
+    store8(bad_rs + strlen(bad_rs) - 10, 65);
+    assert_eq(_heap_per(bad_rs, js), 0, "heap: a forged RS256 token");
+    var bad_es = _with_suffix(JV_ES_GOOD, "");
+    store8(bad_es + strlen(bad_es) - 10, 65);
+    assert_eq(_heap_per(bad_es, js), 0, "heap: a forged ES256 token");
+    assert_eq(_heap_per(JV_RS_GOOD, js), 0, "heap: a good RS256 token");
+    assert_eq(_heap_per(JV_ES_GOOD, js), 0, "heap: a good ES256 token");
+    assert_eq(_heap_per(JV_RS_UNKNOWN_KID, js), 0, "heap: an unknown kid");
 
     # ---- what a signature covers ----
     # The right MAC with more after it: a compare of 32 bytes alone would take this.

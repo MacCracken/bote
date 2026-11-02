@@ -6,7 +6,9 @@
 #   20  any byte of a good token, changed to anything else, gets it refused: a token
 #       has one spelling, and a signature covers all of it;
 #   30  nothing a token holds, signed or not, crashes the claim reads;
-#   40  and refusing a token leaves nothing on the heap.
+#   40  refusing a token leaves nothing on the heap;
+#   50  and a JWK Set of any bytes neither crashes the loader nor loads a key from a
+#       set the check refused.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -31,6 +33,7 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/jwt.cyr"
+include "tests/fixtures/jwt_vectors.cyr"
 
 alloc_init();
 sakshi_set_level(SK_ERROR);
@@ -149,5 +152,46 @@ while (hi < 200) {
     hi = hi + 1;
 }
 if (alloc_used() != before) { sys_exit(40); }
+
+# Every bit-flipped byte of a good token, on keys a verify of which takes milliseconds, so
+# one change a byte and not 255.
+var ks = jwt_secret_with_audience(jwt_secret_from_jwks(JV_JWKS), JV_AUD);
+fn _flip_case(tok) {
+    if (auth_validator_jwt(tok, ks) == 0) { sys_exit(20); }
+    var n = strlen(tok);
+    var t = alloc(n + 1);
+    var i = 0;
+    while (i < n) {
+        memcpy(t, tok, n + 1);
+        store8(t + i, load8(t + i) ^ 1);
+        bote_req_begin();
+        if (auth_validator_jwt(t, ks) != 0) { sys_exit(20); }
+        i = i + 1;
+    }
+    return 0;
+}
+_flip_case(JV_RS_GOOD);
+_flip_case(JV_ES_GOOD);
+
+fn _jwks_sweep(set) {
+    var n = strlen(set);
+    var t = alloc(n + 1);
+    var i = 0;
+    while (i < n) {
+        var si = 0;
+        while (si < strlen(_sub)) {
+            memcpy(t, set, n + 1);
+            store8(t + i, load8(_sub + si));
+            var why = jwt_jwks_check(t);
+            var sec = jwt_secret_from_jwks(t);
+            if ((why == 0) != (sec != 0)) { sys_exit(50); }
+            si = si + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+_jwks_sweep(JV_JWKS_ONE_EC);
+_jwks_sweep(JV_JWKS_ONE_RSA);
 
 sys_exit(0);

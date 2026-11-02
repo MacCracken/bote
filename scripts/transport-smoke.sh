@@ -232,6 +232,33 @@ grep -q "$JKEY" "$L/jwt-noaud.held" && err "the JWT key reached a log on the way
 rc=0; BOTE_JWT_SECRET=$JKEY BOTE_BEARER_TOKENS=tok BOTE_RESOURCE_URL=http://127.0.0.1:18399/mcp BOTE_AUTH_SERVERS=https://as.example.com timeout 5 $B http 18388 2> "$L/jwt-both.held" || rc=$?
 [ "$rc" -eq 2 ] || err "a JWT key and a token list: rc=$rc, not 2"
 
+# Public keys from a JWK Set: a token signed by another implementation is let in, and one
+# for another server is not. The vectors are valid until 2100.
+vec() { python3 -I -c 'import re,sys
+for l in open("tests/fixtures/jwt_vectors.cyr"):
+    m=re.match(r"var "+sys.argv[1]+r" = \"(.*)\";$",l)
+    if m: print(m.group(1).replace("\\\"","\"").replace("\\\\","\\"))' "$1"; }
+vec JV_JWKS > "$L/jwks.json"
+BOTE_LOG=debug BOTE_RESOURCE_URL=https://mcp.example.com/mcp BOTE_AUTH_SERVERS=https://as.example.com BOTE_JWKS_FILE="$L/jwks.json" \
+  start jwks "$L/jwks.err" $B http 18387
+wait_port 18387 || err "nothing listening on 18387"
+for t in JV_RS_GOOD JV_ES_GOOD; do
+  c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H "Authorization: Bearer $(vec $t)" -d "$INIT" http://127.0.0.1:18387/mcp)
+  [ "$c" = "200" ] || err "$t answered $c, not 200"
+done
+for t in JV_RS_OTHER_AUD JV_ES_OTHER_AUD JV_HS_WITH_PEM JV_ES_ZERO_SIG; do
+  c=$(curl -s -o /dev/null -w '%{http_code}' "${H[@]}" -H "Authorization: Bearer $(vec $t)" -d "$INIT" http://127.0.0.1:18387/mcp)
+  [ "$c" = "401" ] || err "$t answered $c, not 401"
+done
+rc=0; BOTE_JWKS_FILE="$L/jwks.json" BOTE_JWT_SECRET=$JKEY BOTE_RESOURCE_URL=https://mcp.example.com/mcp BOTE_AUTH_SERVERS=https://as.example.com timeout 5 $B http 18388 2> "$L/jwks-both.held" || rc=$?
+[ "$rc" -eq 2 ] || err "a JWK Set and a shared key: rc=$rc, not 2"
+rc=0; BOTE_JWKS_FILE="$L/no-such-file" BOTE_RESOURCE_URL=https://mcp.example.com/mcp BOTE_AUTH_SERVERS=https://as.example.com timeout 5 $B http 18388 2> "$L/jwks-gone.held" || rc=$?
+[ "$rc" -eq 2 ] || err "a JWK Set that is not there: rc=$rc, not 2"
+vec JV_JWK_PRIVATE_RSA | python3 -I -c 'import sys; print("{\"keys\":["+sys.stdin.read().strip()+"]}")' > "$L/jwks-private.json"
+rc=0; BOTE_JWKS_FILE="$L/jwks-private.json" BOTE_RESOURCE_URL=https://mcp.example.com/mcp BOTE_AUTH_SERVERS=https://as.example.com timeout 5 $B http 18388 2> "$L/jwks-private.held" || rc=$?
+[ "$rc" -eq 2 ] || err "a JWK Set holding a private key: rc=$rc, not 2"
+grep -q '\[ERROR\] BOTE_JWKS_FILE refused' "$L/jwks-private.held" || err "no reason for the refused set: $(cat "$L/jwks-private.held")"
+
 # A session exists once initialize has succeeded (3.4.15): a refused one gets none.
 h=$(curl -s -D - -o /dev/null "${H[@]}" -d '{"method":"initialize"' http://127.0.0.1:18392/mcp)
 echo "$h" | grep -qi '^mcp-session-id:' && err "a refused initialize was given a session: $h"

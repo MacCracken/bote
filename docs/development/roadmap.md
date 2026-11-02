@@ -30,9 +30,7 @@ revision's required list is features bote lacks. Each has a place below.
 
 ## Next patch
 
-**3.6.2 — RS256 and ES256.** Item 1 of 3.6.x goes first, ahead of the `403`: audience validation is only as
-useful as the tokens bote can verify, and most authorization servers sign asymmetrically. A defect found in
-3.6.1 lands ahead of it.
+**3.6.3 — `403` with `insufficient_scope`.** The last item of 3.6.x. A defect found in 3.6.2 lands ahead of it.
 
 ## 3.5.x — MCP 2026-07-28, dual-era
 
@@ -59,18 +57,19 @@ Run `./scripts/conformance.sh` at any release that touches the protocol. It need
 
 ## 3.6.x — Authorization on HTTP
 
-bote is a resource server with bearer auth, and 3.6.0 and 3.6.1 meet the 2026-07-28 authorization spec's
-`MUST`s for HS256 tokens: it publishes its metadata and checks a token's audience. What is left is below.
+bote is a resource server with bearer auth, and it meets the 2026-07-28 authorization spec's `MUST`s: it
+publishes its metadata and checks a token's audience, for HS256, RS256 and ES256. What is left is below.
 Authorization as a whole is optional, so this applies when an operator turns auth on.
 
-1. **RS256 and ES256.** An OAuth 2.1 authorization server does not share an HS256 secret with its resource
-   servers, so HS256 alone rarely meets the audience check 3.6.1 built. sigil has the primitives
-   (`rsa_pkcs1v15_verify_sha256`, `ecdsa_p256_verify`), and `_jwt_str_field_eq` already reads `alg` as an
-   exact field, which is the precondition for accepting more than one algorithm. The keys need a home:
-   configured ones first, and fetching `jwks_uri` is a separate step, with the SSRF guard and a cache.
-2. **`403` with `error="insufficient_scope"`** when a token lacks a scope, with `scope` and `resource_metadata`
+1. **`403` with `error="insufficient_scope"`** when a token lacks a scope, with `scope` and `resource_metadata`
    in the challenge. A validator's return is opaque to bote, so bote cannot yet see what a token grants, and a
    scope hierarchy is the server's to account for.
+2. **What a verify costs.** ES256 takes about 10.5 ms and RS256 about 1.3 ms, on the single loop, for a good token and
+   a forged one alike, so about 100 forged tokens a second occupy a server that takes ES256. A cache of tokens
+   already verified, bounded and keyed by hash, would give legitimate traffic that time back. A forged token
+   stays expensive until threaded dispatch (3.7.x), so a server on the internet wants a rate limit in front.
+3. **Fetching `jwks_uri`.** Keys come from a file, and rotating them means a restart with the new set in place. Fetching
+   them needs the SSRF guard and a cache, and has to survive the authorization server being down.
 
 ## 3.7.x — Threaded dispatch and `subscriptions/listen`
 

@@ -18,7 +18,7 @@
 # request-scoped context lands. Returning 0 means "reject".
 #
 # MCP says a server MUST validate that a token was issued for it, and bote cannot do
-# that for a validator it knows nothing about. auth_validator_jwt_hs256 does, given an
+# that for a validator it knows nothing about. auth_validator_jwt does, given an
 # audience. Any other validator has to.
 #
 # Why fn pointer + ctx instead of a hardcoded scheme? Real deployments

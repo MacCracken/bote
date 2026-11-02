@@ -50,7 +50,7 @@ apps don't each reimplement the same protocol.
 | **`HostRegistry` + SSRF guard** — IPv4 + IPv6 blocklists for loopback, private, link-local, cloud-metadata | ✅ |
 | **Audit / events sinks** — fn-pointer + ctx adapters, libro + majra wired | ✅ |
 | **Streaming primitives** — `ProgressUpdate`, `CancellationToken`, progress notifications | data layer ✅ / threaded dispatch ⏳ (roadmap 3.5.x) |
-| **OAuth 2.1 substrate** — bearer (RFC 6750), Protected Resource Metadata (RFC 9728), JWT HS256 access tokens with audience, issuer, `exp` and `nbf` checks (RFC 8707, RFC 7519), PKCE-S256 helpers | ✅ |
+| **OAuth 2.1 substrate** — bearer (RFC 6750), Protected Resource Metadata (RFC 9728), JWT access tokens, HS256, RS256 and ES256, with audience, issuer, `exp` and `nbf` checks (RFC 8707, RFC 7519), PKCE-S256 helpers | ✅ |
 | **Sandbox runner** — fn-pointer + ctx adapter (kavach-shaped), noop default | ✅ in `dist/bote.cyr` (3.3.13); not in the core bundle |
 
 ---
@@ -128,7 +128,26 @@ BOTE_AUTH_SERVERS="https://auth.example.com" ./build/bote http 8390
 
 A token issued for another server is refused even when its signature is good, which is what MCP
 asks of a resource server. A key under 32 bytes, a key with no `BOTE_RESOURCE_URL`, or a key beside
-`BOTE_BEARER_TOKENS` stops the server at startup. RS256 and ES256 are next on the roadmap.
+`BOTE_BEARER_TOKENS` stops the server at startup.
+
+Most authorization servers sign with a private key. Save their JWK Set, the document at their
+`jwks_uri`, and point bote at it:
+
+```sh
+BOTE_JWKS_FILE="/etc/bote/jwks.json" \
+BOTE_RESOURCE_URL="https://mcp.example.com/mcp" \
+BOTE_AUTH_SERVERS="https://auth.example.com" ./build/bote http 8390
+# RS256 (2048 to 4096 bits, e = 65537) and ES256 (P-256), with the same claim checks
+```
+
+A token's `kid` picks the key, and with no `kid` there must be exactly one key of its `alg`. Keys
+bote cannot use are skipped with a WARN. A set with a private key in it, or with nothing usable, stops
+the server, and so does giving it `BOTE_JWKS_FILE` and `BOTE_JWT_SECRET` together. Keys are read at
+startup, so rotating them means a restart with the new set in place.
+
+A signature check is the slowest thing a request does. ES256 costs about 10.5 ms and RS256 about 1.3 ms,
+for a forged token as much as a good one, on one thread. Put a rate limit ahead of a server that
+takes tokens from the internet.
 
 ### Browsers
 
@@ -321,9 +340,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 3243 total across sixteen files (+ a core-only drift smoke)
+### Tests — 3345 total across sixteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 3243 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 3345 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 819 — core protocol/dispatch/codec/schema/session/transports
@@ -333,7 +352,7 @@ cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fs_tools.tcyr      # 56 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 203 — host registry + SSRF guard (IPv4 + IPv6)
 cyrius test tests/bote_http_era.tcyr      # 1372 — MCP 2026-07-28 on HTTP, on the real handlers
-cyrius test tests/bote_jwt.tcyr           # 126 — JWT HS256 verify + exact alg + exp enforcement
+cyrius test tests/bote_jwt.tcyr           # 228 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256

@@ -114,30 +114,60 @@ fn _bote_bearer_from_env(out_fp, out_ctx) {
     return 1;
 }
 
-# BOTE_JWT_SECRET: an HS256 key, for tokens from an authorization server. Each must name
-# BOTE_RESOURCE_URL in `aud`, and one of BOTE_AUTH_SERVERS in `iss`, so the first is
-# required: a verifier with no audience of its own cannot do what MCP asks. Returns 1, 0
-# when it is unset, or -1 when the server should not start. The key is never logged.
+# The public keys in the JWK Set at `path`, as a JwtSecret, or 0 once it has said why not.
+fn _bote_jwks_load(path) {
+    var len[8];
+    var json = file_read_whole_max(path, BOTE_JWKS_MAX, &len);
+    if (json == 0) {
+        bote_log_error("BOTE_JWKS_FILE cannot be read");
+        return 0;
+    }
+    var why = jwt_jwks_check(json);
+    if (why != 0) {
+        var ln[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&ln, SK_ERROR, "BOTE_JWKS_FILE refused");
+        bote_log_str(&ln, "reason", why);
+        bote_log_emit(&ln);
+        return 0;
+    }
+    return jwt_secret_from_jwks(json);
+}
+
+# BOTE_JWT_SECRET: an HS256 key. BOTE_JWKS_FILE: the path of a JWK Set, for RS256 and ES256.
+# A token must name BOTE_RESOURCE_URL in `aud`, and one of BOTE_AUTH_SERVERS in `iss`, so the
+# first is required: a verifier with no audience of its own cannot do what MCP asks. Returns
+# 1, 0 when neither is set, or -1 when the server should not start. A key is never logged.
 fn _bote_jwt_from_env(out_fp, out_ctx) {
     var key = getenv("BOTE_JWT_SECRET");
-    if (key == 0) { return 0; }
-    if (load64(out_fp) != 0) {
-        bote_log_error("BOTE_JWT_SECRET and BOTE_BEARER_TOKENS are both set: a request has one validator");
+    var jwks = getenv("BOTE_JWKS_FILE");
+    if (key == 0 && jwks == 0) { return 0; }
+    if (key != 0 && jwks != 0) {
+        bote_log_error("BOTE_JWT_SECRET and BOTE_JWKS_FILE are both set: a server verifies with one or the other");
         return 0 - 1;
     }
-    if (strlen(key) < BOTE_JWT_MIN_KEY) {
-        bote_log_error("BOTE_JWT_SECRET is under 32 bytes, which RFC 7518 3.2 does not allow for HS256");
+    if (load64(out_fp) != 0) {
+        bote_log_error("a JWT key and BOTE_BEARER_TOKENS are both set: a request has one validator");
         return 0 - 1;
     }
     var url = getenv("BOTE_RESOURCE_URL");
     if (url == 0) {
-        bote_log_error("BOTE_JWT_SECRET needs BOTE_RESOURCE_URL: a token must be checked against this server's identity");
+        bote_log_error("a JWT key needs BOTE_RESOURCE_URL: a token must be checked against this server's identity");
         return 0 - 1;
     }
-    var s = jwt_secret_new(key);
+    var s = 0;
+    if (jwks != 0) {
+        s = _bote_jwks_load(jwks);
+        if (s == 0) { return 0 - 1; }
+    } else {
+        if (strlen(key) < BOTE_JWT_MIN_KEY) {
+            bote_log_error("BOTE_JWT_SECRET is under 32 bytes, which RFC 7518 3.2 does not allow for HS256");
+            return 0 - 1;
+        }
+        s = jwt_secret_new(key);
+    }
     jwt_secret_with_audience(s, url);
     jwt_secret_with_issuers(s, _split_csv_tokens(getenv("BOTE_AUTH_SERVERS")));
-    store64(out_fp, &auth_validator_jwt_hs256);
+    store64(out_fp, &auth_validator_jwt);
     store64(out_ctx, s);
     bote_log_info("jwt auth enabled");
     return 1;

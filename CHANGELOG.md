@@ -18,6 +18,86 @@ have per release.
 
 _(empty)_
 
+## [3.6.2] — 2026-11-01 · RS256 and ES256, from a JWK Set
+
+Most authorization servers sign with a private key, so 3.6.1's audience check reached few of them. bote now verifies RS256 and
+ES256 against public keys the operator supplies, as a JWK Set, which is the document an authorization server publishes.
+
+**The official client ran its OAuth flow on each algorithm.** The mock authorization server signs with real keys through Node's
+crypto, and bote verifies them, in both eras: 266 checks, from 182. The verifiers are also checked against RFC 7515's published
+A.2 and A.3 examples, and against tokens from a signer bote shares nothing with.
+
+**A signature check is now the slowest thing a request does, and it is the thing to plan around.** See Performance. It is reached
+with no credentials, and a forged token costs what a good one does.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Added
+
+- **`jwt_secret_from_jwks(json)`** loads a JWK Set, and **`BOTE_JWKS_FILE`** points the binary at one. `jwt_jwks_check` says why a set
+  cannot load. RS256 keys of 2048 to 4096 bits with e = 65537, and ES256 keys on P-256. A set holding anything else is not an
+  error, because real ones hold encryption keys and other algorithms: those are left out with a WARN. A set with nothing usable,
+  two keys with one `kid`, or a private key stops the server.
+- **`auth_validator_jwt`**, for every algorithm. `auth_validator_jwt_hs256` is the same function under its old name.
+- `_jx_array_next`, the one step along a JSON array, now that three places needed it.
+- `tests/fixtures/jwt_vectors.mjs` writes `jwt_vectors.cyr`: public keys and tokens signed by Node. No private key is kept.
+- Benchmarks `jwt_rs256` and `jwt_es256`.
+
+### Security
+
+- **Algorithm confusion cannot happen here by construction.** A key has one algorithm from the moment it loads (RFC 8725 §3.1). A
+  token's `alg` only selects among keys of that algorithm, and a handle holds a shared secret or public keys and never both, so a public
+  key never reaches the HMAC. An HS256 token keyed with the RSA modulus or with its PEM is refused by test, as is `alg: none`.
+- **Nothing in a token can supply a key.** `kid` picks among the operator's keys, and `jwk`, `jku`, `x5u` and `x5c` are not read. With no
+  `kid` there must be exactly one key of that `alg`, because trying each would hand a forged token one expensive verify per key.
+- **`crit` is refused**, for HS256 as well, as RFC 7515 §4.1.11 asks of a verifier that does not understand it. It was ignored.
+- **CVE-2022-21449's all-zero ECDSA signature is refused by test**, along with `r` or `s` equal to the curve order.
+- **Keys are checked at load:** a modulus under 2048 bits, even, or not minimal, a small `e`, a point off the curve, a coordinate of the
+  wrong length.
+- **ES256 has two spellings of every signature.** `(r, n - s)` is valid, and JWS has no rule against it, so a token's text cannot key a
+  revocation list under ES256. A test pins this. HS256 and RS256 keep one spelling. Key on `jti` instead.
+
+### Tests
+
+- 3,345 assertions, from 3,243, on x86_64 and under `qemu-aarch64`. `tests/bote_jwt.tcyr` has 228, from 126.
+- 46 mutants, all killed, and one left out as equivalent. Ten survived the first run, nearly all because a second check caught the same
+  input, and two of those would have been forgeries with the check gone: a correct RS256 signature with a byte after it, and an
+  HS256 token signed with an empty key against a handle with no key. Each has a test of its own now.
+- `fuzz/jwt.fcyr` flips every byte of an RS256 and an ES256 token, and sweeps JWK Sets through the loader.
+- `scripts/transport-smoke.sh` runs Node-signed tokens through the binary, and proves each bad set stops it.
+
+### Performance
+
+No regression on a path that existed. Interleaved A/B, 15 alternating rounds, pinned to one core, 3.6.1 against this tree. The machine
+was busy with other work, so this compares minimums, in ns, which load cannot lower:
+
+| Bench | 3.6.1 | 3.6.2 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 4,004 | 3,994 | −0.2% |
+| `dispatch_tools_call` | 2,112 | 2,212 | +4.7% |
+| `http_era_legacy` | 2,470 | 2,483 | +0.5% |
+| `http_era_modern` | 11,416 | 11,504 | +0.8% |
+| `jwt_validate_audience`, HS256 | 8,842 | 8,892 | +0.6% |
+
+`dispatch_tools_call` is unchanged code, so its +4.7% is this binary's layout.
+
+**What a token costs**, from the same run, a good token or a forged one alike:
+
+| Algorithm | Per token | Against a request of about 230 µs |
+|---|---|---|
+| HS256 | 8.9 µs | 4% |
+| RS256 | 1.3 ms | 6 times the request |
+| ES256 | 10.5 ms | 46 times the request |
+
+Most of that is sigil's arithmetic, and none of it is on the heap: a verify keeps 0 B. On one thread it caps a server at about 95
+ES256 or 770 RS256 requests a second, and a forged token needs no credentials to spend that time, so about 95 forged tokens a
+second occupy a server that takes ES256. `kid` and the signature's length are checked first, so a token that names no key costs
+nothing, but one that names a real `kid` does. Put a rate limit in front of a server that takes tokens from the internet. The
+roadmap has a cache of verified tokens for the legitimate half of this, and threaded dispatch for the rest.
+
+Stdio is byte-identical to 3.6.1 over 200,000 messages, and HTTP with no auth configured on 50 of 50 cases, with only the version
+string aligned.
+
 ## [3.6.1] — 2026-11-01 · A token must have been issued for this server
 
 MCP says a server MUST validate that a token was issued for it, and until now bote checked a signature and an expiry. A good
