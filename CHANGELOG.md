@@ -18,6 +18,139 @@ have per release.
 
 _(empty)_
 
+## [3.7.0] — 2026-11-02 · Streamable on worker threads
+
+**`bote streamable` serves on worker threads**, 4 by default (`BOTE_WORKERS`). Its loop only accepts, and each connection
+goes to the next free worker, so a client that is slow to send or to read, or a token that is slow to verify, holds one
+worker and not the server. On the smoke test a connection held open half-sent stops every other client of a
+`BOTE_WORKERS=0` server, the one loop it was, and none of a threaded one. The first bite of 3.7.x: everything a streamable
+request reaches in bote is made safe between workers, the request's own state per thread and the rest guarded.
+
+**Five defects land ahead of it**, from an independent review of 3.6.6. The worst is older: since 3.4.15 the request arena
+kept a chunk for every message a little larger than the one before, 105 MB for 300 refused `resources/read` calls, with no
+auth. See the correction notices in 3.6.6 and 3.4.15.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Added
+
+- **`streamable_config_with_workers(c, n)`** and `streamable_config_workers`: serve on `n` threads, or on the calling thread
+  with 0, the default, so an embedder's server is as it was until it asks. StreamableConfig grows to 96 B.
+- **`BOTE_WORKERS`** in the binary, for `bote streamable`: 4 unless set, at most `BOTE_WORKERS_MAX` (64), held there with a
+  WARN; a value that is not a count keeps 4 with a WARN. Logged at INFO.
+- **`src/conn.cyr`**: `bote_conn_serve_pooled(transport, addr, port, fp, ctx, workers)` on sandhi's pool;
+  `bote_conn_arm()`, which gives every thread a request state of its own; `bote_conn_serial_sinks(d)`, which makes a
+  dispatcher's audit and event sinks take turns, since libro's chain and majra's hub were written for one caller at a time.
+- **`src/protocol.cyr`**, in core: `bote_req_state()`, the calling thread's request state (arena, token, its kept copy, a
+  fetch's reason); `bote_req_arena_new()`, bote's own request arena, and `bote_req_arena_bytes(a)`.
+- `session_store_lock` / `session_store_unlock`, `stream_event_to_wire_a`, `resumption_buffer_events_after_a`.
+
+### Changed
+
+- **A threaded server's shared state is guarded.** The session store takes a mutex in each of its functions (SessionStore
+  32 B), which also covers each session's outbound buffer: publishing a notification and draining one hold it, and a drain is
+  copied onto the arena under it, so what a GET sends is the buffer at one moment. A session's outbound bundle is installed
+  with a compare-and-swap, so two workers asking at once share one. A JwtSecret (136 B) gives each refresh to one worker by
+  a compare-and-swap on when it was last asked, so the others go on with the keys held and no verify waits on a fetch; its
+  cache is read and written under its mutex once threads run, and each clear moves a generation on, so a token verified with
+  keys a refresh has since replaced is not remembered. `bote_fetch_why()` is the calling thread's.
+- **A fork from a worker holds the allocators' locks across it** (`_bf_fork`), so the child cannot inherit one another
+  worker held: lib/alloc.cyr's and lib/freelist.cyr's, through their own functions, for want of a stdlib hook (filed in
+  cyrius's repository as 2026-11-02-bote-fork-needs-the-allocator-locks.md).
+- **Two JWK Sets with the same keys are the same set**, in any order.
+- **On agnos a token naming a key the set does not hold asks nothing**; the timer still refreshes there.
+- **A GET's drain, and a POST carrying the pending events, render them on the request arena.**
+
+### Fixed
+
+- **The request arena grew without bound for messages of rising size** (since 3.4.15). lib/alloc.cyr's growable arena, when
+  the chunk after the one in use was too small, linked a new chunk in front of it and kept both, so each message a little
+  larger than any before added a chunk for good: 105,138,568 B for 300 refused `resources/read` calls, the URI rising from
+  12 KB to 42 KB. bote has its own arena: the first chunk ahead that fits, else one appended at the end, of the chunk size
+  doubled until the request fits, so a ramp keeps a chunk for each size its largest message needs. Alone, 200 rounds of a
+  rising size kept 24,121,984 B on the stdlib's and keep 262,160 B now; end to end, 150 messages rising to a 92 KB URI keep
+  2.9 MB, where the stdlib's kept about 2 MB a message. Filed in cyrius's repository as
+  2026-11-02-bote-growable-arena-keeps-a-chunk-per-larger-request.md.
+- **A resource registered with no handler was judged by itself, and served by its template**, so the template's scopes did
+  not apply to it, on `resources/read`, the HTTP 403 gate and a completion. It is judged by what serves it now.
+- **A JWK Set served in another order on each fetch was a change each time**: a heap copy of the keys, kept, and the
+  verified-token cache emptied, at up to one fetch a minute that a client could trigger.
+- **On agnos a client could start a fetch** by naming an unknown `kid`, and there a fetch runs in this process and keeps what
+  sandhi's client allocates.
+- **`jwt_secret_from_jwks` kept a handle for each set it refused.** It checks the set first.
+- **A GET's drain rendered every pending event on the heap**, each time: twenty GETs of forty events kept 275,200 B. A
+  POST carrying them did the same.
+- `ssrf_host` and `_ssrf_lower` said they return a fresh heap string; since 3.6.6 it is on the arena, until the next message.
+
+### Security
+
+- **One client no longer holds a streamable server.** A connection sent half a request held the one loop until sandhi's
+  60 s budget for it, and a client reading a little at a time held it longer; each now holds a worker, and it takes
+  `BOTE_WORKERS` of them to hold the server. A forged token's verify, about 10.5 ms for ES256, holds one worker too.
+- **A client could exhaust the server's memory** with refused requests of rising size, needing no credentials, on every
+  transport. Fixed above.
+- **A template's scopes could be bypassed** through a URI registered as a resource with no handler. Fixed above.
+
+### Tests
+
+- 4,499 assertions, from 4,404, in 20 files, on x86_64 and under `qemu-aarch64`.
+  - **`tests/bote_threads.tcyr`**, new, has 49, each driven from several threads at once: each thread's own request state,
+    armed from a worker so that the main thread, with no thread-local block, gets one at its first look; 1,600 sessions made
+    on four threads, none lost; a session's outbound bundle asked for by eight threads at once; 1,500 notifications published
+    while three threads drain and another makes sessions, every drain whole and in order; sinks that take turns; eight
+    workers finding the keys due, or meeting an unknown `kid`, making one fetch; sixteen tokens in four cache slots on eight
+    threads; a fork while another thread holds lib/alloc.cyr's lock, and lib/freelist.cyr's; the streamable handler on six
+    threads at once over socketpairs, 720 sessions and calls; and 0 heap bytes for a GET's drain and a POST's.
+  - **`tests/bote.tcyr`** has 969, from 947: the arena, its chunks, alignment, bounds, realloc and order; 200 rounds of a
+    rising size keeping one chunk; the review's ramp end to end, started past the largest size the rows before it reached,
+    and run twice; and a resource with no handler judged by its template.
+  - **`tests/bote_jwt.tcyr`** has 471, from 454: the same keys in another order, a key twice, and the generation: a token
+    verified across a change of keys is not remembered, and the next verify is.
+  - **`tests/bote_streamable.tcyr`** has 58, from 53: a full store keeps nothing for a refusal, and arming on a main thread
+    with no thread-local block. **`tests/bote_fetch.tcyr`** has 62.
+- **39 mutants, 39 killed.** The first run left seven standing. Six were test gaps, now covered: arming on a main thread
+  with no block, a full store's refusal, publishing and draining unlocked (a vec that never frees hands a racing copy valid
+  pointers to stale data, so the test checks order, not only validity), a shrinking realloc, and a ramp that started inside
+  sizes the arena had already reached. The seventh was a mutant that left the lock's release in place, which let the child
+  go free; written properly, it is killed.
+- **`fuzz/req_arena.fcyr`**, new, the twelfth harness: random cycles of allocations, reallocations and resets, every block
+  intact at the end of its cycle, aligned, and the heap bounded. lib/alloc.cyr's growable arena fails it on the bound.
+- **`scripts/transport-smoke.sh`**: streamable answers beside a held connection, which stops a `BOTE_WORKERS=0` server;
+  `BOTE_WORKERS` is held to its bound; and sixteen clients send 12,639 authenticated requests in 3.5 s while the keys are
+  fetched from a `jwks_uri` every second, each fetch forked from a worker, none failing.
+- **The official suite** is where 3.6.6 left it, and the official client passes 410 of 410 on every transport and token kind.
+- stdio is byte-identical to 3.6.6 over 200,000 messages, and HTTP over 50 of 50.
+
+### Performance
+
+**On worker threads**, `bote streamable` with 8 client processes on 8 cores and the server on 8 others, 3 s per row, the
+client part of what is measured. Requests a second:
+
+| Load | `BOTE_WORKERS=0` | 4 workers |
+|---|---|---|
+| `server/discover`, no auth | 12,789 | 22,179 |
+| the same with an ES256 token, remembered | 8,824 | 19,066 |
+| a forged ES256 token, a full verify each, refused | 96 | 223 |
+
+**Per message the request path costs what it did.** Interleaved A/B against 3.6.6, 15 rounds pinned to an idle core:
+most rows are 1 to 3% slower, rows that run none of the changed code among them (`jsonx_get_str_flat` +14.6%,
+`jsonx_get_raw_nested` +3.8%, `schema_compile_nested` +2.3%), which is layout: the bench binary grew 12.6 KB. So a
+control was built with the same layout, this tree with 3.6.6's request path (the stdlib's arena and its fast path) and no
+session lock, and run against it, 11 rounds. Minimums, in ns:
+
+| Bench | control | 3.7.0 | Delta |
+|---|---|---|---|
+| `dispatch_tools_call` | 2,193 | 2,182 | −0.5% |
+| `dispatch_initialize` | 1,776 | 1,778 | +0.1% |
+| `codec_process_message` | 4,108 | 4,077 | −0.8% |
+| `http_era_legacy` | 2,451 | 2,479 | +1.1% |
+| `http_era_modern` | 11,595 | 11,413 | −1.6% |
+| `session_validate`, new: under the store's lock | 1,685 | 1,708 | +1.4%, 23 ns |
+
+**The per-thread lookup costs a message 47 ns**, armed: `codec_process_message_arena` 4,044 ns against
+`codec_process_message_threaded` 4,091 ns, the same message before and after `bote_conn_arm`. A process that never arms
+pays one compare. Most of `session_validate`'s 1.7 µs is the `clock_gettime` system call (3.4.1).
+
 ## [3.6.6] — 2026-11-02 · Keys from `jwks_uri`
 
 **The rest of 3.6.x, authorization on HTTP.** Three items, each built and mutation-tested before the next:
@@ -34,6 +167,14 @@ _(empty)_
 call, and on agnos a web call kept its record. See the correction notice in 3.6.5.
 
 The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+> ⚠ **Corrected at 3.7.0.** Four claims in this entry were not true, found by an independent review of this release.
+> `dispatcher_resource_scopes_missing` did not judge a URI "by what would serve it" when a resource was registered there with
+> no handler: `resources/read` serves that URI by the template, and the check judged the resource, so a template's scopes
+> were bypassed for it. "Each fetch is made in a child" holds on Linux; on agnos it runs in this process, and a client
+> could start one by naming an unknown `kid`. "A set that has not changed... keeps nothing" failed for the same keys in
+> another order, which read as a change: a heap copy of the keys a fetch, kept, and an emptied cache. And a JWK Set that
+> `jwt_secret_from_jwks` refused kept the handle it had made. Each is fixed in 3.7.0.
 
 ### Added
 
@@ -1196,6 +1337,11 @@ yet; that now leads the roadmap.
 > ⚠ **Corrected at 3.5.0.** "A request leaves nothing on the heap" held for the scenarios measured here, not for every
 > request: a long value in a refused request's `id`, method, name, URI or cursor still grew the heap, with no auth. See
 > 3.5.0's Security section.
+
+> ⚠ **Corrected at 3.7.0.** The request arena did not stay bounded. lib/alloc.cyr's growable arena, when the chunk after
+> the one in use was too small, linked a new chunk in front of it and kept both, so messages that each needed a little
+> more than the one before kept a chunk apiece: 300 refused `resources/read` calls, the URI growing from 12 KB to 42 KB,
+> kept 105 MB, with no auth. Every heap row here repeated one size, which keeps nothing. bote has its own arena since 3.7.0.
 
 ### Security
 

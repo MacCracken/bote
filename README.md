@@ -49,7 +49,7 @@ apps don't each reimplement the same protocol.
 | **Typed MCP content blocks** — text / image / audio / resource / resource_link / blob | ✅ |
 | **`HostRegistry` + SSRF guard** — IPv4 + IPv6 blocklists for loopback, private, link-local, cloud-metadata | ✅ |
 | **Audit / events sinks** — fn-pointer + ctx adapters, libro + majra wired | ✅ |
-| **Streaming primitives** — `ProgressUpdate`, `CancellationToken`, progress notifications | data layer ✅ / threaded dispatch ⏳ (roadmap 3.7.x) |
+| **Streaming primitives** — `ProgressUpdate`, `CancellationToken`, progress notifications | data layer ✅ / streamable on worker threads ✅ (3.7.0) / held-open streams ⏳ (roadmap 3.7.x) |
 | **OAuth 2.1 substrate** — bearer (RFC 6750), Protected Resource Metadata (RFC 9728), JWT access tokens, HS256, RS256 and ES256, with audience, issuer, `exp` and `nbf` checks (RFC 8707, RFC 7519), PKCE-S256 helpers | ✅ |
 | **Sandbox runner** — fn-pointer + ctx adapter (kavach-shaped), noop default | ✅ in `dist/bote.cyr` (3.3.13); not in the core bundle |
 
@@ -160,8 +160,9 @@ again less often until it answers. A key that leaves the set stops passing token
 remembered ones included. The URL must be `https://`, or `http://` to a loopback address.
 
 A signature check is the slowest thing a request does. ES256 costs about 10.5 ms and RS256 about 1.3 ms,
-for a forged token as much as a good one, on one thread. Put a rate limit ahead of a server that
-takes tokens from the internet.
+for a forged token as much as a good one, on one thread. On `bote streamable` it holds one worker, not the
+server; on the other transports it holds the server. Put a rate limit ahead of a server that takes tokens
+from the internet.
 
 A token that passed is remembered, so a client that sends the same token again pays about 2.6 µs, on
 any algorithm, instead of the verify. It is judged again on its `exp` and `nbf` each time, and a token
@@ -205,9 +206,20 @@ not affected.
 BOTE_ALLOWED_ORIGINS="https://app.example,http://localhost:3000" ./build/bote bridge 8391
 ```
 
+### Worker threads
+
+`bote streamable` serves on worker threads, 4 by default: its loop only accepts, and each connection goes
+to the next free worker, so a client that is slow to send or to read, or a token that is slow to verify,
+holds one worker and not the server. `BOTE_WORKERS` sets how many, up to 64, and `0` serves every request
+on the one loop, one at a time, as before 3.7.0. The other transports serve one client at a time.
+
+```sh
+BOTE_WORKERS=8 ./build/bote streamable 8392
+```
+
 ### Connection deadlines
 
-Every transport serves one client at a time, so each connection gets a **send deadline**:
+Every transport but streamable serves one client at a time, so each connection gets a **send deadline**:
 a client that stops reading for `BOTE_SEND_TIMEOUT_MS` (default 30000) is dropped instead of
 wedging the server. The Unix transport's receive deadline, `BOTE_UNIX_IDLE_MS`, is **off** by
 default, because a Unix client may legitimately keep its connection quiet between requests; set it
@@ -389,26 +401,27 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 4404 total across eighteen files (+ a core-only drift smoke)
+### Tests — 4499 total across nineteen files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 4404 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 4499 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 947 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/bote.tcyr               # 969 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/conformance.tcyr        # 218 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 91 — bearer + allowlist + JWT + PKCE validators, the head check
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
-cyrius test tests/bote_fetch.tcyr         # 60 — a request made in a child: the record, the cap, the deadline, a real GET
+cyrius test tests/bote_fetch.tcyr         # 62 — a request made in a child: the record, the cap, the deadline, a real GET
 cyrius test tests/bote_fs_tools.tcyr      # 56 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 207 — host registry + SSRF guard (IPv4 + IPv6)
 cyrius test tests/bote_http_era.tcyr      # 1833 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
 cyrius test tests/bote_jwks.tcyr          # 49 — a jwks_uri: what it may be, and real fetches from a child
-cyrius test tests/bote_jwt.tcyr           # 454 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
+cyrius test tests/bote_jwt.tcyr           # 471 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
-cyrius test tests/bote_streamable.tcyr    # 53 — Streamable HTTP / SSE internals
+cyrius test tests/bote_streamable.tcyr    # 58 — Streamable HTTP / SSE internals
+cyrius test tests/bote_threads.tcyr       # 49 — bote on worker threads: each case from several threads at once
 cyrius test tests/bote_transport_unix.tcyr # 76 — Unix transport: sockaddr, accept-error policy, backoff, deadlines, closed-peer write
 cyrius test tests/bote_web_tools.tcyr     # 88 — web_fetch / web_search + the SSRF guard (URL and resolved address) + their records
 cyrius test tests/bote_ws.tcyr            # 94 — WebSocket config + wire-up + the send-deadline drop + scopes per frame + what an upgrade and a connection keep
@@ -468,6 +481,8 @@ cyrius fuzz fuzz/oauth_metadata.fcyr
 cyrius fuzz fuzz/resource_template.fcyr
 cyrius fuzz fuzz/schema_validate.fcyr
 cyrius fuzz fuzz/ssrf_ipv6.fcyr
+cyrius fuzz fuzz/http_head.fcyr
+cyrius fuzz fuzz/req_arena.fcyr
 # 1 passed, 0 failed each
 ```
 

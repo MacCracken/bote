@@ -231,6 +231,33 @@ fn main() {
     assert(streq(sandhi_server_path_only("/mcp?lastEventId=evt-7"), "/mcp") == 1,
     "path strips query for routing");
 
+    # ---------------- 3.7.0: a full store keeps nothing for a refusal ----------------
+    var fs_max = BOTE_SESSION_MAX;
+    BOTE_SESSION_MAX = 4;
+    var fst = session_store_default();
+    var fsi = 0;
+    while (fsi < 4) {
+        session_store_create(fst, "2025-11-25");
+        fsi = fsi + 1;
+    }
+    assert_eq(session_store_create(fst, "2025-11-25"), 0, "full store: a fifth session is refused");
+    var fs_at = alloc_used();
+    fsi = 0;
+    while (fsi < 20) {
+        session_store_create(fst, "2025-11-25");
+        fsi = fsi + 1;
+    }
+    assert_eq(alloc_used() - fs_at, 0, "full store: and twenty refusals keep nothing, no id drawn for them");
+    BOTE_SESSION_MAX = fs_max;
+
+    # ---------------- 3.7.0: arming on the main thread ----------------
+    # Nothing in this file has given the main thread a thread-local block: arming gives
+    # it one, and then reads the slot through it.
+    var arm_g = bote_req_state();
+    assert_eq(bote_conn_arm(), 0, "arm: on the main thread, with no thread-local block yet");
+    assert(bote_req_state() == arm_g, "arm: it keeps the state it had");
+    assert(bote_req_alloc() != 0, "arm: and its arena, through the slot");
+
     return assert_summary();
 }
 

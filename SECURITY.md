@@ -19,16 +19,18 @@ The primary security-relevant surface areas are:
 - **Transport layer** — HTTP, Streamable HTTP/SSE, WebSocket, Unix socket, and
   bridge transports accept network connections. Opt-in auth validators (bearer,
   allowlist, JWT HS256, PKCE) are built in; TLS is expected to be handled by
-  the deployment environment. Each transport serves one connection at a time;
-  since 3.4.3 every connection carries a send deadline (`BOTE_SEND_TIMEOUT_MS`,
+  the deployment environment. `bote streamable` serves on `BOTE_WORKERS` threads
+  since 3.7.0 (4 by default), so a slow client holds one worker; every other
+  transport serves one connection at a time. Since 3.4.3 every connection carries a send deadline (`BOTE_SEND_TIMEOUT_MS`,
   default 30 s), so a client that stops reading is dropped instead of wedging
   the server for everyone. Read deadlines: sandhi's idle and whole-request
   budgets on the HTTP family, opt-in `ws_config_with_idle_ms` on an upgraded
   WebSocket (`BOTE_WS_IDLE_MS` in the binary), opt-in `BOTE_UNIX_IDLE_MS` on the
   Unix transport — a quiet client holds those two single-threaded servers unless
   the operator opts in. The send deadline is per write, so a client that keeps
-  reading a little at a time is not dropped and can slow every other client;
-  threaded dispatch (roadmap 3.7.x) is the answer to that one.
+  reading a little at a time is not dropped: on streamable it holds a worker, and
+  `BOTE_WORKERS` such clients hold them all; on the other transports one holds
+  the server.
 - **Browsers** — since **3.4.15** every HTTP-family transport refuses a present
   `Origin` that is not on `BOTE_ALLOWED_ORIGINS` with 403, before anything else
   runs, and with no list set every present `Origin` is refused, except since **3.5.2**
@@ -195,9 +197,9 @@ The primary security-relevant surface areas are:
 
 | Version | Supported |
 | ------- | --------- |
-| 3.6.x   | Yes (current minor) |
-| 3.5.x   | Yes (prior minor) |
-| < 3.5   | No        |
+| 3.7.x   | Yes (current minor) |
+| 3.6.x   | Yes (prior minor) |
+| < 3.6   | No        |
 
 ## Reporting a Vulnerability
 

@@ -68,16 +68,19 @@ fn stream_event_data(e) { return load64(e + 16); }
 #   event: <type>\n
 #   data: <data>\n
 #   \n
-fn stream_event_to_wire(e) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "id: ");
-    str_builder_add_cstr(sb, stream_event_id(e));
-    str_builder_add_cstr(sb, "\nevent: ");
-    str_builder_add_cstr(sb, stream_event_type(e));
-    str_builder_add_cstr(sb, "\ndata: ");
-    str_builder_add_cstr(sb, stream_event_data(e));
-    str_builder_add_cstr(sb, "\n\n");
-    return str_data(str_builder_build(sb));
+fn stream_event_to_wire(e) { return stream_event_to_wire_a(default_alloc(), e); }
+
+# stream_event_to_wire on `a`: what the transport sends, on the request arena.
+fn stream_event_to_wire_a(a, e) {
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, "id: ");
+    str_builder_add_cstr_a(a, sb, stream_event_id(e));
+    str_builder_add_cstr_a(a, sb, "\nevent: ");
+    str_builder_add_cstr_a(a, sb, stream_event_type(e));
+    str_builder_add_cstr_a(a, sb, "\ndata: ");
+    str_builder_add_cstr_a(a, sb, stream_event_data(e));
+    str_builder_add_cstr_a(a, sb, "\n\n");
+    return str_data(str_builder_build_a(a, sb));
 }
 
 # ================================================================
@@ -116,7 +119,12 @@ fn resumption_buffer_push(rb, event) {
 # or if last_event_id is null/empty (streq on null would segfault;
 # empty string never matches a real "evt-N" id).
 fn resumption_buffer_events_after(rb, last_event_id) {
-    var out = vec_new();
+    return resumption_buffer_events_after_a(default_alloc(), rb, last_event_id);
+}
+
+# resumption_buffer_events_after, the vec on `a`.
+fn resumption_buffer_events_after_a(a, rb, last_event_id) {
+    var out = vec_new_a(a);
     if (last_event_id == 0) { return out; }
     if (load8(last_event_id) == 0) { return out; }
     var events = resumption_buffer_events(rb);
@@ -134,7 +142,7 @@ fn resumption_buffer_events_after(rb, last_event_id) {
     if (found_at < 0) { return out; }
     var j = found_at + 1;
     while (j < n) {
-        vec_push(out, vec_get(events, j));
+        vec_push_a(a, out, vec_get(events, j));
         j = j + 1;
     }
     return out;
@@ -164,15 +172,15 @@ fn session_outbound_id_gen(so) { return load64(so + 8); }
 
 # Lazily get (or create) the SessionOutbound bundle for an McpSession,
 # stashing it in the session's opaque outbound slot (session.cyr keeps that
-# slot type-agnostic). Returns the bundle. Wired into the GET drain (a later
-# bite); ships unused so the buffer sits empty until a producer feeds it.
+# slot type-agnostic). Returns the bundle. Installed with a compare-and-swap
+# (3.7.0): two workers that both find the slot empty keep one bundle between
+# them, so a notification pushed into it is not lost with the other.
 fn _strm_session_outbound(session) {
     var so = mcp_session_outbound(session);
-    if (so == 0) {
-        so = session_outbound_new();
-        mcp_session_set_outbound(session, so);
-    }
-    return so;
+    if (so != 0) { return so; }
+    so = session_outbound_new();
+    if (atomic_cas(session + 32, 0, so) == 1) { return so; }
+    return mcp_session_outbound(session);
 }
 
 # ================================================================
@@ -198,6 +206,9 @@ fn _strm_notify_publish(ctx, topic, payload) {
         return 0;
     }
     if (ctx == 0) { return 0; }
+    # Under the store's lock, which also guards every session's buffer: a worker
+    # may be draining one while this pushes to it.
+    session_store_lock(ctx);
     var ids = session_store_ids(ctx);
     var sessions = session_store_sessions(ctx);
     var n = vec_len(ids);
@@ -211,6 +222,7 @@ fn _strm_notify_publish(ctx, topic, payload) {
         }
         i = i + 1;
     }
+    session_store_unlock(ctx);
     return 0;
 }
 
@@ -221,7 +233,7 @@ fn strm_notify_sink(store) {
 }
 
 # ================================================================
-# StreamableConfig (80 bytes):
+# StreamableConfig (96 bytes):
 #   +0  endpoint_path     cstr (e.g. "/mcp")
 #   +8  bind_addr         i64
 #   +16 port              i64
@@ -232,10 +244,17 @@ fn strm_notify_sink(store) {
 #   +56 dispatcher        Dispatcher ptr (set by transport_streamable_run)
 #   +64 bearer_validator  fn ptr (token, ctx) → claims | 0, or 0 to disable
 #   +72 bearer_ctx        i64 ctx passed verbatim to validator
+#   +80 resource_metadata Protected Resource Metadata (src/oauth_metadata.cyr) or 0
+#   +88 workers           worker threads to serve on (3.7.0), or 0 for the calling
+#                         thread alone. With workers, bote's own state is safe
+#                         between them and the dispatcher's sinks take turns
+#                         (bote_conn_serial_sinks); a handler is called from any
+#                         of them. bote's fs, web and libro tools are not yet
+#                         safe there, and neither is registering while serving.
 # ================================================================
 
 fn streamable_config_new(path, addr, port) {
-    var c = alloc(88);
+    var c = alloc(96);
     store64(c, path);
     store64(c + 8, addr);
     store64(c + 16, port);
@@ -247,8 +266,12 @@ fn streamable_config_new(path, addr, port) {
     store64(c + 64, 0);
     store64(c + 72, 0);
     store64(c + 80, 0);
+    store64(c + 88, 0);
     return c;
 }
+
+fn streamable_config_with_workers(c, n) { store64(c + 88, n); return c; }
+fn streamable_config_workers(c) { return load64(c + 88); }
 
 fn streamable_config_with_resource_metadata(c, p) { store64(c + 80, p); return c; }
 fn streamable_config_resource_metadata(c) { return load64(c + 80); }
@@ -437,19 +460,21 @@ fn _strm_handle_post(cfd, buf, n, config) {
     # pending events (its session was just created this request), so it always
     # takes the application/json path below.
     var pso = _strm_post_session_outbound(buf, n, config);
-    if (pso != 0 && _strm_accepts_sse(buf, n) == 1
-      && resumption_buffer_len(session_outbound_buffer(pso)) > 0) {
+    var pend = 0;
+    if (pso != 0 && _strm_accepts_sse(buf, n) == 1) {
+        pend = _strm_drain_events_a(bote_req_alloc(), st, session_outbound_buffer(pso), 0);
+    }
+    if (pend != 0 && vec_len(pend) > 0) {
         sandhi_server_send_chunked_start_a(bote_req_alloc(), cfd, HTTP_OK, "text/event-stream", extra);
         var rframe = _strm_response_frame(resp);
         # A failed write means the peer stopped reading: drop it at once, as the
         # GET path does, or each event waits out its own send deadline while
         # every other client waits too.
         var pw = sandhi_server_send_chunk(cfd, rframe, strlen(rframe));
-        var pend = resumption_buffer_events(session_outbound_buffer(pso));
         var pi = 0;
         var pn = vec_len(pend);
         while (pi < pn && pw >= 0) {
-            var w = stream_event_to_wire(vec_get(pend, pi));
+            var w = stream_event_to_wire_a(bote_req_alloc(), vec_get(pend, pi));
             pw = sandhi_server_send_chunk(cfd, w, strlen(w));
             pi = pi + 1;
         }
@@ -489,10 +514,28 @@ fn _strm_send_retry(cfd, retry_ms) {
 # live socket. An empty Last-Event-ID is treated as absent (drain-all) rather
 # than passed to events_after, which would return empty on the empty string.
 fn _strm_drain_events(rbuf, last_id) {
+    return _strm_drain_events_a(bote_req_alloc(), 0, rbuf, last_id);
+}
+
+# _strm_drain_events, copied onto `a` under the lock of the store `st` (0 for
+# none), so what is sent is what the buffer held at one moment while another
+# worker pushes to it (3.7.0).
+fn _strm_drain_events_a(a, st, rbuf, last_id) {
+    if (st != 0) { session_store_lock(st); }
+    var out = 0;
     if (last_id != 0 && load8(last_id) != 0) {
-        return resumption_buffer_events_after(rbuf, last_id);
+        out = resumption_buffer_events_after_a(a, rbuf, last_id);
+    } else {
+        var ev = resumption_buffer_events(rbuf);
+        out = vec_new_a(a);
+        var i = 0;
+        while (i < vec_len(ev)) {
+            vec_push_a(a, out, vec_get(ev, i));
+            i = i + 1;
+        }
     }
-    return resumption_buffer_events(rbuf);
+    if (st != 0) { session_store_unlock(st); }
+    return out;
 }
 
 fn _strm_handle_get(cfd, buf, n, config) {
@@ -548,12 +591,12 @@ fn _strm_handle_get(cfd, buf, n, config) {
 
     # Drain buffered notifications (unconditional when there is no cursor).
     var last_id = sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Last-Event-ID");
-    var drain = _strm_drain_events(rbuf, last_id);
+    var drain = _strm_drain_events_a(bote_req_alloc(), st, rbuf, last_id);
     var di = 0;
     var dn = vec_len(drain);
     while (di < dn) {
         var ev = vec_get(drain, di);
-        var wire = stream_event_to_wire(ev);
+        var wire = stream_event_to_wire_a(bote_req_alloc(), ev);
         sse_r = sandhi_server_send_chunk(cfd, wire, strlen(wire));
         if (sse_r < 0) { bote_conn_log_send_drop("streamable", sse_r); return 0; }
         di = di + 1;
@@ -606,9 +649,12 @@ fn _strm_handle(config, cfd, buf, n) {
 fn transport_streamable_run(dispatcher, config) {
     _strm_init();
     store64(config + 56, dispatcher);
-    return bote_conn_serve("streamable",
+    var workers = streamable_config_workers(config);
+    if (workers > 0) { bote_conn_serial_sinks(dispatcher); }
+    return bote_conn_serve_pooled("streamable",
       streamable_config_addr(config),
       streamable_config_port(config),
       &_strm_handle,
-      config);
+      config,
+      workers);
 }

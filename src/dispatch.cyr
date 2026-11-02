@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.6.6"; }
+fn _bote_server_version() { return "3.7.0"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -1152,11 +1152,14 @@ fn dispatcher_prompt_scopes_missing(d, name, claims) {
 }
 
 # The same for reading `uri`, judged by what would serve it, as resources/read finds that:
-# the resource registered at that URI, else the first template it matches (3.6.6).
+# the handler of the resource registered at that URI, else the first template it matches
+# (3.6.6). A resource registered with no handler is served by the template, and so is
+# judged by it (3.7.0): it was judged by the resource, which may require nothing, and
+# served by a template that required a scope.
 fn dispatcher_resource_scopes_missing(d, uri, claims) {
     if (claims == 0 || uri == 0 || dispatcher_resources(d) == 0) { return 0; }
     var r = dispatcher_resources(d);
-    if (resource_registry_contains(r, uri) == 1) {
+    if (resource_registry_handler(r, uri) != 0) {
         return _dsp_scopes_lacking(d, resource_def_required_scopes(resource_registry_get(r, uri)), claims);
     }
     var t = resource_registry_template_for(r, uri);

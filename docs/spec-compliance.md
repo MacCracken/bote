@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.6.6 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.7.0 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
 > ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not. Every other table here is against 2025-11-25.
 
@@ -91,7 +91,7 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | Every response is valid JSON: strings escaped per RFC 8259 §7, control bytes included, and valid UTF-8 (§8.1), invalid bytes as U+FFFD (3.4.15); every handler's result on one line of valid JSON (3.4.15) | `jsonx::bote_json_escape`, `dispatch::_dsp_checked_result` | ✅ (3.4.6) — through 3.4.5 the escaper left control bytes other than LF / CR / TAB raw, so a tool result holding an ESC or a BEL (an ANSI-coloured log through `fs_read`) was not JSON, and an embedder's `serverInfo` was not escaped at all. Asserted by the conformance suite's standing valid-JSON check (J15, F12) and a fuzz property |
 | `initialize` handshake (serverInfo + capabilities + version negotiation; `serverInfo` configurable via `dispatcher_set_server_info`) | `dispatch` | ✅ |
 | `ping` → empty `{}` result (spec: the receiver *MUST* respond promptly) | `dispatch` | ✅ (3.3.13) — answered ahead of every capability gate, so a bare dispatcher replies; emits no audit or event record (liveness, not activity). bote answers pings, it does not originate them |
-| `notifications/initialized` / `notifications/cancelled` — accepted, never answered | `codec` (no response to any notification) | ✅ (`cancelled` is ignored: there is no in-flight work to cancel until threaded dispatch, roadmap 3.7.x) |
+| `notifications/initialized` / `notifications/cancelled` — accepted, never answered | `codec` (no response to any notification) | ✅ (`cancelled` is ignored: a request runs to its end. Streamable serves on worker threads since 3.7.0, and cancelling one is roadmap 3.7.x) |
 | `tools/list` with full `inputSchema` | `dispatch` + `registry` | ✅ |
 | `outputSchema`; `title` and `icons`; `instructions` in `initialize` | — | ⏳ not implemented, roadmap 3.8.x. `structuredContent` goes out on bote's own libro tools |
 | Pagination: `nextCursor` omitted when there is no next page; an invalid `cursor` is `-32602` | `dispatch` | ✅ (3.4.5) — bote returns every item in one page and never issues a cursor, so any `cursor` a client sends is invalid and gets `-32602`, the spec's code for one, on `tools/list`, `prompts/list`, `resources/list` and `resources/templates/list`. A null `cursor` is read as absent. Through 3.4.4 a cursor was ignored and the first page sent again, which a client concatenating pages would take as duplicates |
@@ -281,29 +281,32 @@ registered by default in the binaries.
 
 ---
 
-## Test Coverage (bote 3.5.1)
+## Test Coverage (bote 3.7.0)
 
 | Scope | Count | Source |
 |---|---|---|
-| **Protocol conformance by spec clause** — JSON-RPC 2.0 §4 / §5 / §4.1 / §5.1 / §6 (incl. the spec's own examples), MCP initialize + all four revisions, ping, cancellation, capability gating, pagination cursors, tools/list, the tools/call protocol-vs-execution error split, prompts, resources, completion, control bytes in a tool result, every handler-result shape, typed arguments; the 2026-07-28 stateless path; every response checked to be valid JSON and a §5 Response object | **203** | `tests/conformance.tcyr` (3.4.5; 3.5.0) |
-| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / the per-request DEBUG line, the string escaper, registration checks, numbers per 2020-12 | **668** | `tests/bote.tcyr` |
-| Bearer + allowlist + JWT + PKCE validators | **55** | `tests/bote_auth.tcyr` |
+| **Protocol conformance by spec clause** — JSON-RPC 2.0 §4 / §5 / §4.1 / §5.1 / §6 (incl. the spec's own examples), MCP initialize + all four revisions, ping, cancellation, capability gating, pagination cursors, tools/list, the tools/call protocol-vs-execution error split, prompts, resources, completion, control bytes in a tool result, every handler-result shape, typed arguments; the 2026-07-28 stateless path; `-31403` on both eras; every response checked to be valid JSON and a §5 Response object | **218** | `tests/conformance.tcyr` (3.4.5; 3.5.0) |
+| Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / the per-request DEBUG line, the string escaper, registration checks, numbers per 2020-12, required scopes, the request arena and its bound | **969** | `tests/bote.tcyr` |
+| Bearer + allowlist + JWT + PKCE validators, the 403's challenge, the head check | **91** | `tests/bote_auth.tcyr` |
 | Content blocks + annotations | **25** | `tests/bote_content.tcyr` |
+| An outbound request made in a child: the record, the cap, the deadline, a real GET | **62** | `tests/bote_fetch.tcyr` |
 | `fs_tools` path safety + root confinement + control bytes as valid JSON + schemas and annotations; decoded names, truncation, fs_mkdir | **56** | `tests/bote_fs_tools.tcyr` |
-| HostRegistry + IPv4 / IPv6 SSRF (URL and resolved address; each 3.4.7 range named) + the IPv6 parser against cyrius's + hot-reload | **203** | `tests/bote_host.tcyr` |
-| JWT — HS256, RS256, ES256, JWK Sets, exact `alg`, `crit`, `exp`, `nbf`, `aud`, `iss`, algorithm confusion, no heap (mutation-proven) | **228** | `tests/bote_jwt.tcyr` |
+| HostRegistry + IPv4 / IPv6 SSRF (URL and resolved address; each 3.4.7 range named) + the IPv6 parser against cyrius's + hot-reload | **207** | `tests/bote_host.tcyr` |
+| MCP 2026-07-28 on HTTP, each clause on the real handlers over a socketpair; Protected Resource Metadata; the 403 for a missing scope | **1833** | `tests/bote_http_era.tcyr` |
+| A `jwks_uri`: what it may be, and real fetches from a child | **49** | `tests/bote_jwks.tcyr` |
+| JWT — HS256, RS256, ES256, JWK Sets, exact `alg`, `crit`, `exp`, `nbf`, `aud`, `iss`, algorithm confusion, scopes, tokens already verified, keys from a source, no heap (mutation-proven) | **471** | `tests/bote_jwt.tcyr` |
 | `libro_tools` incl. tampered-chain decode + populated-chain proof + CallToolResults, the retention guard, RFC 3339 timestamps, schemas, integers as validated, audit identity | **73** | `tests/bote_libro_tools.tcyr` |
 | Operational logging over sakshi | **50** | `tests/bote_log.tcyr` |
 | RFC 7636 PKCE-S256 | **17** | `tests/bote_pkce.tcyr` |
 | Sandbox runner adapter | **13** | `tests/bote_sandbox.tcyr` |
-| Streamable HTTP — event ids, resumption, per-session outbound, drain selection | **53** | `tests/bote_streamable.tcyr` |
+| Streamable HTTP — event ids, resumption, per-session outbound, drain selection, a full store's refusal | **58** | `tests/bote_streamable.tcyr` |
+| bote on worker threads — each case driven from several threads at once (3.7.0) | **49** | `tests/bote_threads.tcyr` |
 | Unix transport — sockaddr, accept-error policy, backoff, deadlines, closed-peer write, overlong lines, socket-path refusals | **76** | `tests/bote_transport_unix.tcyr` |
-| `web_tools` — scheme guard, SSRF guard (URL and resolved address), HTML stripper, entities, schemas and annotations, outbound deadline | **66** | `tests/bote_web_tools.tcyr` |
-| MCP 2026-07-28 on HTTP, each clause on the real handlers over a socketpair | **517** | `tests/bote_http_era.tcyr` |
-| WebSocket config + wire-up + the send-deadline drop + the upgrade's version check | **24** | `tests/bote_ws.tcyr` |
-| **Total assertions** | **2158** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
-| Hot-path benchmarks | **18** | `tests/bote.bcyr` |
-| Fuzz harnesses | **7** | `fuzz/*.fcyr` (in CI since 3.3.8; `jsonx_valid.fcyr` since 3.4.5, `ssrf_ipv6.fcyr` since 3.4.7) |
+| `web_tools` — scheme guard, SSRF guard (URL and resolved address), HTML stripper, entities, schemas and annotations, outbound deadline, a request in a child | **88** | `tests/bote_web_tools.tcyr` |
+| WebSocket config + wire-up + the send-deadline drop + the upgrade's version check + scopes per frame + the token judged again | **94** | `tests/bote_ws.tcyr` |
+| **Total assertions** | **4499** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
+| Hot-path benchmarks | **36** | `tests/bote.bcyr` |
+| Fuzz harnesses | **12** | `fuzz/*.fcyr` (in CI since 3.3.8) |
 | End-to-end transport round trips | 6 (stdio, HTTP, Unix, bridge, streamable, WS) | CI's "Transport smoke" step plus a per-release stdio probe on the built binary |
 
 The Rust archive's conformance suite (`tests/conformance.rs`, tag `0.92.0`, 44 scenarios) is

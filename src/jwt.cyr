@@ -370,16 +370,29 @@ fn _jwt_key_same(k, j) {
     return 1;
 }
 
-# 1 when the two vecs of keys hold the same keys in the same order. A set that only moved
-# its keys around reads as changed, which costs one copy of it and is right either way.
-fn _jwt_keys_same(old, fresh) {
-    if (old == 0 || vec_len(old) != vec_len(fresh)) { return 0; }
+# 1 when every key of `keys` is in `others`.
+fn _jwt_keys_in(keys, others) {
     var i = 0;
-    while (i < vec_len(old)) {
-        if (_jwt_key_same(vec_get(old, i), vec_get(fresh, i)) == 0) { return 0; }
+    while (i < vec_len(keys)) {
+        var found = 0;
+        var j = 0;
+        while (j < vec_len(others) && found == 0) {
+            if (_jwt_key_same(vec_get(keys, i), vec_get(others, j)) == 1) { found = 1; }
+            j = j + 1;
+        }
+        if (found == 0) { return 0; }
         i = i + 1;
     }
     return 1;
+}
+
+# 1 when the two vecs hold the same keys, in any order (3.7.0): they verify the same tokens.
+# Compared in order, a server that serves its set in another order each time made every
+# fetch a change, each one a heap copy of the keys kept for good and an emptied cache.
+fn _jwt_keys_same(old, fresh) {
+    if (old == 0) { return 0; }
+    if (_jwt_keys_in(old, fresh) == 0) { return 0; }
+    return _jwt_keys_in(fresh, old);
 }
 
 # The base64url member `name` of `jwk`, decoded on `a`, or 0.
@@ -624,8 +637,8 @@ fn _jwt_payload_a(a, token, s, plen_out) {
 
 # Verify an HS256 JWT. Returns 1 on valid, 0 otherwise.
 fn jwt_verify_hs256(token, key, key_len) {
-    var s[120];    # BOTE_JWT_SECRET_BYTES
-    memset(&s, 0, 120);
+    var s[136];    # BOTE_JWT_SECRET_BYTES
+    memset(&s, 0, 136);
     store64(&s, key);
     store64(&s + 8, key_len);
     var plen[8];
@@ -650,6 +663,11 @@ fn jwt_verify_hs256(token, key, key_len) {
 # another token is one verify more. The table is allocated when the first token is stored
 # and never grows. A slot (48 B): +0 digest, +32 exp, +40 nbf, -1 for either when
 # absent. An empty slot is zero, and no token's digest is.
+#
+# On worker threads (3.7.0) the table is read and written under the handle's mutex, taken
+# only once threads are running. Each clear moves the handle's generation on, and a token
+# is stored only if the generation is the one it read before it was verified: a token a
+# worker verified with keys a refresh has since replaced is not remembered past them.
 
 var BOTE_JWT_CACHE_DEFAULT = 1024;
 var BOTE_JWT_CACHE_MAX = 65536;
@@ -664,14 +682,36 @@ fn jwt_secret_with_cache(s, slots) {
         n = 1;
         while (n < slots && n < BOTE_JWT_CACHE_MAX) { n = n * 2; }
     }
+    _jwt_lock(s);
     store64(s + 40, n);
     store64(s + 48, 0);
+    store64(s + 128, load64(s + 128) + 1);
+    _jwt_unlock(s);
     return s;
 }
 
-fn _jwt_cache_clear(s) {
+fn _jwt_lock(s) {
+    if (_threads_active != 0 && load64(s + 120) != 0) { mutex_lock(load64(s + 120)); }
+    return 0;
+}
+
+fn _jwt_unlock(s) {
+    if (_threads_active != 0 && load64(s + 120) != 0) { mutex_unlock(load64(s + 120)); }
+    return 0;
+}
+
+# Forget every token judged before, with the lock held.
+fn _jwt_cache_clear_held(s) {
     var t = load64(s + 48);
     if (t != 0) { memset(t, 0, load64(s + 40) * BOTE_JWT_SLOT_BYTES); }
+    store64(s + 128, load64(s + 128) + 1);
+    return 0;
+}
+
+fn _jwt_cache_clear(s) {
+    _jwt_lock(s);
+    _jwt_cache_clear_held(s);
+    _jwt_unlock(s);
     return 0;
 }
 
@@ -760,12 +800,22 @@ fn _jwt_backoff(s) {
     return b;
 }
 
-# 1 when the source may be asked at `now`.
-fn _jwt_gate_open(s, now) {
-    var tried = load64(s + 104);
+# 1 when the source may be asked at `now`, last asked at `tried`.
+fn _jwt_gate_at(s, tried, now) {
     if (tried == 0 || now < tried) { return 1; }
     if (now - tried >= _jwt_backoff(s)) { return 1; }
     return 0;
+}
+
+fn _jwt_gate_open(s, now) { return _jwt_gate_at(s, load64(s + 104), now); }
+
+# 1 for the one caller that takes the ask at `now` (3.7.0). The gate is judged on the
+# `tried` it read, and a compare-and-swap moves that to `now`, so workers that find the
+# keys due together make one fetch between them, and the others go on with the keys held.
+fn _jwt_take(s, now) {
+    var tried = load64(s + 104);
+    if (_jwt_gate_at(s, tried, now) == 0) { return 0; }
+    return atomic_cas(s + 104, tried, now);
 }
 
 # 1 when the keys are due a refresh at `now`: old, or never fetched, and the gate open. For
@@ -784,6 +834,11 @@ fn _jwt_refresh_due(s, now) {
 # the keys it had. Neither a key nor the set is logged.
 fn _jwt_refresh_at(s, now) {
     store64(s + 104, now);
+    return _jwt_ask(s, now);
+}
+
+# _jwt_refresh_at, its ask already taken.
+fn _jwt_ask(s, now) {
     var why[8];
     store64(&why, 0);
     var body = fncall2(load64(s + 72), load64(s + 80), &why);
@@ -826,11 +881,17 @@ fn jwt_secret_refresh(s) {
 # the gate allows. 1 when it gave a set, which is then worth a second pick.
 fn _jwt_refetch_for_kid(s, header, hlen) {
     if (load64(s + 72) == 0) { return 0; }
+    # On agnos a fetch runs in this process (src/fetch.cyr), and what sandhi's client
+    # allocates stays: a client must not be able to make one by naming a kid (3.7.0). The
+    # timer still refreshes there.
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
     if (_jwt_str_field_eq(header, hlen, "alg", "RS256") == 0 && _jwt_str_field_eq(header, hlen, "alg", "ES256") == 0) { return 0; }
     var now = _jwt_now();
-    if (now == 0 || _jwt_gate_open(s, now) == 0) { return 0; }
+    if (now == 0 || _jwt_take(s, now) == 0) { return 0; }
     bote_log(SK_DEBUG, "jwks asked again for a key it does not hold");
-    if (_jwt_refresh_at(s, now) != 0) { return 0; }
+    if (_jwt_ask(s, now) != 0) { return 0; }
     return 1;
 }
 
@@ -854,11 +915,13 @@ fn _jwt_refetch_for_kid(s, header, hlen) {
 #   +96 fetched   when the source last gave a set that was taken, 0 for never
 #   +104 tried    when the source was last asked, 0 for never
 #   +112 failures asked since then without a set taken
+#   +120 lock     a mutex for the table, taken once threads are running (3.7.0)
+#   +128 gen      moved on by every clear of the table
 # jwt_secret_new(secret_cstr) builds one for HS256, and jwt_secret_from_jwks(json) one for
 # public keys. A handle holds one or the other, and that is what decides what it verifies.
 # ================================================================
 
-var BOTE_JWT_SECRET_BYTES = 120;
+var BOTE_JWT_SECRET_BYTES = 136;
 
 fn jwt_secret_new(key) {
     var s = alloc(BOTE_JWT_SECRET_BYTES);
@@ -866,12 +929,15 @@ fn jwt_secret_new(key) {
     store64(s, key);
     if (key != 0) { store64(s + 8, strlen(key)); }
     store64(s + 40, BOTE_JWT_CACHE_DEFAULT);
+    store64(s + 120, mutex_new());
     return s;
 }
 
 # A JwtSecret for the public keys in the JWK Set `json`, or 0 when jwt_jwks_check refuses
-# it. A key bote cannot use is left out, with a WARN naming it.
+# it. A key bote cannot use is left out, with a WARN naming it. The set is checked before
+# the handle is made, so a refused one keeps nothing.
 fn jwt_secret_from_jwks(json) {
+    if (jwt_jwks_check(json) != 0) { return 0; }
     var s = jwt_secret_new(0);
     if (jwt_secret_set_jwks(s, json) != 0) { return 0; }
     return s;
@@ -918,8 +984,13 @@ fn _jwt_set_jwks(s, json, changed_out) {
         }
         i = i + 1;
     }
+    # The keys are published, filled, under the lock that clears the table: a worker
+    # reads either the old set and its tokens or the new set and none.
+    _jwt_lock(s);
+    atomic_fence();
     store64(s + 32, kept);
-    _jwt_cache_clear(s);
+    _jwt_cache_clear_held(s);
+    _jwt_unlock(s);
     store64(changed_out, 1);
     return 0;
 }
@@ -961,27 +1032,46 @@ fn auth_validator_jwt(token, jwt_secret) {
     var now = 0 - 1;
     if (load64(jwt_secret + 72) != 0) {
         now = _jwt_now();
-        if (_jwt_refresh_due(jwt_secret, now) == 1) { _jwt_refresh_at(jwt_secret, now); }
+        if (_jwt_refresh_due(jwt_secret, now) == 1 && _jwt_take(jwt_secret, now) == 1) {
+            _jwt_ask(jwt_secret, now);
+        }
     }
     var digest[32];
     var cached = load64(jwt_secret + 40) > 0;
+    var gen = 0;
     if (cached == 1) {
         sha256(token, strlen(token), &digest);
+        var hit = 0;
+        var exp = 0;
+        var nbf = 0;
+        _jwt_lock(jwt_secret);
+        gen = load64(jwt_secret + 128);
         var e = _jwt_cache_find(jwt_secret, &digest);
         if (e != 0) {
+            hit = 1;
+            exp = load64(e + 32);
+            nbf = load64(e + 40);
             store64(jwt_secret + 56, load64(jwt_secret + 56) + 1);
-            if (_jwt_window_at(load64(e + 32), load64(e + 40), now) == 0) { return 0; }
+        } else {
+            store64(jwt_secret + 64, load64(jwt_secret + 64) + 1);
+        }
+        _jwt_unlock(jwt_secret);
+        if (hit == 1) {
+            if (_jwt_window_at(exp, nbf, now) == 0) { return 0; }
             bote_log(SK_TRACE, "jwt verified from the cache");
             return token;
         }
-        store64(jwt_secret + 64, load64(jwt_secret + 64) + 1);
     }
     var a = bote_req_alloc();
     var plen[8];
     var payload = _jwt_payload_a(a, token, jwt_secret, &plen);
     if (payload == 0) { return 0; }
     if (_jwt_for_us(a, payload, load64(&plen), jwt_secret) == 0) { return 0; }
-    if (cached == 1) { _jwt_cache_put(jwt_secret, &digest, payload, load64(&plen)); }
+    if (cached == 1) {
+        _jwt_lock(jwt_secret);
+        if (load64(jwt_secret + 128) == gen) { _jwt_cache_put(jwt_secret, &digest, payload, load64(&plen)); }
+        _jwt_unlock(jwt_secret);
+    }
     return token;   # opaque claims = the validated token
 }
 

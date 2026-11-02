@@ -1,0 +1,673 @@
+# bote_threads.tcyr — bote on worker threads (3.7.0)
+#
+# What a threaded server's workers share, each driven from several threads at once: the
+# request state each thread keeps (src/protocol.cyr, src/conn.cyr), the session store and
+# its buffers (src/session.cyr, src/transport_streamable.cyr), the dispatcher's sinks, a
+# JwtSecret's refresh and cache (src/jwt.cyr), a fetch forked while another thread holds
+# an allocator's lock (src/fetch.cyr), and the streamable handler itself over socketpairs.
+# A race is a matter of chance, so each case runs enough rounds that the code with its
+# lock or its compare-and-swap removed fails it, every time it was tried.
+#
+# Run: cyrius test tests/bote_threads.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/atomic.cyr"
+include "lib/sync.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/auth.cyr"
+include "src/jwt.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/transport_streamable.cyr"
+include "tests/fixtures/jwt_vectors.cyr"
+
+#ifndef CYRIUS_TARGET_AGNOS
+
+var _go = 0;
+var _n = 0;
+
+fn _wait_go() {
+    while (atomic_load(&_go) == 0) { }
+    return 0;
+}
+
+# Run `fp(i)` on `n` threads, i from 0, started together, and wait for them all.
+fn _on_threads(fp, n) {
+    _go = 0;
+    var ts = alloc(n * 8);
+    var i = 0;
+    while (i < n) {
+        store64(ts + i * 8, thread_create(fp, i));
+        i = i + 1;
+    }
+    atomic_store(&_go, 1);
+    i = 0;
+    while (i < n) {
+        thread_join(load64(ts + i * 8));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _cat3(a, b, c) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    str_builder_add_cstr(sb, c);
+    return str_data(str_builder_build(sb));
+}
+
+fn _has(hay, needle) { return strstr(hay, needle) >= 0; }
+
+# ---- each thread's request state ---------------------------------------------
+var _rs_arena = 0;
+var _rs_state = 0;
+var _rs_noted = 0;
+var _rs_tok_ok = 0;
+
+var _rs_armed = 0;
+var _rs_arm_state = 0;
+
+# Arms from a thread that is not the main one, which then has no thread-local block.
+fn _rs_arm(i) {
+    _rs_armed = bote_conn_arm();
+    _rs_arm_state = bote_req_state();
+    return 0;
+}
+
+fn _rs_worker(i) {
+    _wait_go();
+    store64(_rs_arena + i * 8, bote_req_alloc());
+    store64(_rs_state + i * 8, bote_req_state());
+    bote_req_begin();
+    var t = alloc_via(bote_req_alloc(), 16);
+    store64(t, 1000 + i);
+    store8(t + 8, 0);
+    bote_req_note_token(t);
+    _bf_why("thread");
+    # Every thread notes its token before any reads one back.
+    atomic_fetch_add(&_rs_noted, 1);
+    while (atomic_load(&_rs_noted) < _n) { }
+    if (bote_req_token() == t && load64(bote_req_token()) == 1000 + i && bote_req_kept() == 0) {
+        atomic_fetch_add(&_rs_tok_ok, 1);
+    }
+    return 0;
+}
+
+# 1 when the n words at p differ from each other and from `other`.
+fn _all_apart(p, n, other) {
+    var i = 0;
+    while (i < n) {
+        if (load64(p + i * 8) == 0 || load64(p + i * 8) == other) { return 0; }
+        var j = i + 1;
+        while (j < n) {
+            if (load64(p + i * 8) == load64(p + j * 8)) { return 0; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ---- the session store -------------------------------------------------------
+var _ss_store = 0;
+var _ss_bad = 0;
+
+fn _ss_worker(i) {
+    _wait_go();
+    var k = 0;
+    while (k < 400) {
+        var sid = session_store_create(_ss_store, "2025-11-25");
+        if (sid == 0 || session_store_validate(_ss_store, sid) == 0) { atomic_fetch_add(&_ss_bad, 1); }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# ---- a session's outbound bundle, and publishing beside draining ---------------
+var _so_sess = 0;
+var _so_got = 0;
+
+fn _so_worker(i) {
+    _wait_go();
+    store64(_so_got + i * 8, _strm_session_outbound(_so_sess));
+    return 0;
+}
+
+var _pd_store = 0;
+var _pd_sid = 0;
+var _pd_bad = 0;
+var _pd_stop = 0;
+var _pd_drains = 0;
+
+var _pd_torn = 0;
+
+# The number after "evt-".
+fn _pd_num(id) {
+    var n = 0;
+    var i = 4;
+    while (load8(id + i) >= 48 && load8(id + i) <= 57) {
+        n = n * 10 + load8(id + i) - 48;
+        i = i + 1;
+    }
+    return n;
+}
+
+# A drain is what the buffer held at one moment: its ids run one after another, with none
+# repeated and none missed, which a copy made while another thread pushes does not keep.
+fn _pd_drainer(i) {
+    _wait_go();
+    var sess = session_store_validate(_pd_store, _pd_sid);
+    var buf = session_outbound_buffer(_strm_session_outbound(sess));
+    while (atomic_load(&_pd_stop) == 0) {
+        bote_req_begin();
+        var ev = _strm_drain_events_a(bote_req_alloc(), _pd_store, buf, 0);
+        var j = 0;
+        var prev = 0 - 1;
+        while (j < vec_len(ev)) {
+            var e = vec_get(ev, j);
+            if (e == 0 || memeq(stream_event_id(e), "evt-", 4) == 0) {
+                atomic_fetch_add(&_pd_bad, 1);
+            } else {
+                var n = _pd_num(stream_event_id(e));
+                if (prev >= 0 && n != prev + 1) { atomic_fetch_add(&_pd_torn, 1); }
+                prev = n;
+            }
+            j = j + 1;
+        }
+        atomic_fetch_add(&_pd_drains, 1);
+    }
+    return 0;
+}
+
+# Makes sessions while the publisher walks them.
+fn _pd_creator(i) {
+    _wait_go();
+    while (atomic_load(&_pd_stop) == 0) {
+        session_store_create(_pd_store, "2025-11-25");
+        var k = 0;
+        while (k < 2000) { k = k + 1; }
+    }
+    return 0;
+}
+
+fn _pd_publisher(i) {
+    _wait_go();
+    var k = 0;
+    while (k < 1500) {
+        _strm_notify_publish(_pd_store, TOPIC_TOOL_REGISTERED(), "{}");
+        k = k + 1;
+    }
+    atomic_store(&_pd_stop, 1);
+    return 0;
+}
+
+fn _pd_run(i) {
+    if (i == 0) { return _pd_publisher(i); }
+    if (i == 1) { return _pd_creator(i); }
+    return _pd_drainer(i);
+}
+
+# ---- sinks that take their turn ------------------------------------------------
+var _snk_in = 0;
+var _snk_overlap = 0;
+var _snk_calls = 0;
+var _snk_d = 0;
+var _snk_msg = 0;
+
+fn _snk_log(ctx, ev) {
+    if (atomic_fetch_add(&_snk_in, 1) != 0) { _snk_overlap = 1; }
+    var k = 0;
+    while (k < 2000) { k = k + 1; }
+    atomic_fetch_add(&_snk_calls, 1);
+    atomic_fetch_add(&_snk_in, 0 - 1);
+    return 0;
+}
+
+fn _snk_publish(ctx, topic, payload) { return 0; }
+fn _snk_tool(args, claims) { return "{}"; }
+
+fn _snk_worker(i) {
+    _wait_go();
+    var k = 0;
+    while (k < 250) {
+        codec_process_message_a(bote_req_begin(), _snk_msg, _snk_d, 0);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# ---- a JwtSecret: refresh and cache --------------------------------------------
+var _jt_now = 1800000000;
+var _jt_calls = 0;
+var _jt_doc = 0;
+var _jt_s = 0;
+var _jt_tok = 0;
+var _jt_good = 0;
+var _jt_bad = 0;
+var _jt_expired = 0;
+
+fn _jt_clock() { return atomic_load(&_jt_now); }
+
+# A source that is slow to answer, as a jwks_uri is, and counts each ask.
+fn _jt_src(ctx, why_out) {
+    atomic_fetch_add(&_jt_calls, 1);
+    sleep_ms(30);
+    return _jt_doc;
+}
+
+fn _jt_ask_worker(i) {
+    _wait_go();
+    bote_req_begin();
+    auth_validator_jwt(_jt_tok, _jt_s);
+    return 0;
+}
+
+fn _mint_hs256(hdr_json, payload_json, key) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base64url_encode(hdr_json, strlen(hdr_json)));
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_cstr(sb, base64url_encode(payload_json, strlen(payload_json)));
+    var signing_input = str_cstr(str_builder_build(sb));
+    var mac = alloc(32);
+    hmac_sha256(key, strlen(key), signing_input, strlen(signing_input), mac);
+    var sb2 = str_builder_new();
+    str_builder_add_cstr(sb2, signing_input);
+    str_builder_add_cstr(sb2, ".");
+    str_builder_add_cstr(sb2, base64url_encode(mac, 32));
+    return str_cstr(str_builder_build(sb2));
+}
+
+var _hc_toks = 0;
+
+fn _hc_worker(i) {
+    _wait_go();
+    var k = 0;
+    while (k < 300) {
+        bote_req_begin();
+        var t = load64(_hc_toks + ((k + i * 7) % 16) * 8);
+        if (auth_validator_jwt(t, _jt_s) == t) { atomic_fetch_add(&_jt_good, 1); }
+        else { atomic_fetch_add(&_jt_bad, 1); }
+        if (k % 10 == 0) {
+            bote_req_begin();
+            if (auth_validator_jwt(_jt_tok, _jt_s) != 0) { atomic_fetch_add(&_jt_expired, 1); }
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# ---- a fork while another thread holds an allocator's lock -----------------------
+var _fk_stop = 0;
+
+# Holds lib/alloc.cyr's lock half the time, as a thread that allocates a great deal does.
+fn _fk_hold_alloc(i) {
+    while (atomic_load(&_fk_stop) == 0) {
+        _alloc_lock_acquire();
+        var k = 0;
+        while (k < 300) { k = k + 1; }
+        _alloc_lock_release();
+        k = 0;
+        while (k < 300) { k = k + 1; }
+    }
+    return 0;
+}
+
+fn _fk_hold_fl(i) {
+    while (atomic_load(&_fk_stop) == 0) {
+        _fl_lock_acquire();
+        var k = 0;
+        while (k < 300) { k = k + 1; }
+        _fl_lock_release();
+        k = 0;
+        while (k < 300) { k = k + 1; }
+    }
+    return 0;
+}
+
+fn _fk_child_alloc(ctx, r) {
+    var p = alloc(64);
+    store64(p, 77);
+    bote_fetch_put_int(r, load64(p));
+    return 0;
+}
+
+fn _fk_child_fl(ctx, r) {
+    var p = fl_alloc(64);
+    store64(p, 78);
+    bote_fetch_put_int(r, load64(p));
+    return 0;
+}
+
+# How many of `n` fetches of `fp` came back with `want`.
+fn _fk_rounds(fp, want, n) {
+    var ok = 0;
+    var i = 0;
+    while (i < n) {
+        bote_req_begin();
+        var cur[24];
+        if (bote_fetch_in_child(fp, 0, 4096, 3000, &cur) == 1 && bote_fetch_int(&cur) == want) { ok = ok + 1; }
+        i = i + 1;
+    }
+    return ok;
+}
+
+# ---- the streamable handler on threads -----------------------------------------
+var _sh_cfg = 0;
+var _sh_ok = 0;
+var _sh_bad = 0;
+
+fn _sh_echo(args, claims) { return args; }
+
+fn _sh_raw(hdrs, body) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "POST /mcp HTTP/1.1\r\nHost: x\r\nAccept: application/json\r\n");
+    str_builder_add_cstr(sb, hdrs);
+    str_builder_add_cstr(sb, "Content-Length: ");
+    str_builder_add_int(sb, strlen(body));
+    str_builder_add_cstr(sb, "\r\n\r\n");
+    str_builder_add_cstr(sb, body);
+    return str_data(str_builder_build(sb));
+}
+
+# The reply to `raw` from _strm_handle, read into `rcv`, NUL-ended.
+fn _sh_run(raw, rbuf, rcv) {
+    var n = strlen(raw);
+    memcpy(rbuf, raw, n);
+    store8(rbuf + n, 0);
+    var sp[16];
+    sys_socketpair(1, 1, 0, &sp);
+    var sa = load32(&sp);
+    var sb = load32(&sp + 4);
+    _strm_handle(_sh_cfg, sa, rbuf, n);
+    sys_close(sa);
+    var got = 0;
+    var r = sys_read(sb, rcv, 65536);
+    while (r > 0) {
+        got = got + r;
+        r = sys_read(sb, rcv + got, 65536 - got);
+    }
+    sys_close(sb);
+    store8(rcv + got, 0);
+    return got;
+}
+
+fn _sh_worker(i) {
+    _wait_go();
+    var rbuf = alloc(70000);
+    var rcv = alloc(65600);
+    var init = _sh_raw("", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}");
+    var k = 0;
+    while (k < 120) {
+        _sh_run(init, rbuf, rcv);
+        var at = strstr(rcv, "MCP-Session-Id: ");
+        if (memeq(rcv, "HTTP/1.1 200", 12) == 0 || at < 0) {
+            atomic_fetch_add(&_sh_bad, 1);
+        } else {
+            var sid = alloc(40);
+            memcpy(sid, rcv + at + 16, 32);
+            store8(sid + 32, 0);
+            var sb = str_builder_new();
+            str_builder_add_cstr(sb, "w");
+            str_builder_add_int(sb, i * 100000 + k);
+            str_builder_add_cstr(sb, "-mark");
+            var mark = str_data(str_builder_build(sb));
+            var call = _sh_raw(_cat3("MCP-Session-Id: ", sid, "\r\n"),
+              _cat3("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"t_echo\",\"arguments\":{\"m\":\"", mark, "\"}}}"));
+            _sh_run(call, rbuf, rcv);
+            if (memeq(rcv, "HTTP/1.1 200", 12) == 1 && _has(rcv, mark) == 1) { atomic_fetch_add(&_sh_ok, 1); }
+            else { atomic_fetch_add(&_sh_bad, 1); }
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+#endif
+
+fn main() {
+    alloc_init();
+    fl_init();
+    #ifndef CYRIUS_TARGET_AGNOS
+
+    # ---------------- each thread's request state ----------------
+    assert(bote_req_state() == &_bote_req_g, "before a threaded server, one state for the process");
+    var g_arena = bote_req_alloc();
+    # Armed on a worker: the main thread, which nothing gave a thread-local block, is given
+    # one at its first look, and does not fault.
+    var at = thread_create(&_rs_arm, 0);
+    thread_join(at);
+    assert_eq(_rs_armed, 0, "arm: a slot is claimed, from a thread that is not the main one");
+    assert(_rs_arm_state == &_bote_req_g, "arm: the thread that armed keeps the state it had");
+    assert(_bote_req_state_fp != 0, "arm: the lookup is set");
+    var main_state = bote_req_state();
+    assert(main_state != 0 && main_state != &_bote_req_g, "arm: the main thread, without a block, gets a state of its own");
+    var main_arena = bote_req_alloc();
+    assert(main_arena != 0 && main_arena != g_arena, "arm: ...and an arena");
+    assert(bote_req_state() == main_state, "arm: ...the same one each time");
+    assert_eq(bote_conn_arm(), 0, "arm again: nothing to do");
+    assert(bote_req_state() == main_state, "arm again: ...and nothing changed");
+    _n = 6;
+    _rs_arena = alloc(_n * 8);
+    _rs_state = alloc(_n * 8);
+    _on_threads(&_rs_worker, _n);
+    assert_eq(_all_apart(_rs_arena, _n, main_arena), 1, "each thread has an arena of its own");
+    assert_eq(_all_apart(_rs_state, _n, &_bote_req_g), 1, "and a state of its own");
+    assert_eq(_rs_tok_ok, _n, "each thread reads back the token it noted, with the others noting theirs");
+    assert(bote_fetch_why() == 0, "a fetch's reason is the thread's own");
+    assert(bote_req_token() == 0, "and so is a token");
+
+    # ---------------- the session store ----------------
+    _ss_store = session_store_default();
+    _on_threads(&_ss_worker, 4);
+    assert_eq(_ss_bad, 0, "sessions: each made on four threads at once validates");
+    assert_eq(session_store_active_count(_ss_store), 1600, "sessions: none lost");
+    assert_eq(vec_len(session_store_ids(_ss_store)), 1600, "sessions: the id list agrees");
+
+    # ---------------- a session's outbound bundle ----------------
+    _so_got = alloc(8 * 8);
+    var so_split = 0;
+    var so_i = 0;
+    while (so_i < 60) {
+        _so_sess = mcp_session_new("s", "2025-11-25", 0);
+        _on_threads(&_so_worker, 8);
+        var so_j = 1;
+        while (so_j < 8) {
+            if (load64(_so_got + so_j * 8) != load64(_so_got)) { so_split = so_split + 1; }
+            so_j = so_j + 1;
+        }
+        so_i = so_i + 1;
+    }
+    assert_eq(so_split, 0, "outbound: eight threads asking at once share one bundle");
+
+    # ---------------- publishing beside draining ----------------
+    _pd_store = session_store_default();
+    _pd_sid = session_store_create(_pd_store, "2025-11-25");
+    session_store_create(_pd_store, "2025-11-25");
+    session_store_create(_pd_store, "2025-11-25");
+    _on_threads(&_pd_run, 5);
+    assert_eq(_pd_bad, 0, "notify: every drained event is whole, with three threads draining");
+    assert_eq(_pd_torn, 0, "notify: and every drain is the buffer at one moment, with sessions made beside it");
+    assert(_pd_drains > 0, "notify: the drains ran");
+    var pd_buf = session_outbound_buffer(_strm_session_outbound(session_store_validate(_pd_store, _pd_sid)));
+    assert_eq(resumption_buffer_len(pd_buf), 1000, "notify: the buffer holds its bound");
+    assert(streq(stream_event_id(vec_get(resumption_buffer_events(pd_buf), 999)), "evt-1499") == 1, "notify: and the last event pushed");
+
+    # ---------------- sinks that take their turn ----------------
+    var sk_reg = tool_registry_new();
+    registry_register(sk_reg, tool_def_new("t_sk", "Sink", schema_new("object", 0, vec_new())));
+    _snk_d = dispatcher_new(sk_reg);
+    dispatcher_handle(_snk_d, "t_sk", &_snk_tool);
+    dispatcher_set_audit(_snk_d, audit_sink_new(&_snk_log, 0));
+    var sk_ev = event_sink_set_list_only(event_sink_new(&_snk_publish, 0));
+    dispatcher_set_events(_snk_d, sk_ev);
+    var sk_au = dispatcher_audit_sink(_snk_d);
+    bote_conn_serial_sinks(_snk_d);
+    assert(audit_sink_log_fp(dispatcher_audit_sink(_snk_d)) == &_bote_conn_audit_serial, "sinks: the audit sink is wrapped");
+    assert(load64(dispatcher_event_sink(_snk_d) + 16) == 1, "sinks: an event sink keeps its list-only flag");
+    bote_conn_serial_sinks(_snk_d);
+    assert(load64(audit_sink_ctx(dispatcher_audit_sink(_snk_d))) == sk_au, "sinks: wrapped once, around the sink it was given");
+    var sk_none = dispatcher_new(sk_reg);
+    dispatcher_set_audit(sk_none, audit_sink_noop());
+    var sk_noop = dispatcher_audit_sink(sk_none);
+    bote_conn_serial_sinks(sk_none);
+    assert(dispatcher_audit_sink(sk_none) == sk_noop, "sinks: a sink with no function is left alone");
+    assert(dispatcher_event_sink(sk_none) == 0, "sinks: and none stays none");
+    _snk_msg = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"t_sk\",\"arguments\":{}}}";
+    _on_threads(&_snk_worker, 4);
+    assert_eq(_snk_overlap, 0, "sinks: the audit sink is never in two calls at once");
+    assert_eq(_snk_calls, 1000, "sinks: and is called for every tools/call");
+
+    # ---------------- a JwtSecret: one refresh between the workers ----------------
+    _bote_jwt_clock = &_jt_clock;
+    _jt_doc = JV_JWKS_ONE_RSA;
+    _jt_s = jwt_secret_new(0);
+    jwt_secret_with_audience(_jt_s, JV_AUD);
+    jwt_secret_with_key_source(_jt_s, &_jt_src, 0, 600);
+    _jt_tok = "aaaaaaaaaaaaaaaaaaaaaaaa.bbbb.cccc";
+    _on_threads(&_jt_ask_worker, 8);
+    assert_eq(_jt_calls, 1, "jwks: eight workers finding the keys due make one fetch");
+    assert_eq(vec_len(jwt_secret_keys(_jt_s)), 1, "jwks: and its keys are taken");
+    # A minute on, a token naming a key it does not hold, on every worker at once.
+    _jt_now = _jt_now + 61;
+    _jt_doc = JV_JWKS;
+    _jt_tok = JV_ES_UNKNOWN_KID;
+    _on_threads(&_jt_ask_worker, 8);
+    assert_eq(_jt_calls, 2, "jwks: eight tokens naming an unknown kid at once make one fetch");
+    assert_eq(vec_len(jwt_secret_keys(_jt_s)), 6, "jwks: and the new set is taken");
+    _bote_jwt_clock = 0;
+
+    # ---------------- a JwtSecret's cache on threads ----------------
+    var hk = "0123456789abcdef0123456789abcdef";
+    _jt_s = jwt_secret_with_cache(jwt_secret_with_audience(jwt_secret_new(hk), "https://mcp.example.com/mcp"), 4);
+    _hc_toks = alloc(16 * 8);
+    var hi = 0;
+    while (hi < 16) {
+        var hb = str_builder_new();
+        str_builder_add_cstr(hb, "{\"aud\":\"https://mcp.example.com/mcp\",\"exp\":4102444800,\"jti\":");
+        str_builder_add_int(hb, hi);
+        str_builder_add_cstr(hb, "}");
+        store64(_hc_toks + hi * 8, _mint_hs256("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", str_data(str_builder_build(hb)), hk));
+        hi = hi + 1;
+    }
+    _jt_tok = _mint_hs256("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", "{\"aud\":\"https://mcp.example.com/mcp\",\"exp\":1000}", hk);
+    _jt_good = 0;
+    _jt_bad = 0;
+    _jt_expired = 0;
+    _on_threads(&_hc_worker, 8);
+    assert_eq(_jt_good, 2400, "cache: sixteen tokens in four slots, on eight threads, all pass");
+    assert_eq(_jt_bad, 0, "cache: none fails");
+    assert_eq(_jt_expired, 0, "cache: an expired token never passes");
+    assert_eq(jwt_secret_cache_hits(_jt_s) + jwt_secret_cache_misses(_jt_s), 2640, "cache: every lookup counted once");
+
+    # ---------------- a fork while another thread holds an allocator's lock ----------------
+    _fk_stop = 0;
+    var fk_t = thread_create(&_fk_hold_alloc, 0);
+    var fk_ok = _fk_rounds(&_fk_child_alloc, 77, 24);
+    atomic_store(&_fk_stop, 1);
+    thread_join(fk_t);
+    assert_eq(fk_ok, 24, "fork: a child allocates though another thread held the allocator's lock");
+    _fk_stop = 0;
+    fk_t = thread_create(&_fk_hold_fl, 0);
+    fk_ok = _fk_rounds(&_fk_child_fl, 78, 24);
+    atomic_store(&_fk_stop, 1);
+    thread_join(fk_t);
+    assert_eq(fk_ok, 24, "fork: and the freelist's");
+
+    # ---------------- the streamable handler on threads ----------------
+    var sh_reg = tool_registry_new();
+    registry_register(sh_reg, tool_def_new("t_echo", "Echo", schema_new("object", 0, vec_new())));
+    var sh_d = dispatcher_new(sh_reg);
+    dispatcher_handle(sh_d, "t_echo", &_sh_echo);
+    var sh_store = session_store_default();
+    dispatcher_set_events(sh_d, strm_notify_sink(sh_store));
+    _sh_cfg = streamable_config_new("/mcp", 0x0100007F, 0);
+    streamable_config_with_session_store(_sh_cfg, sh_store);
+    assert_eq(streamable_config_workers(_sh_cfg), 0, "workers: none unless asked");
+    streamable_config_with_workers(_sh_cfg, 4);
+    assert_eq(streamable_config_workers(_sh_cfg), 4, "workers: as asked");
+    store64(_sh_cfg + 56, sh_d);
+    _strm_init();
+    _on_threads(&_sh_worker, 6);
+    assert_eq(_sh_bad, 0, "streamable: six threads in the handler at once, no reply wrong");
+    assert_eq(_sh_ok, 720, "streamable: every call answered with its own arguments");
+    assert_eq(session_store_active_count(sh_store), 720, "streamable: every session kept");
+
+    # A drain renders what it sends on the arena: a GET, and a POST that carries the
+    # pending events, keep nothing however many are pending.
+    var dr_rbuf = alloc(70000);
+    var dr_rcv = alloc(65600);
+    var dr_sid = session_store_create(sh_store, "2025-11-25");
+    var dr_i = 0;
+    while (dr_i < 40) {
+        _strm_notify_publish(sh_store, TOPIC_TOOL_REGISTERED(), "{}");
+        dr_i = dr_i + 1;
+    }
+    var dr_get = _cat3("GET /mcp HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\nMCP-Session-Id: ", dr_sid, "\r\n\r\n");
+    _sh_run(dr_get, dr_rbuf, dr_rcv);
+    assert(_has(dr_rcv, "id: evt-39") == 1, "drain: a GET sends what is pending");
+    var dr_at = alloc_used();
+    dr_i = 0;
+    while (dr_i < 20) {
+        _sh_run(dr_get, dr_rbuf, dr_rcv);
+        dr_i = dr_i + 1;
+    }
+    assert_eq(alloc_used() - dr_at, 0, "drain heap: twenty GETs of forty events keep nothing");
+    var dr_post = _cat3("POST /mcp HTTP/1.1\r\nHost: x\r\nAccept: application/json, text/event-stream\r\nMCP-Session-Id: ", dr_sid,
+      "\r\nContent-Length: 40\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}");
+    _sh_run(dr_post, dr_rbuf, dr_rcv);
+    assert(_has(dr_rcv, "text/event-stream") == 1 && _has(dr_rcv, "id: evt-39") == 1, "drain: a POST carries them too");
+    dr_at = alloc_used();
+    dr_i = 0;
+    while (dr_i < 20) {
+        _sh_run(dr_post, dr_rbuf, dr_rcv);
+        dr_i = dr_i + 1;
+    }
+    assert_eq(alloc_used() - dr_at, 0, "drain heap: twenty POSTs carrying them keep nothing");
+    #endif
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit(rc);

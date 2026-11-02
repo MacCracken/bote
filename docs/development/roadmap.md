@@ -34,31 +34,27 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.7.0 — Worker-thread dispatch behind the streamable transport.** Item 1 of 3.7.x below, the first of its small bites.
+**3.7.1 — The rest of the per-worker state.** Item 1 of 3.7.x below: bote's own tools, and registering while a threaded server
+runs, so that streamable on worker threads can serve what the other transports do.
 
 ## 3.7.x — Threaded dispatch and `subscriptions/listen`
 
-A held-open stream on the single-threaded sandhi loop starves the POSTs that feed it, and `subscriptions/listen`
-is such a stream. **Large: small bites.**
+`bote streamable` serves on worker threads since 3.7.0, so a held-open stream no longer starves the POSTs that feed it,
+and `subscriptions/listen` is such a stream. **Large: small bites.**
 
-1. Worker-thread dispatch behind the streamable transport, with the accept loop never blocking on a
-   handler. This also ends one slow client holding every other client, which the send deadline
-   (per write, not per response) cannot do on its own, and moves a forged token's verify, about 10.5 ms for
-   ES256, off the loop. Until then a server on the internet wants a rate limit in front.
-2. Per-worker state. Today's process-wide buffers become per-worker: the request arena
-   (`bote_req_alloc`), the token it holds for a handler (`bote_req_note_token`), `_fs_read_buf`,
-   `_ws_frame_buf`, `_ws_token_buf`, `_unix_buf`. sandhi's worker arena is fixed-size and fails when full, so it needs its
-   grow option or a large reply crashes. A JwtSecret is shared and unlocked: its verified-token cache, and the refresh
-   that swaps its keys and clears that cache in the middle of a request, need a lock or a handle per worker.
-   `bote_fetch_in_child` forks, and a fork copies only the thread that calls it, with any lock another thread held still
-   held: the outbound requests, the web tools' and the `jwks_uri` fetch, need sandhi's arena fix upstream by then, or a
-   process of their own.
-3. `subscriptions/listen`, with `toolsListChanged`, `promptsListChanged`, `resourcesListChanged` and
+1. The rest of the per-worker state. The request's own state, sessions and their buffers, a JwtSecret, the dispatcher's
+   sinks and a forked fetch are safe on worker threads. bote's own tools are not: `_fs_read_buf`, the web tools' globals
+   and the libro tools' chain, which is why streamable keeps the echo references. Neither is registering a tool, prompt or
+   resource while a threaded server runs, which is how a `listChanged` notification comes about. The other transports'
+   buffers (`_ws_frame_buf`, `_ws_token_buf`, `_unix_buf`, stdio's) matter only if those transports take workers too.
+2. `subscriptions/listen`, with `toolsListChanged`, `promptsListChanged`, `resourcesListChanged` and
    `resourceSubscriptions`, `notifications/subscriptions/acknowledged`, and
-   `io.modelcontextprotocol/subscriptionId` tagging. Then `notifications/resources/updated`.
-4. Cancellation: on Streamable HTTP closing the response stream cancels the request, and on stdio
+   `io.modelcontextprotocol/subscriptionId` tagging. Then `notifications/resources/updated`. A listening stream holds a
+   worker for as long as it is open, so the pool needs room for streams beside requests: a bound on streams, or streams
+   parked off the pool.
+3. Cancellation: on Streamable HTTP closing the response stream cancels the request, and on stdio
    `notifications/cancelled`. `bote_cancel_token_*` is the data layer.
-5. `notifications/progress` on a request's own response stream.
+4. `notifications/progress` on a request's own response stream.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption.
@@ -98,6 +94,10 @@ Not planned, because the current spec removes or deprecates them: the held-open 
   so a handler has to know that. `jsonx_get_str_dec_a` and `_sch_parse_int` are the pieces.
 - **Reclaim sessions.** A session's bytes are not freed when it expires, so a server churning sessions
   still grows, slowly. The legacy path keeps sessions until a 4.0 retires it.
+- **A completion handler reads `ref` itself.** bote picks the prompt or template whose scopes a
+  `completion/complete` needs from the first `ref`, as its one key scanner reads every key, and hands the
+  handler the params as sent. A handler that reads a repeated `ref` last-wins answers for a target other
+  than the one judged. Refuse a repeated `ref`, or hand the handler the one bote read.
 
 ## Open decisions (no version)
 

@@ -22,7 +22,7 @@
 1. **One protocol implementation** — every consumer dispatches through bote instead of reimplementing JSON-RPC 2.0.
 2. **Registry-driven** — tools registered with schemas, dispatch validates automatically.
 3. **Transport-agnostic** — same `Dispatcher` powers six transports.
-4. **Streaming-ready data layer** — progress + cancellation primitives and a polled per-session push are in place; real-time held-open streaming is bote-side work (roadmap 3.7.x) — the cyrius thread / async / thread-local / arena primitives it needs are complete and pinned.
+4. **Streaming-ready data layer** — progress + cancellation primitives and a polled per-session push are in place; real-time held-open streaming is bote-side work (roadmap 3.7.x). Since 3.7.0 the streamable transport serves on sandhi's worker pool (`bote_conn_serve_pooled`, `BOTE_WORKERS`): each thread has its own request state (`bote_req_state`, through a thread-local slot `bote_conn_arm` claims), and what workers share is guarded — the session store and its buffers by a mutex, a session's outbound bundle and a JwtSecret's refresh by compare-and-swap, its cache by a mutex once threads run, the dispatcher's sinks by `bote_conn_serial_sinks`, a forked fetch by holding the allocators' locks across the fork.
 5. **Audit + events as fn-pointer + ctx adapters** — libro and majra wired today; any other backend drops in via the same shape.
 6. **Auth as opt-in middleware** — bearer-token validator is a fn-pointer slot on each HTTP-family transport config; unset = no overhead, no behavior change.
 7. **No global state in the dispatcher** — caller owns the registry and dispatcher heap pointers; transports are per-instance.

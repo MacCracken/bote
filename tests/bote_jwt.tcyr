@@ -1142,8 +1142,27 @@ fn main() {
     jwt_secret_set_jwks(ksx, JV_JWKS);
     assert_eq(_taken(JV_RS_GOOD, ksx), 1, "set: ...and after the same set again");
     assert_eq(jwt_secret_cache_hits(ksx), ks_hits + 1, "set: ...from the cache, which the same set leaves alone");
-    assert_eq(jwt_secret_set_jwks(ksx, _ks_reversed()), 0, "set: the same keys moved are taken");
-    assert(jwt_secret_keys(ksx) != ks_keys && vec_len(jwt_secret_keys(ksx)) == vec_len(ks_keys), "set: ...as a change");
+    # 3.7.0: keys in another order are the same set. Compared in order, a server serving
+    # its set shuffled made every fetch a change: a heap copy, kept, and an emptied cache.
+    var ks_hits2 = jwt_secret_cache_hits(ksx);
+    assert_eq(jwt_secret_set_jwks(ksx, _ks_reversed()), 0, "set: the same keys in another order are taken");
+    assert_eq(jwt_secret_keys(ksx), ks_keys, "set: ...as the same set, kept as it was");
+    assert_eq(_taken(JV_RS_GOOD, ksx), 1, "set: ...a token verifies");
+    assert_eq(jwt_secret_cache_hits(ksx), ks_hits2 + 1, "set: ...from the cache it left alone");
+    var ks_rev = _ks_reversed();
+    bote_req_begin();
+    var ks_rev_at = alloc_used();
+    jwt_secret_set_jwks(ksx, ks_rev);
+    assert_eq(alloc_used() - ks_rev_at, 0, "set heap: the same keys in another order keep nothing");
+    assert_eq(jwt_secret_set_jwks(ksx, _cat(_cat("{\"keys\":[", JV_JWK_EC), _cat(",", _cat(JV_JWK_EC, "]}")))), 0, "set: a key twice");
+    var ks_twice = jwt_secret_keys(ksx);
+    assert_eq(jwt_secret_set_jwks(ksx, _set_of(JV_JWK_EC)), 0, "set: ...and then once");
+    assert_eq(jwt_secret_keys(ksx), ks_twice, "set: ...is the same set");
+    assert_eq(jwt_secret_set_jwks(ksx, _cat(_cat("{\"keys\":[", JV_JWK_EC), _cat(",", _cat(JV_JWK_RSA, "]}")))), 0, "set: ...and one more key");
+    assert(jwt_secret_keys(ksx) != ks_twice, "set: ...is another");
+    assert_eq(jwt_secret_set_jwks(ksx, _set_of(JV_JWK_EC)), 0, "set: ...and one fewer");
+    assert(vec_len(jwt_secret_keys(ksx)) == 1, "set: ...is another again");
+    jwt_secret_set_jwks(ksx, JV_JWKS);
     var ksx_r1 = jwt_secret_keys(ksx);
     assert_eq(jwt_secret_set_jwks(ksx, _set_of(_cat(_cat("{\"kty\":\"RSA\",\"kid\":\"r9\",", JV_JWK_RSA + 1), ""))), 0, "set: r1's key under another kid is taken");
     assert(jwt_secret_keys(ksx) != ksx_r1, "set: ...as another key");
@@ -1175,6 +1194,16 @@ fn main() {
     assert(jwt_secret_set_jwks(ksx, _set_with_good(JV_JWK_PRIVATE_RSA)) != 0, "set: ...and one holding a private key");
     assert_eq(jwt_secret_keys(ksx), ks_ec, "set: ...and the keys it had are kept");
     assert(jwt_secret_set_jwks(jwt_secret_new(_KEY), JV_JWKS) != 0, "set: an HS256 handle takes no keys");
+    bote_req_begin();
+    jwt_secret_from_jwks("{\"keys\":5}");
+    var fj_at = alloc_used();
+    var fj_i = 0;
+    while (fj_i < 5) {
+        bote_req_begin();
+        jwt_secret_from_jwks("{\"keys\":5}");
+        fj_i = fj_i + 1;
+    }
+    assert_eq(alloc_used() - fj_at, 0, "from_jwks heap: a refused set keeps nothing, not even a handle");
     var kd = jwt_secret_new(0);
     jwt_secret_set_jwks(kd, JV_JWKS);
     bote_req_begin();
@@ -1258,6 +1287,22 @@ fn main() {
     assert_eq(_taken(JV_HS_WITH_N, kid), 0, "kid: an HS256 token is refused");
     assert_eq(_ks_calls, 3, "kid: ...and asks nothing, no key could serve it");
     assert(strstr(_ks_log, "jwks asked again for a key it does not hold") >= 0, "kid log: a DEBUG line");
+
+    # 3.7.0: a token verified with keys that changed while it was is not remembered. Here
+    # the change is the one its own kid asked for, and so the next look is a miss.
+    _ks_doc = JV_JWKS_ONE_RSA;
+    var gn = _ks_secret(600);
+    _tc_now = 1000;
+    assert_eq(_taken(JV_ES_GOOD, gn), 0, "gen: a key the first set does not hold");
+    _ks_doc = JV_JWKS;
+    _tc_now = 1060;
+    var gn_m = jwt_secret_cache_misses(gn);
+    var gn_h = jwt_secret_cache_hits(gn);
+    assert_eq(_taken(JV_ES_GOOD, gn), 1, "gen: its kid fetches the set holding its key, and it verifies");
+    assert_eq(_taken(JV_ES_GOOD, gn), 1, "gen: ...and again");
+    assert_eq(jwt_secret_cache_misses(gn), gn_m + 2, "gen: ...in full both times: verified across a change of keys, it was not remembered");
+    assert_eq(_taken(JV_ES_GOOD, gn), 1, "gen: a third time");
+    assert_eq(jwt_secret_cache_hits(gn), gn_h + 1, "gen: ...from the cache, which the second filled");
 
     # A source that fails is asked after 60 s, then 120, 240, 480, and then every 600,
     # and meanwhile the keys it gave last serve.

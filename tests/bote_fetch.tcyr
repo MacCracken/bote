@@ -283,14 +283,18 @@ fn main() {
     var dp[8];
     sys_pipe(&dp);
     var dbuf[8];
+    var deof[8];
+    store64(&deof, 0);
     var d0 = clock_now_ms();
-    assert_eq(_bf_read_all(load32(&dp), &dbuf, 8, clock_now_ms() - 1), 0, "read: a deadline past is refused");
+    assert_eq(_bf_read_all(load32(&dp), &dbuf, 8, clock_now_ms() - 1, &deof), 0, "read: a deadline past is refused");
     assert(streq(bote_fetch_why(), "deadline") == 1 && clock_now_ms() - d0 < 1000, "read: ...as the deadline, at once");
+    assert_eq(load64(&deof), 0, "read: ...which is not the end of the pipe");
     sys_write(load32(&dp + 4), "12345678", 8);
-    assert_eq(_bf_read_all(load32(&dp), &dbuf, 8, 0), 1, "read: no deadline reads what is there");
+    assert_eq(_bf_read_all(load32(&dp), &dbuf, 8, 0, &deof), 1, "read: no deadline reads what is there");
     sys_close(load32(&dp + 4));
-    assert_eq(_bf_read_all(load32(&dp), &dbuf, 8, 0), 0, "read: a closed pipe is a short reply");
+    assert_eq(_bf_read_all(load32(&dp), &dbuf, 8, 0, &deof), 0, "read: a closed pipe is a short reply");
     assert(streq(bote_fetch_why(), "short reply") == 1, "read: ...and says so");
+    assert_eq(load64(&deof), 1, "read: ...at the end of the pipe");
     sys_close(load32(&dp));
 
     # The deadline: a child that would take 5 s is ended at 200 ms.

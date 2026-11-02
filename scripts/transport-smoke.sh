@@ -21,7 +21,10 @@
 #     turns that off, and the token never reaches the log (3.6.4);
 #   - web_search, made in a child, returns a loopback SearXNG's results and its
 #     status, writes nothing to the stdio wire, and gives up on a server that never
-#     answers by BOTE_WEB_TIMEOUT_MS (3.6.5).
+#     answers by BOTE_WEB_TIMEOUT_MS (3.6.5);
+#   - streamable on worker threads answers beside a held connection, which stops it
+#     with BOTE_WORKERS=0, holds BOTE_WORKERS to its bound, and serves sixteen
+#     clients at once while a jwks_uri is fetched every second from its workers (3.7.0).
 # Needs curl and python3. CI runs it as the "Transport smoke" step.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -395,6 +398,55 @@ s.serve_forever()' "$jk" "$jt/srv.pem" "$jt/srv.key" > /dev/null 2>&1 & pids+=($
 else
   echo "jwks tls: no openssl, skipped"
 fi
+# Worker threads (3.7.0): streamable serves on BOTE_WORKERS threads, 4 by default, so a
+# client that holds a connection open holds one worker and not the server. Sixteen clients
+# at once then answer while the keys are fetched from a jwks_uri every second, each fetch
+# forked from a worker beside the others. BOTE_WORKERS=0 is the one loop it was, which the
+# same held connection stops.
+grep -q 'worker threads workers=4' "$L/strm.err" || err "workers: streamable did not start 4: $(head -3 "$L/strm.err")"
+hold() { python3 -I -c 'import socket,sys,time
+s=socket.create_connection(("127.0.0.1",int(sys.argv[1])))
+s.sendall(b"POST /mcp HTTP/1.1\r\nHost: x\r\n")
+time.sleep(float(sys.argv[2]))' "$1" "$2" & pids+=($!); sleep 0.2; }
+hold 18392 4
+c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "${H[@]}" -d "$INIT" http://127.0.0.1:18392/mcp)
+[ "$c" = "200" ] || err "workers: a held connection kept another client from an answer ($c)"
+BOTE_WORKERS=0 start workers0 "$L/workers0.err" $B streamable 18378
+wait_port 18378 || err "workers: nothing listening on 18378"
+grep -q 'worker threads workers=0' "$L/workers0.err" || err "workers: BOTE_WORKERS=0 not taken: $(head -3 "$L/workers0.err")"
+hold 18378 3
+c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 "${H[@]}" -d "$INIT" http://127.0.0.1:18378/mcp)
+[ "$c" = "200" ] && err "workers: with BOTE_WORKERS=0 a held connection held nothing, which this check needs to show"
+BOTE_WORKERS=500 start workers500 "$L/workers500.err" $B streamable 18377
+wait_port 18377 || err "workers: nothing listening on 18377"
+grep -q 'BOTE_WORKERS past its bound; holding it there workers=500 max=64' "$L/workers500.err" && grep -q 'worker threads workers=64' "$L/workers500.err" \
+  || err "workers: 500 not held at 64: $(head -3 "$L/workers500.err")"
+python3 -I -m http.server 18376 --bind 127.0.0.1 --directory "$jk" > /dev/null 2>&1 & pids+=($!)
+wait_port 18376 || err "workers: the key server did not start"
+env "${JENV[@]}" BOTE_LOG=debug BOTE_JWKS_URL=http://127.0.0.1:18376/full.json BOTE_JWKS_REFRESH=1 BOTE_WORKERS=4 \
+  $B streamable 18375 > /dev/null 2> "$L/workersjk.err" & pids+=($!)
+wait_port 18375 || err "workers: nothing listening on 18375: $(cat "$L/workersjk.err")"
+r=$(python3 -I -c 'import http.client,json,sys,threading,time
+port=int(sys.argv[1]); toks=sys.argv[2:]; bad=[]; ok=[0]; lk=threading.Lock()
+disc=json.dumps({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}})
+hd={"Content-Type":"application/json","Accept":"application/json","MCP-Protocol-Version":"2026-07-28","Mcp-Method":"server/discover"}
+def run(t):
+    end=time.time()+3.5
+    while time.time()<end:
+        c=http.client.HTTPConnection("127.0.0.1",port,timeout=10)
+        c.request("POST","/mcp",disc,dict(hd,Authorization="Bearer "+toks[t%len(toks)]))
+        r=c.getresponse(); d=r.read(); c.close()
+        with lk:
+            if r.status==200 and b"supportedVersions" in d: ok[0]+=1
+            else: bad.append(r.status)
+th=[threading.Thread(target=run,args=(t,)) for t in range(16)]
+[x.start() for x in th]; [x.join() for x in th]
+print(ok[0],len(bad),bad[:3])' 18375 "$(vec JV_RS_GOOD)" "$(vec JV_ES_GOOD)")
+set -- $r
+[ "${1:-0}" -gt 200 ] && [ "${2:-1}" = "0" ] || err "workers: sixteen clients beside a refresh a second: $r"
+n=$(grep -c 'jwks keys unchanged' "$L/workersjk.err")
+[ "$n" -ge 2 ] || err "workers: the keys were refreshed $n times in 3.5 s, not every second"
+grep -q 'jwks refresh failed' "$L/workersjk.err" && err "workers: a refresh forked from a worker failed: $(grep 'jwks refresh failed' "$L/workersjk.err" | head -2)"
 
 # A session exists once initialize has succeeded (3.4.15): a refused one gets none.
 h=$(curl -s -D - -o /dev/null "${H[@]}" -d '{"method":"initialize"' http://127.0.0.1:18392/mcp)

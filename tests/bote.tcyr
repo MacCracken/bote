@@ -2520,6 +2520,84 @@ fn main() {
     assert_eq(_ra_heap_per_msg(_ra_fill("prompts/get", "{\"name\":\"ra_prompt\",\"arguments\":{\"other\":\"", 60000, "\"}}"), ra_d, 50), 0, "arena: a prompt missing an argument leaves no heap");
     assert_eq(_ra_heap_per_msg(_ra_fill("resources/read", "{\"uri\":\"", 60000, "\"}"), ra_d, 50), 0, "arena: 60 KB naming no resource leaves no heap");
     assert_eq(_ra_heap_per_msg(_ra_fill_of("resources/read", "{\"uri\":\"", "\\u0001", 10000, "\"}"), ra_d, 50), 0, "arena: a uri of control bytes, six times as long escaped, leaves no heap");
+    # 3.7.0: messages that each need a little more of the arena than the one before.
+    # lib/alloc.cyr's growable arena kept a chunk for every one of them: 300 refused
+    # resources/read calls, the URI growing from 12 KB to 42 KB, kept 105 MB. The rows
+    # above have grown this arena already, so these start past the largest of them: a
+    # 62 KB URI, whose error reserves six times that for escaping, and on to 92 KB.
+    var ra_ramp = vec_new();
+    var ra_ri = 0;
+    while (ra_ri < 150) {
+        vec_push(ra_ramp, _ra_fill("resources/read", "{\"uri\":\"", 62000 + ra_ri * 200, "\"}"));
+        ra_ri = ra_ri + 1;
+    }
+    var ra_ramp_at = alloc_used();
+    ra_ri = 0;
+    while (ra_ri < 150) {
+        codec_process_message_a(bote_req_begin(), vec_get(ra_ramp, ra_ri), ra_d, 0);
+        ra_ri = ra_ri + 1;
+    }
+    # bote's arena keeps 2.9 MB here, a chunk for each size the largest needs; the stdlib's
+    # kept a chunk a message, about 2 MB each.
+    assert(alloc_used() - ra_ramp_at < 8388608, "arena: 150 messages, each needing a little more, keep under 8 MB");
+    ra_ramp_at = alloc_used();
+    ra_ri = 0;
+    while (ra_ri < 150) {
+        codec_process_message_a(bote_req_begin(), vec_get(ra_ramp, ra_ri), ra_d, 0);
+        ra_ri = ra_ri + 1;
+    }
+    assert_eq(alloc_used() - ra_ramp_at, 0, "arena: ...and the same 150 again keep nothing");
+
+    # The arena itself (3.7.0).
+    var ba = bote_req_arena_new();
+    assert_eq(bote_req_arena_bytes(ba), 65536, "arena: one chunk to start");
+    var ba1 = alloc_via(ba, 10);
+    var ba2 = alloc_via(ba, 8);
+    assert_eq(ba2 - ba1, 16, "arena: 8-byte aligned, one after another");
+    assert_eq(alloc_via(ba, 0), 0, "arena: 0 bytes is none");
+    assert_eq(alloc_via(ba, 0 - 8), 0, "arena: a negative size is none");
+    assert_eq(alloc_via(ba, BOTE_REQ_ALLOC_MAX + 1), 0, "arena: past its bound is none");
+    assert_eq(alloc_via(ba, 4611686018427387905), 0, "arena: ...and one whose doubling would overflow");
+    memcpy(ba1, "abcdefghi", 10);
+    var ba_re = realloc_via(ba, ba1, 10, 100);
+    assert(ba_re != ba1 && memeq(ba_re, "abcdefghi", 10) == 1, "arena: a realloc copies what there was");
+    assert(memeq(realloc_via(ba, ba1, 10, 4), "abcd", 4) == 1, "arena: ...and no more than it asked for");
+    # A shrinking realloc at the very end of a chunk: copying more than it asked for
+    # would run past the chunk, into the arena's own allocator, made right after it.
+    var bc = bote_req_arena_new();
+    alloc_via(bc, 65536 - 8);
+    var bc_src = alloc(64);
+    memset(bc_src, 65, 64);
+    assert(memeq(realloc_via(bc, bc_src, 64, 8), "AAAAAAAA", 8) == 1, "arena: a realloc into a chunk's last bytes");
+    assert(alloc_via(bc, 8) != 0, "arena: ...leaves the arena whole");
+    alloc_via(ba, 60000);
+    var ba_a = alloc_via(ba, 60000);
+    assert_eq(bote_req_arena_bytes(ba), 131072, "arena: a full chunk adds one of the chunk size");
+    var ba_big = alloc_via(ba, 200000);
+    assert(ba_big != 0, "arena: a request past the chunk size");
+    memset(ba_big, 7, 200000);
+    assert_eq(bote_req_arena_bytes(ba), 131072 + 262144, "arena: ...gets a chunk of the size doubled until it fits");
+    reset_via(ba);
+    assert(alloc_via(ba, 10) == ba1, "arena: a reset starts over at the first chunk");
+    alloc_via(ba, 65000);
+    assert(alloc_via(ba, 100000) == ba_big, "arena: a request the next chunk cannot hold passes it, for the first one that can");
+    assert(alloc_via(ba, 60000) != 0 && bote_req_arena_bytes(ba) == 393216, "arena: ...and adds nothing");
+    reset_via(ba);
+    alloc_via(ba, 65000);
+    assert(alloc_via(ba, 60000) == ba_a, "arena: the chunks are taken in order");
+    var bb = bote_req_arena_new();
+    reset_via(bb);
+    alloc_via(bb, 60000);
+    alloc_via(bb, 70000);
+    var bb_at = alloc_used();
+    var bb_i = 0;
+    while (bb_i < 200) {
+        reset_via(bb);
+        alloc_via(bb, 60000);
+        alloc_via(bb, 70000 + bb_i * 512);
+        bb_i = bb_i + 1;
+    }
+    assert(alloc_used() - bb_at <= 262160, "arena: 200 rounds each a little larger keep one chunk, not one a round");
 
     # The error serializer: what a client wrote is in the id and in the message.
     var ra_x = _ra_rep("x", 60000);
@@ -2833,6 +2911,8 @@ fn main() {
     assert_eq(dispatcher_register_resource(sp_d, resource_def_with_required_scopes(resource_def_new("sp://secret", "s", "S", 0), sp_two), &h_sp_res), 0, "resource scopes: good ones register");
     dispatcher_register_resource(sp_d, resource_def_new("sp://open", "o", "O", 0), &h_sp_res);
     dispatcher_register_resource(sp_d, resource_def_new("sp://t/exact", "e", "E", 0), &h_sp_res);
+    # 3.7.0: listed, with no handler of its own, so the template serves it.
+    dispatcher_register_resource(sp_d, resource_def_new("sp://t/nohandler", "n", "N", 0), 0);
     assert_eq(dispatcher_register_resource_template(sp_d, resource_template_with_required_scopes(resource_template_new("sp://t/{id}", "t", "T", 0), sp_two), &h_sp_res), 0, "template scopes: good ones register");
     dispatcher_register_resource_template(sp_d, resource_template_new("sp://o/{id}", "o", "O", 0), &h_sp_res);
     dispatcher_set_completion(sp_d, &h_sp_complete);
@@ -2864,6 +2944,8 @@ fn main() {
     assert_eq(dispatcher_resource_scopes_missing(sp_d, "sp://open", "x"), 0, "resource missing: one that asks for none");
     assert_eq(dispatcher_resource_scopes_missing(sp_d, "sp://t/9", "x"), sp_two, "resource missing: a URI its template serves");
     assert_eq(dispatcher_resource_scopes_missing(sp_d, "sp://t/exact", "x"), 0, "resource missing: an exact resource is judged, not the template it also matches");
+    assert_eq(dispatcher_resource_scopes_missing(sp_d, "sp://t/nohandler", "x"), sp_two, "resource missing: a resource with no handler is judged by the template that serves it");
+    assert(strstr(codec_process_message_a(bote_req_begin(), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"sp://t/nohandler\"}}", sp_d, "x"), "-31403") >= 0, "resource missing: ...and its read refused");
     assert_eq(dispatcher_resource_scopes_missing(sp_d, "sp://o/9", "x"), 0, "resource missing: an open template");
     assert_eq(dispatcher_resource_scopes_missing(sp_d, "sp://none", "x"), 0, "resource missing: nothing serves it");
     assert_eq(dispatcher_resource_scopes_missing(sp_d, 0, "x"), 0, "resource missing: no URI");

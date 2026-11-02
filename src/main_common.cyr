@@ -524,6 +524,30 @@ fn bote_main_conn_from_env() {
     return 0;
 }
 
+# BOTE_WORKERS (3.7.0): how many worker threads `bote streamable` serves on, from 0 to
+# BOTE_WORKERS_MAX, 4 when unset; 0 is the one serving loop it had before. A value that is
+# not a count keeps 4 with a WARN, one past the bound is held to it with a WARN. Logged at
+# INFO.
+var BOTE_WORKERS_DEFAULT = 4;
+var BOTE_WORKERS_MAX = 64;
+
+fn bote_main_workers_from_env() {
+    var n = _bote_env_count("BOTE_WORKERS", BOTE_WORKERS_DEFAULT);
+    if (n > BOTE_WORKERS_MAX) {
+        var wl[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&wl, SK_WARN, "BOTE_WORKERS past its bound; holding it there");
+        bote_log_int(&wl, "workers", n);
+        bote_log_int(&wl, "max", BOTE_WORKERS_MAX);
+        bote_log_emit(&wl);
+        n = BOTE_WORKERS_MAX;
+    }
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_INFO, "worker threads");
+    bote_log_int(&ln, "workers", n);
+    bote_log_emit(&ln);
+    return n;
+}
+
 # The startup line. `port` 0 and `path` 0 are omitted.
 fn bote_main_log_start(transport, port, path, auth_on) {
     var ln[BOTE_LOG_LINE_BYTES];

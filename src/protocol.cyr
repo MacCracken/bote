@@ -81,11 +81,126 @@ fn resp_success(id, result) {
 # answer one message goes here instead, and each transport rewinds it when the
 # next message starts. What outlives a request stays on the heap: `args` and
 # everything else a handler or a sink is handed, since either may keep it, and
-# sessions. One arena: the transports serve one message at a time.
-var _bote_req_al = 0;
+# sessions.
+#
+# The arena is part of a request's state, a block of BOTE_REQ_STATE_BYTES:
+#   +0  arena   made on first use
+#   +8  token   the token an accepted request presented, on the arena
+#   +16 kept    its copy on the heap, once a handler has been handed one
+#   +24 why     why this thread's last bote_fetch_in_child failed (src/fetch.cyr), or 0
+# A transport that serves one message at a time uses the process's block. A server
+# that serves on worker threads (3.7.0, src/conn.cyr) sets _bote_req_state_fp to a
+# function returning the calling thread's block, before its first worker starts.
+var BOTE_REQ_STATE_BYTES = 32;
+var BOTE_REQ_STATE_WHY = 24;
+var _bote_req_g[4];
+var _bote_req_state_fp = 0;
+
+fn bote_req_state() {
+    if (_bote_req_state_fp == 0) { return &_bote_req_g; }
+    return fncall0(_bote_req_state_fp);
+}
+
 fn bote_req_alloc() {
-    if (_bote_req_al == 0) { _bote_req_al = arena_allocator_growable(65536); }
-    return _bote_req_al;
+    var s = &_bote_req_g;
+    if (_bote_req_state_fp != 0) { s = fncall0(_bote_req_state_fp); }
+    var a = load64(s);
+    if (a == 0) {
+        a = bote_req_arena_new();
+        store64(s, a);
+    }
+    return a;
+}
+
+# The arena itself (3.7.0). lib/alloc.cyr's growable arena, when the chunk after the one
+# in use is too small for a request, links a new chunk in front of it and keeps both. A
+# client whose every message was a little larger than the last therefore added a chunk a
+# message, for good: 300 refused resources/read calls, the URI growing from 12 KB to
+# 42 KB, kept 105 MB. Filed in cyrius's repository as
+# 2026-11-02-bote-growable-arena-keeps-a-chunk-per-larger-request.md. This one takes
+# the first chunk ahead that is large enough, and only when there is none adds one, at
+# the end of the chain, of the chunk size doubled until the request fits. A chunk is
+# added only when a message needs more room than every chunk ahead of it has, so what a
+# client can make it keep is bounded by the largest message it sends.
+#
+# State (40 B): +0 the first chunk, +8 the chunk in use, +16 its next free byte, +24 its
+# end, +32 the chunk size. A chunk: +0 the next, +8 its capacity, its bytes from +16.
+var BOTE_REQ_CHUNK = 65536;
+var BOTE_REQ_ALLOC_MAX = 1099511627776;   # 1 TiB: past this the doubling would overflow
+
+fn _bote_ar_use(st, ch) {
+    store64(st + 8, ch);
+    store64(st + 16, ch + 16);
+    store64(st + 24, ch + 16 + load64(ch + 8));
+    return 0;
+}
+
+fn _bote_ar_take(st, ch, size) {
+    _bote_ar_use(st, ch);
+    store64(st + 16, ch + 16 + size);
+    return ch + 16;
+}
+
+fn _bote_ar_alloc(st, size) {
+    if (size <= 0 || size > BOTE_REQ_ALLOC_MAX) { return 0; }
+    size = (size + 7) & (0 - 8);
+    var p = load64(st + 16);
+    if (p + size <= load64(st + 24)) {
+        store64(st + 16, p + size);
+        return p;
+    }
+    var prev = load64(st + 8);
+    var c = load64(prev);
+    while (c != 0) {
+        if (load64(c + 8) >= size) { return _bote_ar_take(st, c, size); }
+        prev = c;
+        c = load64(c);
+    }
+    var cap = load64(st + 32);
+    while (cap < size) { cap = cap * 2; }
+    var ch = alloc(cap + 16);
+    if (ch == 0) { return 0; }
+    store64(ch, 0);
+    store64(ch + 8, cap);
+    store64(prev, ch);
+    return _bote_ar_take(st, ch, size);
+}
+
+fn _bote_ar_realloc(st, old, old_size, new_size) {
+    var p = _bote_ar_alloc(st, new_size);
+    if (p == 0 || old == 0) { return p; }
+    var n = old_size;
+    if (new_size < n) { n = new_size; }
+    memcpy(p, old, n);
+    return p;
+}
+
+fn _bote_ar_free(st, ptr) { return 0; }
+
+fn _bote_ar_reset(st) { return _bote_ar_use(st, load64(st)); }
+
+# A request arena of its own, as an Allocator, or 0 when the heap is out.
+fn bote_req_arena_new() {
+    var st = alloc(40);
+    var ch = alloc(BOTE_REQ_CHUNK + 16);
+    if (st == 0 || ch == 0) { return 0; }
+    store64(ch, 0);
+    store64(ch + 8, BOTE_REQ_CHUNK);
+    store64(st, ch);
+    store64(st + 32, BOTE_REQ_CHUNK);
+    _bote_ar_use(st, ch);
+    return allocator_new(&_bote_ar_alloc, &_bote_ar_realloc, &_bote_ar_free, &_bote_ar_reset, st);
+}
+
+# Every byte the arena `a` (a bote_req_arena_new) holds, across its chunks.
+fn bote_req_arena_bytes(a) {
+    var c = load64(load64(a + 32));
+    var n = 0;
+    while (c != 0) {
+        n = n + load64(c + 8);
+        c = load64(c);
+    }
+    return n;
 }
 
 # 1 when `s` is an RFC 6749 §3.3 scope-token. A scope goes out inside a quoted header
@@ -114,25 +229,25 @@ fn bote_scope_list_ok(scopes) {
 
 # The token an accepted request presented, on the arena, and its copy on the heap once
 # a handler has been handed one. A refused call must keep nothing, so that copy waits.
-var _bote_req_token = 0;
-var _bote_req_kept = 0;
 
 # Start a message: whatever the previous one left on the arena is gone.
 fn bote_req_begin() {
     var al = bote_req_alloc();
     reset_via(al);
-    _bote_req_token = 0;
-    _bote_req_kept = 0;
+    var s = bote_req_state();
+    store64(s + 8, 0);
+    store64(s + 16, 0);
     return al;
 }
 
 # The token noted for this message, or 0.
-fn bote_req_token() { return _bote_req_token; }
+fn bote_req_token() { return load64(bote_req_state() + 8); }
 
 # `token` is on the arena and is this message's claims.
 fn bote_req_note_token(token) {
-    _bote_req_token = token;
-    _bote_req_kept = 0;
+    var s = bote_req_state();
+    store64(s + 8, token);
+    store64(s + 16, 0);
     return token;
 }
 
@@ -140,24 +255,27 @@ fn bote_req_note_token(token) {
 # already made of it, or 0. A connection that presents its token once, for every message
 # after, then keeps one copy, not one per message.
 fn bote_req_note_token_kept(token, kept) {
-    _bote_req_token = token;
-    _bote_req_kept = kept;
+    var s = bote_req_state();
+    store64(s + 8, token);
+    store64(s + 16, kept);
     return token;
 }
 
 # The heap copy of this message's token a handler has been handed, or 0.
-fn bote_req_kept() { return _bote_req_kept; }
+fn bote_req_kept() { return load64(bote_req_state() + 16); }
 
 # `claims` as a handler may have them, and a handler may keep them. Once for a message, so
 # a batch of calls makes one copy.
 fn bote_req_claims_kept(claims) {
-    if (claims == 0 || claims != _bote_req_token) { return claims; }
-    if (_bote_req_kept == 0) {
+    var s = bote_req_state();
+    if (claims == 0 || claims != load64(s + 8)) { return claims; }
+    if (load64(s + 16) == 0) {
         var n = strlen(claims) + 1;
-        _bote_req_kept = alloc(n);
-        memcpy(_bote_req_kept, claims, n);
+        var k = alloc(n);
+        memcpy(k, claims, n);
+        store64(s + 16, k);
     }
-    return _bote_req_kept;
+    return load64(s + 16);
 }
 
 fn resp_success_a(a, id, result) {

@@ -212,18 +212,25 @@ fn mcp_session_outbound(s) { return load64(s + 32); }
 fn mcp_session_set_outbound(s, ptr) { store64(s + 32, ptr); return 0; }
 
 # ================================================================
-# SessionStore (24 bytes):
+# SessionStore (32 bytes):
 #   +0  sessions    hashmap: sid_cstr -> McpSession ptr
 #   +8  ids         vec of sid_cstrs (insertion order — for prune iteration)
 #   +16 timeout_ns  i64
+#   +24 lock        a mutex (3.7.0): a threaded server's workers share the store. Every
+#                   function below takes it; code that reads the map or the ids itself,
+#                   or what a session points at, holds it with session_store_lock.
 # ================================================================
 fn session_store_new(timeout_ns) {
-    var st = alloc(24);
+    var st = alloc(32);
     store64(st, map_new());
     store64(st + 8, vec_new());
     store64(st + 16, timeout_ns);
+    store64(st + 24, mutex_new());
     return st;
 }
+
+fn session_store_lock(st)   { return mutex_lock(load64(st + 24)); }
+fn session_store_unlock(st) { return mutex_unlock(load64(st + 24)); }
 
 # Default: 1 hour timeout (3600 * 1e9 ns).
 fn session_store_default() {
@@ -242,34 +249,50 @@ var BOTE_SESSION_MAX = 4096;
 
 # Returns the new session id, or 0 when the store is full of live sessions.
 fn session_store_create(st, protocol_version) {
+    session_store_lock(st);
     if (vec_len(session_store_ids(st)) >= BOTE_SESSION_MAX) {
-        session_store_prune_expired(st);
-        if (vec_len(session_store_ids(st)) >= BOTE_SESSION_MAX) { return 0; }
+        _ses_prune(st);
+        if (vec_len(session_store_ids(st)) >= BOTE_SESSION_MAX) {
+            session_store_unlock(st);
+            return 0;
+        }
     }
+    # Drawn only once there is room, so a full store keeps nothing for a refusal.
     var sid = _gen_session_id();
     var now = clock_now_ns();
     var session = mcp_session_new(sid, protocol_version, now);
     map_set(session_store_sessions(st), sid, session);
     vec_push(session_store_ids(st), sid);
+    session_store_unlock(st);
     return sid;
 }
 
 # Validate and touch a session. Returns the session ptr or 0 if unknown.
 fn session_store_validate(st, sid) {
+    session_store_lock(st);
     var s = map_get(session_store_sessions(st), sid);
-    if (s == 0) { return 0; }
+    if (s == 0) {
+        session_store_unlock(st);
+        return 0;
+    }
     var now = clock_now_ns();
     if (now - mcp_session_last_active(s) >= session_store_timeout_ns(st)) {
-        session_store_prune_expired(st);
+        _ses_prune(st);
+        session_store_unlock(st);
         return 0;
     }
     mcp_session_touch(s, now);
+    session_store_unlock(st);
     return s;
 }
 
 # Remove a session. Returns 1 if found, 0 if not.
 fn session_store_remove(st, sid) {
-    if (map_has(session_store_sessions(st), sid) == 0) { return 0; }
+    session_store_lock(st);
+    if (map_has(session_store_sessions(st), sid) == 0) {
+        session_store_unlock(st);
+        return 0;
+    }
     map_delete(session_store_sessions(st), sid);
     var ids = session_store_ids(st);
     var n = vec_len(ids);
@@ -281,16 +304,28 @@ fn session_store_remove(st, sid) {
         }
         i = i + 1;
     }
+    session_store_unlock(st);
     return 1;
 }
 
 # Number of active sessions.
 fn session_store_active_count(st) {
-    return map_count(session_store_sessions(st));
+    session_store_lock(st);
+    var n = map_count(session_store_sessions(st));
+    session_store_unlock(st);
+    return n;
 }
 
 # Prune sessions inactive longer than timeout. Returns the number pruned.
 fn session_store_prune_expired(st) {
+    session_store_lock(st);
+    var n = _ses_prune(st);
+    session_store_unlock(st);
+    return n;
+}
+
+# session_store_prune_expired, with the lock held.
+fn _ses_prune(st) {
     var now = clock_now_ns();
     var timeout = session_store_timeout_ns(st);
     var sessions = session_store_sessions(st);

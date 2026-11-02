@@ -275,8 +275,8 @@ fn _ssrf_starts_with(s, prefix) {
     return 0;
 }
 
-# ASCII-lowercase a cstr into a fresh alloc. Caller owns the result.
-# `s` lowercased, on the request arena: a client's URL, judged once a message.
+# `s` lowercased, on the request arena: a client's URL, judged once a message. It lasts
+# until the next bote_req_begin.
 fn _ssrf_lower(s) {
     var n = strlen(s);
     var out = alloc_via(bote_req_alloc(), n + 1);
@@ -790,10 +790,11 @@ fn ssrf_reason(code) {
     return "unknown";
 }
 
-# The lowercased host of `url` as a fresh cstr (userinfo, port and IPv6
-# brackets stripped), or 0 when it does not parse. For logging which host a
-# request aimed at without logging the URL, whose userinfo or query string
-# may carry a credential (3.4.0).
+# The lowercased host of `url` (userinfo, port and IPv6 brackets stripped), or 0
+# when it does not parse. On the request arena since 3.6.6, so it lasts until the
+# next bote_req_begin: copy it to keep it. For logging which host a request aimed
+# at without logging the URL, whose userinfo or query string may carry a
+# credential (3.4.0).
 fn ssrf_host(url) {
     var start_slot[8]; var end_slot[8];
     store64(&start_slot, 0); store64(&end_slot, 0);

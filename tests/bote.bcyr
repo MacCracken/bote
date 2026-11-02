@@ -38,6 +38,7 @@ include "tests/fixtures/jwt_vectors.cyr"
 include "src/http_era.cyr"
 include "src/oauth_metadata.cyr"
 include "src/fetch.cyr"
+include "src/conn.cyr"
 
 # ================================================================
 # Globals — preallocated state shared by benchmark callbacks
@@ -127,6 +128,14 @@ fn b_http_era_params() { return _b_era(_b_param_dispatcher, _b_era_params, _b_er
 fn b_http_head_nul() { return bote_http_head_nul(_b_era_modern, _b_era_modern_at); }
 
 # A request made in a child, less the request: the fork, the pipe and the reap (3.6.5).
+# 3.7.0: a session looked up under the store's lock, and a message on the request arena,
+# before and after a threaded server arms its per-thread state (the last row, so that no
+# other row runs armed).
+var _b_sess_store = 0;
+var _b_sess_id = 0;
+fn b_session_validate() { return session_store_validate(_b_sess_store, _b_sess_id); }
+fn b_codec_process_message_arena() { return codec_process_message_a(bote_req_begin(), _b_call_line, _b_dispatcher, 0); }
+
 fn _b_child_nop(ctx, rec) { return 0; }
 fn b_fetch_in_child_empty() {
     bote_req_begin();
@@ -516,6 +525,18 @@ fn main() {
     var b33 = bench_new("jwt_cached_es256_sourced");
     bench_run(b33, &b_jwt_cached_es256_sourced, 10000);
     vec_push(benches, b33);
+    _b_sess_store = session_store_default();
+    _b_sess_id = session_store_create(_b_sess_store, "2025-11-25");
+    var b34 = bench_new("session_validate");
+    bench_run(b34, &b_session_validate, 100000);
+    vec_push(benches, b34);
+    var b35 = bench_new("codec_process_message_arena");
+    bench_run(b35, &b_codec_process_message_arena, 10000);
+    vec_push(benches, b35);
+    bote_conn_arm();
+    var b36 = bench_new("codec_process_message_threaded");
+    bench_run(b36, &b_codec_process_message_arena, 10000);
+    vec_push(benches, b36);
 
     bench_report_all(benches);
     return 0;

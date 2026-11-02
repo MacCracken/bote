@@ -1,0 +1,102 @@
+# Fuzz: bote's request arena (3.7.0) over random cycles of allocations, reallocations and
+# resets, each cycle a message. Four properties, each with its own exit code:
+#
+#   10   every block of a cycle holds what was written to it when the cycle ends: no two
+#        blocks of one message overlap, and none runs past its chunk;
+#   20   a block is 8-byte aligned;
+#   30   a realloc keeps the bytes it was handed, up to the smaller size;
+#   40   what it keeps stays bounded: the heap grows no more than BOUND bytes, however the
+#        sizes move, where lib/alloc.cyr's growable arena kept a chunk for each new
+#        largest request.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/fnptr.cyr"
+
+include "src/log.cyr"
+include "src/protocol.cyr"
+
+alloc_init();
+
+# A small, fixed generator: the run is the same every time.
+var _rng = 88172645463325252;
+fn _rand() {
+    _rng = _rng ^ (_rng << 13);
+    _rng = _rng ^ (_rng >> 7);
+    _rng = _rng ^ (_rng << 17);
+    if (_rng < 0) { return 0 - _rng; }
+    return _rng;
+}
+
+# A size: mostly small, now and then past the chunk size, up to 600 KB, rising over the
+# run so that each phase reaches sizes the one before did not.
+fn _size(round) {
+    var r = _rand() % 100;
+    if (r < 70) { return 1 + _rand() % 512; }
+    if (r < 95) { return 1 + _rand() % 70000; }
+    return 1 + _rand() % (100000 + round * 25);
+}
+
+# The byte block `p` of `n` bytes is filled with.
+fn _tag(p, n) { return (p / 8 + n) & 255; }
+
+var BOUND = 16777216;
+var a = bote_req_arena_new();
+var blocks = alloc(64 * 8);
+var lens = alloc(64 * 8);
+var base = alloc_used();
+var round = 0;
+while (round < 20000) {
+    reset_via(a);
+    var nb = 1 + _rand() % 24;
+    var i = 0;
+    while (i < nb) {
+        var n = _size(round);
+        var p = alloc_via(a, n);
+        if ((p & 7) != 0) { sys_exit(20); }
+        if (i > 0 && _rand() % 6 == 0) {
+            # Grow or shrink the block before this one into p's place.
+            var q = load64(blocks + (i - 1) * 8);
+            var qn = load64(lens + (i - 1) * 8);
+            var rn = 1 + _rand() % (qn * 2 + 1);
+            var r = realloc_via(a, q, qn, rn);
+            var keep = qn;
+            if (rn < keep) { keep = rn; }
+            var k = 0;
+            while (k < keep) {
+                if (load8(r + k) != _tag(q, qn)) { sys_exit(30); }
+                k = k + 1;
+            }
+            store64(blocks + (i - 1) * 8, r);
+            store64(lens + (i - 1) * 8, rn);
+            memset(r, _tag(r, rn), rn);
+        }
+        memset(p, _tag(p, n), n);
+        store64(blocks + i * 8, p);
+        store64(lens + i * 8, n);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < nb) {
+        var bp = load64(blocks + i * 8);
+        var bn = load64(lens + i * 8);
+        var t = _tag(bp, bn);
+        var k = 0;
+        while (k < bn) {
+            if (load8(bp + k) != t) { sys_exit(10); }
+            k = k + 7;
+        }
+        if (load8(bp + bn - 1) != t) { sys_exit(10); }
+        i = i + 1;
+    }
+    if (alloc_used() - base > BOUND) { sys_exit(40); }
+    round = round + 1;
+}
+
+sys_exit(0);

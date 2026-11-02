@@ -168,6 +168,9 @@ fn main() {
         streamable_config_with_allowed_origins(scfg, allowed_origins);
         streamable_config_with_resource_metadata(scfg, prm);
         if (bearer_fp != 0) { streamable_config_with_bearer_validator(scfg, bearer_fp, bearer_ctx); }
+        # BOTE_WORKERS (3.7.0): the worker threads requests are served on, 4 unless set; 0
+        # serves them on this thread, one at a time, as before.
+        streamable_config_with_workers(scfg, bote_main_workers_from_env());
         bote_main_log_start("streamable", sport, 0, bearer_fp != 0);
         return bote_main_log_exit("streamable", transport_streamable_run(sdisp, scfg));
     }
