@@ -654,6 +654,8 @@ fn main() {
       "K1 prompts/list: the prompt, with its required argument marked");
     v = _send(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/get\",\"params\":{\"name\":\"code_review\",\"arguments\":{\"code\":\"x\"}}}");
     _expect(bayan_json_v_is_arr(_get(_result(v), "messages")) == 1, "K2 prompts/get: a messages array");
+    v = _send(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/get\",\"params\":{\"name\":\"code\\u005freview\",\"arguments\":{\"code\":\"x\"}}}");
+    _expect(bayan_json_v_is_arr(_get(_result(v), "messages")) == 1, "K2b prompts/get: an escaped name is the name it decodes to");
     _expect_code(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/list\",\"params\":{\"cursor\":\"p2\"}}", 0 - 32602,
       "K2b pagination: prompts/list refuses a cursor it never issued");
     _expect_code(f, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/get\",\"params\":{\"name\":\"nope\"}}", 0 - 32602,

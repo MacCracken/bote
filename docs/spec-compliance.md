@@ -1,8 +1,8 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.5.0 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.5.1 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
-> ⚠ **bote speaks the current revision, 2026-07-28, in part.** Its stateless core works over stdio and Unix, and over WebSocket when no `MCP-Protocol-Version` header is sent. Streamable HTTP does not speak it yet: it refuses that version in the header a conforming client sends, roadmap 3.5.1. [The 2026-07-28 section](#mcp-2026-07-28-stateless-path) lists what is in. Every other table here is against 2025-11-25.
+> ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not; `Mcp-Param` headers are the last transport gap. Every other table here is against 2025-11-25.
 
 This file lists what the shipped Cyrius implementation **covers today**, including the
 gaps — a ❌ row is a defect on the released binary, a ⏳ row is planned work. Both are
@@ -22,7 +22,7 @@ assertions, which is how the rows marked (3.4.5) were found.
 | `2025-03-26` | ✅ |
 | `2025-06-18` | ✅ (3.3.13) |
 | `2025-11-25` | ✅ **default** |
-| `2026-07-28` | ⚠️ stateless core, on the request path (3.5.0); not on Streamable HTTP |
+| `2026-07-28` | ✅ stateless, on every transport (3.5.0; HTTP 3.5.1). Gaps listed below |
 
 The first four are negotiated via `initialize`. The server picks the highest
 mutually supported version, so `initialize` never lands on `2026-07-28`, which
@@ -44,8 +44,10 @@ legitimately batch).
 ## MCP 2026-07-28, stateless path
 
 Selected per request by `params._meta["io.modelcontextprotocol/protocolVersion"]`. A request without
-that key, and every `initialize`, takes the legacy path unchanged. Handlers are the same on both.
-Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`.
+that key, and every `initialize`, takes the legacy path unchanged. Handlers are the same on both. On HTTP
+the header and `_meta` must agree first; a POST with neither is treated as `2025-03-26`, as the spec allows.
+Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`, and in
+`tests/bote_http_era.tcyr` on the real HTTP handlers.
 
 | Spec Requirement | Status |
 |---|---|
@@ -60,7 +62,15 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | `ping` and `initialize` are gone | ✅ (3.5.0) — a modern `ping` is `-32601`. An `initialize` selects the legacy path whatever `_meta` it carries, so it never lands on a revision that has no `initialize` |
 | No `listChanged` advertised | ✅ (3.5.0) — the modern era has no way to deliver it until `subscriptions/listen` |
 | `tools/list` in a deterministic order | ✅ registration order, in both eras |
-| Streamable HTTP: `MCP-Protocol-Version` against `_meta`, `Mcp-Method` / `Mcp-Name`, `-32020`, `202`, `404`, `405` | ⏳ roadmap 3.5.1 |
+| Every POST: `MCP-Protocol-Version` and `Mcp-Method`, and `Mcp-Name` on `tools/call`, `resources/read` and `prompts/get`. Missing, invalid or disagreeing with the body is `400` + `-32020` | ✅ (3.5.1) `src/http_era.cyr`, on `bote http` and `bote streamable`. Names are case-insensitive, values case-sensitive |
+| `Mcp-Name` in the `=?base64?…?=` sentinel, decoded before the comparison | ✅ (3.5.1) lower-case markers only, canonical Base64 only |
+| An unsupported version is `400` + `-32022`; a method bote does not implement is `404` + `-32601`; a missing required field is `400` + `-32602` | ✅ (3.5.1) every `-32602` is `400`, the one rule that meets any reading of "required field". `-32603` is `500`. The spec gives neither of those last two a status |
+| A notification is `202` with no body | ✅ (3.5.1), in both eras. It was `204` through 3.5.0, which 2025-11-25 does not allow either |
+| One message per POST | ✅ (3.5.1) a batch, a response or a non-object is `400`, a batch that names this revision included |
+| Responses in `application/json` | ✅ the spec lets the server choose per request. SSE arrives with `subscriptions/listen` |
+| `GET` and `DELETE` are `405` to a request naming this revision, with `Allow` | ✅ (3.5.1). A legacy `GET` keeps its stream |
+| `Mcp-Session-Id` and `Last-Event-ID` are ignored, and no session is minted | ✅ (3.5.1) |
+| `Mcp-Param-{Name}`, for a tool that declares `x-mcp-header` | ⏳ roadmap 3.5.2. No bote tool declares one |
 | `-32021` for a missing client capability | ⏳ no request bote serves needs one yet; capabilities are required and not otherwise read |
 | `subscriptions/listen` and the rest of its notifications | ⏳ roadmap 3.7.x |
 
@@ -127,7 +137,7 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 
 | Spec Requirement | Module | Status |
 |---|---|---|
-| `MCP-Protocol-Version` header parsing + validation | `session::validate_protocol_version` + per-transport `_check_protocol` | ✅ |
+| `MCP-Protocol-Version` header parsing + validation | `session::bote_protocol_known` + `http_era::bote_http_check_version` | ✅ — absent is taken as `2025-03-26`, as the spec allows, unless `require_protocol` is set. Through 3.5.0 `bote streamable` refused a POST without it, `initialize` included (3.5.1) |
 | `MCP-Session-Id` — server-issued on `initialize`, validated on subsequent | `session::SessionStore` + per-transport `_check_session` | ✅ HTTP / streamable / bridge |
 | Session creation on initialize (auto, returned in response header) | `session_store_create` + handler hook | ✅ |
 | Session timeout + pruning (configurable; default 1h) | `session_store_validate` + `session_store_prune_expired` | ✅ (3.4.15) — through 3.4.14 nothing checked a session's age and nothing called the pruner, so a session never expired. The store now holds at most `BOTE_SESSION_MAX` (4096) and answers 503 when full of live sessions; a session is minted only after `initialize` succeeds |
@@ -261,11 +271,11 @@ registered by default in the binaries.
 
 ---
 
-## Test Coverage (bote 3.5.0)
+## Test Coverage (bote 3.5.1)
 
 | Scope | Count | Source |
 |---|---|---|
-| **Protocol conformance by spec clause** — JSON-RPC 2.0 §4 / §5 / §4.1 / §5.1 / §6 (incl. the spec's own examples), MCP initialize + all four revisions, ping, cancellation, capability gating, pagination cursors, tools/list, the tools/call protocol-vs-execution error split, prompts, resources, completion, control bytes in a tool result, every handler-result shape, typed arguments; the 2026-07-28 stateless path; every response checked to be valid JSON and a §5 Response object | **202** | `tests/conformance.tcyr` (3.4.5; 3.5.0) |
+| **Protocol conformance by spec clause** — JSON-RPC 2.0 §4 / §5 / §4.1 / §5.1 / §6 (incl. the spec's own examples), MCP initialize + all four revisions, ping, cancellation, capability gating, pagination cursors, tools/list, the tools/call protocol-vs-execution error split, prompts, resources, completion, control bytes in a tool result, every handler-result shape, typed arguments; the 2026-07-28 stateless path; every response checked to be valid JSON and a §5 Response object | **203** | `tests/conformance.tcyr` (3.4.5; 3.5.0) |
 | Core — error / protocol / jsonx / registry / prompts / resources / completion / dispatch / codec / schema / stream / session / HTTP helpers / discovery / bridge / events / audit / the per-request DEBUG line, the string escaper, registration checks, numbers per 2020-12 | **668** | `tests/bote.tcyr` |
 | Bearer + allowlist + JWT + PKCE validators | **55** | `tests/bote_auth.tcyr` |
 | Content blocks + annotations | **25** | `tests/bote_content.tcyr` |
@@ -279,10 +289,11 @@ registered by default in the binaries.
 | Streamable HTTP — event ids, resumption, per-session outbound, drain selection | **53** | `tests/bote_streamable.tcyr` |
 | Unix transport — sockaddr, accept-error policy, backoff, deadlines, closed-peer write, overlong lines, socket-path refusals | **76** | `tests/bote_transport_unix.tcyr` |
 | `web_tools` — scheme guard, SSRF guard (URL and resolved address), HTML stripper, entities, schemas and annotations, outbound deadline | **66** | `tests/bote_web_tools.tcyr` |
-| WebSocket config + wire-up + the send-deadline drop | **21** | `tests/bote_ws.tcyr` |
-| **Total assertions** | **1637** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
-| Hot-path benchmarks | **16** | `tests/bote.bcyr` |
-| Fuzz harnesses | **6** | `fuzz/*.fcyr` (in CI since 3.3.8; `jsonx_valid.fcyr` since 3.4.5, `ssrf_ipv6.fcyr` since 3.4.7) |
+| MCP 2026-07-28 on HTTP, each clause on the real handlers over a socketpair | **517** | `tests/bote_http_era.tcyr` |
+| WebSocket config + wire-up + the send-deadline drop + the upgrade's version check | **24** | `tests/bote_ws.tcyr` |
+| **Total assertions** | **2158** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
+| Hot-path benchmarks | **18** | `tests/bote.bcyr` |
+| Fuzz harnesses | **7** | `fuzz/*.fcyr` (in CI since 3.3.8; `jsonx_valid.fcyr` since 3.4.5, `ssrf_ipv6.fcyr` since 3.4.7) |
 | End-to-end transport round trips | 6 (stdio, HTTP, Unix, bridge, streamable, WS) | CI's "Transport smoke" step plus a per-release stdio probe on the built binary |
 
 The Rust archive's conformance suite (`tests/conformance.rs`, tag `0.92.0`, 44 scenarios) is

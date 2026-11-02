@@ -259,7 +259,7 @@ fn _bridge_handle(config, cfd, buf, n) {
     }
     # Anything other than POST is rejected.
     if (streq(method, "POST") == 0) {
-        bote_http_refuse(cfd, SK_DEBUG, "bridge", HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed", "method");
+        bote_http_refuse_method(cfd, "bridge", "Allow: POST, GET, OPTIONS\r\n");
         return 0;
     }
     # Only "/" is the bridge endpoint.

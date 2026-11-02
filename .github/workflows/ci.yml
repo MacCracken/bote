@@ -344,6 +344,7 @@ jobs:
                       tests/bote_content.tcyr \
                       tests/bote_fs_tools.tcyr \
                       tests/bote_host.tcyr \
+                      tests/bote_http_era.tcyr \
                       tests/bote_jwt.tcyr \
                       tests/bote_libro_tools.tcyr \
                       tests/bote_log.tcyr \

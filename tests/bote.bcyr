@@ -30,7 +30,10 @@ include "src/audit.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
 include "src/auth.cyr"
+include "src/http_era.cyr"
 
 # ================================================================
 # Globals — preallocated state shared by benchmark callbacks
@@ -72,11 +75,25 @@ fn h_echo_b(args) { return args; }
 # (dispatch_tools_call, whose handler returns its args as bare JSON).
 fn h_result_b(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}"; }
 var _b_call_result_req = 0;
+var _b_era_legacy = "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2025-11-25\r\nMCP-Session-Id: abc\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}}";
+var _b_era_legacy_at = 0;
+var _b_era_modern = "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: svc_echo\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}},\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}}";
+var _b_era_modern_at = 0;
 var _b_result_dispatcher = 0;
 
 # ================================================================
 # Benchmark callbacks (no-arg functions, called by bench_run)
 # ================================================================
+
+# What an HTTP POST pays to learn its era: a legacy request with a version header,
+# and a modern tools/call with every header checked.
+fn _b_era(raw, body) {
+    bote_req_begin();
+    var out[8];
+    return bote_http_era(0 - 1, "bench", raw, strlen(raw), body, 0, &out);
+}
+fn b_http_era_legacy() { return _b_era(_b_era_legacy, _b_era_legacy + _b_era_legacy_at); }
+fn b_http_era_modern() { return _b_era(_b_era_modern, _b_era_modern + _b_era_modern_at); }
 
 fn b_dispatch_initialize() {
     return dispatcher_dispatch(_b_dispatcher, _b_init_req, 0);
@@ -169,6 +186,8 @@ fn _bench_setup() {
     dispatcher_handle(_b_result_dispatcher, "svc_result", &h_result_b);
     _b_call_result_req = req_with_params(req_new("3", "tools/call"), "{\"name\":\"svc_result\",\"arguments\":{\"msg\":\"hi\"}}");
 
+    _b_era_legacy_at = strstr(_b_era_legacy, "\r\n\r\n") + 4;
+    _b_era_modern_at = strstr(_b_era_modern, "\r\n\r\n") + 4;
     _b_init_req = req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}");
     _b_list_req = req_new("2", "tools/list");
     _b_call_req = req_with_params(req_new("3", "tools/call"),
@@ -278,6 +297,14 @@ fn main() {
     var b16 = bench_new("dispatch_tools_call_result");
     bench_run(b16, &b_dispatch_tools_call_result, 10000);
     vec_push(benches, b16);
+
+    var b17 = bench_new("http_era_legacy");
+    bench_run(b17, &b_http_era_legacy, 10000);
+    vec_push(benches, b17);
+
+    var b18 = bench_new("http_era_modern");
+    bench_run(b18, &b_http_era_modern, 10000);
+    vec_push(benches, b18);
 
     bench_report_all(benches);
     return 0;

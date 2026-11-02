@@ -163,15 +163,29 @@ fn _auth_log_rejected(reason) {
 # a security mitigation firing (403 origin, 413 oversized, a rejected
 # Transfer-Encoding) and SK_DEBUG for an ordinary client mistake (404, 405,
 # an unknown session, a protocol-version mismatch). Returns `status`.
-fn bote_http_refuse(cfd, level, transport, status, text, reason) {
+fn bote_http_log_refusal(level, transport, status, reason) {
     var ln[BOTE_LOG_LINE_BYTES];
     bote_log_line(&ln, level, "request refused");
     bote_log_str(&ln, "transport", transport);
     bote_log_int(&ln, "status", status);
     bote_log_str(&ln, "reason", reason);
     bote_log_emit(&ln);
+    return 0;
+}
+
+fn bote_http_refuse(cfd, level, transport, status, text, reason) {
+    bote_http_log_refusal(level, transport, status, reason);
     sandhi_server_send_status_a(bote_req_alloc(), cfd, status, text);
     return status;
+}
+
+# A 405. RFC 9110 15.5.6: it MUST name what the resource does allow, and `allow`
+# is that header, CRLF included.
+fn bote_http_refuse_method(cfd, transport, allow) {
+    bote_http_log_refusal(SK_DEBUG, transport, HTTP_METHOD_NOT_ALLOWED, "method");
+    sandhi_server_send_response_a(bote_req_alloc(), cfd, HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed",
+      "text/plain", "", 0, allow);
+    return HTTP_METHOD_NOT_ALLOWED;
 }
 
 fn auth_bearer_check(cfd, buf, blen, validator_fp, validator_ctx, claims_out) {

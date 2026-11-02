@@ -1,0 +1,184 @@
+# Fuzz: bote_http_era (3.5.1) reads a client's raw headers and body before anything
+# else has judged them, so a crash is a remote crash, and a byte kept is a slow one.
+# Each property has its own exit code:
+#
+#   10  _he_b64_decode_a agrees with bayan_base64_decode on every substitution of
+#       every encoded text: canonical Base64 is accepted, nothing else is, and what
+#       decodes to a NUL is refused. bayan is the oracle;
+#   20  a substituted request of any kind, at any offset, gets one of the three
+#       answers and nothing else;
+#   30  and leaves nothing on the heap.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/auth.cyr"
+include "src/http_era.cyr"
+
+alloc_init();
+sakshi_set_level(SK_ERROR);
+
+var _buf = alloc(8192);
+
+# 1 when the bayan pair at `d` holds a NUL.
+fn _has_nul(d) {
+    var p = load64(d);
+    var n = load64(d + 8);
+    var i = 0;
+    while (i < n) {
+        if (load8(p + i) == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+var b64_subs = "=A-+/ \t!z0";
+
+fn _b64_case(enc) {
+    var n = strlen(enc);
+    var i = 0;
+    while (i <= n) {
+        var si = 0;
+        while (si < strlen(b64_subs)) {
+            memcpy(_buf, enc, n);
+            store8(_buf + n, 0);
+            if (i < n) { store8(_buf + i, load8(b64_subs + si)); }
+            var ours = _he_b64_decode_a(bote_req_begin(), _buf, n);
+            var theirs = bayan_base64_decode(_buf, n);
+            var want = 0;
+            if (theirs != 0 && _has_nul(theirs) == 0) { want = 1; }
+            var got = 0;
+            if (ours != 0) { got = 1; }
+            if (want != got) { sys_exit(10); }
+            if (got == 1 && memeq(ours, load64(theirs), load64(theirs + 8)) == 0) { sys_exit(10); }
+            si = si + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+var plain = alloc(64);
+var pl = 0;
+while (pl < 40) {
+    store8(plain + pl, 0);
+    var enc_in = 0;
+    while (enc_in < pl) {
+        store8(plain + enc_in, 1 + (enc_in * 37 + pl * 11) % 250);
+        enc_in = enc_in + 1;
+    }
+    _b64_case(bayan_base64_encode(plain, pl));
+    pl = pl + 1;
+}
+# A NUL inside, which only an encoded text can carry.
+store8(plain, 65); store8(plain + 1, 0); store8(plain + 2, 66);
+_b64_case(bayan_base64_encode(plain, 3));
+
+var meta = "\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}";
+
+fn _seed(hdrs, body) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "POST /mcp HTTP/1.1\r\nHost: x\r\n");
+    str_builder_add_cstr(sb, hdrs);
+    str_builder_add_cstr(sb, "\r\n");
+    str_builder_add_cstr(sb, body);
+    return str_data(str_builder_build(sb));
+}
+
+fn _modern(method, extra) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, "\",\"params\":{");
+    str_builder_add_cstr(sb, meta);
+    str_builder_add_cstr(sb, extra);
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}
+
+var seeds = vec_new();
+vec_push(seeds, _seed("MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: t\r\n", _modern("tools/call", ",\"name\":\"t\",\"arguments\":{\"a\":1}")));
+vec_push(seeds, _seed("MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: resources/read\r\nMcp-Name: =?base64?cmVzOi8vYQ==?=\r\n", _modern("resources/read", ",\"uri\":\"res://a\"")));
+vec_push(seeds, _seed("MCP-Protocol-Version: 2026-07-28\r\n", "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/x\"}"));
+vec_push(seeds, _seed("MCP-Protocol-Version: 2025-11-25\r\nMCP-Session-Id: abc\r\n", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"));
+vec_push(seeds, _seed("", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\"}}"));
+vec_push(seeds, _seed("MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/list\r\n", "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}]"));
+
+var subs = "\x01\t\n\r \"'=?\\{}[]:,0Az\xC3\xFF";
+
+fn _sweep(require) {
+    var si = 0;
+    while (si < vec_len(seeds)) {
+        var s = vec_get(seeds, si);
+        var n = strlen(s);
+        var i = 0;
+        while (i < n) {
+            var bi = 0;
+            while (bi < strlen(subs)) {
+                memcpy(_buf, s, n);
+                store8(_buf + i, load8(subs + bi));
+                store8(_buf + n, 0);
+                var be = strstr(_buf, "\r\n\r\n");
+                var body = _buf + n;
+                if (be >= 0) { body = _buf + be + 4; }
+                bote_req_begin();
+                var out[8];
+                var era = bote_http_era(0 - 1, "fuzz", _buf, n, body, require, &out);
+                if (era != BOTE_HTTP_LEGACY && era != BOTE_HTTP_MODERN && era != BOTE_HTTP_REFUSED) { sys_exit(20); }
+                if (era == BOTE_HTTP_MODERN && load64(&out) == 0) { sys_exit(20); }
+                bi = bi + 1;
+            }
+            i = i + 1;
+        }
+        si = si + 1;
+    }
+    return 0;
+}
+
+_sweep(0);
+var used0 = alloc_used();
+_sweep(0);
+_sweep(1);
+_sweep(0);
+if (alloc_used() - used0 != 0) { sys_exit(30); }
+
+sys_exit(0);

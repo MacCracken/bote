@@ -23,9 +23,18 @@ fn mcp_session_id_header() { return "MCP-Session-Id"; }
 # (all three binaries, `tests/bote*.tcyr`, `dist/bote.cyr`), and the
 # transport-free `[lib.core]` profile carries dispatch without session,
 # so the single-pass forward reference always resolves.
+#
+# bote_protocol_known adds the one revision `initialize` never negotiates, and
+# allocates nothing, because a transport asks it about a client's header.
+fn bote_protocol_known(v) {
+    if (v == 0) { return 0; }
+    if (_mcp_is_supported(v) == 1) { return 1; }
+    return _mcp_is_modern(v);
+}
+
 fn validate_protocol_version(v) {
     if (v == 0) { return "unsupported MCP protocol version: (null)"; }
-    if (_mcp_is_supported(v) == 1) { return 0; }
+    if (bote_protocol_known(v) == 1) { return 0; }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "unsupported MCP protocol version: ");
     str_builder_add_cstr(sb, v);

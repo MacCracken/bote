@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.5.0"; }
+fn _bote_server_version() { return "3.5.1"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -1233,7 +1233,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
     }
 
     if (streq(method, "prompts/get") == 1 && dispatcher_prompts(d) != 0) {
-        var pname = jsonx_get_str_a(a, params, "name");
+        var pname = jsonx_get_str_dec_a(a, params, "name");
         if (pname == 0 || strlen(pname) == 0) {
             var pe = bote_err_new_a(a, BOTE_ERR_INVALID_PARAMS, "", "missing or empty 'name' field");
             return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(pe)), str_data(bote_err_format_a(a, pe)));

@@ -72,6 +72,7 @@ include "src/jwt.cyr"
 include "src/pkce.cyr"
 # conn.cyr — per-connection send / idle deadlines every transport applies (3.4.3).
 include "src/conn.cyr"
+include "src/http_era.cyr"
 include "src/transport_stdio.cyr"
 include "src/transport_http.cyr"
 include "src/transport_unix.cyr"

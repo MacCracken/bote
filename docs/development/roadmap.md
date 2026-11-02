@@ -4,8 +4,8 @@
 > current version is in [`VERSION`](../../VERSION), pins are in [`cyrius.cyml`](../../cyrius.cyml),
 > and test and benchmark counts are in [`CLAUDE.md`](../../CLAUDE.md)'s testing table.
 >
-> **Spec**: bote's default is MCP 2025-11-25. The stateless core of **2026-07-28** is in, on stdio, Unix
-> and WebSocket; Streamable HTTP is next.
+> **Spec**: bote's default is MCP 2025-11-25. **2026-07-28** is served beside it on every transport,
+> Streamable HTTP included; `Mcp-Param` headers are the last transport gap.
 > [spec-compliance.md](../spec-compliance.md) · [SECURITY.md](../../SECURITY.md) ·
 > [2026-11-01 closeout audit](../audit/2026-11-01-closeout.md)
 
@@ -22,18 +22,17 @@ polled push of `tools` / `prompts` `list_changed`. Four revisions are accepted t
 2024-11-05 through 2025-11-25, and every path is asserted by spec clause in `tests/conformance.tcyr`.
 One binary carries every transport, on x86_64, aarch64 and agnos, all CI-gated.
 
-**The gap that orders everything below:** MCP 2026-07-28 is a breaking revision, and bote speaks it only
-in part. Since 3.5.0 a request carrying `_meta` `io.modelcontextprotocol/protocolVersion` takes the
-stateless path, with `server/discover` and the modern result shape, and an `initialize` takes today's
-path, in one process. Every transport that reads `MCP-Protocol-Version` still refuses the new version
-in that header, and a conforming client sends it on every POST, so a modern client reaches bote over
-stdio and Unix, and over WebSocket when it sends no such header, but not yet over Streamable HTTP.
+**The gap that orders everything below:** MCP 2026-07-28 is a breaking revision, and bote speaks it, with
+gaps. Since 3.5.0 a request carrying `_meta` `io.modelcontextprotocol/protocolVersion` takes the stateless
+path, with `server/discover` and the modern result shape, and an `initialize` takes the legacy path, in one
+process. Since 3.5.1 that holds on HTTP too: `bote http` and `bote streamable` check `MCP-Protocol-Version`,
+`Mcp-Method` and `Mcp-Name` against the body. What is left is below.
 
 ---
 
 ## Next patch
 
-**3.5.1 — Streamable HTTP, modern path.** See below. A defect found in the 3.5.0 core lands ahead of it.
+**3.5.2 — `Mcp-Param` headers, conformance, the default.** See below. A defect found in 3.5.1 lands ahead of it.
 
 ## 3.5.x — MCP 2026-07-28, dual-era
 
@@ -42,17 +41,18 @@ The largest open item, and the first. The revision removes `initialize`, `Mcp-Se
 protocol becomes stateless: each request carries its own version and capabilities. **Large: small bites,
 each verified before the next.**
 
-1. **Streamable HTTP, modern path (3.5.1).** `validate_protocol_version` accepts `2026-07-28`.
-   `MCP-Protocol-Version` on every POST, checked against `_meta`. `Mcp-Method` and `Mcp-Name`, with
-   mismatches refused as `400` + `-32020`. One message per POST. `202` for a notification. `404` +
-   `-32601` for an unknown method. `405` for a modern `GET` or `DELETE`. `Mcp-Session-Id` and
-   `Last-Event-ID` ignored on the modern path. Read `basic/transports/streamable-http` first.
-2. **Client capabilities (3.5.1 or later).** `-32021` belongs to a request that needs a capability the
-   client did not declare. No request bote serves needs one today, so 3.5.0 requires the object and reads
-   nothing from it. The first feature that needs one adds the check.
-3. **Conformance and the default (3.5.2).** Run the 2026-07-28 clauses over every transport, keep the
-   legacy clauses passing on the same binary, and then decide whether the modern revision becomes the
-   documented default.
+1. **`Mcp-Param-{Name}` (3.5.2).** A tool whose `inputSchema` puts `x-mcp-header` on a property has that
+   argument mirrored in a header, and a server MUST compare the two, with the Base64 sentinel decoded and
+   integers compared numerically, and refuse a mismatch as `400` + `-32020`. An embedder can already write
+   the annotation in a property's raw schema, and bote would advertise it and not check it. Registration
+   warns about such keywords, so at the least it should warn about this one. Read `server/tools` first.
+2. **Conformance and the default (3.5.2).** Run the 2026-07-28 clauses over every transport, and run a
+   third-party client against bote, which nothing has yet: every check so far is against the spec's text.
+   Keep the legacy clauses passing on the same binary, then decide whether the modern revision becomes
+   the documented default.
+3. **Client capabilities.** `-32021` belongs to a request that needs a capability the client did not
+   declare. No request bote serves needs one today, so bote requires the object and reads nothing from it.
+   The first feature that needs one adds the check.
 
 Nothing here touches the handler ABI. The legacy path stays until a 4.0 removes it.
 
@@ -138,7 +138,7 @@ Not planned, because the current spec removes or deprecates them: the held-open 
   the archive to a sink, gate the tool on claims, or stop registering it by default.
 - **WebSocket subprotocol and compression.** WebSocket is not an MCP transport, so nothing requires
   these. Both would also need a seam in `lib/ws_server.cyr`.
-- **The default protocol version.** Item 3 of 3.5.x changes it. Whether it changes in that minor or
+- **The default protocol version.** Item 2 of 3.5.x changes it. Whether it changes in that minor or
   after a release of soak is a call for then.
 
 ## Housekeeping — rides any patch
@@ -202,6 +202,8 @@ No open blockers. To file, all found by the 2026-11-01 audit or earlier, and non
 - **`lib/ws_server.cyr`** ignores FIN and RSV, accepts unmasked client frames (RFC 6455 §5.1 says close), does
   not reassemble fragments, and `ws_server_recv` allocates a frame's claimed length before its payload
   arrives. bote reads frames through `ws_server_recv_frame` into one buffer.
+- **`lib/bayan.cyr` `bayan_base64_decode`** has no arena form, so a decode of a client's bytes stays on the
+  heap for good. `src/http_era.cyr` carries a small decoder of its own for that reason.
 - **`lib/str.cyr` `str_to_int`** skips non-digit bytes and wraps, though it documents "0 on invalid".
 - **`lib/sakshi.cyr`** drops the trailing newline when a line fills its 256-byte buffer, gluing two records.
   bote caps its text below that.

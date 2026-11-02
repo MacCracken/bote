@@ -47,6 +47,7 @@ include "src/session.cyr"
 include "src/discovery.cyr"
 include "src/auth.cyr"
 include "src/conn.cyr"
+include "src/http_era.cyr"
 include "src/transport_http.cyr"
 include "src/bridge.cyr"
 # 2.7.2: Streamable HTTP + WebSocket transports moved to their own

@@ -65,22 +65,6 @@ fn _http_check_origin(cfd, buf, blen, config) {
     return HTTP_FORBIDDEN;
 }
 
-fn _http_check_protocol(cfd, buf, blen, config) {
-    var v = sandhi_server_find_header_a(bote_req_alloc(), buf, blen, "MCP-Protocol-Version");
-    if (v == 0) {
-        if (http_config_require_protocol(config) == 1) {
-            bote_http_refuse(cfd, SK_DEBUG, "http", HTTP_BAD_REQUEST, "Bad Request", "protocol_version_missing");
-            return HTTP_BAD_REQUEST;
-        }
-        return 0;
-    }
-    if (validate_protocol_version(v) != 0) {
-        bote_http_refuse(cfd, SK_DEBUG, "http", HTTP_BAD_REQUEST, "Bad Request", "protocol_version");
-        return HTTP_BAD_REQUEST;
-    }
-    return 0;
-}
-
 fn _http_check_session(cfd, buf, blen, config, method) {
     var st = http_config_session_store(config);
     if (st == 0) { return 0; }
@@ -116,7 +100,7 @@ fn _http_handle(config, cfd, buf, n) {
     var path   = sandhi_server_get_path_a(a, buf, n);
 
     if (streq(method, "POST") == 0) {
-        bote_http_refuse(cfd, SK_DEBUG, "http", HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed", "method");
+        bote_http_refuse_method(cfd, "http", "Allow: POST\r\n");
         return 0;
     }
     if (streq(sandhi_server_path_only_a(bote_req_alloc(), path), http_config_path(config)) == 0) {
@@ -133,7 +117,6 @@ fn _http_handle(config, cfd, buf, n) {
         http_config_bearer_validator(config),
         http_config_bearer_ctx(config),
         &claims_slot) != 0) { return 0; }
-    if (_http_check_protocol(cfd, buf, n, config) != 0) { return 0; }
 
     var bo = sandhi_server_body_offset(buf, n);
     if (bo < 0 || bo > n) {
@@ -166,6 +149,13 @@ fn _http_handle(config, cfd, buf, n) {
         return 0;
     }
 
+    var mreq[8];
+    var era = bote_http_era(cfd, "http", buf, n, body, http_config_require_protocol(config), &mreq);
+    if (era == BOTE_HTTP_REFUSED) { return 0; }
+    if (era == BOTE_HTTP_MODERN) {
+        return bote_http_serve_modern(cfd, load64(&mreq), http_config_dispatcher(config), load64(&claims_slot));
+    }
+
     # Initialize: optionally create a session, return MCP-Session-Id header.
     # Only a session store needs the method before dispatch reads it.
     var extra = 0;
@@ -191,10 +181,7 @@ fn _http_handle(config, cfd, buf, n) {
         str_builder_add_cstr(sb, "\r\n");
         extra = str_data(str_builder_build_a(bote_req_alloc(), sb));
     }
-    if (resp == 0) {
-        sandhi_server_send_204_a(bote_req_alloc(), cfd, extra);
-        return 0;
-    }
+    if (resp == 0) { return bote_http_send_accepted(cfd); }
     sandhi_server_send_response_a(bote_req_alloc(), cfd, HTTP_OK, "OK", "application/json",
       resp, strlen(resp), extra);
     return 0;

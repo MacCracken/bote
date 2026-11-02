@@ -37,13 +37,20 @@ The primary security-relevant surface areas are:
   `bote bridge` answered `Access-Control-Allow-Origin: *` with its file tools
   registered, so any website the operator visited could read and write under
   `BOTE_FS_ROOT`. `*` in the list is the operator's explicit choice and logs a WARN.
+- **Headers on MCP 2026-07-28** — a gateway can route on `Mcp-Method` and `Mcp-Name`
+  without reading the body, so since **3.5.1** bote refuses a request whose headers
+  disagree with its body (`400` + `-32020`), after decoding the Base64 sentinel. What
+  a header claimed is what runs. Sessions play no part on this path, and the bearer
+  and Origin checks come first, as on the legacy path. `Mcp-Param-{Name}` is not
+  checked yet (roadmap 3.5.2); no built-in tool declares one.
 - **Memory** — `alloc` never frees, so what a request leaves on the heap stays for
   the life of the process. Since **3.4.15** everything bote allocates to answer a
   message goes on a request arena that the next message rewinds, including
   refusals before and after auth, so an unauthenticated client cannot grow the
-  heap with a refused request. That was only true for short values until **3.5.0**:
+  heap with a refused request. That was only true for short values until **3.5.1**:
   through 3.4.15 a long `id`, method, name, URI or cursor retained 61 to 577 KB per
-  refused request. A valid tool, prompt, resource or completion call still leaves
+  refused request, and through 3.5.0 a long `MCP-Protocol-Version` retained 84 KB.
+  A valid tool, prompt, resource or completion call still leaves
   what its handler is handed and whatever the handler allocates, because the 2.0
   handler ABI lets a handler keep them (roadmap 3.8.x). On a server without auth,
   that means any client that can call one.

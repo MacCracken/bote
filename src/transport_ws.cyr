@@ -119,7 +119,7 @@ fn _ws_check_protocol(cfd, buf, blen, config) {
         }
         return 0;
     }
-    if (validate_protocol_version(v) != 0) {
+    if (bote_protocol_known(v) == 0) {
         bote_http_refuse(cfd, SK_DEBUG, "ws", HTTP_BAD_REQUEST, "Bad Request", "protocol_version");
         return HTTP_BAD_REQUEST;
     }
@@ -172,7 +172,7 @@ fn _bote_ws_handler(config, cfd, buf, n) {
 
     # Only GET on the configured endpoint is valid for a WS upgrade.
     if (streq(method, "GET") == 0) {
-        bote_http_refuse(cfd, SK_DEBUG, "ws", HTTP_METHOD_NOT_ALLOWED, "Method Not Allowed", "method");
+        bote_http_refuse_method(cfd, "ws", "Allow: GET\r\n");
         return 0;
     }
     if (streq(sandhi_server_path_only_a(bote_req_alloc(), path), ws_config_path(config)) == 0) {

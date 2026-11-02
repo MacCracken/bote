@@ -68,6 +68,27 @@ r=$(curl -s "${H[@]}" -H "MCP-Session-Id: $sid" -d "$LIST" http://127.0.0.1:1839
 echo "$r" | grep -q '"name":"bote_echo"' || err "streamable tools/list lacks bote_echo: $r"
 echo "$r" | grep -q '"name":"fs_write"' && err "streamable tools/list gained fs_write (tool-set parity broken): $r"
 
+# MCP 2026-07-28 over HTTP (3.5.1), on the two servers that just served a legacy
+# client. A client of 2025-11-25 has no version to send on `initialize`, either.
+MD='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
+DISC="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{$MD}}"
+CALL="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{$MD,\"name\":\"bote_echo\",\"arguments\":{\"msg\":\"hi\"}}}"
+MV=(-H 'Content-Type: application/json' -H 'MCP-Protocol-Version: 2026-07-28')
+for p in 18390 18392; do
+  r=$(curl -s -w ' HTTP%{http_code}' "${MV[@]}" -H 'Mcp-Method: server/discover' -d "$DISC" "http://127.0.0.1:$p/mcp")
+  echo "$r" | grep -q '"supportedVersions":\["2026-07-28".* HTTP200$' || err "$p modern server/discover: $r"
+  r=$(curl -s -w ' HTTP%{http_code}' "${MV[@]}" -H 'Mcp-Method: tools/call' -H 'Mcp-Name: bote_echo' -d "$CALL" "http://127.0.0.1:$p/mcp")
+  echo "$r" | grep -q '"resultType":"complete".* HTTP200$' || err "$p modern tools/call: $r"
+  r=$(curl -s -w ' HTTP%{http_code}' "${MV[@]}" -H 'Mcp-Method: tools/call' -H 'Mcp-Name: other' -d "$CALL" "http://127.0.0.1:$p/mcp")
+  echo "$r" | grep -q '"code":-32020.* HTTP400$' || err "$p Mcp-Name mismatch: $r"
+  r=$(curl -s -w ' HTTP%{http_code}' -H 'Content-Type: application/json' -d "$DISC" "http://127.0.0.1:$p/mcp")
+  echo "$r" | grep -q '"code":-32020.* HTTP400$' || err "$p modern body with no version header: $r"
+  r=$(curl -s -D - -o /dev/null -H 'Content-Type: application/json' -d "$INIT" "http://127.0.0.1:$p/mcp")
+  echo "$r" | sed -n 1p | grep -q ' 200 ' || err "$p initialize with no version header: $r"
+done
+c=$(curl -s -o /dev/null -w '%{http_code}' -H 'MCP-Protocol-Version: 2026-07-28' http://127.0.0.1:18392/mcp)
+[ "$c" = "405" ] || err "a modern GET answered $c, not 405"
+
 # ws: the handshake upgrades.
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
   -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \

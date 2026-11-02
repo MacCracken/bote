@@ -109,6 +109,17 @@ fn main() {
     ws_config_with_require_protocol(wcfg, 1);
     assert_eq(ws_config_require_protocol(wcfg), 1, "wcfg require_protocol");
 
+    # The revision no `initialize` negotiates is still one bote speaks (3.5.1).
+    var pv_ok = "GET /mcp HTTP/1.1\r\nHost: x\r\nMCP-Protocol-Version: 2026-07-28\r\n\r\n";
+    assert_eq(_ws_check_protocol(0 - 1, pv_ok, strlen(pv_ok), wcfg), 0, "ws: the modern revision is known");
+    var pv_bad = "GET /mcp HTTP/1.1\r\nHost: x\r\nMCP-Protocol-Version: 1900-01-01\r\n\r\n";
+    assert_eq(_ws_check_protocol(0 - 1, pv_bad, strlen(pv_bad), wcfg), HTTP_BAD_REQUEST, "ws: an unknown version is refused");
+    bote_req_begin();
+    var pv_used = alloc_used();
+    bote_req_begin();
+    _ws_check_protocol(0 - 1, pv_bad, strlen(pv_bad), wcfg);
+    assert_eq(alloc_used() - pv_used, 0, "ws: refusing a version leaves no heap");
+
     # --- idle_ms, appended at 3.3.7 ---
     #
     # Default MUST be 0 = "no receive deadline". This is the fix for the

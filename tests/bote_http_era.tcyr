@@ -1,0 +1,474 @@
+# bote_http_era.tcyr — HTTP's side of MCP 2026-07-28, on the real handlers
+# (`_http_handle`, `_strm_handle`) over a socketpair: the status code, the
+# JSON-RPC error and the headers of every clause in the Streamable HTTP page,
+# and the legacy behaviour the same endpoint keeps.
+#
+# Run: cyrius test tests/bote_http_era.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/http_era.cyr"
+include "src/transport_http.cyr"
+include "src/transport_streamable.cyr"
+
+fn h_ok(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+fn h_prompt(args, claims) { return "{\"messages\":[]}"; }
+fn h_res(uri, claims) { return "{\"contents\":[]}"; }
+fn h_array(uri, claims) { return "[1]"; }
+
+var _seen_claims = 0;
+fn h_claims(args, claims) {
+    _seen_claims = claims;
+    return "{\"content\":[]}";
+}
+fn _allow(token, ctx) { return "the-claims"; }
+
+fn _mk_d() {
+    var reg = tool_registry_new();
+    registry_register(reg, tool_def_new("t_echo", "Echo", schema_new("object", 0, vec_new())));
+    registry_register(reg, tool_def_new("t_claims", "Claims", schema_new("object", 0, vec_new())));
+    var props = vec_new();
+    vec_push(props, schema_prop_new("n", "{\"type\":\"integer\"}"));
+    var req = vec_new();
+    vec_push(req, "n");
+    var sch = schema_new("object", props, req);
+    registry_register(reg, tool_def_with_compiled(tool_def_new("t_int", "Int", sch), compiled_compile(sch)));
+    var d = dispatcher_new(reg);
+    dispatcher_handle(d, "t_echo", &h_ok);
+    dispatcher_handle(d, "t_claims", &h_claims);
+    dispatcher_handle(d, "t_int", &h_ok);
+    dispatcher_register_prompt(d, prompt_def_new("p_one", "One", vec_new()), &h_prompt);
+    dispatcher_register_resource(d, resource_def_new("res://a", "a", "A", "text/plain"), &h_res);
+    dispatcher_register_resource(d, resource_def_new("res://\xC3\xA9", "e", "E", "text/plain"), &h_res);
+    dispatcher_register_resource(d, resource_def_new("res://bad", "bad", "Bad", "text/plain"), &h_array);
+    return d;
+}
+
+# 1 when `hay` holds `needle`.
+fn _has(hay, needle) { return strstr(hay, needle) >= 0; }
+
+# ---- requests -----------------------------------------------------------------
+
+fn _cat3(a, b, c) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    str_builder_add_cstr(sb, c);
+    return str_data(str_builder_build(sb));
+}
+
+fn _rep(s, n) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < n) {
+        str_builder_add_cstr(sb, s);
+        i = i + 1;
+    }
+    return str_data(str_builder_build(sb));
+}
+
+fn _raw(verb, hdrs, body) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, verb);
+    str_builder_add_cstr(sb, " /mcp HTTP/1.1\r\nHost: x\r\n");
+    str_builder_add_cstr(sb, hdrs);
+    str_builder_add_cstr(sb, "Content-Length: ");
+    str_builder_add_int(sb, strlen(body));
+    str_builder_add_cstr(sb, "\r\n\r\n");
+    str_builder_add_cstr(sb, body);
+    return str_data(str_builder_build(sb));
+}
+
+var _META = "\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}";
+
+# A modern body: `method`, with `extra` (`,"name":...` or "") beside `_meta`.
+fn _mb(method, extra) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, "\",\"params\":{");
+    str_builder_add_cstr(sb, _META);
+    str_builder_add_cstr(sb, extra);
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}
+
+# A legacy body with no params.
+fn _lb(method) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, "\"}");
+    return str_data(str_builder_build(sb));
+}
+
+var _V = "MCP-Protocol-Version: 2026-07-28\r\n";
+
+# The modern headers for `method`, and `Mcp-Name: name` unless it is 0.
+fn _mh(method, name) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, _V);
+    str_builder_add_cstr(sb, "Mcp-Method: ");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, "\r\n");
+    if (name != 0) {
+        str_builder_add_cstr(sb, "Mcp-Name: ");
+        str_builder_add_cstr(sb, name);
+        str_builder_add_cstr(sb, "\r\n");
+    }
+    return str_data(str_builder_build(sb));
+}
+
+# ---- the handlers, over a socketpair ------------------------------------------
+#ifndef CYRIUS_TARGET_AGNOS
+
+var _rbuf = 0;
+var _rcv = 0;
+var _status = 0;
+var _replies = 0;
+var _head = 0;
+var _body = 0;
+var _http_cfg = 0;
+var _strm_cfg = 0;
+
+fn _run(kind, raw) {
+    var n = strlen(raw);
+    memcpy(_rbuf, raw, n);
+    store8(_rbuf + n, 0);
+    var sp[16];
+    sys_socketpair(1, 1, 0, &sp);
+    var sa = load32(&sp);
+    var sb = load32(&sp + 4);
+    if (kind == 0) { _http_handle(_http_cfg, sa, _rbuf, n); }
+    else { _strm_handle(_strm_cfg, sa, _rbuf, n); }
+    sys_close(sa);
+    var got = 0;
+    var r = sys_read(sb, _rcv, 262144);
+    while (r > 0) {
+        got = got + r;
+        r = sys_read(sb, _rcv + got, 262144 - got);
+    }
+    sys_close(sb);
+    store8(_rcv + got, 0);
+    _replies = 0;
+    var ri = 0;
+    while (ri + 9 <= got) {
+        if (memeq(_rcv + ri, "HTTP/1.1 ", 9) == 1) { _replies = _replies + 1; }
+        ri = ri + 1;
+    }
+    _status = 0;
+    if (got > 12) { _status = (load8(_rcv + 9) - 48) * 100 + (load8(_rcv + 10) - 48) * 10 + load8(_rcv + 11) - 48; }
+    var e = strstr(_rcv, "\r\n\r\n");
+    _head = _rcv;
+    _body = "";
+    if (e >= 0) {
+        store8(_rcv + e + 2, 0);
+        _body = _rcv + e + 4;
+    }
+    return 0;
+}
+
+fn _code() {
+    var e = jsonx_get_raw(_body, "error");
+    if (e == 0) { return ""; }
+    return jsonx_get_raw(e, "code");
+}
+
+fn _nm(kind, name) {
+    if (kind == 0) { return _cat3("http: ", name, ""); }
+    return _cat3("streamable: ", name, "");
+}
+
+# `raw` gets `status`, and the JSON-RPC error `code`, or none when it is "".
+fn _t(kind, raw, status, code, name) {
+    _run(kind, raw);
+    assert_eq(_status, status, _nm(kind, name));
+    assert_eq(_replies, 1, _nm(kind, _cat3(name, ": one reply", "")));
+    assert(streq(_code(), code) == 1, _nm(kind, _cat3(name, ": the error code", "")));
+    return 0;
+}
+
+# Bytes `raw` leaves on the heap per message.
+fn _heap_per(kind, raw) {
+    _run(kind, raw);
+    var before = alloc_used();
+    var i = 0;
+    while (i < 20) {
+        _run(kind, raw);
+        i = i + 1;
+    }
+    return (alloc_used() - before) / 20;
+}
+
+fn _ok_tool() { return _mb("tools/call", ",\"name\":\"t_echo\""); }
+
+fn _clauses(k) {
+    # ---- what a modern client sends ----
+    _t(k, _raw("POST", _mh("server/discover", 0), _mb("server/discover", "")), 200, "", "server/discover");
+    assert(_has(_body, "\"resultType\":\"complete\"") && _has(_body, "supportedVersions"), _nm(k, "...is a modern result"));
+    assert(_has(_head, "Content-Type: application/json"), _nm(k, "...in application/json"));
+    _t(k, _raw("POST", _mh("tools/list", 0), _mb("tools/list", "")), 200, "", "tools/list");
+    assert(_has(_body, "\"ttlMs\":0"), _nm(k, "...with the cache hints"));
+    _t(k, _raw("POST", _mh("tools/call", "t_echo"), _ok_tool()), 200, "", "tools/call");
+    assert(_has(_body, "\"resultType\":\"complete\""), _nm(k, "...is a modern result"));
+    _t(k, _raw("POST", _mh("prompts/get", "p_one"), _mb("prompts/get", ",\"name\":\"p_one\"")), 200, "", "prompts/get");
+    _t(k, _raw("POST", _mh("resources/read", "res://a"), _mb("resources/read", ",\"uri\":\"res://a\"")), 200, "", "resources/read, Mcp-Name is the uri");
+
+    # Header names are case-insensitive, and whitespace around a value is not part of it.
+    _t(k, _raw("POST", "mcp-protocol-version: 2026-07-28\r\nmcp-METHOD: tools/list\r\n", _mb("tools/list", "")), 200, "", "header names in any case");
+    _t(k, _raw("POST", "MCP-Protocol-Version: 2026-07-28 \r\nMcp-Method:\ttools/list\t \r\n", _mb("tools/list", "")), 200, "", "whitespace around a value");
+
+    # The Base64 sentinel.
+    _t(k, _raw("POST", _mh("tools/call", "=?base64?dF9lY2hv?="), _ok_tool()), 200, "", "Mcp-Name in the Base64 sentinel");
+    _t(k, _raw("POST", _mh("resources/read", "=?base64?cmVzOi8vw6k=?="), _mb("resources/read", ",\"uri\":\"res://\\u00e9\"")), 200, "", "a padded sentinel holding UTF-8, against an escaped body");
+    _t(k, _raw("POST", _mh("tools/call", "=?base64?dF9lY2hw?="), _ok_tool()), 400, "-32020", "a sentinel holding another name");
+    _t(k, _raw("POST", _mh("tools/call", "=?BASE64?dF9lY2hv?="), _ok_tool()), 400, "-32020", "the markers are case-sensitive");
+    _t(k, _raw("POST", _mh("tools/call", "=?base64?!!!!?="), _ok_tool()), 400, "-32020", "a sentinel that does not decode");
+    _t(k, _raw("POST", _mh("tools/call", "=?base64?!!!!?="), _mb("tools/call", ",\"name\":\"=?base64?!!!!?=\"")), 400, "-32020", "...even when the body spells it the same");
+
+    # ---- version ----
+    # With a version bote does not speak, -32022 comes first: it says what bote does.
+    _t(k, _raw("POST", "MCP-Protocol-Version: 1900-01-01\r\n", _mb("tools/list", "")), 400, "-32022", "an unsupported version over a modern _meta");
+    _t(k, _raw("POST", "MCP-Protocol-Version: 1900-01-01\r\n", _lb("tools/list")), 400, "-32022", "an unsupported version");
+    assert(_has(_body, "\"id\":7"), _nm(k, "...echoes the id"));
+    assert(_has(_body, "\"requested\":\"1900-01-01\"") && _has(_body, "\"supported\":[\"2026-07-28\""), _nm(k, "...and says what is supported"));
+    _t(k, _raw("POST", "MCP-Protocol-Version: 1900-01-01\r\n", "{\"id\":12x"), 400, "-32022", "an unsupported version over a body that is no JSON");
+    assert(_has(_body, "\"id\":null"), _nm(k, "...takes no id from it"));
+    _t(k, _raw("POST", "", _mb("tools/list", "")), 400, "-32020", "a modern body with no version header");
+    _t(k, _raw("POST", _mh("tools/list", 0), _lb("tools/list")), 400, "-32602", "the modern header with no _meta");
+    _t(k, _raw("POST", _mh("tools/list", 0), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":1}}}"), 400, "-32602", "a version that is no string");
+    _t(k, _raw("POST", _mh("tools/list", 0), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2025-11-25\"}}}"), 400, "-32020", "the header and _meta disagree");
+    _t(k, _raw("POST", "MCP-Protocol-Version: 2025-11-25\r\n", _mb("tools/list", "")), 400, "-32020", "an older header over a modern _meta");
+    _t(k, _raw("POST", _mh("tools/list", 0), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"}}}"), 400, "-32602", "no clientCapabilities");
+
+    # ---- Mcp-Method and Mcp-Name ----
+    _t(k, _raw("POST", _V, _mb("tools/list", "")), 400, "-32020", "no Mcp-Method");
+    assert(_has(_body, "\"id\":7"), _nm(k, "...echoes the id"));
+    _t(k, _raw("POST", _mh("tools/call", "t_echo"), _mb("tools/list", "")), 400, "-32020", "Mcp-Method names another method");
+    assert(_has(_body, "does not match body value"), _nm(k, "...and says so"));
+    _t(k, _raw("POST", _mh("Tools/List", 0), _mb("tools/list", "")), 400, "-32020", "header values are case-sensitive");
+    _t(k, _raw("POST", _mh("tools/li\x01st", 0), _mb("tools/list", "")), 400, "-32020", "a control byte in Mcp-Method");
+    _t(k, _raw("POST", _mh("tools/li\x01st", 0), _mb("tools/li\\u0001st", "")), 400, "-32020", "...even when the body spells it the same");
+    _t(k, _raw("POST", _mh("tools/call", 0), _ok_tool()), 400, "-32020", "tools/call with no Mcp-Name");
+    _t(k, _raw("POST", _mh("prompts/get", 0), _mb("prompts/get", ",\"name\":\"p_one\"")), 400, "-32020", "prompts/get with no Mcp-Name");
+    _t(k, _raw("POST", _mh("resources/read", 0), _mb("resources/read", ",\"uri\":\"res://a\"")), 400, "-32020", "resources/read with no Mcp-Name");
+    _t(k, _raw("POST", _mh("tools/call", "t_other"), _ok_tool()), 400, "-32020", "Mcp-Name names another tool");
+    _t(k, _raw("POST", _mh("prompts/get", "p_two"), _mb("prompts/get", ",\"name\":\"p_one\"")), 400, "-32020", "Mcp-Name names another prompt");
+    _t(k, _raw("POST", _mh("resources/read", "res://b"), _mb("resources/read", ",\"uri\":\"res://a\"")), 400, "-32020", "Mcp-Name names another uri");
+    _t(k, _raw("POST", _mh("tools/call", "t_\xC3\xA9"), _ok_tool()), 400, "-32020", "a raw non-ASCII Mcp-Name");
+    _t(k, _raw("POST", _mh("tools/call", "t_\xC3\xA9"), _mb("tools/call", ",\"name\":\"t_\\u00e9\"")), 400, "-32020", "...even when the body spells it the same");
+    _t(k, _raw("POST", _mh("tools/call", "t_echo"), _mb("tools/call", "")), 400, "-32602", "Mcp-Name with no name in the body");
+
+    # ---- JSON-RPC errors and their status ----
+    _t(k, _raw("POST", _mh("no/such", 0), _mb("no/such", "")), 404, "-32601", "an unknown method");
+    _t(k, _raw("POST", _mh("ping", 0), _mb("ping", "")), 404, "-32601", "ping is gone");
+    _t(k, _raw("POST", _mh("initialize", 0), _mb("initialize", "")), 404, "-32601", "initialize is gone");
+    _t(k, _raw("POST", _mh("tools/call", "t_none"), _mb("tools/call", ",\"name\":\"t_none\"")), 400, "-32602", "an unknown tool");
+    _t(k, _raw("POST", _mh("resources/read", "res://no"), _mb("resources/read", ",\"uri\":\"res://no\"")), 400, "-32602", "a missing resource");
+    _t(k, _raw("POST", _mh("tools/list", 0), _mb("tools/list", ",\"cursor\":\"x\"")), 400, "-32602", "an invalid cursor");
+    _t(k, _raw("POST", _mh("resources/read", "res://bad"), _mb("resources/read", ",\"uri\":\"res://bad\"")), 500, "-32603", "a result that is no object");
+    _t(k, _raw("POST", _mh("tools/call", "t_int"), _mb("tools/call", ",\"name\":\"t_int\",\"arguments\":{\"n\":\"x\"}")), 200, "", "a schema violation is a result");
+    assert(_has(_body, "\"isError\":true"), _nm(k, "...with isError"));
+
+    # ---- one message ----
+    _t(k, _raw("POST", _mh("tools/list", 0), "[{}]"), 400, "-32600", "a batch under the modern header");
+    _t(k, _raw("POST", "", _cat3("[", _mb("tools/list", ""), "]")), 400, "-32600", "a batch naming the modern revision");
+    _t(k, _raw("POST", _mh("tools/list", 0), "{nope"), 400, "-32700", "invalid JSON under the modern header");
+    _t(k, _raw("POST", _mh("tools/list", 0), ""), 400, "-32700", "an empty body under the modern header");
+    _t(k, _raw("POST", _mh("tools/list", 0), "5"), 400, "-32600", "a body that is no object");
+    assert(_has(_body, "one message"), _nm(k, "...and says so"));
+    _t(k, _raw("POST", _mh("tools/list", 0), "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}"), 400, "-32600", "a JSON-RPC response");
+
+    # ---- notifications ----
+    _t(k, _raw("POST", _V, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/x\"}"), 202, "", "a modern notification");
+    assert_eq(strlen(_body), 0, _nm(k, "...has no body"));
+
+    # ---- no sessions on this path ----
+    _t(k, _raw("POST", _mh("tools/list", 0), _mb("tools/list", "")), 200, "", "no session needed");
+    assert(_has(_head, "ession-Id") == 0, _nm(k, "...and none minted"));
+    var stale = _cat3(_mh("tools/list", 0), "Mcp-Session-Id: nope\r\nLast-Event-ID: evt-9\r\n", "");
+    _t(k, _raw("POST", stale, _mb("tools/list", "")), 200, "", "Mcp-Session-Id and Last-Event-ID are ignored");
+    assert(_has(_head, "ession-Id") == 0, _nm(k, "...and not echoed"));
+
+    # ---- the legacy path keeps what it had ----
+    var init = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"c\",\"version\":\"1\"}}}";
+    _t(k, _raw("POST", "", init), 200, "", "initialize with no version header");
+    assert(_has(_head, "MCP-Session-Id: "), _nm(k, "...gets a session"));
+    var sidp = strstr(_head, "MCP-Session-Id: ") + 16;
+    var sidn = 0;
+    while (load8(_head + sidp + sidn) != 13) { sidn = sidn + 1; }
+    var sid = _slice_cstr(default_alloc(), _head, sidp, sidn);
+    var withsid = _cat3("MCP-Session-Id: ", sid, "\r\n");
+    _t(k, _raw("POST", withsid, _lb("tools/list")), 200, "", "a request of 2025-03-26, with a session and no version header");
+    assert(_has(_body, "resultType") == 0, _nm(k, "...is legacy"));
+    _t(k, _raw("POST", _cat3("MCP-Protocol-Version: 2025-11-25\r\n", withsid, ""), _lb("tools/list")), 200, "", "a legacy version header");
+    assert(_has(_body, "resultType") == 0, _nm(k, "...is legacy"));
+    _t(k, _raw("POST", "", _lb("tools/list")), 404, "", "the session gate still holds for legacy traffic");
+    _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"), 202, "", "a legacy notification is 202");
+    _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"progressToken\":1}}}"), 200, "", "legacy _meta with no version");
+    assert(_has(_body, "resultType") == 0, _nm(k, "...is legacy"));
+    _t(k, _raw("POST", _cat3("MCP-Protocol-Version: 2025-11-25\r\n", withsid, ""), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2025-11-25\"}}}"), 200, "", "an older revision in both the header and _meta");
+    _t(k, _raw("POST", _cat3("MCP-Protocol-Version: 2025-11-25\r\n", withsid, ""), _cat3("[", _lb("ping"), "]")), 200, "", "a legacy batch");
+
+    # ---- what comes first ----
+    _t(k, _raw("POST", _cat3("Origin: https://evil.example\r\n", _mh("tools/list", 0), ""), _mb("tools/list", "")), 403, "", "a hostile Origin, ahead of everything");
+
+    # ---- bytes ----
+    var x = _rep("x", 60000);
+    var b64 = _rep("eHh4", 15000);
+    assert_eq(_heap_per(k, _raw("POST", _mh(x, 0), _mb("tools/list", ""))), 0, _nm(k, "a 60 KB Mcp-Method leaves no heap"));
+    assert_eq(_heap_per(k, _raw("POST", _mh("tools/call", x), _ok_tool())), 0, _nm(k, "a 60 KB Mcp-Name leaves no heap"));
+    assert_eq(_heap_per(k, _raw("POST", _mh("tools/call", _cat3("=?base64?", b64, "?=")), _ok_tool())), 0, _nm(k, "a 60 KB sentinel leaves no heap"));
+    assert_eq(_heap_per(k, _raw("POST", _cat3("MCP-Protocol-Version: ", x, "\r\n"), _lb("tools/list"))), 0, _nm(k, "a 60 KB version leaves no heap"));
+    assert_eq(_heap_per(k, _raw("POST", _mh("no/such", 0), _mb("no/such", ""))), 0, _nm(k, "a refused method leaves no heap"));
+    assert_eq(_heap_per(k, _raw("POST", _mh("tools/list", 0), _mb("tools/list", ""))), 0, _nm(k, "a modern tools/list leaves no heap"));
+    assert_eq(_heap_per(k, _raw("POST", _mh("tools/list", 0), "[{}]")), 0, _nm(k, "a refused batch leaves no heap"));
+    return 0;
+}
+#endif
+
+fn main() {
+    alloc_init();
+
+    # ---- pure pieces ----
+    var a = default_alloc();
+    assert(streq(_he_b64_decode_a(a, "QUJD", 4), "ABC") == 1, "b64: a whole group");
+    assert(streq(_he_b64_decode_a(a, "QUI=", 4), "AB") == 1, "b64: one pad");
+    assert(streq(_he_b64_decode_a(a, "QQ==", 4), "A") == 1, "b64: two pads");
+    assert(streq(_he_b64_decode_a(a, "", 0), "") == 1, "b64: empty");
+    assert(streq(_he_b64_decode_a(a, "+/+/", 4), "\xFB\xFF\xBF") == 1, "b64: the standard alphabet");
+    assert_eq(_he_b64_decode_a(a, "QQ=", 3), 0, "b64: a length that is no multiple of 4");
+    assert_eq(_he_b64_decode_a(a, "QR==", 4), 0, "b64: spare bits set");
+    assert_eq(_he_b64_decode_a(a, "QUJ=", 4), 0, "b64: spare bits set, one pad");
+    assert_eq(_he_b64_decode_a(a, "Q===", 4), 0, "b64: three pads");
+    assert_eq(_he_b64_decode_a(a, "Q=Q=", 4), 0, "b64: padding in the middle");
+    assert_eq(_he_b64_decode_a(a, "AA==", 4), 0, "b64: a NUL");
+    assert_eq(_he_b64_decode_a(a, "_-_-", 4), 0, "b64: the URL alphabet");
+    assert(streq(_he_name_value_a(a, "plain"), "plain") == 1, "name: plain");
+    assert(streq(_he_name_value_a(a, "=?base64?QUJD?="), "ABC") == 1, "name: sentinel");
+    assert(streq(_he_name_value_a(a, "=?base64??="), "") == 1, "name: an empty sentinel");
+    assert(streq(_he_name_value_a(a, "=?base64?="), "=?base64?=") == 1, "name: markers that overlap are no sentinel");
+    assert(streq(_he_name_value_a(a, "=?BASE64?QUJD?="), "=?BASE64?QUJD?=") == 1, "name: upper case is no sentinel");
+    assert(streq(_he_name_value_a(a, "=?base64?QUJD"), "=?base64?QUJD") == 1, "name: no closing marker");
+    assert_eq(_he_name_value_a(a, "=?base64?!?="), 0, "name: a sentinel that does not decode");
+    assert_eq(_he_header_ok("a b\tc~"), 1, "header: visible ASCII, space and tab");
+    assert_eq(_he_header_ok("a\x01b"), 0, "header: a control byte");
+    assert_eq(_he_header_ok("a\x7Fb"), 0, "header: DEL");
+    assert_eq(_he_header_ok("\xC3\xA9"), 0, "header: non-ASCII");
+    assert_eq(_he_status_for(0 - 32601), 404, "status: -32601");
+    assert_eq(_he_status_for(0 - 32602), 400, "status: -32602");
+    assert_eq(_he_status_for(0 - 32600), 400, "status: -32600");
+    assert_eq(_he_status_for(0 - 32700), 400, "status: -32700");
+    assert_eq(_he_status_for(0 - 32020), 400, "status: -32020");
+    assert_eq(_he_status_for(0 - 32021), 400, "status: -32021");
+    assert_eq(_he_status_for(0 - 32022), 400, "status: -32022");
+    assert_eq(_he_status_for(0 - 32603), 500, "status: -32603");
+    assert_eq(_he_status_for(0 - 32000), 200, "status: what the spec leaves open");
+    assert_eq(bote_protocol_known("2026-07-28"), 1, "known: the modern revision");
+    assert_eq(bote_protocol_known("2025-11-25"), 1, "known: a legacy revision");
+    assert_eq(bote_protocol_known("1900-01-01"), 0, "known: not a revision");
+    assert_eq(bote_protocol_known(0), 0, "known: none");
+    assert_eq(validate_protocol_version("2026-07-28"), 0, "validate takes the modern revision");
+    assert_eq(_mcp_is_supported("2026-07-28"), 0, "...which initialize never negotiates");
+
+    #ifndef CYRIUS_TARGET_AGNOS
+    _rbuf = alloc(262144);
+    _rcv = alloc(262146);
+    var d = _mk_d();
+    _http_cfg = http_config_new("/mcp", 0, 0);
+    http_config_with_session_store(_http_cfg, session_store_default());
+    store64(_http_cfg + 48, d);
+    _strm_cfg = streamable_config_new("/mcp", 0, 0);
+    streamable_config_with_session_store(_strm_cfg, session_store_default());
+    store64(_strm_cfg + 56, d);
+    _strm_init();
+    _clauses(0);
+    _clauses(1);
+
+    # GET and DELETE. `bote http` serves POST alone, in either era.
+    _t(1, _raw("GET", _V, ""), 405, "", "GET naming this revision");
+    assert(_has(_head, "Allow: POST\r\n"), "streamable: ...says what is allowed");
+    _t(1, _raw("DELETE", _V, ""), 405, "", "DELETE naming this revision");
+    assert(_has(_head, "Allow: POST, GET\r\n"), "streamable: ...says what is allowed");
+    _t(0, _raw("GET", "", ""), 405, "", "GET");
+    assert(_has(_head, "Allow: POST\r\n"), "http: ...says what is allowed");
+    _t(1, _raw("GET", "", ""), 404, "", "a legacy GET still needs its session");
+    _t(1, _raw("GET", "MCP-Protocol-Version: 1900-01-01\r\n", ""), 400, "-32022", "a GET naming an unknown version");
+    assert(_has(_body, "\"id\":null"), "streamable: ...has no id to echo");
+
+    # require_protocol: the header is required, and `initialize` is still exempt.
+    var init_msg = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"c\",\"version\":\"1\"}}}";
+    http_config_with_require_protocol(_http_cfg, 1);
+    streamable_config_with_require_protocol(_strm_cfg, 1);
+    _t(0, _raw("POST", "", _lb("tools/list")), 400, "-32020", "require_protocol with no header");
+    _t(1, _raw("POST", "", _lb("tools/list")), 400, "-32020", "require_protocol with no header");
+    _t(0, _raw("POST", "", "{\"jsonrpc\":\"2.0\",\"id\":7}"), 400, "-32020", "require_protocol on a body with no method");
+    _t(1, _raw("POST", "", "{\"jsonrpc\":\"2.0\",\"id\":7}"), 400, "-32020", "require_protocol on a body with no method");
+    _t(0, _raw("POST", "", "{nope"), 400, "-32020", "require_protocol on a body that is no JSON");
+    _t(0, _raw("POST", "", init_msg), 200, "", "require_protocol exempts initialize");
+    _t(1, _raw("POST", "", init_msg), 200, "", "require_protocol exempts initialize");
+    _t(1, _raw("GET", "", ""), 400, "-32020", "require_protocol on a GET");
+    http_config_with_require_protocol(_http_cfg, 0);
+    streamable_config_with_require_protocol(_strm_cfg, 0);
+
+    # The handler is handed the claims auth produced, on this path too.
+    http_config_with_bearer_validator(_http_cfg, &_allow, 0);
+    streamable_config_with_bearer_validator(_strm_cfg, &_allow, 0);
+    var authed = _cat3(_mh("tools/call", "t_claims"), "Authorization: Bearer tok\r\n", "");
+    _t(0, _raw("POST", _mh("tools/list", 0), _mb("tools/list", "")), 401, "", "no token ahead of everything");
+    _t(1, _raw("POST", _mh("tools/list", 0), _mb("tools/list", "")), 401, "", "no token ahead of everything");
+    _t(0, _raw("POST", authed, _mb("tools/call", ",\"name\":\"t_claims\"")), 200, "", "a token");
+    assert(_seen_claims != 0 && streq(_seen_claims, "the-claims") == 1, "http: the handler sees the claims");
+    _seen_claims = 0;
+    _t(1, _raw("POST", authed, _mb("tools/call", ",\"name\":\"t_claims\"")), 200, "", "a token");
+    assert(_seen_claims != 0 && streq(_seen_claims, "the-claims") == 1, "streamable: the handler sees the claims");
+    #endif
+
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit(rc);

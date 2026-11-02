@@ -18,6 +18,119 @@ have per release.
 
 _(empty)_
 
+## [3.5.1] — 2026-11-01 · MCP 2026-07-28 on HTTP, and `bote streamable` no longer turns away a client's first request
+
+`bote http` and `bote streamable` now speak the current revision. A POST that names `2026-07-28` has its headers checked
+against its body and is answered with the status each outcome calls for, and nothing else on the endpoint changes for it:
+a legacy client beside it keeps its sessions and its `GET` stream. The handler ABI and the stated minimum cyrius (6.7.13)
+are unchanged. `Mcp-Param-{Name}` headers are the last transport gap, roadmap 3.5.2.
+
+Working on that path showed a legacy defect that matters more than the new feature: see Fixed.
+
+### Fixed
+
+- **`bote streamable` refused a client's first request.** It demanded `MCP-Protocol-Version` on every POST and answered `400`
+  without it, but 2025-11-25 asks for that header only on requests after `initialize`, because a client has no version to
+  send until the reply gives it one, and revisions before 2025-06-18 do not define the header at all. A client of 2025-03-26
+  could not use this transport, whatever bote advertised, and a later one could only by sending the header early, which is
+  what `scripts/transport-smoke.sh` happened to do, so nothing failed. A POST with no header is now treated as `2025-03-26`,
+  as the spec allows. `streamable_config_with_require_protocol` used to have no effect and now does, with `initialize`
+  exempt. To keep the old strictness, set it.
+- **A notification is `202` with no body**, on both HTTP transports. It was `204`, which neither revision allows.
+- **A `405` names what is allowed**, as RFC 9110 §15.5.6 requires, on all four HTTP-family transports.
+- **`prompts/get` reads its name as what it decodes to**, like `tools/call` and `resources/read`. `"code_review"` was a
+  prompt that did not exist. A value validated one way and read another is the bug the one-scanner rule exists for.
+- An unsupported `MCP-Protocol-Version` is `400` with `-32022` and `data.supported` in the body, in either era. It was an
+  empty `400`, which a modern client would read as a legacy server.
+
+### Security
+
+- **A long `MCP-Protocol-Version` grew the heap by 83,886 B per request** on http and streamable: after the bearer check
+  where auth is on, and with no credentials where it is not. `validate_protocol_version` built its refusal message on the heap for a value the client
+  wrote. The transports now ask `bote_protocol_known`, which allocates nothing, and WebSocket's upgrade does too. Measured
+  on real binaries with 40 KB headers: 83,886 B → 0.
+- On the modern path a header that disagrees with the body is refused, so what a gateway routed on is what runs.
+
+### Added
+
+- **`src/http_era.cyr`**, shared by `bote http` and `bote streamable`. `bote_http_era` reads `MCP-Protocol-Version` and `_meta`
+  once the body is in hand, because a refusal has to carry the request's id, and refuses, takes the legacy path, or takes
+  `bote_http_serve_modern`:
+
+  | Request | Answer |
+  |---|---|
+  | Unsupported version | `400`, `-32022`, with `data.supported` and `data.requested` |
+  | Modern `_meta` and no version header, or the header and `_meta` disagree | `400`, `-32020` |
+  | Modern header and `_meta` with no version | `400`, `-32602` |
+  | `Mcp-Method` missing, invalid or not the body's method | `400`, `-32020` |
+  | `Mcp-Name` missing, invalid, undecodable or not the body's name or URI, on `tools/call`, `resources/read`, `prompts/get` | `400`, `-32020` |
+  | Batch, JSON-RPC response or non-object | `400`, `-32600` |
+  | Invalid JSON | `400`, `-32700` |
+  | Unknown method, `ping`, `initialize` | `404`, `-32601` |
+  | Any other `-32602`: unknown tool, missing resource, invalid cursor | `400` |
+  | `-32603` | `500` |
+  | Notification | `202`, no body |
+  | `GET` or `DELETE` naming this revision | `405`, with `Allow` |
+
+  The spec gives no status for the last `-32602` row or for `-32603`. `400` for every `-32602` meets "a request missing any
+  required field" on any reading of it, and a client takes a `400` with a recognized error as a modern server's answer.
+  Precedence is not specified either: an unsupported version comes before a mismatch, since it says what bote does speak.
+- **The Base64 sentinel**, `Mcp-Name: =?base64?…?=`, decoded before the comparison: lower-case markers, canonical Base64. The
+  decoder is bote's own, because `bayan_base64_decode` keeps its output on the heap and this is a client's header on a path
+  that may refuse it. Checked against bayan's by the new fuzz harness.
+- `Mcp-Session-Id` and `Last-Event-ID` are ignored on the modern path, and no session is minted. Replies are
+  `application/json`, which the spec lets a server choose per request.
+- `bote_protocol_known`, `bote_http_log_refusal`, `bote_http_refuse_method`.
+
+### Changed
+
+- `validate_protocol_version` accepts `2026-07-28`, so a WebSocket upgrade naming it is no longer refused.
+  `_mcp_is_supported` does not: `initialize` still never negotiates it.
+- `dist/bote.cyr` has 34 modules.
+
+### Performance
+
+No regression on the paths that existed. Interleaved A/B, 15 alternating rounds, pinned to one core, 3.5.0 against 3.5.1,
+medians in ns:
+
+| Bench | 3.5.0 | 3.5.1 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 3,844 | 3,863 | +0.5% |
+| `dispatch_tools_call` | 2,050 | 2,055 | +0.2% |
+| `dispatch_tools_list` | 1,699 | 1,705 | +0.4% |
+| `dispatch_initialize` | 1,726 | 1,721 | −0.3% |
+| `http_era_legacy` | new | 2,384 | |
+| `http_era_modern` | new | 9,516 | |
+
+Over real loopback HTTP, a legacy `tools/list`, 12 rounds of 1,500: 229.4 µs → 228.2 µs, inside the noise (220.5–233.4 and
+210.5–235.0). A modern POST's checks are about 4% of such a round trip.
+
+### Not done
+
+- `Mcp-Param-{Name}`, for a tool that declares `x-mcp-header`. No built-in tool does, but an embedder can write the annotation
+  in a raw property schema, and bote would advertise it and not check it. Roadmap 3.5.2.
+- `-32021`, and SSE on the modern path, which waits for `subscriptions/listen`.
+- **No third-party MCP client has been run against this.** Every check is against the spec's text. Roadmap 3.5.2.
+
+### Proof
+
+- **Legacy stdio:** 200,000 fuzzed messages byte-identical to 3.5.0 with the version string and the `prompts/get` line put
+  back, so that line is the only change there.
+- **Legacy HTTP:** 50 requests on each binary, across http and streamable, 36 identical. Of the 14 that differ, 3 are the
+  version string in `initialize` and 11 are the fixes above.
+- **The fuzzer caught a crash of this patch's own, before it shipped.** With `require_protocol` set, a body with no `method`
+  dereferenced null. `fuzz/http_era.fcyr` found it, the real handler died with SIGSEGV under a unit test, and that test now
+  pins it.
+- **Mutation:** 52 mutants, all killed. Five survived at first. Two showed that no test could see a handler sending a second
+  reply, so every clause now asserts exactly one.
+- **Arena:** a build that overwrites the arena on every rewind matched a normal one over 100,000 messages and passes
+  `tests/bote_http_era.tcyr`, `tests/conformance.tcyr` and `tests/bote.tcyr`.
+- **Real binaries:** `scripts/transport-smoke.sh` drives a modern client and a legacy one on the same `bote http` and
+  `bote streamable`.
+- Tests: 1,637 → 2,158, on x86_64 and under `qemu-aarch64`, 517 of them in the new `tests/bote_http_era.tcyr`, which runs each
+  clause through the real `_http_handle` and `_strm_handle` over a socketpair. agnos compiles with 0 undefined and does not
+  run here, and that file's handler tests are compiled out there.
+
 ## [3.5.0] — 2026-11-01 · MCP 2026-07-28's stateless core beside the legacy revisions in one process, and the heap hole 3.4.15 left open
 
 The first patch of the dual-era minor. A request that names `2026-07-28` in `params._meta` gets that revision, and every
@@ -28,6 +141,10 @@ stated minimum cyrius (6.7.13) are unchanged.
 
 The bench A/B for the router led to a separate finding: **3.4.15's claim that a client cannot grow the heap was wrong for
 long values.** See Security.
+
+> ⚠ **Corrected at 3.5.1.** The fix below missed one more long value: a client's `MCP-Protocol-Version` still grew the heap,
+> by 83,886 B per request. See 3.5.1's Security section. This entry's "Streamable HTTP does not speak it yet" also understated
+> what was wrong there: that transport was refusing legacy clients too. See 3.5.1's Fixed section.
 
 ### Security
 
