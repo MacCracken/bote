@@ -22,7 +22,7 @@
 1. **One protocol implementation** — every consumer dispatches through bote instead of reimplementing JSON-RPC 2.0.
 2. **Registry-driven** — tools registered with schemas, dispatch validates automatically.
 3. **Transport-agnostic** — same `Dispatcher` powers six transports.
-4. **Streaming-ready data layer** — progress + cancellation primitives and a polled per-session push are in place. Since 3.7.2 a `subscriptions/listen` stream carries list changes live on `http`, `bridge` and `streamable`: the thread that answers it writes the acknowledgement and parks a duplicate of the socket in a ListenHub (`src/listen.cyr`), whose one thread waits on every parked socket and on a wake pipe, and writes each stream the changes it asked for, without ever waiting on a client. Since 3.7.3 stdio, unix and WebSocket carry listens too: there the connection is the stream, and a ListenLine holds its subscriptions; the transport hands the codec the line's BoteStream with each message, the codec gives it the listen the dispatcher accepted and any `notifications/cancelled`, and the connection's loop waits on its socket and the line's wake pipe at once, writing a change between its replies. Since 3.7.4 a listen's `resourceSubscriptions` are kept per stream slot, and `dispatcher_resource_updated(d, uri)` reaches them through the event sink chain (`event_sink_with_updated`, a hook with a URI and no payload): each hub and line queues the URI under a lock, and the thread that writes its streams tells each subscription covering it, a URI that requires a scope only to a stream that holds it exactly (3.7.5). Since 3.7.5 a request in flight can be cancelled, cooperatively: the transport sets a check in the request state (`bote_req_set_cancel`), the codec names the request, and a handler asks `bote_cancelled()` as it works. On the modern HTTP path the check is a poll for a client gone (`bote_conn_gone`); on stdio and a Unix socket it reads what has arrived and looks through the lines past the message for a `notifications/cancelled` naming it (`codec_lines_cancel_a`). Once a handler has found its request cancelled the codec answers it with nothing. Since 3.7.6 progress is the same the other way: a handler reports with `bote_progress()`, and the transport's writer (`bote_req_set_progress`) sends it on the request's own stream, the POST's response turned into an SSE stream at the first report on HTTP (`bote_http_progress_begin` / `_end`), a line or a frame on stdio, unix and WebSocket. Each transport's check and writer answer nothing to a thread other than the one serving the request (`bote_conn_tid`). Since 3.7.7 a WebSocket's check peeks at the socket, reads only whole frames and keeps them for the loop (`_ws_cancelled`, `_ws_next_frame`), and on the legacy streamable path a session's requests are entered while they run (`session_inflight_*`, src/session.cyr), so a `notifications/cancelled` POST on another worker reaches the request it names. Since 3.7.0 the streamable transport serves on sandhi's worker pool (`bote_conn_serve_pooled`, `BOTE_WORKERS`): each thread has its own request state (`bote_req_state`, through a thread-local slot `bote_conn_arm` claims), and what workers share is guarded — the session store and its buffers by a mutex, a session's outbound bundle and a JwtSecret's refresh by compare-and-swap, its cache by a mutex once threads run, the dispatcher's sinks by `bote_conn_serial_sinks`, a forked fetch by holding the allocators' locks across the fork.
+4. **Streaming-ready data layer** — progress + cancellation primitives and a polled per-session push are in place. Since 3.7.2 a `subscriptions/listen` stream carries list changes live on `http`, `bridge` and `streamable`: the thread that answers it writes the acknowledgement and parks a duplicate of the socket in a ListenHub (`src/listen.cyr`), whose one thread waits on every parked socket and on a wake pipe, and writes each stream the changes it asked for, without ever waiting on a client. Since 3.7.3 stdio, unix and WebSocket carry listens too: there the connection is the stream, and a ListenLine holds its subscriptions; the transport hands the codec the line's BoteStream with each message, the codec gives it the listen the dispatcher accepted and any `notifications/cancelled`, and the connection's loop waits on its socket and the line's wake pipe at once, writing a change between its replies. Since 3.7.4 a listen's `resourceSubscriptions` are kept per stream slot, and `dispatcher_resource_updated(d, uri)` reaches them through the event sink chain (`event_sink_with_updated`, a hook with a URI and no payload): each hub and line queues the URI under a lock, and the thread that writes its streams tells each subscription covering it, a URI that requires a scope only to a stream that holds it exactly (3.7.5). Since 3.7.5 a request in flight can be cancelled, cooperatively: the transport sets a check in the request state (`bote_req_set_cancel`), the codec names the request, and a handler asks `bote_cancelled()` as it works. On the modern HTTP path the check is a poll for a client gone (`bote_conn_gone`); on stdio and a Unix socket it reads what has arrived and looks through the lines past the message for a `notifications/cancelled` naming it (`codec_lines_cancel_a`). Once a handler has found its request cancelled the codec answers it with nothing. Since 3.7.6 progress is the same the other way: a handler reports with `bote_progress()`, and the transport's writer (`bote_req_set_progress`) sends it on the request's own stream, the POST's response turned into an SSE stream at the first report on HTTP (`bote_http_progress_begin` / `_end`), a line or a frame on stdio, unix and WebSocket. Each transport's check and writer answer nothing to a thread other than the one serving the request: the request state records its owner (`sys_gettid`) once a message, and `bote_cancelled` and `bote_progress` compare it before they touch the arena (3.7.7). Since 3.7.7 a WebSocket's check peeks at the socket, reads only whole frames and keeps them for the loop (`_ws_cancelled`, `_ws_next_frame`), and on the legacy streamable path a session's requests are entered while they run (`session_inflight_*`, src/session.cyr), so a `notifications/cancelled` POST on another worker reaches the request it names. Since 3.7.0 the streamable transport serves on sandhi's worker pool (`bote_conn_serve_pooled`, `BOTE_WORKERS`): each thread has its own request state (`bote_req_state`, through a thread-local slot `bote_conn_arm` claims), and what workers share is guarded — the session store and its buffers by a mutex, a session's outbound bundle and a JwtSecret's refresh by compare-and-swap, its cache by a mutex once threads run, the dispatcher's sinks by `bote_conn_serial_sinks`, a forked fetch by holding the allocators' locks across the fork.
 5. **Audit + events as fn-pointer + ctx adapters** — libro and majra wired today; any other backend drops in via the same shape.
 6. **Auth as opt-in middleware** — bearer-token validator is a fn-pointer slot on each HTTP-family transport config; unset = no overhead, no behavior change.
 7. **No global state in the dispatcher** — caller owns the registry and dispatcher heap pointers; transports are per-instance.
@@ -194,6 +194,7 @@ tests/
 ├── bote_libro_tools.tcyr      — 73 (libro_tools; incl. the tampered-chain
 │                                 error decode + populated-chain proof paths)
 ├── bote_log.tcyr              — 50 (src/log.cyr: levels, line bytes, escaping, truncation)
+├── bote_output.tcyr           — 122 (3.8.0: a tool's outputSchema, registration to the heap)
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 53 (streamable HTTP / SSE)
@@ -201,7 +202,7 @@ tests/
 ├── bote_web_tools.tcyr        — 88 (web_tools; URL + resolved-address SSRF guard; the records their children write)
 ├── bote_ws.tcyr               — 94 (WebSocket; send-deadline drop; `-31403` per frame; what an upgrade and a connection keep)
 ├── bote_core_only_smoke.tcyr  — drift guard (includes only dist/bote-core.cyr)
-└── bote.bcyr                  — 32 hot-path benchmarks
+└── bote.bcyr                  — 42 hot-path benchmarks
 
 fuzz/
 ├── codec_parse.fcyr
@@ -213,7 +214,8 @@ fuzz/
 ├── resource_template.fcyr    — what a template matches re-expands to the same URI, byte for byte
 ├── oauth_metadata.fcyr       — what an operator configures cannot leave its header parameter, the document stays JSON, and no request reaches a scoped tool without its scope
 ├── ssrf_ipv6.fcyr            — host.cyr's IPv6 parser against cyrius's, plus ssrf_check on mutated URLs
-└── schema_validate.fcyr
+├── schema_validate.fcyr
+└── output_shape.fcyr         — (3.8.0) an outputSchema's 2025-11-25 form and a result's shaping are JSON, in each revision's shape, with no heap
 
 docs/
 ├── architecture/overview.md   — this file
@@ -293,7 +295,12 @@ chooses for itself. `dispatcher_dispatch_a` makes one pass over the params and r
 - **Any other version:** `-32022`.
 
 Handlers, schema validation, audit and events are the same on both paths. That one pass also reads the fields
-`tools/call` needs, so choosing the era costs that method no second walk of its params.
+`tools/call` needs, so choosing the era costs that method no second walk of its params. What differs inside
+`_dsp_serve_a` is told by its `modern` argument (3.8.0): the shape of an outputSchema in `tools/list`, and of a
+result's `structuredContent`. 2025-11-25 allows an object in both places, so a tool whose schema has another root
+is listed there with it as an object's `result` (built at registration, `_reg_output_legacy`), and
+`structuredContent` that is no object goes as `{"result": …}` (`_dsp_tool_result_out_a`). Before that, the result
+is judged by the tool's outputSchema, and one that fails is a tool error.
 
 ---
 
@@ -314,7 +321,7 @@ Handlers, schema validation, audit and events are the same on both paths. That o
 
 A `tools/call` whose arguments fail the tool's `inputSchema` is **not** an error code: it is a
 result with `isError: true`, so the model can read what it got wrong (MCP 2025-11-25, SEP-1303).
-So is a handler that returns nothing.
+So is a handler that returns nothing, and (3.8.0) a result its tool's outputSchema refuses.
 
 Maintained in `src/error.cyr::bote_err_rpc_code`; `-32002` and the cursor refusal are set in
 `src/dispatch.cyr`.
@@ -447,13 +454,13 @@ standing rules are in CLAUDE.md under Key Principles.
 
 | Artifact | Count | Where |
 |---|---|---|
-| Core unit tests | 947 | `tests/bote.tcyr` |
+| Core unit tests | 969 | `tests/bote.tcyr` |
 | Protocol conformance | 218 | `tests/conformance.tcyr` — by spec clause, through `codec_process_message` (3.4.5) |
-| Module tests | 3239 | `tests/bote_auth.tcyr` (91) + `bote_content.tcyr` (25) + `bote_fetch.tcyr` (60) + `bote_fs_tools.tcyr` (56) + `bote_host.tcyr` (207) + `bote_http_era.tcyr` (1833) + `bote_jwks.tcyr` (49) + `bote_jwt.tcyr` (454) + `bote_libro_tools.tcyr` (73) + `bote_log.tcyr` (50) + `bote_pkce.tcyr` (17) + `bote_sandbox.tcyr` (13) + `bote_streamable.tcyr` (53) + `bote_transport_unix.tcyr` (76) + `bote_web_tools.tcyr` (88) + `bote_ws.tcyr` (94) |
-| **Total assertions** | **4404** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
-| Benchmarks | 33 | `tests/bote.bcyr` |
-| Third-party conformance | 25 of 37, 21 of 30 | `scripts/conformance.sh`: the official suite's required lists for 2026-07-28 and 2025-11-25, and 410 checks of the official client, its OAuth flow with HS256, RS256 and ES256 and a step-up from a 403 included. By hand, because it installs from npm |
-| Fuzz harnesses | 11 | `fuzz/*.fcyr` |
+| Module tests | 4166 | the other twenty-two `tests/bote_*.tcyr` files; each is listed with its count in CLAUDE.md's testing table |
+| **Total assertions** | **5353** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
+| Benchmarks | 42 | `tests/bote.bcyr` |
+| Third-party conformance | 26 of 37, 22 of 30 | `scripts/conformance.sh`: the official suite's required lists for 2026-07-28 and 2025-11-25, and the official client on all four of its transports, its OAuth flow included |
+| Fuzz harnesses | 15 | `fuzz/*.fcyr` |
 
 All hot paths sub-10 µs on x86_64 (`AMD Ryzen 7 5800H`). Side-by-side
 with the Rust v0.92.0 baseline in

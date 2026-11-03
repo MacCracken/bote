@@ -81,6 +81,21 @@ async function exercise(label, transport, mode, want) {
   const need = label.startsWith('stdio') ? 2 : 3;
   ok(`${label} progress heard`, seen.length >= need && seen.every((v, i) => i === 0 || seen[i - 1] < v), seen);
 
+  // (3.8.0) outputSchema: the client checks each structured result against what tools/list
+  // said, and 2025-11-25 is shown an array root wrapped as {result}, on both sides.
+  const sw = tools && tools.tools.find(t => t.name === 'bote_structured');
+  ok(`${label} outputSchema listed`, sw && sw.outputSchema && sw.outputSchema.required.includes('humidity'), sw);
+  const st = await attempt(`${label} structured`, () => c.callTool({ name: 'bote_structured', arguments: {} }));
+  ok(`${label} structured`, st && !st.isError && st.structuredContent.temperature === 22.5 && JSON.parse(st.content[0].text).humidity === 65, st);
+  const su = tools && tools.tools.find(t => t.name === 'bote_structured_list');
+  const arrayRoot = want === NEW ? su && su.outputSchema.type === 'array' : su && su.outputSchema.type === 'object' && su.outputSchema.properties.result.type === 'array';
+  ok(`${label} an array root listed`, arrayRoot, su && su.outputSchema);
+  const sl = await attempt(`${label} structured list`, () => c.callTool({ name: 'bote_structured_list', arguments: {} }));
+  const users = sl && (want === NEW ? sl.structuredContent : sl.structuredContent.result);
+  ok(`${label} structured list`, sl && !sl.isError && Array.isArray(users) && users[1].name === 'Bob', sl);
+  const sb = await attempt(`${label} structured, refused`, () => c.callTool({ name: 'bote_structured_bad', arguments: {} }));
+  ok(`${label} a result its schema refuses is a tool error`, sb && sb.isError === true && sb.content[0].text.includes('structuredContent.temperature: expected number'), sb);
+
   const done = await attempt(`${label} complete`, () => c.complete({ ref: { type: 'ref/prompt', name: 'test_prompt_with_arguments' }, argument: { name: 'arg1', value: 'par' } }));
   ok(`${label} completion`, done && done.completion.values.length === 3, done);
 

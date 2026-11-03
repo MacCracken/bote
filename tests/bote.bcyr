@@ -81,6 +81,12 @@ fn h_echo_b(args) { return args; }
 # (dispatch_tools_call, whose handler returns its args as bare JSON).
 fn h_result_b(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}"; }
 var _b_call_result_req = 0;
+# 3.8.0: one structured result, from a tool without an outputSchema and from one with,
+# whose result is judged by it; the two differ by that judgement alone.
+fn h_structured_b(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"temperature\\\":22.5,\\\"conditions\\\":\\\"Partly cloudy\\\",\\\"humidity\\\":65}\"}],\"structuredContent\":{\"temperature\":22.5,\"conditions\":\"Partly cloudy\",\"humidity\":65}}"; }
+var _b_output_dispatcher = 0;
+var _b_call_structured_req = 0;
+var _b_call_output_req = 0;
 var _b_era_legacy = "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2025-11-25\r\nMCP-Session-Id: abc\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}}";
 var _b_era_legacy_at = 0;
 var _b_era_modern = "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: svc_echo\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}},\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}}";
@@ -161,6 +167,14 @@ fn b_dispatch_tools_call() {
 
 fn b_dispatch_tools_call_result() {
     return dispatcher_dispatch(_b_result_dispatcher, _b_call_result_req, 0);
+}
+
+fn b_dispatch_tools_call_structured() {
+    return dispatcher_dispatch(_b_output_dispatcher, _b_call_structured_req, 0);
+}
+
+fn b_dispatch_tools_call_output() {
+    return dispatcher_dispatch(_b_output_dispatcher, _b_call_output_req, 0);
 }
 
 fn b_jsonx_get_str_flat() {
@@ -322,6 +336,15 @@ fn _bench_setup() {
     _b_result_dispatcher = dispatcher_new(rreg);
     dispatcher_handle(_b_result_dispatcher, "svc_result", &h_result_b);
     _b_call_result_req = req_with_params(req_new("3", "tools/call"), "{\"name\":\"svc_result\",\"arguments\":{\"msg\":\"hi\"}}");
+    var oreg = tool_registry_new();
+    registry_register(oreg, tool_def_new("svc_structured", "a structured result", schema_new("object", 0, vec_new())));
+    registry_register(oreg, tool_def_with_output_schema(tool_def_new("svc_weather", "a structured result, judged", schema_new("object", 0, vec_new())),
+      "{\"type\":\"object\",\"properties\":{\"temperature\":{\"type\":\"number\"},\"conditions\":{\"type\":\"string\"},\"humidity\":{\"type\":\"number\"}},\"required\":[\"temperature\",\"conditions\",\"humidity\"]}"));
+    _b_output_dispatcher = dispatcher_new(oreg);
+    dispatcher_handle(_b_output_dispatcher, "svc_structured", &h_structured_b);
+    dispatcher_handle(_b_output_dispatcher, "svc_weather", &h_structured_b);
+    _b_call_structured_req = req_with_params(req_new("3", "tools/call"), "{\"name\":\"svc_structured\",\"arguments\":{}}");
+    _b_call_output_req = req_with_params(req_new("3", "tools/call"), "{\"name\":\"svc_weather\",\"arguments\":{}}");
 
     _b_era_legacy_at = strstr(_b_era_legacy, "\r\n\r\n") + 4;
     _b_era_modern_at = strstr(_b_era_modern, "\r\n\r\n") + 4;
@@ -577,6 +600,12 @@ fn main() {
     var b40 = bench_new("progress_report");
     bench_run(b40, &b_progress_report, 100000);
     vec_push(benches, b40);
+    var b41 = bench_new("dispatch_tools_call_structured");
+    bench_run(b41, &b_dispatch_tools_call_structured, 10000);
+    vec_push(benches, b41);
+    var b42 = bench_new("dispatch_tools_call_output");
+    bench_run(b42, &b_dispatch_tools_call_output, 10000);
+    vec_push(benches, b42);
     bote_req_begin();
     bote_conn_arm();
     thread_join(thread_create(&_b_thread_nop, 0));

@@ -222,6 +222,13 @@ fn main() {
     assert_eq(_strm_accepts_sse(acc_no, strlen(acc_no)), 0, "Accept without event-stream → no sse");
     var acc_absent = "POST /mcp HTTP/1.1\r\nContent-Type: application/json\r\n\r\n";
     assert_eq(_strm_accepts_sse(acc_absent, strlen(acc_absent)), 0, "absent Accept → no sse");
+    # 3.8.0, from the 3.7.7 review: read as the progress path reads it.
+    var acc_q0 = "POST /mcp HTTP/1.1\r\nAccept: application/json, text/event-stream;q=0\r\n\r\n";
+    assert_eq(_strm_accepts_sse(acc_q0, strlen(acc_q0)), 0, "Accept with event-stream at q=0 → no sse");
+    var acc_two = "POST /mcp HTTP/1.1\r\nAccept: application/json\r\naccept: text/event-stream\r\n\r\n";
+    assert_eq(_strm_accepts_sse(acc_two, strlen(acc_two)), 1, "event-stream in a second Accept field → sse ok");
+    var acc_body = "POST /mcp HTTP/1.1\r\nAccept: application/json\r\n\r\nAccept: text/event-stream";
+    assert_eq(_strm_accepts_sse(acc_body, strlen(acc_body)), 0, "an Accept line in the body is no field");
     # The response is framed as an id-less SSE `message` event.
     assert(streq(_strm_response_frame("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}"),
     "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n") == 1,

@@ -1,0 +1,481 @@
+# bote_output.tcyr — a tool's outputSchema (3.8.0): what registration refuses and keeps,
+# its 2025-11-25 form for a root that is no object (references moved under
+# properties/result), tools/list on both revisions, and what a call sends: a result that
+# matches as it was, one that does not or has no structuredContent as an error, a bare
+# value as structuredContent, structuredContent that is no object with a text block and,
+# before 2026-07-28, wrapped; the audit, the log, a batch and the heap.
+#
+# Run: cyrius test tests/bote_output.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+
+var _ret = 0;
+fn h_ret(args, claims) { return _ret; }
+
+var _M = ",\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}";
+var _MH = "{\"resultType\":\"complete\",\"_meta\":{\"io.modelcontextprotocol/serverInfo\":{\"name\":\"bote\",\"version\":\"";
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
+
+fn _msg(method, params, modern) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, "\",\"params\":{");
+    str_builder_add_cstr(sb, params);
+    if (modern == 1) {
+        if (strlen(params) == 0) { str_builder_add_cstr(sb, _M + 1); } else { str_builder_add_cstr(sb, _M); }
+    }
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}
+
+fn _call_msg(tool, modern) { return _msg("tools/call", _cat3("\"name\":\"", tool, "\",\"arguments\":{}"), modern); }
+fn _call(d, tool, modern) { return codec_process_message(_call_msg(tool, modern), d, 0); }
+fn _list(d, modern) { return codec_process_message(_msg("tools/list", "", modern), d, 0); }
+fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+
+# The legacy response for result `r`, and the modern one's text after its _meta.
+fn _legacy(r) { return _cat3("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":", r, "}"); }
+fn _modern_tail(r) { return _cat3(",", r + 1, "}"); }
+fn _ends(s, suf) {
+    if (s == 0) { return 0; }
+    var n = strlen(s);
+    var k = strlen(suf);
+    if (k > n) { return 0; }
+    return streq(s + n - k, suf);
+}
+
+# `r` the handler's result; the call answered `want` on 2025-11-25 and 2026-07-28.
+fn _expect(d, tool, r, want_legacy, want_modern, name) {
+    _ret = r;
+    var l = _call(d, tool, 0);
+    assert_streq(l, _legacy(want_legacy), _cat(name, " (2025-11-25)"));
+    var m = _call(d, tool, 1);
+    var ok = 0;
+    if (_has(m, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"resultType\":\"complete\",") == 1 && _ends(m, _modern_tail(want_modern)) == 1) { ok = 1; }
+    assert(ok == 1, _cat(name, " (2026-07-28)"));
+    if (ok == 0) { println(m); }
+    return 0;
+}
+
+fn _tool(name, os) {
+    return tool_def_with_output_schema(tool_def_new(name, "d", schema_new("object", 0, vec_new())), os);
+}
+
+fn _refused(d, name, os) {
+    var e = dispatcher_register_tool(d, _tool(name, os), &h_ret);
+    if (e == 0) { return 0; }
+    return bote_err_reason(e);
+}
+
+# The 2025-11-25 form registration keeps for schema `os`.
+fn _legacy_form(os) {
+    var t = _tool("t_form", os);
+    _registry_prepare(t);
+    return tool_def_output_legacy(t);
+}
+
+# Log capture, through sakshi's emit hook.
+var _lc_buf = 0;
+var _lc_all = 0;
+fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    var b = alloc(n + 1);
+    memcpy(b, msg, n);
+    store8(b + n, 0);
+    vec_push(_lc_all, b);
+    return 0;
+}
+fn _lc_begin() { _lc_all = vec_new(); sakshi_set_emit_hook(&_lc_hook); sakshi_set_level(SK_TRACE); return 0; }
+fn _lc_end() { sakshi_clear_emit_hook(); sakshi_set_level(SK_ERROR); return 0; }
+fn _lc_find(sub) {
+    var i = 0;
+    while (i < vec_len(_lc_all)) {
+        if (_has(vec_get(_lc_all, i), sub) == 1) { return vec_get(_lc_all, i); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+var _aud = 0;
+fn _aud_log(ctx, event) { vec_push(_aud, event); return 0; }
+
+var WEATHER = "{\"type\":\"object\",\"properties\":{\"temperature\":{\"type\":\"number\"},\"conditions\":{\"type\":\"string\"},\"humidity\":{\"type\":\"number\"}},\"required\":[\"temperature\",\"conditions\",\"humidity\"]}";
+var USERS = "{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"id\",\"name\"]}}";
+var OK_W = "{\"content\":[{\"type\":\"text\",\"text\":\"x\"}],\"structuredContent\":{\"temperature\":22.5,\"conditions\":\"c\",\"humidity\":65}}";
+
+fn _err_result(tool, why) {
+    return _cat3(_cat3("{\"content\":[{\"type\":\"text\",\"text\":\"tool execution failed: ", tool, " - "), why, "\"}],\"isError\":true}");
+}
+
+fn main() {
+    sakshi_set_level(SK_ERROR);
+    var d = dispatcher_new(tool_registry_new());
+
+    # ---- Registration ----
+    assert_streq(_refused(d, "t_bad1", "{\"type\":"), "the outputSchema is not valid JSON", "registration: an outputSchema that is not JSON");
+    assert_streq(_refused(d, "t_bad2", "true"), "the outputSchema must be a JSON Schema object", "registration: the schema true is no object");
+    assert_streq(_refused(d, "t_bad3", "[]"), "the outputSchema must be a JSON Schema object", "registration: an array");
+    assert_streq(_refused(d, "t_bad4", " \"object\""), "the outputSchema must be a JSON Schema object", "registration: a string");
+    assert_eq(registry_contains(dispatcher_registry(d), "t_bad1"), 0, "registration: ...and nothing refused is registered");
+    assert_eq(registry_check_tool_def(_tool("t_ok", WEATHER)), 0, "registration: a JSON Schema object passes the check");
+    assert_eq(dispatcher_register_tool(d, _tool("t_weather", WEATHER), &h_ret), 0, "registration: an object root");
+    assert_eq(dispatcher_register_tool(d, _tool("t_users", USERS), &h_ret), 0, "registration: an array root");
+    assert_eq(dispatcher_register_tool(d, tool_def_new("t_plain", "d", schema_new("object", 0, vec_new())), &h_ret), 0, "registration: no outputSchema");
+    assert_eq(dispatcher_register_tool(d, _tool("t_nul", "{\"type\":\"object\",\"properties\":{\"n\\u0000\":{\"type\":\"string\"}}}"), &h_ret), 0, "registration: a property whose name holds a NUL");
+    assert_eq(dispatcher_register_tool(d, _tool("t_untyped", "{\"properties\":{\"a\":{\"type\":\"string\"}}}"), &h_ret), 0, "registration: a root with no type");
+    var tw = registry_get(dispatcher_registry(d), "t_weather");
+    assert_eq(prop_tag(tool_def_output_prop(tw)), SCH_OBJECT, "registration: the schema is compiled");
+    assert_eq(tool_def_output_legacy(tw), 0, "registration: an object root has no other form");
+    var tp = registry_get(dispatcher_registry(d), "t_plain");
+    assert_eq(tool_def_output_schema(tp), 0, "registration: a tool without one has none");
+    assert_eq(tool_def_output_prop(tp), 0, "registration: ...and nothing compiled");
+
+    var rr = _tool("t_again", USERS);
+    dispatcher_register_tool(d, rr, &h_ret);
+    assert(tool_def_output_legacy(rr) != 0, "registration: an array root has its 2025-11-25 form");
+    tool_def_with_output_schema(rr, WEATHER);
+    dispatcher_register_tool(d, rr, &h_ret);
+    assert_eq(tool_def_output_legacy(rr), 0, "registration: ...which the same definition registered again with an object root has not");
+    assert_eq(prop_tag(tool_def_output_prop(rr)), SCH_OBJECT, "registration: ...and is compiled again");
+    var ml = _tool("t_lines", "{\n  \"type\": \"object\",\r\n  \"properties\": {\"a\": {\"type\": \"string\"}}\n}");
+    dispatcher_register_tool(d, ml, &h_ret);
+    assert_streq(tool_def_output_schema(ml), "{  \"type\": \"object\",  \"properties\": {\"a\": {\"type\": \"string\"}}}", "registration: a schema on several lines is kept on one");
+
+    # ---- The 2025-11-25 form ----
+    assert_streq(_legacy_form(USERS), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"id\",\"name\"]}}},\"required\":[\"result\"]}", "legacy form: an array root is the property result of an object");
+    assert_streq(_legacy_form("{\"type\":\"string\"}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"string\"}},\"required\":[\"result\"]}", "legacy form: a string root");
+    assert_streq(_legacy_form("{\"properties\":{\"a\":{}}}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"properties\":{\"a\":{}}}},\"required\":[\"result\"]}", "legacy form: a root with no type is wrapped, as the SDK reads it");
+    assert_eq(_legacy_form("{\"type\":\"obj\\u0065ct\"}"), 0, "legacy form: an escaped \"object\" is an object");
+    assert_eq(_legacy_form("{\"type\":\"object\",\"properties\":{}}"), 0, "legacy form: none for an object root");
+    assert_streq(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"array\"}"), "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\"}},\"required\":[\"result\"]}", "legacy form: $schema moves to the wrapper");
+    assert_streq(_legacy_form("{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"},\"$defs\":{\"u\":{\"type\":\"object\",\"properties\":{\"$ref\":{\"type\":\"string\"},\"next\":{\"$ref\":\"#\"},\"o\":{\"$ref\":\"other.json#/a\"},\"n\":{\"$ref\":\"#anchor\"}}}},\"default\":{\"$ref\":\"#/x\"},\"enum\":[{\"$ref\":\"#/y\"}],\"anyOf\":[{\"$dynamicRef\":\"#/$defs/u\"}]}"),
+      "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/$defs/u\"},\"$defs\":{\"u\":{\"type\":\"object\",\"properties\":{\"$ref\":{\"type\":\"string\"},\"next\":{\"$ref\":\"#/properties/result\"},\"o\":{\"$ref\":\"other.json#/a\"},\"n\":{\"$ref\":\"#anchor\"}}}},\"default\":{\"$ref\":\"#/x\"},\"enum\":[{\"$ref\":\"#/y\"}],\"anyOf\":[{\"$dynamicRef\":\"#/properties/result/$defs/u\"}]}},\"required\":[\"result\"]}",
+      "legacy form: references to the document move under properties/result; names, data, anchors and other documents do not");
+    assert_streq(_legacy_form("{\"type\":\"array\",\"items\":{\"properties\":{\"default\":{\"$ref\":\"#/$defs/d\"},\"$id\":{\"type\":\"string\"},\"x\":{\"$ref\":\"#/$defs/x\"}}}}"),
+      "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"properties\":{\"default\":{\"$ref\":\"#/properties/result/$defs/d\"},\"$id\":{\"type\":\"string\"},\"x\":{\"$ref\":\"#/properties/result/$defs/x\"}}}}},\"required\":[\"result\"]}",
+      "legacy form: a property named for a keyword is a name, and its schema is read");
+    assert_streq(_legacy_form("{\"$id\":\"https://e.org/u\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"}}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"$id\":\"https://e.org/u\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"}}},\"required\":[\"result\"]}", "legacy form: a root with its own base is copied as it is");
+    assert_streq(_legacy_form("{\"type\":\"array\",\"items\":{\"$id\":\"https://e.org/i\",\"$ref\":\"#/$defs/z\"},\"prefixItems\":[{\"$id\":\"#frag\",\"$ref\":\"#/a\"}]}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$id\":\"https://e.org/i\",\"$ref\":\"#/$defs/z\"},\"prefixItems\":[{\"$id\":\"#frag\",\"$ref\":\"#/properties/result/a\"}]}},\"required\":[\"result\"]}", "legacy form: a subschema with its own base is kept; a fragment $id is no base");
+    assert_streq(_legacy_form("{\"type\":\"array\",\"items\":{\"$r\\u0065f\":\"\\u0023/$defs/q\",\"a\\\"b\":1}}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$r\\u0065f\":\"#/properties/result/$defs/q\",\"a\\\"b\":1}}},\"required\":[\"result\"]}", "legacy form: keys and references read as they decode, keys written as they were");
+
+    # ---- What registration warns of ----
+    _lc_begin();
+    dispatcher_register_tool(d, _tool("t_warn", "{\"type\":\"string\",\"pattern\":\"^a\",\"properties\":{\"n\":{\"type\":\"string\",\"maxLength\":3},\"k\":{\"type\":[\"string\",\"null\"]}}}"), &h_ret);
+    _lc_end();
+    assert(_has(_lc_find("property=outputSchema keyword=pattern"), "schema keyword not enforced") == 1, "warn: a keyword at the root");
+    assert(_lc_find("property=outputSchema.n keyword=maxLength") != 0, "warn: a keyword on a property");
+    assert(_lc_find("property=outputSchema.k keyword=\"type array\"") != 0, "warn: a type array");
+
+    # ---- tools/list ----
+    var ll = _list(d, 0);
+    assert(_has(ll, _cat3("\"name\":\"t_weather\",\"description\":\"d\",\"inputSchema\":{\"type\":\"object\"},\"outputSchema\":", WEATHER, "}")) == 1, "tools/list 2025-11-25: an object root as written");
+    assert(_has(ll, "\"name\":\"t_users\",\"description\":\"d\",\"inputSchema\":{\"type\":\"object\"},\"outputSchema\":{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\"") == 1, "tools/list 2025-11-25: an array root wrapped");
+    assert(_has(ll, "\"name\":\"t_plain\",\"description\":\"d\",\"inputSchema\":{\"type\":\"object\"}}") == 1, "tools/list: no outputSchema for a tool without one");
+    var lm = _list(d, 1);
+    assert(_has(lm, _cat3("\"name\":\"t_weather\",\"description\":\"d\",\"inputSchema\":{\"type\":\"object\"},\"outputSchema\":", WEATHER, "}")) == 1, "tools/list 2026-07-28: an object root as written");
+    assert(_has(lm, _cat3("\"name\":\"t_users\",\"description\":\"d\",\"inputSchema\":{\"type\":\"object\"},\"outputSchema\":", USERS, "}")) == 1, "tools/list 2026-07-28: an array root as written");
+    assert(_has(ll, "\"outputSchema\":{  \"type\": \"object\",") == 1, "tools/list: a schema written on several lines goes out on one");
+    assert(_has(ll, "\n") == 0, "tools/list: ...and nothing in the reply breaks the line");
+
+    # ---- A call's result: an outputSchema with an object root ----
+    _expect(d, "t_weather", OK_W, OK_W, OK_W, "call: a result that matches goes out as it was");
+    var noc = _err_result("t_weather", "the tool has an outputSchema and the result has no structuredContent");
+    _expect(d, "t_weather", "{\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}", noc, noc, "call: no structuredContent is a tool error");
+    var bad = _err_result("t_weather", "the result's structuredContent does not match the outputSchema: structuredContent: missing required field: humidity; structuredContent.temperature: expected number");
+    _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":{\"temperature\":\"hot\",\"conditions\":\"c\"}}", bad, bad, "call: structuredContent that does not match is a tool error naming each violation");
+    var notobj = _err_result("t_weather", "the result's structuredContent does not match the outputSchema: structuredContent: expected object");
+    _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":[1]}", notobj, notobj, "call: an array where the schema has an object");
+    var ie = "{\"content\":[{\"type\":\"text\",\"text\":\"boom\"}],\"isError\":true}";
+    _expect(d, "t_weather", ie, ie, ie, "call: an error result needs no structuredContent");
+    var ie2 = "{\"content\":[],\"isError\":true,\"structuredContent\":{\"temperature\":\"x\"}}";
+    _expect(d, "t_weather", ie2, ie2, ie2, "call: ...and is not judged by the schema");
+    var ief = "{\"content\":[],\"isError\":false}";
+    _expect(d, "t_weather", ief, noc, noc, "call: isError false is no error");
+    var bare = "{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2}";
+    var bare_out = "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"temperature\\\":1,\\\"conditions\\\":\\\"c\\\",\\\"humidity\\\":2}\"}],\"structuredContent\":{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2}}";
+    _expect(d, "t_weather", bare, bare_out, bare_out, "call: a bare record is the structuredContent, its JSON in a text block");
+    var bare_bad = _err_result("t_weather", "the result's structuredContent does not match the outputSchema: structuredContent: missing required field: conditions; structuredContent: missing required field: humidity");
+    _expect(d, "t_weather", "{\"temperature\":1}", bare_bad, bare_bad, "call: ...and is judged like any other");
+    var dup = _err_result("t_weather", "the result names structuredContent more than once");
+    _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2},\"structuredContent\":{\"temperature\":\"x\"}}", dup, dup, "call: structuredContent twice is a tool error");
+    _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2},\"structured\\u0043ontent\":{}}", dup, dup, "call: ...spelled two ways");
+    var dupe = _err_result("t_weather", "the result names isError more than once");
+    _expect(d, "t_weather", "{\"content\":[],\"isError\":true,\"isError\":false,\"structuredContent\":{\"temperature\":\"x\"}}", dupe, dupe, "call: isError twice is a tool error");
+    var dupc = _err_result("t_weather", "the result names content more than once");
+    _expect(d, "t_weather", "{\"content\":[],\"content\":[],\"structuredContent\":{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2}}", dupc, dupc, "call: content twice is a tool error");
+    _expect(d, "t_weather", "", _err_result("t_weather", "the handler returned a result that is not valid JSON"), _err_result("t_weather", "the handler returned a result that is not valid JSON"), "call: a result that is not JSON is the error it was");
+
+    # ---- An array root ----
+    var ub = "[{\"id\":\"1\",\"name\":\"A\"}]";
+    _expect(d, "t_users", ub,
+      "{\"content\":[{\"type\":\"text\",\"text\":\"[{\\\"id\\\":\\\"1\\\",\\\"name\\\":\\\"A\\\"}]\"}],\"structuredContent\":{\"result\":[{\"id\":\"1\",\"name\":\"A\"}]}}",
+      "{\"content\":[{\"type\":\"text\",\"text\":\"[{\\\"id\\\":\\\"1\\\",\\\"name\\\":\\\"A\\\"}]\"}],\"structuredContent\":[{\"id\":\"1\",\"name\":\"A\"}]}",
+      "call: a bare array, wrapped before 2026-07-28 and as it is on it");
+    var ut = "{\"content\":[{\"type\":\"text\",\"text\":\"Found 1\"}],\"structuredContent\":[{\"id\":\"1\",\"name\":\"A\"}]}";
+    _expect(d, "t_users", ut, "{\"content\":[{\"type\":\"text\",\"text\":\"Found 1\"}],\"structuredContent\":{\"result\":[{\"id\":\"1\",\"name\":\"A\"}]}}", ut, "call: a text block the result has is kept, and none added");
+    _expect(d, "t_users", "{\"content\":[{\"type\":\"image\",\"data\":\"AA==\",\"mimeType\":\"image/png\"}],\"structuredContent\":[]}",
+      "{\"content\":[{\"type\":\"image\",\"data\":\"AA==\",\"mimeType\":\"image/png\"},{\"type\":\"text\",\"text\":\"[]\"}],\"structuredContent\":{\"result\":[]}}",
+      "{\"content\":[{\"type\":\"image\",\"data\":\"AA==\",\"mimeType\":\"image/png\"},{\"type\":\"text\",\"text\":\"[]\"}],\"structuredContent\":[]}",
+      "call: a text block added after the blocks a result has");
+    var ut2 = "{\"content\":[{\"type\":\"image\",\"data\":\"AA==\",\"mimeType\":\"image/png\"},{\"type\":\"text\",\"text\":\"n\"}],\"structuredContent\":[]}";
+    _expect(d, "t_users", ut2, "{\"content\":[{\"type\":\"image\",\"data\":\"AA==\",\"mimeType\":\"image/png\"},{\"type\":\"text\",\"text\":\"n\"}],\"structuredContent\":{\"result\":[]}}", ut2, "call: a text block after another block counts");
+    var utx = "{\"content\":[ {\"type\":\"t\\u0065xt\",\"text\":\"n\"} ],\"structuredContent\":[]}";
+    _expect(d, "t_users", utx, "{\"content\":[ {\"type\":\"t\\u0065xt\",\"text\":\"n\"} ],\"structuredContent\":{\"result\":[]}}", utx, "call: a text block is read as its type decodes");
+    var ubad = _err_result("t_users", "the result's structuredContent does not match the outputSchema: structuredContent[0].id: expected string; structuredContent[1]: missing required field: name");
+    _expect(d, "t_users", "[{\"id\":1,\"name\":\"A\"},{\"id\":\"2\"}]", ubad, ubad, "call: each item judged");
+    var uobj = _err_result("t_users", "the result's structuredContent does not match the outputSchema: structuredContent: expected array");
+    _expect(d, "t_users", "{\"content\":[],\"structuredContent\":{\"id\":\"1\"}}", uobj, uobj, "call: an object where the schema has an array");
+
+    var una = "{\"content\":[{\"type\":\"text\",\"text\":\"a\"}],\"structuredContent\":{\"a\":\"x\"}}";
+    _expect(d, "t_untyped", una, "{\"content\":[{\"type\":\"text\",\"text\":\"a\"}],\"structuredContent\":{\"result\":{\"a\":\"x\"}}}", una, "call: an object, wrapped before 2026-07-28 where the listed schema was");
+
+    var nn = "{\"content\":[{\"type\":\"text\",\"text\":\"n\"}],\"structuredContent\":{\"n\":5}}";
+    _expect(d, "t_nul", nn, nn, nn, "call: a property named \"n\\u0000\" judges no \"n\" (it judged one through 3.7.7)");
+    var esc_err = "{\"content\":[],\"is\\u0045rror\":true}";
+    _expect(d, "t_weather", esc_err, esc_err, esc_err, "call: an escaped isError is an error, as a client reads it");
+
+    # ---- No outputSchema: structuredContent is shaped, never judged ----
+    var po = "{\"content\":[],\"structuredContent\":{\"any\":1}}";
+    _expect(d, "t_plain", po, po, po, "plain: an object goes out as it was");
+    _expect(d, "t_plain", "{\"content\":[],\"structuredContent\":[1,2]}",
+      "{\"content\":[{\"type\":\"text\",\"text\":\"[1,2]\"}],\"structuredContent\":{\"result\":[1,2]}}",
+      "{\"content\":[{\"type\":\"text\",\"text\":\"[1,2]\"}],\"structuredContent\":[1,2]}", "plain: an array, with a text block, and wrapped before 2026-07-28");
+    _expect(d, "t_plain", "{\"content\":[],\"structuredContent\":null}",
+      "{\"content\":[{\"type\":\"text\",\"text\":\"null\"}],\"structuredContent\":{\"result\":null}}",
+      "{\"content\":[{\"type\":\"text\",\"text\":\"null\"}],\"structuredContent\":null}", "plain: null");
+    _expect(d, "t_plain", "{\"content\":[{\"type\":\"text\",\"text\":\"t\"}],\"structuredContent\":\"s\\\"q\",\"_meta\":{\"k\":\"v\"},\"a\\\"b\":1}",
+      "{\"content\":[{\"type\":\"text\",\"text\":\"t\"}],\"_meta\":{\"k\":\"v\"},\"a\\\"b\":1,\"structuredContent\":{\"result\":\"s\\\"q\"}}",
+      "{\"content\":[{\"type\":\"text\",\"text\":\"t\"}],\"structuredContent\":\"s\\\"q\",\"_meta\":{\"k\":\"v\"},\"a\\\"b\":1}", "plain: a string, with every other member kept");
+    var ec = "{\"cont\\u0065nt\":[{\"type\":\"text\",\"text\":\"x\"}]}";
+    _expect(d, "t_plain", ec, ec, ec, "plain: an escaped content is a CallToolResult, as a client reads it (a text block of it through 3.7.7)");
+    _expect(d, "t_plain", "{\"content\":[],\"structured\\u0043ontent\":[1],\"a\\u0000b\":1}",
+      "{\"content\":[{\"type\":\"text\",\"text\":\"[1]\"}],\"a\\u0000b\":1,\"structuredContent\":{\"result\":[1]}}",
+      "{\"content\":[{\"type\":\"text\",\"text\":\"[1]\"}],\"a\\u0000b\":1,\"structuredContent\":[1]}", "plain: an escaped structuredContent is shaped, and every key goes as it was written");
+    var pb = "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"r\\\":1}\"}]}";
+    _expect(d, "t_plain", "{\"r\":1}", pb, pb, "plain: a bare record is still a text block");
+
+    # ---- The log ----
+    _lc_begin();
+    _ret = "{\"content\":[],\"structuredContent\":{\"temperature\":\"SECRET-VALUE\",\"conditions\":\"c\",\"humidity\":2}}";
+    _call(d, "t_weather", 0);
+    _lc_end();
+    var wl = _lc_find("tool result refused");
+    assert(_has(wl, "tool=t_weather reason=\"structuredContent does not match the outputSchema\"") == 1, "log: a WARN names the tool and why");
+    assert(_lc_find("SECRET-VALUE") == 0, "log: ...and never what the result held");
+    assert(_lc_find("expected number") == 0, "log: ...nor the violations");
+
+    # ---- The audit ----
+    var ad = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(ad, _tool("t_weather", WEATHER), &h_ret);
+    _aud = vec_new();
+    dispatcher_set_audit(ad, audit_sink_new(&_aud_log, 0));
+    _ret = OK_W;
+    codec_process_message_a(bote_req_begin(), _call_msg("t_weather", 0), ad, 0);
+    _ret = "{\"content\":[],\"structuredContent\":{\"temperature\":\"x\"}}";
+    codec_process_message_a(bote_req_begin(), _call_msg("t_weather", 0), ad, 0);
+    _ret = "{\"content\":[]}";
+    codec_process_message_a(bote_req_begin(), _call_msg("t_weather", 1), ad, 0);
+    _ret = 0;
+    codec_process_message_a(bote_req_begin(), _call_msg("t_weather", 0), ad, 0);
+    _ret = OK_W;
+    codec_process_message_a(bote_req_begin(), _call_msg("t_weather", 0), ad, 0);
+    assert_eq(vec_len(_aud), 5, "audit: one record a call");
+    assert_eq(tool_call_event_success(vec_get(_aud, 0)), 1, "audit: a result that matches succeeded");
+    assert_eq(tool_call_event_success(vec_get(_aud, 1)), 0, "audit: one that does not failed");
+    assert(_has(tool_call_event_error(vec_get(_aud, 1)), "tool execution failed: t_weather - the result's structuredContent does not match the outputSchema: ") == 1, "audit: ...with why, kept past the next messages");
+    assert_streq(tool_call_event_error(vec_get(_aud, 2)), "tool execution failed: t_weather - the tool has an outputSchema and the result has no structuredContent", "audit: no structuredContent failed, on 2026-07-28 too");
+    assert_streq(tool_call_event_error(vec_get(_aud, 3)), "tool execution failed: t_weather - the handler returned no result", "audit: a handler returning nothing, kept past the next message");
+    assert_eq(tool_call_event_success(vec_get(_aud, 4)), 1, "audit: the next good call succeeded");
+
+    # ---- A batch ----
+    _ret = "{\"content\":[],\"structuredContent\":{\"temperature\":\"x\"}}";
+    var bt = codec_process_message(_cat3("[", _cat3(_call_msg("t_weather", 0), ",", _call_msg("t_plain", 0)), "]"), d, 0);
+    assert(_has(bt, "\"isError\":true") == 1, "batch: an element is judged by its tool");
+    assert(_has(bt, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[],\"structuredContent\":{\"temperature\":\"x\"}}}") == 1, "batch: ...and its neighbour by its own");
+
+    # ---- The heap ----
+    # A call costs `args` on the heap, as since 3.4.15; nothing in its result's handling
+    # keeps more, refused or shaped, at any size.
+    var hm_ok = _call_msg("t_plain", 0);
+    var hm_w = _call_msg("t_weather", 0);
+    var hm_u = _call_msg("t_users", 0);
+    var hm_um = _call_msg("t_users", 1);
+    _ret = "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}";
+    codec_process_message_a(bote_req_begin(), hm_ok, d, 0);
+    var h0 = alloc_used();
+    codec_process_message_a(bote_req_begin(), hm_ok, d, 0);
+    var base = alloc_used() - h0;
+    var big = str_builder_new();
+    str_builder_add_cstr(big, "{\"content\":[],\n\"structuredContent\":{\"temperature\":\"");
+    var bi = 0;
+    while (bi < 60000) { str_builder_add_cstr(big, "\\u0001"); bi = bi + 6; }
+    str_builder_add_cstr(big, "\"}}");
+    _ret = str_data(str_builder_build(big));
+    codec_process_message_a(bote_req_begin(), hm_w, d, 0);
+    var h1 = alloc_used();
+    var hi = 0;
+    while (hi < 10) { codec_process_message_a(bote_req_begin(), hm_w, d, 0); hi = hi + 1; }
+    assert_eq(alloc_used() - h1, base * 10, "heap: ten results on two lines refused with 60 KB in them keep only their args");
+    var rec = str_builder_new();
+    str_builder_add_cstr(rec, "{\"r\":\"");
+    bi = 0;
+    while (bi < 60000) { str_builder_add_cstr(rec, "\\u0003"); bi = bi + 6; }
+    str_builder_add_cstr(rec, "\"}");
+    _ret = str_data(str_builder_build(rec));
+    codec_process_message_a(bote_req_begin(), hm_ok, d, 0);
+    var h1b = alloc_used();
+    hi = 0;
+    while (hi < 10) { codec_process_message_a(bote_req_begin(), hm_ok, d, 0); hi = hi + 1; }
+    assert_eq(alloc_used() - h1b, base * 10, "heap: a 60 KB bare record as a text block keeps only args (1.2 KB a call more through 3.7.7)");
+    var arr = str_builder_new();
+    str_builder_add_cstr(arr, "[");
+    var ai = 0;
+    while (ai < 1500) { if (ai > 0) { str_builder_add_cstr(arr, ","); } str_builder_add_cstr(arr, "{\"id\":\"1\",\"name\":\"\\\"A\\\"\\u0002x\"}"); ai = ai + 1; }
+    str_builder_add_cstr(arr, "]");
+    _ret = str_data(str_builder_build(arr));
+    codec_process_message_a(bote_req_begin(), hm_u, d, 0);
+    codec_process_message_a(bote_req_begin(), hm_um, d, 0);
+    var h2 = alloc_used();
+    hi = 0;
+    while (hi < 10) { codec_process_message_a(bote_req_begin(), hm_u, d, 0); codec_process_message_a(bote_req_begin(), hm_um, d, 0); hi = hi + 1; }
+    assert_eq(alloc_used() - h2, base * 20, "heap: a 60 KB bare array lifted, text added and wrapped, on both revisions, keeps only args");
+    # A ramp: each refused result a little larger than the last, past every size above.
+    var ramp = vec_new();
+    var ri = 0;
+    while (ri < 60) {
+        var rb = str_builder_new();
+        str_builder_add_cstr(rb, "[");
+        var rj = 0;
+        while (rj < 2000 + ri * 40) { if (rj > 0) { str_builder_add_cstr(rb, ","); } str_builder_add_cstr(rb, "{\"id\":7}"); rj = rj + 1; }
+        str_builder_add_cstr(rb, "]");
+        vec_push(ramp, str_data(str_builder_build(rb)));
+        ri = ri + 1;
+    }
+    var h3 = alloc_used();
+    ri = 0;
+    while (ri < 60) { _ret = vec_get(ramp, ri); codec_process_message_a(bote_req_begin(), hm_u, d, 0); ri = ri + 1; }
+    assert(alloc_used() - h3 - base * 60 < 8388608, "heap: 60 refused results, each a little larger, keep under 8 MB beyond args");
+    var h4 = alloc_used();
+    ri = 0;
+    while (ri < 60) { _ret = vec_get(ramp, ri); codec_process_message_a(bote_req_begin(), hm_u, d, 0); ri = ri + 1; }
+    assert_eq(alloc_used() - h4, base * 60, "heap: ...and the same 60 again keep only args");
+    # A long list: forty tools, each with a 4 KB outputSchema whose root is an array.
+    var ld = dispatcher_new(tool_registry_new());
+    var li = 0;
+    while (li < 40) {
+        var ls = str_builder_new();
+        str_builder_add_cstr(ls, "{\"type\":\"array\",\"description\":\"");
+        var lj = 0;
+        while (lj < 4000) { str_builder_add_cstr(ls, "\\\""); lj = lj + 2; }
+        str_builder_add_cstr(ls, "\",\"items\":{\"$ref\":\"#/$defs/x\"},\"anyOf\":[{\"$ref\":\"#\"}");
+        var lk = 0;
+        while (lk < 200) { str_builder_add_cstr(ls, ",{\"$ref\":\"#\"}"); lk = lk + 1; }
+        str_builder_add_cstr(ls, "]}");
+        var lnb = str_builder_new();
+        str_builder_add_cstr(lnb, "t_long_");
+        str_builder_add_int(lnb, li);
+        var lt = _tool(str_data(str_builder_build(lnb)), str_data(str_builder_build(ls)));
+        dispatcher_register_tool(ld, lt, &h_ret);
+        li = li + 1;
+    }
+    var lml = _msg("tools/list", "", 0);
+    var lmm = _msg("tools/list", "", 1);
+    codec_process_message_a(bote_req_begin(), lml, ld, 0);
+    codec_process_message_a(bote_req_begin(), lmm, ld, 0);
+    var h5 = alloc_used();
+    li = 0;
+    while (li < 10) { codec_process_message_a(bote_req_begin(), lml, ld, 0); codec_process_message_a(bote_req_begin(), lmm, ld, 0); li = li + 1; }
+    assert_eq(alloc_used() - h5, 0, "heap: a list of forty 4 KB outputSchemas, on both revisions, keeps nothing");
+    # And forty whose roots are objects, which have no other form to make room for them.
+    var od = dispatcher_new(tool_registry_new());
+    li = 0;
+    while (li < 40) {
+        var os2 = str_builder_new();
+        str_builder_add_cstr(os2, "{\"type\":\"object\",\"description\":\"");
+        var oj = 0;
+        while (oj < 4000) { str_builder_add_cstr(os2, "\\u0004"); oj = oj + 6; }
+        str_builder_add_cstr(os2, "\"}");
+        var onb = str_builder_new();
+        str_builder_add_cstr(onb, "t_obj_");
+        str_builder_add_int(onb, li);
+        dispatcher_register_tool(od, _tool(str_data(str_builder_build(onb)), str_data(str_builder_build(os2))), &h_ret);
+        li = li + 1;
+    }
+    codec_process_message_a(bote_req_begin(), lml, od, 0);
+    codec_process_message_a(bote_req_begin(), lmm, od, 0);
+    var h6 = alloc_used();
+    li = 0;
+    while (li < 10) { codec_process_message_a(bote_req_begin(), lml, od, 0); codec_process_message_a(bote_req_begin(), lmm, od, 0); li = li + 1; }
+    assert_eq(alloc_used() - h6, 0, "heap: a list of forty 4 KB outputSchemas with object roots, on both revisions, keeps nothing");
+    var lr = codec_process_message(lml, ld, 0);
+    assert(_has(lr, "\"items\":{\"$ref\":\"#/properties/result/$defs/x\"}") == 1, "list: the 2025-11-25 form of a long schema");
+
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit_group(rc);

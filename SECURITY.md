@@ -72,7 +72,8 @@ The primary security-relevant surface areas are:
   on stdio, a Unix socket and (3.7.7) a WebSocket by `notifications/cancelled` on its own
   connection. Since **3.7.7**, for 2025-11-25 on `streamable`, by that in a POST of its own,
   which reaches only a request of the session it came on: a session's requests are entered
-  while they run, by session and id, at most 64 at once a store. A WebSocket's check reads
+  while they run, by session and id, at most 64 at once a store, and (3.8.0) its POST still
+  gets a response, with no JSON-RPC response in it. A WebSocket's check reads
   only frames already whole, so a client cannot hold a handler on a frame it never finishes. That is read
   only from what has already arrived, within the transport's buffer, and each line once; the
   check gives back what it allocated. A handler stops only if it asks (`bote_cancelled()`),
@@ -83,6 +84,17 @@ The primary security-relevant surface areas are:
   request state, and through 3.7.5 its ask read the connection beside the loop. Since **3.7.7** that
   is decided before anything else, in `bote_cancelled` and `bote_progress` themselves: through 3.7.6
   a helper's ask still marked and released the handler's request arena, and corrupted it.
+- **Output schemas** — since **3.8.0** a tool that declares an outputSchema has every result
+  that is no error judged by it before it goes, and one that does not match, or has no
+  `structuredContent`, is sent as a tool error, never as it was: a handler bug cannot hand a
+  client data its own schema says it will not get. A result that names `content`,
+  `structuredContent` or `isError` twice is refused the same way, since bote judges the first
+  and a client may read the last, and every result's keys are read as they decode, as a client
+  reads them: through 3.7.7 `"is\u0045rror":true` was a success to the audit and an error to
+  the client. The WARN for a refusal names the tool and why, never what the
+  result held. What the judging and the shaping allocate is on the request arena; through
+  3.7.7 part of the text block bote made of a handler's bare value stayed on the heap, 160 B
+  to 1.2 KB a call, for good.
 - **Progress** — since **3.7.6** a handler's reports go only on the request's own stream, for a
   request that asked with a `progressToken`, and only while it runs: never on a listen stream, never
   for a request cancelled or answered, never with a `progress` that does not increase. A report is

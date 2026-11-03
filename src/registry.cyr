@@ -113,6 +113,9 @@ fn schema_prop_value(p) { return load64(p + 8); }
 #   +56 profiles     vec of cstr tags or 0 (set by tool_def_with_profiles)
 #   +64 param_headers vec of ParamHeader or 0 (read from the schema at registration)
 #   +72 required_scopes vec of cstr or 0 (all of them, for a token to call this tool)
+#   +80 output_schema cstr or 0: the tool's outputSchema, its JSON as written (3.8.0)
+#   +88 output_prop  PropertyDef or 0 (compiled from it at registration)
+#   +96 output_legacy cstr or 0: what 2025-11-25 is shown when the root is not an object
 #
 # Profiles are opaque consumer-defined tags (e.g. "security", "web", "full")
 # used to expose curated tool subsets via a `profile` filter on tools/list.
@@ -120,7 +123,7 @@ fn schema_prop_value(p) { return load64(p + 8); }
 # (profiles == 0) is in no profile. See _build_tools_list_result_a in dispatch.
 
 fn tool_def_new(name, description, input_schema) {
-    var d = alloc(80);
+    var d = alloc(104);
     store64(d, name);
     store64(d + 8, description);
     store64(d + 16, input_schema);
@@ -131,8 +134,16 @@ fn tool_def_new(name, description, input_schema) {
     store64(d + 56, 0);
     store64(d + 64, 0);
     store64(d + 72, 0);
+    store64(d + 80, 0);
+    store64(d + 88, 0);
+    store64(d + 96, 0);
     return d;
 }
+
+# `schema` is a whole JSON Schema, as the tools spec's outputSchema: a JSON object,
+# whose root may be any type on MCP 2026-07-28. It is listed as written, and the
+# structuredContent of every result that is not an error must match it (3.8.0).
+fn tool_def_with_output_schema(d, schema) { store64(d + 80, schema); return d; }
 
 fn tool_def_with_version(d, version) { store64(d + 24, version); return d; }
 fn tool_def_with_deprecated(d, msg) { store64(d + 32, msg); return d; }
@@ -151,6 +162,9 @@ fn tool_def_compiled(d) { return load64(d + 48); }
 fn tool_def_profiles(d) { return load64(d + 56); }
 fn tool_def_param_headers(d) { return load64(d + 64); }
 fn tool_def_required_scopes(d) { return load64(d + 72); }
+fn tool_def_output_schema(d) { return load64(d + 80); }
+fn tool_def_output_prop(d) { return load64(d + 88); }
+fn tool_def_output_legacy(d) { return load64(d + 96); }
 
 # Exact-match membership: 1 if `profile` (non-null) is one of the tool's
 # profile tags, else 0. A null profile or an untagged tool returns 0.
@@ -432,6 +446,7 @@ fn _reg_scan_tool(tool_def, out) {
 # - Each property schema is valid JSON (an object or a boolean), and each
 #   property and each required entry has a name.
 # - Each `x-mcp-header` keeps the rules of MCP 2026-07-28.
+# - (3.8.0) An outputSchema is valid JSON and an object.
 # - Each required scope is a scope-token.
 #
 # Public, so a consumer can check a definition before it registers one.
@@ -467,6 +482,11 @@ fn registry_check_tool_def(tool_def) {
             if (rq == 0 || strlen(rq) == 0) { return "an inputSchema required entry is empty"; }
             j = j + 1;
         }
+    }
+    var os = tool_def_output_schema(tool_def);
+    if (os != 0) {
+        if (jsonx_valid(os, strlen(os)) == 0) { return "the outputSchema is not valid JSON"; }
+        if (jsonx_is_object(os) == 0) { return "the outputSchema must be a JSON Schema object"; }
     }
     var scopes = tool_def_required_scopes(tool_def);
     if (scopes != 0) {
@@ -534,6 +554,170 @@ fn _reg_warn_unenforced(tool_def) {
     return 0;
 }
 
+# The same warnings for an outputSchema: its root, and each of the root's properties.
+fn _reg_warn_output(tool_def) {
+    var kws = _reg_words("anyOf oneOf allOf not $ref pattern minLength maxLength minItems maxItems const ");
+    var os = tool_def_output_schema(tool_def);
+    var at = vec_new();
+    vec_push(at, "outputSchema");
+    vec_push(at, os);
+    var members = _jx_members(jsonx_get_raw(os, "properties"));
+    var mi = 0;
+    while (mi < vec_len(members)) {
+        vec_push(at, _dsp_named_msg("outputSchema.", vec_get(members, mi), 0));
+        vec_push(at, vec_get(members, mi + 1));
+        mi = mi + 2;
+    }
+    var i = 0;
+    while (i < vec_len(at)) {
+        var v = vec_get(at, i + 1);
+        var k = 0;
+        while (k < vec_len(kws)) {
+            if (jsonx_has(v, vec_get(kws, k)) == 1) {
+                _reg_warn_kw(tool_def_name(tool_def), vec_get(at, i), vec_get(kws, k));
+            }
+            k = k + 1;
+        }
+        if (jsonx_has(v, "type") == 1 && jsonx_get_str(v, "type") == 0) {
+            _reg_warn_kw(tool_def_name(tool_def), vec_get(at, i), "type array");
+        }
+        i = i + 2;
+    }
+    return 0;
+}
+
+# 2025-11-25 allows an outputSchema only with an object at its root, and its
+# structuredContent only as an object. What the official SDK shows that revision
+# for any other root, and what bote does too: the schema as the one property,
+# `result`, of an object, and a result's structuredContent wrapped the same way
+# (the dispatcher's _dsp_tool_result_out_a). A root is an object when its `type`
+# is "object", as the SDK reads it.
+fn _reg_output_root_object(os) {
+    var t = jsonx_get_str_dec_a(default_alloc(), os, "type");
+    if (t != 0 && streq(t, "object") == 1) { return 1; }
+    return 0;
+}
+
+# 1 when `$id` in the schema object `v` starts a new base URI, against which the
+# references inside it resolve: wrapping it moves none of them. A `$id` that is
+# only a fragment ("#item", draft-07's anchor) starts none.
+fn _reg_new_base(v) {
+    var id = jsonx_get_raw(v, "$id");
+    if (id == 0) { return 0; }
+    if (load8(id) != 34) { return 1; }
+    var s = _jx_str_dec_at_a(default_alloc(), id, strlen(id), 0);
+    if (s != 0 && load8(s) == 35) { return 0; }
+    return 1;
+}
+
+# 1 when `k` is one of the keywords in `ws`, a vec from _reg_words.
+fn _reg_kw_in(k, ws) {
+    var i = 0;
+    while (i < vec_len(ws)) {
+        if (streq(k, vec_get(ws, i)) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# `v`, a part of an outputSchema, into `sb` with every reference to the document
+# moved under properties/result. `mode` is 0 where `v` is in a keyword's place, 1
+# where it is a map from names to schemas (properties, $defs), and 2 at the root,
+# whose `$schema` the wrapper carries instead. A value that is data (const, enum,
+# default, examples) is copied as it is, and so is a subschema that starts a new
+# base. The rules are the official SDK's (wrapOutputSchemaForLegacy). `kw` holds
+# the two keyword lists: data at +0, name maps at +8.
+fn _reg_rw_refs(sb, v, mode, kw) {
+    var c = _vp_first_nonws(v);
+    if (c == 91) {
+        var el = _sch_split_array(v);
+        str_builder_add_cstr(sb, "[");
+        var j = 0;
+        while (j < vec_len(el)) {
+            if (j > 0) { str_builder_add_cstr(sb, ","); }
+            _reg_rw_refs(sb, vec_get(el, j), 0, kw);
+            j = j + 1;
+        }
+        str_builder_add_cstr(sb, "]");
+        return 0;
+    }
+    if (c != 123 || (mode != 1 && _reg_new_base(v) == 1)) {
+        str_builder_add_cstr(sb, v);
+        return 0;
+    }
+    # Each key judged as it decodes and written as it was (3.8.0), so it means what it did.
+    var m = _jx_members_raw_a(default_alloc(), v);
+    str_builder_add_cstr(sb, "{");
+    var sep = 0;
+    var i = 0;
+    while (i < vec_len(m)) {
+        var k = vec_get(m, i);
+        var kr = vec_get(m, i + 1);
+        var val = vec_get(m, i + 2);
+        i = i + 3;
+        if (mode == 2 && streq(k, "$schema") == 1) { continue; }
+        if (sep == 1) { str_builder_add_cstr(sb, ","); }
+        sep = 1;
+        str_builder_add_cstr(sb, "\"");
+        str_builder_add_cstr(sb, kr);
+        str_builder_add_cstr(sb, "\":");
+        if (mode == 1) {
+            _reg_rw_refs(sb, val, 0, kw);
+        } elif ((streq(k, "$ref") == 1 || streq(k, "$dynamicRef") == 1) && load8(val) == 34) {
+            var r = _jx_str_dec_at_a(default_alloc(), val, strlen(val), 0);
+            if (r != 0 && load8(r) == 35 && (load8(r + 1) == 0 || load8(r + 1) == 47)) {
+                str_builder_add_cstr(sb, "\"#/properties/result");
+                bote_json_escape(sb, r + 1);
+                str_builder_add_cstr(sb, "\"");
+            } else {
+                str_builder_add_cstr(sb, val);
+            }
+        } elif (_reg_kw_in(k, load64(kw)) == 1) {
+            str_builder_add_cstr(sb, val);
+        } elif (_reg_kw_in(k, load64(kw + 8)) == 1) {
+            _reg_rw_refs(sb, val, 1, kw);
+        } else {
+            _reg_rw_refs(sb, val, 0, kw);
+        }
+    }
+    str_builder_add_cstr(sb, "}");
+    return 0;
+}
+
+# What 2025-11-25 is shown for an outputSchema whose root is not an object.
+fn _reg_output_legacy(os) {
+    var kw[16];
+    store64(&kw, _reg_words("const enum default examples "));
+    store64(&kw + 8, _reg_words("properties patternProperties $defs definitions dependentSchemas dependencies "));
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{");
+    var sch = jsonx_get_raw(os, "$schema");
+    if (sch != 0) {
+        str_builder_add_cstr(sb, "\"$schema\":");
+        str_builder_add_cstr(sb, sch);
+        str_builder_add_cstr(sb, ",");
+    }
+    str_builder_add_cstr(sb, "\"type\":\"object\",\"properties\":{\"result\":");
+    _reg_rw_refs(sb, os, 2, &kw);
+    str_builder_add_cstr(sb, "},\"required\":[\"result\"]}");
+    return str_data(str_builder_build(sb));
+}
+
+# An outputSchema as registration keeps it (3.8.0): on one line, as everything bote
+# sends must be, compiled, and with its 2025-11-25 form when its root is no object.
+# Outside JSON's strings, which cannot hold either, a CR or LF is only spacing.
+fn _reg_prepare_output(tool_def) {
+    var os = tool_def_output_schema(tool_def);
+    if (os == 0) { return 0; }
+    os = _dsp_one_line(default_alloc(), os);
+    store64(tool_def + 80, os);
+    store64(tool_def + 88, parse_property(os));
+    store64(tool_def + 96, 0);
+    if (_reg_output_root_object(os) == 0) { store64(tool_def + 96, _reg_output_legacy(os)); }
+    _reg_warn_output(tool_def);
+    return 0;
+}
+
 # What registration does before it touches the registry: refuses a malformed definition
 # (a BoteError), compiles its schema and reads its headers. 0 when it may be added.
 fn _registry_prepare(tool_def) {
@@ -551,6 +735,7 @@ fn _registry_prepare(tool_def) {
     _reg_scan_tool(tool_def, headers);
     if (vec_len(headers) > 0) { store64(tool_def + 64, headers); }
     _reg_warn_unenforced(tool_def);
+    _reg_prepare_output(tool_def);
     return 0;
 }
 

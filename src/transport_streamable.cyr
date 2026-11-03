@@ -367,12 +367,14 @@ fn _strm_peek_method(body) {
 # ================================================================
 
 # Does the client's Accept header allow an SSE (text/event-stream) response?
-# Absent Accept → treated as no (answer with application/json).
+# Absent Accept → treated as no (answer with application/json). Read as progress reads
+# it (bote_http_accepts_sse, 3.8.0): every Accept field, and a weight of 0 refuses.
+# Through 3.7.7 this read the first field only and took `;q=0` as yes, so one POST could
+# be judged both ways.
 fn _strm_accepts_sse(buf, n) {
-    var acc = sandhi_server_find_header_a(bote_req_alloc(), buf, n, "Accept");
-    if (acc == 0) { return 0; }
-    if (strstr(acc, "text/event-stream") >= 0) { return 1; }
-    return 0;
+    var hc[40];
+    bote_http_ctx(&hc, 0 - 1, "streamable", buf, n, 0);
+    return bote_http_accepts_sse(&hc);
 }
 
 # Resolve the requesting session's SessionOutbound bundle from MCP-Session-Id,
@@ -478,8 +480,9 @@ fn _strm_handle_post(cfd, buf, n, config) {
     var resp = codec_process_message_a(bote_req_alloc(), body, streamable_config_dispatcher(config), load64(&claims_slot));
     session_inflight_end(st, slot);
     if (bote_http_progress_end(ps, resp) == 1) { return 0; }
-    # A request its client cancelled is not answered (2025-11-25: SHOULD NOT): its POST ends.
-    if (resp == 0 && bote_req_was_cancelled() == 1) { return 0; }
+    # A request its client cancelled is not answered (2025-11-25: SHOULD NOT), and its POST
+    # still gets a response (3.8.0, bote_http_send_unanswered).
+    if (resp == 0 && bote_req_was_cancelled() == 1) { return bote_http_send_unanswered(&hc); }
 
     # A session exists once `initialize` has succeeded. Minted before dispatch,
     # a request the codec refused still got one.

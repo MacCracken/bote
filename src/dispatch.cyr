@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.7.7"; }
+fn _bote_server_version() { return "3.8.0"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -695,10 +695,17 @@ fn _dsp_tool_list_room(t) {
         var j = 0;
         while (j < vec_len(req)) { n = n + 8 + _dsp_room(vec_get(req, j)); j = j + 1; }
     }
+    # Each form of an outputSchema is sent as it is kept.
+    var os = tool_def_output_schema(t);
+    if (os != 0) { n = n + 32 + strlen(os); }
+    var ol = tool_def_output_legacy(t);
+    if (ol != 0) { n = n + strlen(ol); }
     return n;
 }
 
-fn _build_tools_list_result_a(a, reg, profile) {
+# `modern` is 1 for MCP 2026-07-28, which is shown an outputSchema as it was
+# written, and 0 for the revisions before it, which are shown its object form.
+fn _build_tools_list_result_a(a, reg, profile, modern) {
     bote_reg_read();
     var sb = str_builder_new_a(a);
     var room = 64;
@@ -727,6 +734,12 @@ fn _build_tools_list_result_a(a, reg, profile) {
         _json_emit_str_field(sb, "description", tool_def_description(t));
         str_builder_add_cstr(sb, ",\"inputSchema\":");
         _emit_schema(sb, tool_def_input_schema(t));
+        var os = tool_def_output_schema(t);
+        if (os != 0) {
+            if (modern == 0 && tool_def_output_legacy(t) != 0) { os = tool_def_output_legacy(t); }
+            str_builder_add_cstr(sb, ",\"outputSchema\":");
+            str_builder_add_cstr(sb, os);
+        }
         var v = tool_def_version(t);
         if (v != 0) {
             str_builder_add_cstr(sb, ",");
@@ -845,13 +858,14 @@ fn _dsp_tool_error_result_a(a, text) {
     return str_data(str_builder_build_a(a, sb));
 }
 
-# A successful tool call's result carrying `text` as one text block (3.4.8).
-fn _dsp_tool_text_result(text) {
-    var sb = str_builder_new();
+# A successful tool call's result carrying `text` as one text block (3.4.8), on `a`.
+fn _dsp_tool_text_result_a(a, text) {
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, _dsp_room(text) + 64);
     str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
     if (text != 0) { _json_emit_escaped(sb, text); }
     str_builder_add_cstr(sb, "\"}]}");
-    return str_data(str_builder_build(sb));
+    return str_data(str_builder_build_a(a, sb));
 }
 
 # 1 when the n bytes at p equal cstr lit.
@@ -872,37 +886,72 @@ fn _dsp_is_content_type(p, n) {
 # What a handler's result (valid JSON) is, from one pass over its top-level
 # members, with nothing allocated: bit 1 when `content` is an array, bit 2
 # when `isError` is true, bit 4 when `type` is an MCP content type. 0 for a
-# result that is not an object.
+# result that is not an object. (3.8.0) Bit 8 when it has `structuredContent`,
+# and bits 16, 32 and 64 when it names `content`, `structuredContent` or
+# `isError` more than once. Its keys are read as the one key scanner reads them
+# (_jx_scan): what they decode to, for a key under 256 bytes, where through 3.7.7
+# `"is\u0045rror":true` was not an error here and was one to a client. `info`, a
+# DspResult, gets where the first `content` and `structuredContent` values are.
 var DSP_SHAPE_CONTENT = 1;
 var DSP_SHAPE_ISERROR = 2;
 var DSP_SHAPE_BLOCK = 4;
-fn _dsp_result_shape(buf) {
+var DSP_SHAPE_SC = 8;
+var DSP_SHAPE_TWICE_CONTENT = 16;
+var DSP_SHAPE_TWICE_SC = 32;
+var DSP_SHAPE_TWICE_ISERROR = 64;
+
+# DspResult (24 bytes), what a tools/call result's handling knows of it: +0 the offset
+# of its first `content` value, +8 of its first `structuredContent` value, each -1 for
+# none, +16 its shape's bits. Filled by _dsp_coerce_result for the result it returns.
+fn _dsp_info_set(info, cp, sp, flags) {
+    store64(info, cp);
+    store64(info + 8, sp);
+    store64(info + 16, flags);
+    return 0;
+}
+
+fn _dsp_result_shape(buf, info) {
+    _dsp_info_set(info, 0 - 1, 0 - 1, 0);
     var len = strlen(buf);
     var i = _jx_skip_ws(buf, len, 0);
     if (i >= len || load8(buf + i) != 123) { return 0; }
     var flags = 0;
+    var errs = 0;
+    var dec[256];
     i = _jx_skip_ws(buf, len, i + 1);
     while (i < len && load8(buf + i) == 34) {
         var ks = i + 1;
         var ke = _jx_skip_string(buf, len, i);
         var klen = ke - ks - 1;
+        var kp = buf + ks;
+        if (klen > 0 && klen < 256 && _jx_has_escape(kp, klen) == 1) {
+            klen = _jx_unescape_into(kp, klen, &dec);
+            kp = &dec;
+        }
         i = _jx_skip_ws(buf, len, ke);
-        if (i >= len || load8(buf + i) != 58) { return flags; }
+        if (i >= len || load8(buf + i) != 58) { break; }
         var vs = _jx_skip_ws(buf, len, i + 1);
         var ve = _jx_skip_value(buf, len, vs);
         if (vs < len) {
             var vc = load8(buf + vs);
-            if (vc == 91 && _dsp_bytes_eq(buf + ks, klen, "content") == 1) {
-                flags = flags | DSP_SHAPE_CONTENT;
-            } elif (vc == 116 && _dsp_bytes_eq(buf + ks, klen, "isError") == 1 && _dsp_bytes_eq(buf + vs, ve - vs, "true") == 1) {
-                flags = flags | DSP_SHAPE_ISERROR;
-            } elif (vc == 34 && _dsp_bytes_eq(buf + ks, klen, "type") == 1 && _dsp_is_content_type(buf + vs + 1, ve - vs - 2) == 1) {
+            if (_dsp_bytes_eq(kp, klen, "content") == 1) {
+                if (load64(info) >= 0) { flags = flags | DSP_SHAPE_TWICE_CONTENT; } else { store64(info, vs); }
+                if (vc == 91) { flags = flags | DSP_SHAPE_CONTENT; }
+            } elif (_dsp_bytes_eq(kp, klen, "structuredContent") == 1) {
+                if (load64(info + 8) >= 0) { flags = flags | DSP_SHAPE_TWICE_SC; } else { store64(info + 8, vs); }
+                flags = flags | DSP_SHAPE_SC;
+            } elif (_dsp_bytes_eq(kp, klen, "isError") == 1) {
+                if (errs != 0) { flags = flags | DSP_SHAPE_TWICE_ISERROR; }
+                errs = 1;
+                if (vc == 116 && _dsp_bytes_eq(buf + vs, ve - vs, "true") == 1) { flags = flags | DSP_SHAPE_ISERROR; }
+            } elif (vc == 34 && _dsp_bytes_eq(kp, klen, "type") == 1 && _dsp_is_content_type(buf + vs + 1, ve - vs - 2) == 1) {
                 flags = flags | DSP_SHAPE_BLOCK;
             }
         }
         i = _jx_skip_ws(buf, len, ve);
         if (i < len && load8(buf + i) == 44) { i = _jx_skip_ws(buf, len, i + 1); }
     }
+    store64(info + 16, flags);
     return flags;
 }
 
@@ -920,21 +969,33 @@ fn _dsp_result_shape(buf) {
 #   - anything else (a bare record, an array, a number, a string): sent as a
 #     text block holding the JSON text, so the model still sees the data.
 # A domain object that happens to carry a `type` member ({"type":"person"})
-# is not mistaken for a block: only the five content types lift.
-fn _dsp_coerce_result(name, result, fail_out) {
+# is not mistaken for a block: only the five content types lift. (3.8.0) For a
+# tool `t` with an outputSchema, anything else is its structuredContent, with
+# its JSON text in a text block (_dsp_tool_structured_result).
+# What it builds is on `a` (3.8.0), and so is a failure's message, which goes
+# to the heap as well when `keep` is 1, for a sink, which may keep it. Through 3.7.7
+# all of it was on the heap, kept for good for each call.
+fn _dsp_coerce_result(a, t, name, result, fail_out, keep, info) {
     store64(fail_out, 0);
+    var why = 0;
     if (result == 0) {
-        var m0 = str_data(bote_err_format(bote_err_new(BOTE_ERR_EXEC_FAILED, name, "the handler returned no result")));
-        store64(fail_out, m0);
-        return _dsp_tool_error_result(m0);
+        why = "the handler returned no result";
+    } elif (jsonx_valid(result, strlen(result)) == 0) {
+        why = "the handler returned a result that is not valid JSON";
     }
-    if (jsonx_valid(result, strlen(result)) == 0) {
-        var m1 = str_data(bote_err_format(bote_err_new(BOTE_ERR_EXEC_FAILED, name, "the handler returned a result that is not valid JSON")));
-        store64(fail_out, m1);
-        return _dsp_tool_error_result(m1);
+    # Each result built here starts {"content":[ and its content is at 11.
+    if (why != 0) {
+        var m = str_data(bote_err_format_a(a, bote_err_new_a(a, BOTE_ERR_EXEC_FAILED, name, why)));
+        if (keep == 1) {
+            store64(fail_out, _slice_cstr(default_alloc(), m, 0, strlen(m)));
+        } else {
+            store64(fail_out, m);
+        }
+        _dsp_info_set(info, 11, 0 - 1, DSP_SHAPE_CONTENT | DSP_SHAPE_ISERROR);
+        return _dsp_tool_error_result_a(a, m);
     }
-    result = _dsp_one_line(default_alloc(), result);
-    var shape = _dsp_result_shape(result);
+    result = _dsp_one_line(a, result);
+    var shape = _dsp_result_shape(result, info);
     if ((shape & DSP_SHAPE_CONTENT) != 0) {
         if ((shape & DSP_SHAPE_ISERROR) != 0) {
             store64(fail_out, "the tool reported an error (isError)");
@@ -942,13 +1003,185 @@ fn _dsp_coerce_result(name, result, fail_out) {
         return result;
     }
     if ((shape & DSP_SHAPE_BLOCK) != 0) {
-        var sb = str_builder_new();
+        var sb = str_builder_new_a(a);
+        _sb_grow_a(a, sb, strlen(result) + 16);
         str_builder_add_cstr(sb, "{\"content\":[");
         str_builder_add_cstr(sb, result);
         str_builder_add_cstr(sb, "]}");
-        return str_data(str_builder_build(sb));
+        _dsp_info_set(info, 11, 0 - 1, DSP_SHAPE_CONTENT);
+        return str_data(str_builder_build_a(a, sb));
     }
-    return _dsp_tool_text_result(result);
+    if (t != 0 && tool_def_output_prop(t) != 0) {
+        var st = _dsp_tool_structured_result_a(a, result);
+        _dsp_info_set(info, 11, strlen(st) - strlen(result) - 1, DSP_SHAPE_CONTENT | DSP_SHAPE_SC);
+        return st;
+    }
+    _dsp_info_set(info, 11, 0 - 1, DSP_SHAPE_CONTENT);
+    return _dsp_tool_text_result_a(a, result);
+}
+
+# `v`, a bare value a handler returned, as the structured result of a tool with an
+# outputSchema (3.8.0): structuredContent, and its JSON in a text block, which the
+# tools spec says a tool returning structured content SHOULD also send.
+fn _dsp_tool_structured_result_a(a, v) {
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, 7 * strlen(v) + 64);
+    str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
+    _json_emit_escaped(sb, v);
+    str_builder_add_cstr(sb, "\"}],\"structuredContent\":");
+    str_builder_add_cstr(sb, v);
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build_a(a, sb));
+}
+
+# 1 when the content array at buf[cp] holds a text block, or is no array, which
+# leaves nothing to add a block to.
+fn _dsp_has_text_block(a, buf, n, cp) {
+    if (cp < 0 || load8(buf + cp) != 91) { return 1; }
+    var i = _jx_skip_ws(buf, n, cp + 1);
+    while (i < n && load8(buf + i) != 93) {
+        var e = _jx_skip_value(buf, n, i);
+        var tp = _jx_find_value_pos(buf + i, e - i, "type");
+        var ty = _jx_str_dec_at_a(a, buf + i, e - i, tp);
+        if (ty != 0 && streq(ty, "text") == 1) { return 1; }
+        i = _jx_array_next(buf, n, i);
+    }
+    return 0;
+}
+
+# `result` rebuilt with its structuredContent, the value at buf[sp], as
+# {"result": value} when `wrap` is 1, and with a text block holding that value's
+# JSON added to its content when `text` is 1. Its other members are as they were,
+# each key written as it was, and a second structuredContent goes with the first.
+fn _dsp_result_rebuild_a(a, result, n, sp, wrap, text) {
+    var sc = _jx_raw_at_a(a, result, n, sp);
+    var m = _jx_members_raw_a(a, result);
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, 2 * n + 6 * strlen(sc) + 64);
+    str_builder_add_cstr(sb, "{");
+    var sep = 0;
+    var did_text = 0;
+    var i = 0;
+    while (i < vec_len(m)) {
+        var k = vec_get(m, i);
+        var kr = vec_get(m, i + 1);
+        var v = vec_get(m, i + 2);
+        i = i + 3;
+        if (streq(k, "structuredContent") == 1) { continue; }
+        if (sep == 1) { str_builder_add_cstr(sb, ","); }
+        sep = 1;
+        str_builder_add_cstr(sb, "\"");
+        str_builder_add_cstr(sb, kr);
+        str_builder_add_cstr(sb, "\":");
+        if (text == 1 && did_text == 0 && streq(k, "content") == 1) {
+            did_text = 1;
+            var vn = strlen(v);
+            var close = vn - 1;
+            while (close > 0 && load8(v + close) != 93) { close = close - 1; }
+            var inner = _jx_skip_ws(v, close, 1);
+            store8(v + close, 0);
+            str_builder_add_cstr(sb, v);
+            if (inner < close) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"type\":\"text\",\"text\":\"");
+            bote_json_escape(sb, sc);
+            str_builder_add_cstr(sb, "\"}]");
+        } else {
+            str_builder_add_cstr(sb, v);
+        }
+    }
+    if (sep == 1) { str_builder_add_cstr(sb, ","); }
+    str_builder_add_cstr(sb, "\"structuredContent\":");
+    if (wrap == 1) { str_builder_add_cstr(sb, "{\"result\":"); }
+    str_builder_add_cstr(sb, sc);
+    if (wrap == 1) { str_builder_add_cstr(sb, "}"); }
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build_a(a, sb));
+}
+
+# One WARN for a result refused by its tool's outputSchema: the handler's bug, for
+# the operator. The reason is bote's own words; the violations, which may quote the
+# result, go to the client and never to the log.
+fn _dsp_log_output_refused(name, reason) {
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_WARN, "tool result refused");
+    bote_log_str(&ln, "tool", name);
+    bote_log_str(&ln, "reason", reason);
+    bote_log_emit(&ln);
+    return 0;
+}
+
+# What the client is sent for `result`, the CallToolResult of a call to tool `t`
+# (3.8.0). *fail_out is the failure _dsp_coerce_result found, which a result its
+# tool's outputSchema refuses replaces: on the heap when `keep` is 1, for a sink.
+#   - A tool with an outputSchema: a result that is no error must carry
+#     structuredContent, and it must match ("Servers MUST provide structured
+#     results that conform to this schema", the tools spec). One that does not is
+#     a tool execution error, as an argument failing the inputSchema is, and its
+#     bytes are not sent. Nor is one naming content, structuredContent or isError
+#     twice: bote judges the first, and a client may read the last.
+#   - structuredContent that is no object gets a text block holding its JSON when
+#     the result has none, on every revision (SEP-2106 §4.3, as the official SDK).
+#   - Before 2026-07-28 structuredContent is an object: anything else, and all
+#     structuredContent of a tool whose outputSchema has no object at its root,
+#     goes as {"result": value}, which is what that tool's listed schema says.
+# `info` is the DspResult _dsp_coerce_result filled for `result`: a result with no
+# structuredContent, from a tool with no outputSchema, costs nothing more here.
+fn _dsp_tool_result_out_a(a, t, name, result, fail_out, modern, keep, info) {
+    var cp = load64(info);
+    var sp = load64(info + 8);
+    var flags = load64(info + 16);
+    var prop = 0;
+    if (t != 0) { prop = tool_def_output_prop(t); }
+    if (prop == 0 && sp < 0) { return result; }
+    var n = strlen(result);
+    if (prop != 0) {
+        var why = 0;
+        var reason = 0;
+        var twice = 0;
+        if ((flags & DSP_SHAPE_TWICE_CONTENT) != 0) { twice = "content"; }
+        elif ((flags & DSP_SHAPE_TWICE_SC) != 0) { twice = "structuredContent"; }
+        elif ((flags & DSP_SHAPE_TWICE_ISERROR) != 0) { twice = "isError"; }
+        if (twice != 0) {
+            reason = "the result names a member twice";
+            why = _dsp_named_msg_a(a, "the result names ", twice, " more than once");
+        } elif ((flags & DSP_SHAPE_ISERROR) == 0 && sp < 0) {
+            reason = "no structuredContent";
+            why = "the tool has an outputSchema and the result has no structuredContent";
+        } elif ((flags & DSP_SHAPE_ISERROR) == 0) {
+            var vs = _sch_check_value_a(a, prop, "structuredContent", _jx_raw_at_a(a, result, n, sp));
+            if (vs != 0) {
+                reason = "structuredContent does not match the outputSchema";
+                var vb = str_builder_new_a(a);
+                str_builder_add_cstr_a(a, vb, "the result's structuredContent does not match the outputSchema: ");
+                var vi = 0;
+                while (vi < vec_len(vs)) {
+                    if (vi > 0) { str_builder_add_cstr_a(a, vb, "; "); }
+                    str_builder_add_cstr_a(a, vb, vec_get(vs, vi));
+                    vi = vi + 1;
+                }
+                why = str_data(str_builder_build_a(a, vb));
+            }
+        }
+        if (why != 0) {
+            _dsp_log_output_refused(name, reason);
+            var msg = str_data(bote_err_format_a(a, bote_err_new_a(a, BOTE_ERR_EXEC_FAILED, name, why)));
+            if (keep == 1) {
+                store64(fail_out, _slice_cstr(default_alloc(), msg, 0, strlen(msg)));
+            } else {
+                store64(fail_out, msg);
+            }
+            return _dsp_tool_error_result_a(a, msg);
+        }
+    }
+    if (sp < 0) { return result; }
+    var obj = 0;
+    if (load8(result + sp) == 123) { obj = 1; }
+    var wrap = 0;
+    if (modern == 0 && (obj == 0 || (t != 0 && tool_def_output_legacy(t) != 0))) { wrap = 1; }
+    var text = 0;
+    if (obj == 0 && _dsp_has_text_block(a, result, n, cp) == 0) { text = 1; }
+    if (wrap == 0 && text == 0) { return result; }
+    return _dsp_result_rebuild_a(a, result, n, sp, wrap, text);
 }
 
 # 1 when a list request's params carry a non-null `cursor`. bote returns
@@ -1300,12 +1533,12 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
 
     var meta = _jx_raw_at_a(a, params, plen, load64(&pos + 32));
     if (meta == 0 || jsonx_has(meta, DSP_META_VERSION) == 0) {
-        return _dsp_serve_a(a, d, request, claims, &pos, plen);
+        return _dsp_serve_a(a, d, request, claims, &pos, plen, 0);
     }
     var method = req_method(request);
     # `initialize` selects legacy semantics, whatever else it carries.
     if (streq(method, "initialize") == 1) {
-        return _dsp_serve_a(a, d, request, claims, &pos, plen);
+        return _dsp_serve_a(a, d, request, claims, &pos, plen, 0);
     }
 
     # A required field missing or of the wrong type is malformed: -32602.
@@ -1317,7 +1550,7 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
     if (_mcp_is_modern(pv) == 0) {
         # An older revision named per request is that revision's behaviour.
         if (_mcp_is_supported(pv) == 1) {
-            return _dsp_serve_a(a, d, request, claims, &pos, plen);
+            return _dsp_serve_a(a, d, request, claims, &pos, plen, 0);
         }
         return _dsp_unsupported_version(a, id, pv);
     }
@@ -1334,7 +1567,7 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
     if (streq(method, "ping") == 1) {
         return resp_error_a(a, id, 0 - 32601, "method not found: ping");
     }
-    return _dsp_modern_response(a, d, method, _dsp_serve_a(a, d, request, claims, &pos, plen));
+    return _dsp_modern_response(a, d, method, _dsp_serve_a(a, d, request, claims, &pos, plen, 1));
 }
 
 # ================================================================
@@ -1563,9 +1796,11 @@ fn _dsp_listen_a(a, d, id, params, claims) {
     return resp_success_a(a, id, bote_listen_ack_uris_a(a, mask, uris));
 }
 
-# The methods themselves, for both eras: what differs between them is around this.
-# `pos` is the router's pass over the params: name, version, arguments, caller_id.
-fn _dsp_serve_a(a, d, request, claims, pos, plen) {
+# The methods themselves, for both eras: what differs between them is around this,
+# and what `modern` (1 for 2026-07-28) says inside it: the shapes of an outputSchema
+# and a structuredContent (3.8.0). `pos` is the router's pass over the params: name,
+# version, arguments, caller_id.
+fn _dsp_serve_a(a, d, request, claims, pos, plen, modern) {
     var id = req_id(request);
     var method = req_method(request);
     var params = req_params(request);
@@ -1688,7 +1923,12 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
         # JSON, or a result carrying isError — is audited and published as
         # a failure.
         var fail_slot[8];
-        var result = _dsp_coerce_result(name, fncall2(fp, args, bote_req_claims_kept(claims)), &fail_slot);
+        var keep = 0;
+        if (audit_on == 1 || events_on == 1) { keep = 1; }
+        var rinfo[24];
+        var result = _dsp_coerce_result(a, t, name, fncall2(fp, args, bote_req_claims_kept(claims)), &fail_slot, keep, &rinfo);
+        # Judged by the tool's outputSchema, and shaped for this revision (3.8.0).
+        result = _dsp_tool_result_out_a(a, t, name, result, &fail_slot, modern, keep, &rinfo);
         var no_result = load64(&fail_slot);
         # A call its handler found cancelled did not complete, whatever it returned (3.7.5).
         # Only the sinks read it.
@@ -1738,7 +1978,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
         if (_dsp_cursor_given(params) == 1) { return _dsp_cursor_refusal_a(a, id); }
         var lprofile = 0;
         if (params != 0) { lprofile = jsonx_get_str_a(a, params, "profile"); }
-        return resp_success_a(a, id, _build_tools_list_result_a(a, reg, lprofile));
+        return resp_success_a(a, id, _build_tools_list_result_a(a, reg, lprofile, modern));
     }
 
     # prompts/* only when the prompts capability is enabled (a PromptRegistry

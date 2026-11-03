@@ -169,6 +169,19 @@ fn complete(params, claims) {
     return "{\"completion\":{\"values\":[\"paris\",\"park\",\"party\"],\"total\":150,\"hasMore\":false}}";
 }
 
+# (3.8.0) Tools with an outputSchema, whose results the official client checks against
+# what tools/list said: a record, an array, which 2025-11-25 is shown wrapped, and a result
+# its schema refuses, which bote answers with a tool error. Not called by the suite.
+var _FX_WEATHER = "{\"type\":\"object\",\"properties\":{\"temperature\":{\"type\":\"number\"},\"conditions\":{\"type\":\"string\"},\"humidity\":{\"type\":\"number\"}},\"required\":[\"temperature\",\"conditions\",\"humidity\"]}";
+var _FX_USERS = "{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/user\"},\"$defs\":{\"user\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"id\",\"name\"]}}}";
+fn t_structured(args, claims) { return "{\"temperature\":22.5,\"conditions\":\"Partly cloudy\",\"humidity\":65}"; }
+fn t_structured_list(args, claims) { return "[{\"id\":\"1\",\"name\":\"Alice\"},{\"id\":\"2\",\"name\":\"Bob\"}]"; }
+fn t_structured_bad(args, claims) { return "{\"temperature\":\"warm\",\"conditions\":\"c\",\"humidity\":1}"; }
+
+fn _otool(d, name, desc, os, fp) {
+    return dispatcher_register_tool(d, tool_def_with_output_schema(tool_def_new(name, desc, schema_new("object", 0, vec_new())), os), fp);
+}
+
 # ---- the server ----
 
 fn _tool(d, name, desc, fp) {
@@ -245,6 +258,9 @@ fn fixture_dispatcher() {
     var ur = vec_new();
     vec_push(ur, "uri");
     dispatcher_register_tool(d, tool_def_new("bote_update_resource", "Says a resource changed", schema_new("object", up, ur)), &t_update_resource);
+    _otool(d, "bote_structured", "Weather, as structured content", _FX_WEATHER, &t_structured);
+    _otool(d, "bote_structured_list", "Users, an array", _FX_USERS, &t_structured_list);
+    _otool(d, "bote_structured_bad", "A result its schema refuses", _FX_WEATHER, &t_structured_bad);
     _fx_d = d;
     return d;
 }

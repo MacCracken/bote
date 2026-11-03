@@ -557,6 +557,11 @@ fn _ws_frames(config, ws, cfd, ws_claims, ws_token, ws_held) {
         # A request's progress goes on the connection, a frame each (3.7.6).
         bote_req_set_progress(&_ws_progress_write, ws);
         bote_req_set_cancel(&_ws_cancelled, ws);
+        # Each message's check looks from the head again (3.8.0): the arena is rewound
+        # for it, so its id is mostly where the last one's was, and a check that judged
+        # a request by that address went on from where the last one stopped, past a
+        # cancellation queued meanwhile for this one. No id is at -1.
+        _ws_q_seen_id = 0 - 1;
         var msg = _bote_ws_recv(ws);
         if (msg == 0) { return 0; }
         heard = clock_now_ms();

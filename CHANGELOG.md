@@ -18,6 +18,169 @@ have per release.
 
 _(empty)_
 
+## [3.8.0] — 2026-11-03 · Output schemas
+
+**A tool can declare an `outputSchema`, and every result is judged by it.** Build one with
+`tool_def_with_output_schema(t, json)`, where `json` is a JSON Schema in its own JSON. `tools/list` sends it as written.
+Every result that is no error must carry `structuredContent` that matches it, because the tools spec says "Servers
+MUST provide structured results that conform to this schema". A result that does not match goes out as a tool error
+naming each violation, never as it was. A handler can return a bare value, which goes as `structuredContent` with its
+JSON in a text block. Each revision gets the shape it allows: 2026-07-28 allows any root and any value, and 2025-11-25
+is shown an object, wrapped as `{"result": …}`, the way the official SDK does it.
+
+**Three defects in 3.7.7 land ahead of it**, from an independent review of that release. The worst made a WebSocket
+miss a cancellation queued for the next request. See the correction notice in 3.7.7.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Added
+
+- **`tool_def_with_output_schema(t, json)`** and `tool_def_output_schema(t)` (core, `src/registry.cyr`).
+  - Registration refuses a schema that is not valid JSON or not an object.
+  - Registration keeps the schema on one line and compiles it with the property parser the input side uses
+    (`parse_property`), so any root type is judged.
+  - It warns of the keywords bote lists and does not enforce, on the root and its properties, as for `inputSchema`.
+  - For a root whose `type` is not `"object"`, it builds the form 2025-11-25 is shown (`_reg_output_legacy`):
+    - the schema becomes the property `result` of an object;
+    - `$schema` moves to the wrapper;
+    - every `$ref` and `$dynamicRef` into the document moves under `#/properties/result`;
+    - names in `properties`, `$defs` and the other maps, data in `const`, `enum`, `default` and `examples`, anchors,
+      other documents, and a subschema with a base of its own are left as they were. These are the official SDK's rules.
+  - A `ToolDef` grows from 80 to 104 B.
+- **`tools/list`** sends a tool's outputSchema, in the form its revision allows. `_dsp_serve_a` takes the revision.
+- **What a call's result is judged by, and sent as** (`_dsp_tool_result_out_a`):
+  - **A tool with an outputSchema.** A result that is no error and has no `structuredContent`, or whose
+    `structuredContent` does not match, is a tool error, as an argument failing the `inputSchema` is. Each violation
+    is named from `structuredContent`, for example `structuredContent.temperature: expected number` or
+    `structuredContent[0].id: expected string`.
+    - So is a result that names `content`, `structuredContent` or `isError` twice. bote reads the first of each, and a
+      client may read the last, so a second `isError` could have passed an unjudged result.
+    - The call is audited and published as a failure. A WARN names the tool and why, never what the result held.
+    - An `isError` result is not judged. That is the SDK's rule; the spec does not say.
+  - **A bare value** a handler returns for such a tool is its `structuredContent`, with its JSON in a text block, as
+    the spec says a tool SHOULD send it (`_dsp_tool_structured_result_a`).
+  - **`structuredContent` that is no object**, from any tool, gets a text block holding its JSON when the result has
+    none (SEP-2106 §4.3, as the SDK does). Before 2026-07-28 it goes as `{"result": …}`, and so does all
+    `structuredContent` of a tool listed there with a wrapped schema.
+- **`_sch_check_value_a(a, prop, root, value)`** (core): any JSON value against a whole schema, its violations on `a`,
+  each named from `root`. It judges from the empty path, as arguments are judged, and names a violation only once it
+  has one: a path built for every property cost a judgement a fifth more.
+- **`_jx_members_a(a, obj)`** and **`_jx_members_raw_a(a, obj)`** (core): the member walker on an arena, and one that
+  also gives each key as it was written, for code that writes an object again. The 2025-11-25 form of a schema and a
+  rebuilt result write each key as it was, so it means what it did.
+- **What coercion learns of a result is kept for the check after it** (`_dsp_result_shape(buf, info)`, a 24-byte
+  DspResult): where its first `content` and `structuredContent` are, and whether it names `content`,
+  `structuredContent` or `isError` twice, from the one pass over its keys coercion already made. A tool without an
+  outputSchema whose result has no `structuredContent` pays nothing more for 3.8.0.
+- **`bote_http_send_unanswered(hc)`**, for the fix below.
+- The conformance fixture has three tools with an outputSchema, which the official client checks.
+
+### Changed
+
+- **What a call's result is built into goes on the request arena** (`_dsp_coerce_result`, which now takes the arena,
+  the tool, whether a sink is listening, and the DspResult it fills). This covers the text block of a bare value, the lifted content block,
+  the one-line copy of a result on several lines, and a failure's message. That message is copied to the heap only for
+  an audit or event sink, which may keep it. Through 3.7.7 it was built on the heap, and part of it stayed for good:
+  measured beyond `args`, 160 B a call for a handler returning a 7-byte bare record and 1.2 KB for a 60 KB one. Now 0.
+
+### Fixed
+
+From the review of 3.7.7:
+
+- **A WebSocket missed a cancellation queued while the request before it ran.** The check judged a request by its id's
+  address, which the next message mostly shares, since the arena is rewound for it. So it went on from where the last
+  request's look had stopped, past the cancellation. The next request ran to its end and was answered. Each message's
+  check now looks from the queue's head.
+- **A cancelled legacy request's POST got no HTTP response.** The connection closed with no status line, which a
+  client reads as a failed request. 2025-11-25 says a request's POST MUST get an SSE stream or a JSON object, and a
+  cancelled request SHOULD get no JSON-RPC response. It now gets an SSE stream ended with no event: the shape a
+  request whose progress had begun already got. A client that takes no SSE gets 202, as there is no JSON object to
+  send it.
+- **Streamable's piggyback read `Accept` from its first field and took `q=0` as yes**, while progress read every
+  field. It reads `Accept` as progress does now (`bote_http_accepts_sse`).
+- `docs/architecture/overview.md` named `bote_conn_tid`, which 3.7.7 removed.
+
+Found while building this:
+
+- **A handler's result was read by its keys as written.** The scanner reads a key as what it decodes to, and so does a
+  client. Coercion now does too: `"is\u0045rror":true` was a success to the audit and an error to the client, and a
+  result whose `"cont\u0065nt"` is an array went out as a text block holding the whole result.
+- **A nested schema property whose name holds an escaped NUL judged a message's member cut at the NUL**: `"a\u0000b"`
+  judged `"a"`. The member walker cut the decoded name at the NUL. A name whose decoding holds one is now kept as it was
+  written, and matches nothing, as the scanner has it.
+
+### Security
+
+- An outputSchema is now enforced on the server: a handler's bug cannot hand a client data its schema says it will not
+  get. A repeated `content`, `structuredContent` or `isError` is refused, so that what bote judged is what a client
+  reads.
+- The arena change above: a client calling a tool whose handler returns bare JSON no longer grows the heap with each
+  call.
+
+### Tests
+
+- **5,353 assertions, from 5,224**, on x86_64 and under `qemu-aarch64`.
+  - **`tests/bote_output.tcyr`**, 122, new:
+    - registration's refusals, the schema kept on one line and compiled, and a definition registered again with
+      another root;
+    - the 2025-11-25 form's exact bytes for array, string and untyped roots, `$schema` moved, every kind of reference,
+      names, data, anchors, other documents, a base kept, and escaped keys and references;
+    - the WARNs, and `tools/list` on both revisions;
+    - on both revisions, what a call's result goes as: matching, missing, mismatched with each violation named, an
+      error result, `isError` false, a bare record and array lifted, a member twice (spelled two ways), a text block
+      added after others or not, an untyped root wrapped, and a tool without a schema shaped and never judged;
+    - keys read as they decode: an escaped `isError`, `content` and `structuredContent`, a property named with a NUL
+      judging nothing, and every key of a rebuilt result written as it was;
+    - the log never holding the result, the audit's messages kept past the next messages, and a batch;
+    - the heap: results refused with 60 KB on two lines, a 60 KB array lifted on both revisions, a bare record as
+      text, a ramp of rising sizes, and lists of forty 4 KB schemas with array and with object roots. Each keeps
+      nothing beyond `args`.
+  - **`tests/bote_cancel.tcyr`**, 141, from 137: a cancellation queued on a WebSocket while the request before it
+    ran, and a cancelled legacy POST answered with an SSE stream with no event, or 202.
+  - **`tests/bote_streamable.tcyr`**, 64, from 61: the piggyback's `Accept` with `q=0`, a second field, and a line in
+    the body.
+- **`fuzz/output_shape.fcyr`**, new: 20,000 random schemas through the 2025-11-25 form and 30,000 random results through
+  their shaping. Each must come out valid JSON in the shape its revision allows, a schema with no reference must be
+  carried byte for byte, and nothing may stay on the heap.
+- **65 mutants, 65 killed.** One first survived: removing the room a `tools/list` keeps for each outputSchema. The long
+  list's schemas all had array roots, and the room for their 2025-11-25 form covered the schema too. A list of
+  object roots kills it.
+- **The official suite** is where 3.7.7 left it. **The official client** passes 483 checks, from 448: a record, an
+  array (wrapped on 2025-11-25) and a refused result, on each of its transports and revisions.
+
+### Performance
+
+**A tool call costs a little more, and judging a result by its outputSchema costs what judging the same object as
+arguments does.** Interleaved A/B against 3.7.7, 15 rounds pinned to one core. Minimums, in ns:
+
+| Bench | 3.7.7 | 3.8.0 | Delta |
+|---|---|---|---|
+| `dispatch_tools_call` | 2,057 | 2,213 | +7.6% |
+| `dispatch_tools_call_result` | 1,871 | 1,886 | +0.8% |
+| `dispatch_tools_call_scoped` | 4,990 | 5,148 | +3.2% |
+| `codec_process_message` | 3,882 | 4,128 | +6.3% |
+| `codec_process_message_arena` | 3,889 | 4,047 | +4.1% |
+| `codec_serialize_response` (untouched) | 177 | 189 | +6.8% |
+| `dispatch_tools_call_structured` | — | 3,504 | new |
+| `dispatch_tools_call_output` | — | 6,437 | new |
+
+- About 75 ns of `dispatch_tools_call`'s 156 is measured in isolation:
+  - +40 ns: the text block of a bare value is sized before it is written, which keeps it on the arena;
+  - +20 ns: the key walk decodes keys as the scanner does;
+  - +15 ns: the check after coercion.
+
+  `codec_serialize_response`, code this release does not touch, moved +6.8% in the same run. The rest is likely in
+  the range that code position alone moves these rows, though no layout control was run to prove it.
+- **`dispatch_tools_call_output` against `_structured`**: +2.9 µs. These are the same result, from a tool with an
+  outputSchema and from one without. The cost is the validator judging three required fields, which is what an
+  `inputSchema` of the same shape costs a call.
+  - The first build cost 4.6 µs. A second walk copied every member to find a repeated key (1.2 µs), and a path was
+    built for every property judged (0.7 µs).
+  - Both are gone. The repeat is found in the walk coercion already makes, and a path is named only for a violation.
+  - Judging an object's names in one pass of the scanner is on the roadmap.
+- **`dispatch_tools_call_result`** paid +9.8% in the first build, from a second scan of the result's keys. With the
+  walk shared it is +0.8%.
+
 ## [3.7.7] — 2026-11-03 · Cancellation everywhere
 
 **Cancellation on a WebSocket, and on the legacy streamable path.** On a WebSocket a `notifications/cancelled` frame, a
@@ -31,6 +194,19 @@ request arena: on a one-loop server its helper thread asked or reported through 
 correction notice in 3.7.6.
 
 The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+> ⚠ **Corrected at 3.8.0.** Three claims below were not true, found by an independent review of this release.
+> - "A `notifications/cancelled` naming the request cancels it" missed one queued while the request before it ran. The
+>   check judged a request by its id's address, which the next message, on a rewound arena, mostly shares, so it went on
+>   from where the last request's look had stopped. The review's probe over the real handler: the next request ran to its
+>   end and was answered, with every id tried, numbers and strings.
+> - "A cancelled request's POST ends with no answer, as 2025-11-25 says it SHOULD." The SHOULD is about the JSON-RPC
+>   response. The POST got no HTTP response at all, where the spec says a request's POST MUST get an SSE stream or a
+>   JSON object, and a client reads a closed connection as a failed request.
+> - "Every field is read now, and a weight of 0 refuses" held for progress and not for streamable's piggyback, which
+>   still read one `Accept` field and took `q=0` as yes, so one POST could be judged both ways.
+>
+> Each is fixed in 3.8.0.
 
 ### Added
 

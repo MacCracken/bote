@@ -851,6 +851,16 @@ fn main() {
     _ws_text(wsc, _ping("12"));
     assert_eq(_rd_await(wsr, "\"id\":12,\"result\"", 3000), 1, "ws: served on after the helper");
     assert(_hh_helper == 0 && _hh_self == 1, "ws: a helper thread asking is answered with nothing; the handler hears the cancellation");
+    # A cancellation queued while one request ran, for the request after it (3.8.0): each
+    # message's id sits where the last one's did, and the check went on past it.
+    _hw_reset(400);
+    _ws_text(wsc, _call("13", "t_wait"));
+    _hw_await(2000);
+    _ws_text(wsc, _call("14", "t_wait"));
+    _ws_text(wsc, _cancel("14"));
+    _ws_text(wsc, _ping("15"));
+    assert_eq(_rd_await(wsr, "\"id\":15,\"result\"", 3000), 1, "ws: served on after a request whose cancellation was queued");
+    assert(_rd_count(wsr, "\"id\":13,\"result\"") == 1 && _rd_count(wsr, "\"id\":14") == 0, "ws: a cancellation queued during one request cancels the next");
     # A ping read while looking is answered in its turn; a close ends the request.
     _hw_reset(3000);
     _ws_text(wsc, _call("5", "t_wait"));
@@ -1012,7 +1022,26 @@ fn main() {
     assert(atomic_load(&_hw_saw) == 1 && clock_now_ms() - t0 < 2000, "legacy: ...reaches the request on another worker");
     var lr = _rd_new(lcl);
     _rd_eof(lr, 2000);
-    assert_eq(strlen(_rd_buf(lr)), 0, "legacy: ...whose POST ends with no answer");
+    # 3.8.0, from the 3.7.7 review: the POST still gets a response, an SSE stream with no
+    # event in it. Through 3.7.7 it got nothing, which a client reads as a failed request.
+    assert(_has(_rd_buf(lr), "HTTP/1.1 200") && _has(_rd_buf(lr), "Content-Type: text/event-stream"), "legacy: ...whose POST gets an SSE stream");
+    assert(_has(_rd_buf(lr), "\r\n\r\n0\r\n\r\n") && _rd_count(lr, "data:") == 0, "legacy: ...ended with no event in it");
+    sys_close(lcl);
+    # A client that takes no SSE gets 202: there is no JSON object to send it.
+    var ljhdr = _cat3("Accept: application/json\r\nMCP-Session-Id: ", lsid, "\r\n");
+    sys_socketpair(1, 1, 0, &lcp);
+    _lc_fd = load32(&lcp);
+    lcl = load32(&lcp + 4);
+    _lc_raw = _raw(1, ljhdr, _lcall("43", "t_wait"));
+    _hw_reset(3000);
+    t0 = clock_now_ms();
+    lt = thread_create(&_lc_thread, 0);
+    _hw_await(2000);
+    _http_cancel_post(lhdr, "43");
+    thread_join(lt);
+    lr = _rd_new(lcl);
+    _rd_eof(lr, 2000);
+    assert(atomic_load(&_hw_saw) == 1 && _has(_rd_buf(lr), "HTTP/1.1 202") && _rd_count(lr, "\"id\":43") == 0, "legacy: a cancelled request whose client takes no SSE gets 202");
     sys_close(lcl);
     # A request that was not cancelled is answered, and its entry is gone after it.
     sys_socketpair(1, 1, 0, &lcp);

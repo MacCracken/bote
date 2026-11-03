@@ -239,8 +239,21 @@ fn _jx_scan(buf, len, keys, n, pos) {
 # schema's `properties`, read at registration. A vec on the heap of key, raw value,
 # key, raw value, in order. Each key is what it decodes to, as _jx_scan matches
 # one, so a name read here is one a message can reach. Empty for anything else.
-fn _jx_members(obj) {
-    var out = vec_new();
+# (3.8.0) A key whose decoding holds a NUL stays as it was written: as a cstr it
+# would mean less, and match a name the scanner does not. Through 3.7.7 it was cut
+# at the NUL, so a nested property named "a\u0000b" judged a message's "a".
+fn _jx_members(obj) { return _jx_members_x(default_alloc(), obj, 0); }
+
+# _jx_members on `a`.
+fn _jx_members_a(a, obj) { return _jx_members_x(a, obj, 0); }
+
+# Each member as three: its key as _jx_members has it, its key as written (between
+# the quotes, escapes and all), and its raw value. For code that writes an object
+# again: the key as written means what the original did, and is valid in JSON.
+fn _jx_members_raw_a(a, obj) { return _jx_members_x(a, obj, 1); }
+
+fn _jx_members_x(a, obj, raw) {
+    var out = vec_new_a(a);
     if (obj == 0) { return out; }
     var len = strlen(obj);
     var i = _jx_skip_ws(obj, len, 0);
@@ -251,17 +264,24 @@ fn _jx_members(obj) {
         if (i >= len || load8(obj + i) != 34) { return out; }
         var ke = _jx_skip_string(obj, len, i);
         var kl = ke - i - 2;
-        var key = alloc(kl + 1);
-        _jx_unescape_into(obj + i + 1, kl, key);
+        var as = alloc_via(a, kl + 1);
+        memcpy(as, obj + i + 1, kl);
+        store8(as + kl, 0);
+        var key = as;
+        if (kl > 0 && _jx_has_escape(as, kl) == 1) {
+            var dk = alloc_via(a, kl + 1);
+            if (_jx_unescape_into(as, kl, dk) == strlen(dk)) { key = dk; }
+        }
         i = _jx_skip_ws(obj, len, ke);
         if (i >= len || load8(obj + i) != 58) { return out; }
         i = _jx_skip_ws(obj, len, i + 1);
         var ve = _jx_skip_value(obj, len, i);
-        var val = alloc(ve - i + 1);
+        var val = alloc_via(a, ve - i + 1);
         memcpy(val, obj + i, ve - i);
         store8(val + ve - i, 0);
-        vec_push(out, key);
-        vec_push(out, val);
+        vec_push_a(a, out, key);
+        if (raw == 1) { vec_push_a(a, out, as); }
+        vec_push_a(a, out, val);
         i = _jx_skip_ws(obj, len, ve);
         if (i < len && load8(obj + i) == 44) { i = i + 1; }
     }

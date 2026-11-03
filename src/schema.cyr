@@ -617,6 +617,46 @@ fn compiled_validate(compiled, params_cstr) {
     return v;
 }
 
+# The violations of `value`, any JSON value, against `prop`, a PropertyDef such as
+# parse_property makes of a whole schema, each named from `root`: on `a`, or 0 when
+# there are none. A tool's structuredContent is judged with it (3.8.0).
+#
+# It is judged from the empty path, as arguments are, and only a violation is named
+# from `root`: a path built for every property of every result cost a judgement a
+# fifth more. What the empty path gives each kind of violation decides the join:
+# ": expected object" at the root, "[0].id: ..." under it in an array, a bare
+# "missing required field: x" for the root's own, and "a.b: ..." elsewhere.
+fn _sch_check_value_a(a, prop, root, value) {
+    var slot[24];
+    store64(&slot, 0);
+    store64(&slot + 8, a);
+    store64(&slot + 16, 0);
+    _validate_value("", value, prop, &slot);
+    var vs = load64(&slot);
+    if (vs == 0) { return 0; }
+    var i = 0;
+    while (i < vec_len(vs)) {
+        var v = vec_get(vs, i);
+        var sep = ".";
+        var c = load8(v);
+        if (c == 58 || c == 91) { sep = ""; }
+        elif (_sch_starts(v, "missing required field: ") == 1) { sep = ": "; }
+        var sb = str_builder_new_a(a);
+        str_builder_add_cstr_a(a, sb, root);
+        str_builder_add_cstr_a(a, sb, sep);
+        str_builder_add_cstr_a(a, sb, v);
+        vec_set(vs, i, str_data(str_builder_build_a(a, sb)));
+        i = i + 1;
+    }
+    return vs;
+}
+
+fn _sch_starts(s, lit) {
+    var n = strlen(lit);
+    if (strlen(s) < n) { return 0; }
+    return memeq(s, lit, n);
+}
+
 # compiled_validate without the empty vec: the violations, on `a`, or 0 when
 # there are none.
 fn compiled_check_a(a, compiled, params_cstr) {

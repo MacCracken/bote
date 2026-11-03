@@ -33,6 +33,7 @@ apps don't each reimplement the same protocol.
 | **JSON-RPC 2.0** — requests, responses, notifications, batch arrays | ✅ |
 | **Tool registry** — register / discover / version / deprecate, insertion-order list | ✅ |
 | **Compiled schema validation** — type, enum, bounds, nested objects, multi-violation | ✅ |
+| **Output schemas** — `outputSchema` listed, and every result's `structuredContent` judged by it, in the shape each revision allows | ✅ (3.8.0) |
 | **Dispatch** — `initialize`, `tools/list`, `tools/call`; `project_tool` name validation | ✅ |
 | **Prompts / resources / completion** — `prompts/*`, `resources/*`, `completion/complete`; polled `list_changed` push | ✅ |
 | **Stdio transport** — line-oriented JSON-RPC | ✅ |
@@ -295,6 +296,34 @@ It returns 1 when it went, 0 when there is nothing to send it to, and -1 when it
 
 A request that reports nothing is answered exactly as before.
 
+### Structured output
+
+A tool can say what its result holds, as the tools spec's `outputSchema`: a JSON Schema, in its own JSON.
+
+```cyrius
+var WEATHER = "{\"type\":\"object\",\"properties\":{\"temperature\":{\"type\":\"number\"},\"conditions\":{\"type\":\"string\"}},\"required\":[\"temperature\",\"conditions\"]}";
+
+fn h_weather(args, claims) { return "{\"temperature\":22.5,\"conditions\":\"Partly cloudy\"}"; }
+
+dispatcher_register_tool(d, tool_def_with_output_schema(tool_def_new("svc_weather", "The weather now", schema_new("object", 0, vec_new())), WEATHER), &h_weather);
+```
+
+- **Listed as written.** On 2026-07-28 the root may be any type. 2025-11-25 allows only an object there, so a tool
+  whose root is anything else is listed there with the schema as the property `result` of an object, its references
+  moved to match, as the official SDK does it.
+- **A bare value is the structured result.** The handler above returns a record, which goes as `structuredContent`,
+  with its JSON in a text block, as the spec says a tool SHOULD send it. A handler can return a whole CallToolResult
+  instead.
+- **Every result is judged before it goes.** "Servers MUST provide structured results that conform to this schema."
+  A result that is no error and has no `structuredContent`, one whose `structuredContent` does not match, and one that
+  names `content`, `structuredContent` or `isError` twice are sent as a tool error naming what is wrong, never as
+  they were. The call is audited as a failure, and a WARN names the tool and why, never what the result held.
+- **The shape each revision allows.** `structuredContent` that is no object gets a text block holding its JSON when
+  the result has none, and on 2025-11-25 it goes as `{"result": …}`, from any tool.
+
+Registration refuses a schema that is not a JSON object. bote judges the subset it judges an `inputSchema` by, and
+warns at registration of the keywords it lists and does not enforce.
+
 ### Connection deadlines
 
 Every transport but streamable serves one client at a time, so each connection gets a **send deadline**:
@@ -484,15 +513,15 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 5224 total across twenty-three files (+ a core-only drift smoke)
+### Tests — 5353 total across twenty-four files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5224 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5353 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 969 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/conformance.tcyr        # 218 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 91 — bearer + allowlist + JWT + PKCE validators, the head check
-cyrius test tests/bote_cancel.tcyr        # 137 — cancelling a request in flight: the check, the codec, stdio, unix, HTTP, a fetch's child
+cyrius test tests/bote_cancel.tcyr        # 141 — cancelling a request in flight: the check, the codec, stdio, unix, HTTP, a fetch's child
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fetch.tcyr         # 62 — a request made in a child: the record, the cap, the deadline, a real GET
 cyrius test tests/bote_fs_tools.tcyr      # 63 — fs_write / fs_read / fs_mkdir
@@ -504,10 +533,11 @@ cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_listen.tcyr        # 224 — subscriptions/listen: the filter, and real streams on the three HTTP handlers
 cyrius test tests/bote_listen_line.tcyr   # 192 — subscriptions/listen where the connection is the stream: stdio, unix, WebSocket
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
+cyrius test tests/bote_output.tcyr        # 122 — outputSchema: registration, the 2025-11-25 form, tools/list, each result judged and shaped, the heap
 cyrius test tests/bote_progress.tcyr      # 110 — progress on a request's own stream: the writer, stdio, unix, WebSocket, HTTP's SSE response
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
-cyrius test tests/bote_streamable.tcyr    # 61 — Streamable HTTP / SSE internals
+cyrius test tests/bote_streamable.tcyr    # 64 — Streamable HTTP / SSE internals
 cyrius test tests/bote_threads.tcyr       # 81 — bote on worker threads: each case from several threads at once
 cyrius test tests/bote_transport_unix.tcyr # 76 — Unix transport: sockaddr, accept-error policy, backoff, deadlines, closed-peer write
 cyrius test tests/bote_web_tools.tcyr     # 88 — web_fetch / web_search + the SSRF guard (URL and resolved address) + their records

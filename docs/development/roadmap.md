@@ -33,7 +33,7 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.0 — `outputSchema`**, the first item of 3.8.x below.
+**3.8.1 — `title` and `icons`**, the next item of 3.8.x below.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
@@ -42,8 +42,6 @@ stdio's) are each one connection's, and a worker per connection would need a hom
 
 ## 3.8.x — The tool surface
 
-- **`outputSchema`**, in the spec since 2025-06-18 and absent here. `structuredContent` already goes out
-  on bote's own libro tools.
 - **`title` and `icons`** on tools, prompts and resources, and `instructions` from the server. Check their
   status against the 2026-07-28 schema first.
 - **Multi round-trip requests.** `InputRequiredResult` is how a server now asks a client for input. It
@@ -53,11 +51,16 @@ stdio's) are each one connection's, and a worker per connection would need a hom
   nothing from it. This is 10 of the 12 scenarios bote fails on the 2026-07-28 list.
 - **Root keywords in `inputSchema`.** `ToolSchema` is type, properties and required, so a tool cannot say
   `$schema`, `$defs`, `allOf`, or the `additionalProperties: false` the spec recommends for a tool with no
-  parameters. The suite's unscored `json-schema-2020-12` checks exactly that.
+  parameters. The suite's unscored `json-schema-2020-12` checks exactly that. An outputSchema is kept as its
+  own JSON since 3.8.0, compiled from it and listed as written, which is the shape an inputSchema can take.
+- **Output schemas on bote's own tools.** The libro tools already send `structuredContent`; give them, and
+  `fs_read`, the outputSchema that says what it holds, so a client can check it.
 - **JSON Schema coverage.** The 2026-07-28 revision allows any 2020-12 keyword. bote validates a subset and
   warns at registration about the keywords it advertises and does not enforce: `anyOf`, `oneOf`, `allOf`,
   `not`, `$ref`, `pattern`, the length and item bounds, `const`, type arrays and non-string enums. Enforce
-  them, with the resource bounds the spec asks for on `$ref` and composition.
+  them, with the resource bounds the spec asks for on `$ref` and composition. And judge an object with one pass of the
+  scanner for all of its names: each property and each required name is a scan of its own today, 2.6 µs for an object
+  of three, which an outputSchema now pays on every result as an inputSchema does on every call.
 - **What a valid tool call still leaves on the heap.** A request costs bote nothing that outlives it, except
   `args` and whatever a handler allocates, because the 2.0 ABI lets a handler keep both. bote's own
   libro, fs and web handlers need not: give them the request arena, and bound the binary. `fs_read` of a

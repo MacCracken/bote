@@ -592,6 +592,28 @@ fn bote_http_progress_end(ps, json) {
     return 1;
 }
 
+# The response to the POST of a request bote does not answer, one its client cancelled
+# (3.8.0). 2025-11-25 says a request's POST MUST get an SSE stream or a JSON object, and
+# a cancelled request SHOULD get no JSON-RPC response: so an SSE stream ended with no
+# event, the shape a request whose progress had begun already got. A client that takes no
+# SSE gets 202, there being no JSON object to send it. Through 3.7.7 the POST ended with
+# no HTTP response at all, which a client reads as a failed request.
+fn bote_http_send_unanswered(hc) {
+    var cfd = _he_cfd(hc);
+    if (bote_http_accepts_sse(hc) == 0) { return bote_http_send_accepted(cfd, _he_extra(hc)); }
+    var a = bote_req_alloc();
+    var hdr = BOTE_HTTP_SSE_HEAD;
+    if (_he_extra(hc) != 0) {
+        var hb = str_builder_new_a(a);
+        str_builder_add_cstr_a(a, hb, hdr);
+        str_builder_add_cstr_a(a, hb, _he_extra(hc));
+        hdr = str_data(str_builder_build_a(a, hb));
+    }
+    if (sandhi_server_send_chunked_start_a(a, cfd, HTTP_OK, "text/event-stream", hdr) < 0) { return 0 - 1; }
+    sandhi_server_send_chunked_end(cfd);
+    return 0;
+}
+
 # MCP 2026-07-28 on Streamable HTTP: closing the response stream is the cancellation, and
 # the server MUST treat a client's disconnect as one. The legacy path never asks: there a
 # disconnect is not a cancellation, and bote's HTTP transports end with the response.

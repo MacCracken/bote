@@ -253,6 +253,12 @@ codec names the request's params, where its `progressToken` is. Without a writer
 is answered with 0 and nothing goes. The thread that sets the check or the writer is the one
 whose asks and reports are answered (3.7.7): set them on the thread that serves the message.
 
+A tool's outputSchema (3.8.0, `tool_def_with_output_schema`) is the core's alone: the
+dispatcher lists it and judges each result by it, in the shape the request's revision
+allows, so a transport has nothing to wire. A `ToolDef` is 104 bytes from 3.8.0, which
+`tool_def_new` allocates; code that reads one through the `tool_def_*` getters is
+unaffected.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`
