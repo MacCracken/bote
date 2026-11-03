@@ -280,9 +280,13 @@ fn _cdc_process_single_a(a, line, dispatcher, claims) {
     # message, since on a worker it is a thread-local lookup.
     var rs = bote_req_state();
     store64(rs + BOTE_REQ_STATE_CANCEL + 16, req_id(req));
+    # And for its progress (3.7.6): where its token is, none sent yet.
+    store64(rs + BOTE_REQ_STATE_PROGRESS + 16, req_params(req));
+    store64(rs + BOTE_REQ_STATE_PROGRESS + 32, 0);
     var resp = dispatcher_dispatch_a(a, dispatcher, req, claims);
     if (dbg == 1) { _cdc_log_request_a(a, req, resp, t0); }
     store64(rs + BOTE_REQ_STATE_CANCEL + 16, 0);
+    store64(rs + BOTE_REQ_STATE_PROGRESS + 16, 0);
     # A request its handler found cancelled gets nothing more, its response included
     # (MCP 2026-07-28: the server MUST NOT send any further messages for it).
     if (load64(rs + BOTE_REQ_STATE_CANCEL + 24) == 1) {
@@ -369,7 +373,10 @@ fn _cdc_line_cancels_a(a, p, n, want) {
     memcpy(line, p, n);
     store8(line + n, 0);
     if (jsonx_valid(line, n) == 0) { return 0; }
-    var req = codec_parse_request_a(a, line);
+    # As the codec admits it (3.7.6): the scanner honored a `"jsonrpc":"1.0"` cancellation
+    # the codec refuses (the 3.7.5 review).
+    var err[8];
+    var req = _cdc_admit_a(a, line, &err);
     if (req == 0 || req_id(req) != 0 || req_method(req) == 0) { return 0; }
     if (streq(req_method(req), "notifications/cancelled") == 0 || req_params(req) == 0) { return 0; }
     var rid = jsonx_get_raw_a(a, req_params(req), "requestId");
@@ -408,6 +415,71 @@ fn codec_lines_cancel_a(a, p, n, id, done) {
     }
     store64(done, start);
     return hit;
+}
+
+# ---- progress (3.7.6) ----------------------------------------------------------------
+
+# 1 when `raw` may be a progressToken: a string or a number (MCP's ProgressToken).
+fn _cdc_token_ok(raw) {
+    if (raw == 0 || load8(raw) == 0) { return 0; }
+    var c = load8(raw);
+    if (c == 34 || c == 45 || (c >= 48 && c <= 57)) { return 1; }
+    return 0;
+}
+
+# Report the progress of the request the calling thread is serving: `progress` so far, out
+# of `total` (or -1 for none known), with `message` (or 0). It goes as
+# `notifications/progress` on the request's own stream, stamped with the progressToken the
+# request carried. 1 when it went; 0 when there is nothing to send it to, the request
+# carrying no token, a transport or a client with no stream for it, or a request already cancelled
+# (nothing more goes out for one); -1 when it was refused, a `progress` no greater than the
+# last one sent (MCP: it MUST increase), or the connection would not take it. Nothing is
+# kept: the notification is built on the request arena and gone once sent.
+fn bote_progress(progress, total, message) {
+    var s = bote_req_state();
+    var fp = load64(s + BOTE_REQ_STATE_PROGRESS);
+    var params = load64(s + BOTE_REQ_STATE_PROGRESS + 16);
+    if (fp == 0 || params == 0) { return 0; }
+    if (load64(s + BOTE_REQ_STATE_CANCEL + 24) == 1) { return 0; }
+    var a = bote_req_alloc();
+    var m[16];
+    bote_req_mark(&m);
+    var meta = jsonx_get_raw_a(a, params, "_meta");
+    var tok = 0;
+    if (meta != 0) { tok = jsonx_get_raw_a(a, meta, "progressToken"); }
+    if (_cdc_token_ok(tok) == 0) {
+        bote_req_release(&m);
+        return 0;
+    }
+    if (load64(s + BOTE_REQ_STATE_PROGRESS + 32) > 0 && progress <= load64(s + BOTE_REQ_STATE_PROGRESS + 24)) {
+        bote_req_release(&m);
+        return 0 - 1;
+    }
+    var sb = str_builder_new_a(a);
+    var room = strlen(tok) + 192;
+    if (message != 0) { room = room + strlen(message) * 6; }
+    _sb_grow_a(a, sb, room);
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":");
+    str_builder_add_cstr(sb, tok);
+    str_builder_add_cstr(sb, ",\"progress\":");
+    str_builder_add_int_a(a, sb, progress);
+    if (total >= 0) {
+        str_builder_add_cstr(sb, ",\"total\":");
+        str_builder_add_int_a(a, sb, total);
+    }
+    if (message != 0) {
+        str_builder_add_cstr(sb, ",\"message\":\"");
+        bote_json_escape(sb, message);
+        str_builder_add_cstr(sb, "\"");
+    }
+    str_builder_add_cstr(sb, "}}");
+    var r = fncall3(fp, load64(s + BOTE_REQ_STATE_PROGRESS + 8), a, str_data(str_builder_build_a(a, sb)));
+    bote_req_release(&m);
+    if (r < 0) { return 0 - 1; }
+    if (r == 1) { return 0; }
+    store64(s + BOTE_REQ_STATE_PROGRESS + 24, progress);
+    store64(s + BOTE_REQ_STATE_PROGRESS + 32, load64(s + BOTE_REQ_STATE_PROGRESS + 32) + 1);
+    return 1;
 }
 
 # Walk a top-level JSON array (cstr starting with `[`); for each element,

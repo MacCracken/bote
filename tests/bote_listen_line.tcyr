@@ -783,6 +783,28 @@ fn main() {
     dispatcher_resource_updated(spd, _long_uri(0, 1025));
     bote_listen_line_deliver(spc);
     assert(_has(_cap, _upd("\"sp://secret\"", "\"wp\"")) && _has(_cap, "sp://later") == 0, "scopes: an overflow tells it what it holds, and not that one");
+    # What serves a URI registered again (3.7.6, the 3.7.5 review): with the same scopes it is
+    # told still; with another scope, which the token may lack, it is not, nor is a template's
+    # URI a resource now serves with another scope, and an overflow tells neither.
+    dispatcher_register_resource(spd, resource_def_with_required_scopes(resource_def_new("sp://secret", "s", "S", "text/plain"), spsc), &h_res);
+    _cap_reset();
+    dispatcher_resource_updated(spd, "sp://secret");
+    bote_listen_line_deliver(spc);
+    assert(_has(_cap, _upd("\"sp://secret\"", "\"wp\"")), "scopes: registered again with its scopes, still told");
+    var spother = vec_new();
+    vec_push(spother, "p:other");
+    dispatcher_register_resource(spd, resource_def_with_required_scopes(resource_def_new("sp://secret", "s", "S", "text/plain"), spother), &h_res);
+    dispatcher_register_resource(spd, resource_def_with_required_scopes(resource_def_new("sp://t/42", "f", "F", "text/plain"), spother), &h_res);
+    _cap_reset();
+    dispatcher_resource_updated(spd, "sp://secret");
+    dispatcher_resource_updated(spd, "sp://t/42");
+    bote_listen_line_deliver(spc);
+    assert(_has(_cap, "sp://secret") == 0 && _has(_cap, "sp://t/42") == 0, "scopes: registered again with a scope the token was not judged by, not told");
+    _cap_reset();
+    dispatcher_resource_updated(spd, _long_uri(0, 1025));
+    bote_listen_line_deliver(spc);
+    assert(_has(_cap, "sp://secret") == 0 && _has(_cap, "sp://t/42") == 0 && _has(_cap, "sp://open"), "scopes: ...nor by an overflow, which still tells what it may read");
+    dispatcher_register_resource(spd, resource_def_with_required_scopes(resource_def_new("sp://secret", "s", "S", "text/plain"), spsc), &h_res);
     bote_listen_line_detach(spc);
     # What a stream keeps is judged again as it is kept, with the listen's claims: what serves
     # a URI may change between the dispatcher's look and the stream's.
@@ -794,7 +816,8 @@ fn main() {
     assert_eq(load64(kjs + 312), 1, "scopes: ...and the stream marked as made with claims");
     bote_req_set_listen_claims("token=p:secret");
     assert_eq(_bl_keep_uris(kja, kjs, "{\"notifications\":{\"resourceSubscriptions\":[\"sp://secret\",\"sp://open\"]}}", spd), 2, "scopes: ...all of it, for claims that hold the scope");
-    assert(load8(load64(kjs + 280)) == 1 && load8(load64(kjs + 280) + 13) == 0, "scopes: ...the scoped one flagged, the open one not");
+    assert(load8(load64(kjs + 280)) == 1 && load8(load64(kjs + 280) + 21) == 0, "scopes: ...the scoped one flagged, the open one not");
+    assert(load64(load64(kjs + 280) + 1) == spsc && load64(load64(kjs + 280) + 22) == 0, "scopes: ...with the scopes it was judged by (3.7.6)");
     bote_req_begin();
     # With no token in play nothing is compared, as resources/read compares nothing.
     bote_listen_line_attach(spc, spd, &_cap_write, 0);

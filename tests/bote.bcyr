@@ -300,6 +300,15 @@ fn b_cancel_lines_scan() { return codec_lines_cancel_a(bote_req_begin(), _b_canc
 var _b_cancel_sp[2];
 fn b_cancel_check_socket() { return bote_conn_gone(load32(&_b_cancel_sp), 1); }
 
+# 3.7.6: one progress report, its token read from the request's params and the notification
+# built, through a writer that drops it.
+fn _b_progress_drop(ctx, a, json) { return 0; }
+var _b_progress_n = 0;
+fn b_progress_report() {
+    _b_progress_n = _b_progress_n + 1;
+    return bote_progress(_b_progress_n, 1000000000, "working");
+}
+
 fn _bench_setup() {
     var reg = tool_registry_new();
     var s = schema_new("object", 0, vec_new());
@@ -562,6 +571,13 @@ fn main() {
     var b39 = bench_new("cancel_check_socket");
     bench_run(b39, &b_cancel_check_socket, 100000);
     vec_push(benches, b39);
+    bote_req_begin();
+    bote_req_set_progress(&_b_progress_drop, 0);
+    bote_req_set_request_params("{\"name\":\"svc_echo\",\"arguments\":{},\"_meta\":{\"progressToken\":\"bench-token-1\"}}");
+    var b40 = bench_new("progress_report");
+    bench_run(b40, &b_progress_report, 100000);
+    vec_push(benches, b40);
+    bote_req_begin();
     bote_conn_arm();
     thread_join(thread_create(&_b_thread_nop, 0));
     var b36 = bench_new("codec_process_message_threaded");

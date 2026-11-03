@@ -43,9 +43,24 @@ fn _stdio_listen_write(fd, json) {
 var _stdio_in = 0;
 var _stdio_from = 0;    # where what follows the message being served begins
 var _stdio_seen = 0;    # how far a check has looked, for this message
+var _stdio_seen_id = 0; # ...and for which request of it: a batch has several (3.7.6)
 var _stdio_eof = 0;
+var _stdio_tid = 0;     # the loop's thread (3.7.6): another's ask is answered with nothing
+
+# A request's progress (3.7.6): one line on stdout, between the replies, as any message.
+fn _stdio_progress(ctx, a, json) {
+    if (bote_conn_tid() != _stdio_tid) { return 1; }
+    return _stdio_listen_write(_stdio_out, json);
+}
 
 fn _stdio_cancelled(ctx, a, id) {
+    if (bote_conn_tid() != _stdio_tid) { return 0; }
+    # A batch's next request looks again from the top: what an earlier one's look read past
+    # may name it (the 3.7.5 review).
+    if (id != _stdio_seen_id) {
+        _stdio_seen = _stdio_from;
+        _stdio_seen_id = id;
+    }
     var room = STDIO_BUF_SIZE - _stdio_buf_len;
     if (room > 0 && _stdio_eof == 0 && bote_conn_readable(_stdio_in) == 1) {
         var n = sys_read(_stdio_in, _stdio_buf + _stdio_buf_len, room);
@@ -64,7 +79,9 @@ fn _stdio_begin(from) {
     var a = bote_listen_line_begin(_stdio_listen);
     _stdio_from = from;
     _stdio_seen = from;
+    _stdio_seen_id = 0;
     bote_req_set_cancel(&_stdio_cancelled, 0);
+    bote_req_set_progress(&_stdio_progress, 0);
     return a;
 }
 
@@ -120,6 +137,7 @@ fn _stdio_serve(dispatcher, in_fd, out_fd) {
     _stdio_init();
     _stdio_out = out_fd;
     _stdio_in = in_fd;
+    _stdio_tid = bote_conn_tid();
     bote_listen_line_attach(_stdio_listen, dispatcher, &_stdio_listen_write, out_fd);
     var r = _stdio_loop(dispatcher, in_fd);
     bote_listen_line_detach(_stdio_listen);

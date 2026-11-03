@@ -255,6 +255,13 @@ fn _ws_listen_write(ws, json) {
     return 0;
 }
 
+# The progress writer (3.7.6): one frame, from the loop's own thread.
+var _ws_tid = 0;
+fn _ws_progress_write(ws, a, json) {
+    if (bote_conn_tid() != _ws_tid) { return 1; }
+    return _ws_listen_write(ws, json);
+}
+
 # The presented token judged again when it is due (3.6.6), before a frame is served or a
 # change goes out: 1 while it holds, 0 once it has failed and the connection is closed with
 # 1008. *judged is when it was last judged.
@@ -422,6 +429,9 @@ fn _ws_frames(config, ws, cfd, ws_claims, ws_token, ws_held) {
         }
         var a = bote_listen_line_begin(lc);
         if (ws_token == 1) { bote_req_note_token_kept(ws_claims, ws_kept); }
+        # A request's progress goes on the connection, a frame each (3.7.6).
+        _ws_tid = bote_conn_tid();
+        bote_req_set_progress(&_ws_progress_write, ws);
         var msg = _bote_ws_recv(ws);
         if (msg == 0) { return 0; }
         heard = clock_now_ms();

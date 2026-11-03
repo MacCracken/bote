@@ -99,14 +99,21 @@ fn resp_success(id, result) {
 #   +64 gone    1 once bote_cancelled has found it cancelled
 #   +72 claims  (3.7.5) the claims a `subscriptions/listen` was judged with, for the
 #               transport that holds its stream, or 0
+#   +80 progress (3.7.6) how the connection sends a notification on the request's own
+#               stream: fn(ctx, a, json) → 0, or below 0 when it would not take it; 0 for none
+#   +88 ctx     its context
+#   +96 params  the raw params of the request being served, where its progressToken is
+#   +104 last   the last `progress` sent for it
+#   +112 sent   how many progress notifications have gone for it
 # A transport that serves one message at a time uses the process's block. A server
 # that serves on worker threads (3.7.0, src/conn.cyr) sets _bote_req_state_fp to a
 # function returning the calling thread's block, before its first worker starts.
-var BOTE_REQ_STATE_BYTES = 80;
+var BOTE_REQ_STATE_BYTES = 120;
 var BOTE_REQ_STATE_WHY = 24;
 var BOTE_REQ_STATE_STREAM = 32;
 var BOTE_REQ_STATE_CANCEL = 40;
-var _bote_req_g[10];
+var BOTE_REQ_STATE_PROGRESS = 80;
+var _bote_req_g[15];
 var _bote_req_state_fp = 0;
 
 fn bote_req_state() {
@@ -349,8 +356,43 @@ fn bote_req_begin() {
     store64(s + BOTE_REQ_STATE_CANCEL + 16, 0);
     store64(s + BOTE_REQ_STATE_CANCEL + 24, 0);
     store64(s + BOTE_REQ_STATE_CANCEL + 32, 0);
+    store64(s + BOTE_REQ_STATE_PROGRESS, 0);
+    store64(s + BOTE_REQ_STATE_PROGRESS + 8, 0);
+    store64(s + BOTE_REQ_STATE_PROGRESS + 16, 0);
+    store64(s + BOTE_REQ_STATE_PROGRESS + 24, 0);
+    store64(s + BOTE_REQ_STATE_PROGRESS + 32, 0);
     return al;
 }
+
+# ---- progress (3.7.6) --------------------------------------------------------------
+#
+# A request that carries `_meta.progressToken` asks to hear how it is going, on its own
+# stream: the POST's SSE response on Streamable HTTP, and the connection itself on stdio
+# (MCP 2026-07-28 and 2025-11-25, progress). A handler reports with bote_progress
+# (src/codec.cyr); the transport sends it through the writer it sets here after
+# bote_req_begin, and the codec names the request.
+
+# The connection's writer for this message: fn(ctx, a, json), 0 when it sent the
+# notification `json`, below 0 when it would not take it, 1 when it has no stream for it.
+fn bote_req_set_progress(fp, ctx) {
+    var s = bote_req_state();
+    store64(s + BOTE_REQ_STATE_PROGRESS, fp);
+    store64(s + BOTE_REQ_STATE_PROGRESS + 8, ctx);
+    return 0;
+}
+
+# The request now being served, by its raw params (the codec's), with none of its progress
+# sent yet.
+fn bote_req_set_request_params(params) {
+    var s = bote_req_state();
+    store64(s + BOTE_REQ_STATE_PROGRESS + 16, params);
+    store64(s + BOTE_REQ_STATE_PROGRESS + 24, 0);
+    store64(s + BOTE_REQ_STATE_PROGRESS + 32, 0);
+    return 0;
+}
+
+# How many progress notifications have gone for the request being served.
+fn bote_req_progress_sent() { return load64(bote_req_state() + BOTE_REQ_STATE_PROGRESS + 32); }
 
 # The claims the dispatcher judged a `subscriptions/listen` with, for the transport that
 # opens its stream next (3.7.5): what it keeps of the listen is judged by the same.

@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.7.5"; }
+fn _bote_server_version() { return "3.7.6"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -1431,14 +1431,18 @@ fn _dsp_listen_uri_a(a, raw, n, pos) {
     return out;
 }
 
-# 1 when what would serve `uri` requires a scope (3.7.5), judged as resources/read is.
-fn _dsp_uri_scoped(d, uri) {
+# The scopes what would serve `uri` requires, judged as resources/read is (3.7.6): the
+# registration's own list, so another registration is another list, or 0 for none.
+fn _dsp_uri_scopes(d, uri) {
     if (d == 0 || uri == 0 || dispatcher_resources(d) == 0) { return 0; }
     var fp[8];
     var sc = resource_registry_serving(dispatcher_resources(d), uri, &fp);
     if (sc == 0 || vec_len(sc) == 0) { return 0; }
-    return 1;
+    return sc;
 }
+
+# 1 when what would serve `uri` requires a scope (3.7.5).
+fn _dsp_uri_scoped(d, uri) { return _dsp_uri_scopes(d, uri) != 0; }
 
 # The URIs of `raw`, a `resourceSubscriptions` already found to be a list of strings, that
 # a stream honors, decoded, on `a`, in the order sent (above). 0 when none is. One the

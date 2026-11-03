@@ -86,6 +86,18 @@ var BOTE_POLL_HUP = 16;
 var BOTE_POLL_NVAL = 32;
 var BOTE_POLL_RDHUP = 8192;
 
+# The calling thread (3.7.6), for a transport whose cancellation check and progress writer
+# reach the loop's own buffer and socket: they answer nothing to another thread, a handler's
+# helper among them, which the process's one request state also reaches. 0 off Linux.
+fn bote_conn_tid() {
+    #ifdef CYRIUS_TARGET_LINUX
+    return sys_gettid();
+    #endif
+    #ifndef CYRIUS_TARGET_LINUX
+    return 0;
+    #endif
+}
+
 # 1 when the client at `fd` has gone; 0 while it is there, and on agnos, which has no poll.
 fn bote_conn_gone(fd, half) {
     #ifdef CYRIUS_TARGET_AGNOS

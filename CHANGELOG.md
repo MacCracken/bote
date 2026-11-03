@@ -18,6 +18,133 @@ have per release.
 
 _(empty)_
 
+## [3.7.6] — 2026-11-02 · Progress
+
+**A handler can report its progress, on the request's own stream.** A request that carries `_meta.progressToken` hears
+`notifications/progress` as its handler reports with `bote_progress(progress, total, message)`:
+- On HTTP, the response to its POST becomes an SSE stream at the first report: the reports, then the response, which ends
+  it.
+- On stdio, a Unix socket and a WebSocket, each report is a line or a frame, before the answer.
+
+bote refuses a `progress` no greater than the last, which the spec says MUST increase. It sends nothing for a request
+with no token, or one already cancelled or answered. The official suite's `tools-call-with-progress` now passes on both
+revisions, and the official client hears the reports on its four transports.
+
+**Four defects in 3.7.5 land ahead of it**, from an independent review of that release. The worst kept telling a token of
+changes to a resource it could no longer read, once the resource was registered again with a scope the token lacks. See
+the correction notice in 3.7.5.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Added
+
+- **`bote_progress(progress, total, message)`** (core, `src/codec.cyr`). `total` is -1 when none is known, and `message`
+  is 0 when there is none. It returns:
+  - 1 when the report went;
+  - 0 when there is nothing to send it to: no token, no stream for it, or a request cancelled;
+  - -1 when it was refused: a `progress` no greater than the last, or a connection that would not take it.
+
+  The notification is built on the request arena and gone once sent.
+  - A transport sets its writer with `bote_req_set_progress(fp, ctx)`, set after `bote_req_begin`. `fp(ctx, a, json)`
+    returns 0 when it sent, below 0 when it failed, and 1 when it has no stream for the report.
+  - The codec names the request's params (`bote_req_set_request_params`); `bote_req_progress_sent()` counts.
+  - The request state grows from 80 to 120 B: the writer, its context, the request's params, the last `progress` sent,
+    and how many.
+- **On HTTP** (`src/http_era.cyr`), `bote_http_progress_begin(hc)` and `bote_http_progress_end(ps, json)`, around the
+  dispatch. They are used on the modern path and on the legacy one on `http` and `streamable`.
+  - The first report sends the SSE head: `Cache-Control: no-cache`, `X-Accel-Buffering: no` (the spec's SHOULD), and the
+    transport's own extra headers, the bridge's CORS among them.
+  - Each report goes as an `event: message` chunk, and the response as the last, before the end.
+  - A client whose `Accept` names no `text/event-stream` hears no progress. Its `Accept` is read only at the first report.
+  - `bote_http_accepts_sse(hc)`.
+- **On stdio, a Unix socket and a WebSocket**: the connection's own writer, a line or a text frame.
+- **`bote_conn_tid()`** (`src/conn.cyr`): the calling thread, 0 off Linux, for the fix below.
+- `test_tool_with_progress` in the conformance fixture reports 0, 50 and 100 of 100, 50 ms apart, as the suite asks, where
+  it had answered and reported nothing.
+
+### Changed
+
+- On the legacy `streamable` path a request that reported answers on its SSE stream. Its session's pending notifications
+  then wait for the next POST or GET, where they had followed the response.
+- The bridge's legacy path stays one JSON reply: its contract with its callers is not MCP's.
+
+### Fixed
+
+From the review of 3.7.5:
+
+- **A resource registered again with a scope the token lacks went on being told to it.** A stream records, for each URI it
+  keeps, the scope list it was judged by: the registration's own. A stream made with claims is told of an update to a URI
+  that requires a scope only while that list still serves it. The same list registered again keeps it. Another list is
+  withheld, even one the token holds, since a stream keeps no token. The overflow path checks the same.
+- **On stdio and a Unix socket, a batch lost the cancellation of a later request.** The first request's check read past a
+  `notifications/cancelled` naming the second, and the second's look started after it. A check now looks again from the
+  top when the request it is asked about changes.
+- **A handler's helper thread could reach the transport's check and writer.** On a one-loop server every thread reaches the
+  process's one request state. So a helper's `bote_cancelled()` read stdin or a Unix socket into the loop's buffer beside
+  the loop, and its report could have gone on the response beside the handler's. Each transport records its serving
+  thread (`bote_conn_tid`) and answers another with nothing, on stdio, unix, WebSocket and HTTP. A worker on `bote
+  streamable` has a state of its own, so its helpers never reached one.
+- **The line scanner honored a cancellation the codec refuses**, one whose `jsonrpc` is not `"2.0"`. It now reads a line as
+  the codec admits it (`_cdc_admit_a`).
+
+### Security
+
+- The scope fix above. Through 3.7.5, a token judged by a resource's old registration heard of each change to it after
+  the resource came to require a scope the token lacks.
+- A handler that starts a thread on stdio, a Unix socket or a one-loop HTTP server no longer races the connection's own
+  reads and writes through it.
+
+### Tests
+
+- **5,177 assertions, from 5,067**, on x86_64 and under `qemu-aarch64`.
+  - **`tests/bote_progress.tcyr`**, 93, new:
+    - `bote_progress` and the writer: no writer, no request, no `_meta`, no token, and a token that is no string or number.
+      The exact bytes with and without a total and a message. MUST increase. A failed write, and a writer with no
+      stream, not counted. Number and escaped tokens. Nothing for a cancelled request. A begun message clearing the
+      writer. A thousand reports of a kilobyte leaving the arena where it was.
+    - The codec: three reports stamped with the request's token, nothing once it is answered, nothing with no token,
+      legacy, and a batch whose second request counts from 0 again.
+    - stdio, a Unix socket and a WebSocket, a line or a frame each before the answer, and a handler's helper thread
+      answered with nothing.
+    - The three HTTP handlers:
+      - the SSE head, one head, three events, then the response and the end, and CORS on the bridge;
+      - JSON for a client that takes no event stream, and for a call with no token;
+      - both eras on `http` and `streamable`, and the bridge's legacy contract one JSON reply.
+    - A client that leaves mid-stream, cancelled and sent nothing more; the heap; two workers apart.
+  - **`tests/bote_cancel.tcyr`**, 109, from 96:
+    - A batch's later request cancelled through the real stdio and unix scanners, where 3.7.5's test used a stand-in
+      check.
+    - A handler's helper thread answered with nothing on stdio, unix and HTTP.
+    - A `jsonrpc` the codec refuses.
+  - **`tests/bote_listen_line.tcyr`**, 190, from 186: a resource registered again with its scopes still told, with
+    another not, nor by an overflow; the scope list each URI keeps.
+- **37 mutants, 36 killed.** The one left showed the check that `_meta` is an object to be redundant, since an array holds
+  no token, and it is gone. Four first survived the tests:
+  - The writer a begun message clears: the test's params were cleared too.
+  - The thread guards on unix and HTTP: there was no helper test there.
+- **The official suite** passes `tools-call-with-progress` on both revisions: three reports and a schema-valid wire.
+- **The official client** passes 448 checks, from 434, hearing the reports on all four of its transports.
+  - On stdio the client handles a response at once and a notification a tick later. So the last report, which arrives in
+    the same read as the answer, finds its handler already removed and is dropped.
+  - bote sends all three, in order, which a raw stdio run shows. The client's check there asks for two.
+
+### Performance
+
+**The request path costs what it did.** Interleaved A/B against 3.7.5, 15 rounds pinned to one core. Minimums, in ns:
+
+| Bench | 3.7.5 | 3.7.6 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 3,970 | 3,978 | +0.2% |
+| `codec_process_message_threaded` | 4,258 | 4,263 | +0.1% |
+| `dispatch_tools_call` | 2,071 | 2,076 | +0.2% |
+| `http_era_modern` | 11,180 | 11,095 | −0.8% |
+
+The codec now names each request's params with two stores beside the id's, from the state it already holds. Rows that run
+none of this patch's code moved further (`jsonx_get_str_flat` −7.6%, `jwt_cached_hs256` +6.2%, `jsonx_valid_request`
++4.6%), which is layout. `progress_report`, new, is 1,822 ns for one report: the token found in the request's params, the
+notification built, and a writer that drops it. A request that reports nothing pays nothing for it. On HTTP its `Accept`
+is read only at the first report.
+
 ## [3.7.5] — 2026-11-02 · Cancellation
 
 **A client can cancel a request in flight.** On `http`, `streamable` and `bridge`, for MCP 2026-07-28, a client that
@@ -33,6 +160,18 @@ behind a scoped template. 3.7.4's fix for a change made while a listen opened he
 on HTTP. See the correction notice in 3.7.4.
 
 The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+> ⚠ **Corrected at 3.7.6.** Five claims below were not true, found by an independent review of this release.
+> - "Never more than it may read" failed for a resource registered again with a scope the token lacks: the stream had been
+>   judged by the old registration and went on being told.
+> - "On stdio and a Unix socket the client sends `notifications/cancelled` naming the request" missed a batch's later
+>   request, once an earlier request's check had read past its cancellation.
+> - `bote_cancelled()` was not "0 off a handler's own thread" on a one-loop server, where every thread reaches the
+>   process's one request state. A handler's helper therefore ran the transport's check beside the loop.
+> - The line scanner did not read a line as the codec does: it honored a cancellation whose `jsonrpc` the codec refuses.
+> - On a Unix socket an ask is two polls, a read and a look, not "one poll".
+>
+> Each is fixed in 3.7.6.
 
 ### Added
 

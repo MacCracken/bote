@@ -441,7 +441,11 @@ fn _strm_handle_post(cfd, buf, n, config) {
 
     var extra = 0;
     var st = streamable_config_session_store(config);
+    # A request's progress goes on the response to its POST (3.7.6, src/http_era.cyr): a
+    # session's pending notifications then wait for the next POST or GET.
+    var ps = bote_http_progress_begin(&hc);
     var resp = codec_process_message_a(bote_req_alloc(), body, streamable_config_dispatcher(config), load64(&claims_slot));
+    if (bote_http_progress_end(ps, resp) == 1) { return 0; }
 
     # A session exists once `initialize` has succeeded. Minted before dispatch,
     # a request the codec refused still got one.

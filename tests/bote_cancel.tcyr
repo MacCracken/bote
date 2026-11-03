@@ -83,6 +83,22 @@ fn h_wait(args, claims) {
     return "{\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}";
 }
 
+# A handler whose helper thread asks for it (3.7.6): the helper is answered with nothing,
+# and the handler, asking itself, hears the cancellation.
+var _hh_helper = 9;
+var _hh_progress = 9;
+var _hh_self = 9;
+fn _helper_asks(i) {
+    _hh_helper = bote_cancelled();
+    _hh_progress = bote_progress(1, 0 - 1, 0);
+    return 0;
+}
+fn h_helper(args, claims) {
+    thread_join(thread_create(&_helper_asks, 0));
+    _hh_self = bote_cancelled();
+    return "{\"content\":[]}";
+}
+
 fn _hw_reset(cap) {
     _hw_cap = cap;
     atomic_store(&_hw_running, 0);
@@ -116,9 +132,11 @@ fn _mk_d() {
     var reg = tool_registry_new();
     registry_register(reg, _tool("t_wait"));
     registry_register(reg, _tool("t_echo"));
+    registry_register(reg, _tool("t_helper"));
     var d = dispatcher_new(reg);
     dispatcher_handle(d, "t_wait", &h_wait);
     dispatcher_handle(d, "t_echo", &h_ok);
+    dispatcher_handle(d, "t_helper", &h_helper);
     dispatcher_set_audit(d, audit_sink_new(&_au_log, 0));
     return d;
 }
@@ -450,6 +468,8 @@ fn main() {
     assert_eq(codec_lines_cancel_a(la, inner, strlen(inner), "\"x\"", &done), 0, "lines: the words inside another message's arguments");
     var asreq = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"x\"}}\n";
     assert_eq(codec_lines_cancel_a(la, asreq, strlen(asreq), "\"x\"", &done), 0, "lines: a request by that name is no notification");
+    var v1 = "{\"jsonrpc\":\"1.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"x\"}}\n";
+    assert_eq(codec_lines_cancel_a(la, v1, strlen(v1), "\"x\"", &done), 0, "lines: a jsonrpc the codec refuses (3.7.6)");
     var bad = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"x\"}\n";
     assert_eq(codec_lines_cancel_a(la, bad, strlen(bad), "\"x\"", &done), 0, "lines: invalid JSON");
     var batch = "[{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"x\"}}]\n";
@@ -560,6 +580,26 @@ fn main() {
     _hw_await(2000);
     _send_line(sw, _cancel("\"7\""));
     assert_eq(_rd_await(so, "\"id\":7,\"result\"", 3000), 1, "stdio: a string 7 does not cancel the number");
+    # A batch (3.7.6, the 3.7.5 review): the cancellation of its second request arrives while
+    # the first runs and asks, and the second, asking, still finds it.
+    _hw_reset(400);
+    _send_line(sw, _cat3("[", _lcall("11", "t_wait"), _cat3(",", _lcall("12", "t_wait"), "]")));
+    _hw_await(2000);
+    _send_line(sw, _cancel("12"));
+    _send_line(sw, _ping("13"));
+    assert_eq(_rd_await(so, "\"id\":13,\"result\"", 3000), 1, "stdio: served on after a batch");
+    assert(_has(_rd_buf(so), "\"id\":11,\"result\"") && _has(_rd_buf(so), "\"id\":12") == 0, "stdio: a batch's later request cancelled while an earlier one ran and asked");
+    # A helper thread the handler starts is answered with nothing; the handler is not.
+    _hh_helper = 9;
+    _hh_progress = 9;
+    _hh_self = 9;
+    var htok = "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"tools/call\",\"params\":{\"name\":\"t_helper\",\"arguments\":{},\"_meta\":{\"progressToken\":\"hp\"}}}";
+    var hlb = _cat3(htok, "\n", _cat3(_cancel("14"), "\n", _cat3(_ping("15"), "\n", "")));
+    sys_write(sw, hlb, strlen(hlb));
+    assert_eq(_rd_await(so, "\"id\":15,\"result\"", 3000), 1, "stdio: served on after the helper");
+    assert(_hh_helper == 0 && _hh_progress == 0, "stdio: a handler's helper thread asks and reports, and is answered with nothing");
+    assert_eq(_hh_self, 1, "stdio: ...the handler itself hears the cancellation");
+    assert_eq(_has(_rd_buf(so), "notifications/progress"), 0, "stdio: ...and nothing the helper reported went out");
     # The end of stdin while a request runs is no cancellation: the answer still goes out,
     # and the loop then ends.
     _hw_reset(300);
@@ -598,6 +638,31 @@ fn main() {
     assert_eq(atomic_load(&_hw_saw), 0, "unix: ...not cancelled");
     thread_join(ut);
     sys_close(uc);
+    sys_close(_ux_fd);
+    # A batch's later request, cancelled while an earlier one runs and asks (3.7.6).
+    sys_socketpair(1, 1, 0, &up);
+    _ux_fd = load32(&up);
+    uc = load32(&up + 4);
+    ur = _rd_new(uc);
+    ut = thread_create(&_unix_thread, 0);
+    _hw_reset(400);
+    _send_line(uc, _cat3("[", _lcall("21", "t_wait"), _cat3(",", _lcall("22", "t_wait"), "]")));
+    _hw_await(2000);
+    _send_line(uc, _cancel("22"));
+    _send_line(uc, _ping("23"));
+    assert_eq(_rd_await(ur, "\"id\":23,\"result\"", 3000), 1, "unix: served on after a batch");
+    assert(_has(_rd_buf(ur), "\"id\":21,\"result\"") && _has(_rd_buf(ur), "\"id\":22") == 0, "unix: a batch's later request cancelled while an earlier one ran and asked");
+    # A helper thread the handler starts is answered with nothing, here too.
+    _hh_helper = 9;
+    _hh_progress = 9;
+    _hh_self = 9;
+    var uhb = _cat3(htok, "\n", _cat3(_cancel("14"), "\n", _cat3(_ping("24"), "\n", "")));
+    sys_write(uc, uhb, strlen(uhb));
+    assert_eq(_rd_await(ur, "\"id\":24,\"result\"", 3000), 1, "unix: served on after the helper");
+    assert(_hh_helper == 0 && _hh_progress == 0 && _hh_self == 1, "unix: a helper thread is answered with nothing, the handler hears the cancellation");
+    assert_eq(_has(_rd_buf(ur), "notifications/progress"), 0, "unix: ...and nothing the helper reported went out");
+    sys_close(uc);
+    thread_join(ut);
     sys_close(_ux_fd);
     # One that closes both ways cancels.
     sys_socketpair(1, 1, 0, &up);
@@ -647,6 +712,22 @@ fn main() {
         assert(atomic_load(&_hw_saw) == 0 && _has(leg, "done"), _cat3(kn, ": the legacy path never asks: a disconnect is no cancellation there", ""));
         kind = kind + 1;
     }
+
+    # On a one-loop server a handler's helper thread reaches the request state too, and is
+    # answered with nothing (3.7.6): here the client has gone before the handler runs.
+    var hsp2[16];
+    sys_socketpair(1, 1, 0, &hsp2);
+    var hsa2 = load32(&hsp2);
+    var hcl2 = load32(&hsp2 + 4);
+    sock_shutdown(hcl2, 1);
+    var hraw = _raw(0, "MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: t_helper\r\n", _call("31", "t_helper"));
+    memcpy(_hh_buf, hraw, strlen(hraw) + 1);
+    _hh_helper = 9;
+    _hh_self = 9;
+    _http_handle(_http_cfg, hsa2, _hh_buf, strlen(hraw));
+    sys_close(hsa2);
+    assert(_hh_helper == 0 && _hh_self == 1, "http: a helper thread asking is answered with nothing; the handler hears its client gone");
+    sys_close(hcl2);
 
     # ---------------- a fetch's child ----------------
     var cur[24];

@@ -431,10 +431,107 @@ fn bote_http_send_accepted(cfd, extra) {
     return 0;
 }
 
+# ---- progress on the POST's own response (3.7.6) -----------------------------------
+#
+# A request that asks for progress hears it on the response to its POST, an SSE stream:
+# the notifications, then the response, which ends it (MCP 2026-07-28 and 2025-11-25,
+# Streamable HTTP: the server MAY send notifications that relate to the request before
+# the response; request-scoped notifications never go on a listen stream). The response
+# stays one JSON object until the handler reports, so a request that reports nothing is
+# answered as before, and one whose client does not accept `text/event-stream` hears no
+# progress, which is looked at only when the handler first reports. A ProgressStream (32 B,
+# on the request arena): +0 the bote_http_ctx, +8 1 once the SSE head has gone, +16 1 once
+# a write to the client failed, 2 when the client takes no SSE, +24 the serving thread: a
+# helper thread the handler starts reaches the same request state on a one-loop server, and
+# is answered with nothing (src/conn.cyr, bote_conn_tid).
+var BOTE_HTTP_SSE_PRE = "event: message\ndata: ";
+var BOTE_HTTP_SSE_HEAD = "Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\n";
+
+# 1 when the request in `hc` accepts an SSE response.
+fn bote_http_accepts_sse(hc) {
+    var acc = _he_header_a(bote_req_alloc(), _he_buf(hc), _he_n(hc), "Accept");
+    if (acc == 0) { return 0; }
+    if (strstr(acc, "text/event-stream") >= 0) { return 1; }
+    return 0;
+}
+
+# One JSON-RPC message as an SSE event, in a chunk: 0, or below 0 once the client is gone.
+fn _he_sse_send(a, cfd, json) {
+    var n = strlen(json);
+    var f = alloc_via(a, n + 32);
+    var pre = strlen(BOTE_HTTP_SSE_PRE);
+    memcpy(f, BOTE_HTTP_SSE_PRE, pre);
+    memcpy(f + pre, json, n);
+    store8(f + pre + n, 10);
+    store8(f + pre + n + 1, 10);
+    return sandhi_server_send_chunk(cfd, f, pre + n + 2);
+}
+
+# The writer bote_progress sends through (src/protocol.cyr): the SSE head the first time,
+# or 1, no stream for it, for a client that takes none.
+fn _he_progress_write(ps, a, json) {
+    if (bote_conn_tid() != load64(ps + 24)) { return 1; }
+    if (load64(ps + 16) == 1) { return 0 - 1; }
+    if (load64(ps + 16) == 2) { return 1; }
+    var hc = load64(ps);
+    var cfd = _he_cfd(hc);
+    if (load64(ps + 8) == 0) {
+        if (bote_http_accepts_sse(hc) == 0) {
+            store64(ps + 16, 2);
+            return 1;
+        }
+        var hdr = BOTE_HTTP_SSE_HEAD;
+        if (_he_extra(hc) != 0) {
+            var hb = str_builder_new_a(a);
+            str_builder_add_cstr_a(a, hb, hdr);
+            str_builder_add_cstr_a(a, hb, _he_extra(hc));
+            hdr = str_data(str_builder_build_a(a, hb));
+        }
+        if (sandhi_server_send_chunked_start_a(a, cfd, HTTP_OK, "text/event-stream", hdr) < 0) {
+            store64(ps + 16, 1);
+            return 0 - 1;
+        }
+        store64(ps + 8, 1);
+    }
+    if (_he_sse_send(a, cfd, json) < 0) {
+        store64(ps + 16, 1);
+        return 0 - 1;
+    }
+    return 0;
+}
+
+# Before the dispatch: the writer, and the ProgressStream it writes through.
+fn bote_http_progress_begin(hc) {
+    var ps = alloc_via(bote_req_alloc(), 32);
+    store64(ps, hc);
+    store64(ps + 8, 0);
+    store64(ps + 16, 0);
+    store64(ps + 24, bote_conn_tid());
+    bote_req_set_progress(&_he_progress_write, ps);
+    return ps;
+}
+
+# After it: 1 when the response went on the stream, `json` its last event, or nothing
+# when it is 0 or the client has gone, and the stream is ended; 0 when no progress went,
+# for the transport to answer as it does.
+fn bote_http_progress_end(ps, json) {
+    bote_req_set_progress(0, 0);
+    if (ps == 0 || load64(ps + 8) == 0) { return 0; }
+    var cfd = _he_cfd(load64(ps));
+    if (load64(ps + 16) == 0) {
+        if (json != 0 && _he_sse_send(bote_req_alloc(), cfd, json) < 0) { return 1; }
+        sandhi_server_send_chunked_end(cfd);
+    }
+    return 1;
+}
+
 # MCP 2026-07-28 on Streamable HTTP: closing the response stream is the cancellation, and
 # the server MUST treat a client's disconnect as one. The legacy path never asks: there a
 # disconnect is not a cancellation, and bote's HTTP transports end with the response.
-fn _he_cancelled(cfd, a, id) { return bote_conn_gone(cfd, 1); }
+fn _he_cancelled(ps, a, id) {
+    if (bote_conn_tid() != load64(ps + 24)) { return 0; }
+    return bote_conn_gone(_he_cfd(load64(ps)), 1);
+}
 
 # Answer a request bote_http_era admitted. Sessions play no part: this revision
 # has none, so `Mcp-Session-Id` and `Last-Event-ID` are ignored and none is minted.
@@ -446,18 +543,30 @@ fn bote_http_serve_modern(hc, req, dispatcher, claims) {
     # This connection can hold a `subscriptions/listen` stream open (3.7.2), and a client
     # that closes it has cancelled its request (3.7.5).
     bote_req_set_stream(1);
-    bote_req_set_cancel(&_he_cancelled, _he_cfd(hc));
+    # And its progress goes on this response (3.7.6), through the stream the check reads too.
+    var ps = bote_http_progress_begin(hc);
+    bote_req_set_cancel(&_he_cancelled, ps);
     bote_req_set_request_id(req_id(req));
+    bote_req_set_request_params(req_params(req));
     var resp = dispatcher_dispatch_a(a, dispatcher, req, claims);
     bote_req_set_stream(0);
     bote_req_set_cancel(0, 0);
+    bote_req_set_request_params(0);
     if (dbg == 1) { _cdc_log_request_a(a, req, resp, t0); }
     # Nothing more goes out for a cancelled request: its client has gone.
     if (bote_req_was_cancelled() == 1) {
+        bote_req_set_progress(0, 0);
         bote_req_set_request_id(0);
         return 0;
     }
     bote_req_set_request_id(0);
+    if (ps != 0 && load64(ps + 8) == 1) {
+        var sj = 0;
+        if (resp != 0) { sj = codec_serialize_response_a(a, resp); }
+        bote_http_progress_end(ps, sj);
+        return 0;
+    }
+    bote_req_set_progress(0, 0);
     if (resp == 0) { return bote_http_send_accepted(_he_cfd(hc), _he_extra(hc)); }
     # A listen the dispatcher accepted opens a stream, not a reply (3.7.2, src/listen.cyr).
     if (resp_error_obj(resp) == 0 && dispatcher_listen(dispatcher) != 0 && streq(req_method(req), "subscriptions/listen") == 1) {

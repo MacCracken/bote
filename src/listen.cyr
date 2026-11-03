@@ -46,15 +46,18 @@
 # after the first, +288 the bytes used there, +296 how many, each a decoded string and NUL,
 # (3.7.4) +304 the BOTE_LISTEN_* kinds it is owed: changes made while it was being opened,
 # (3.7.5) +312 1 when its listen was judged with claims, +320 the dispatcher that judged it.
-# In the room each URI is a flag byte, the URI and its NUL: the flag is 1 when what serves
-# the URI required a scope as it was kept, which the listen's claims held.
+# In the room each URI is a flag byte, (3.7.6) the scope list it was judged by, 8 bytes, the
+# URI and its NUL: the flag is 1 when what serves the URI required a scope as it was kept,
+# which the listen's claims held, and the list is that registration's.
 #
 # A resource that requires a scope (3.7.5): the dispatcher honors no URI the listen's claims
 # may not read, and a stream whose listen was made with claims is told of an update to a
-# URI that requires a scope only when it holds that URI exactly, kept with its flag: a
-# stream keeps no token, so a URI under one it holds, or a scope added since, it is not
-# told of. Less than happened, for a scope it may hold, and never more than its token may
-# read. A stream made with no claims compares nothing, as resources/read does.
+# URI that requires a scope only when it holds that URI exactly, kept with its flag, and
+# what serves it still requires the scopes it was judged by (3.7.6: through 3.7.5 a resource
+# registered again with a scope the token lacked went on being told). A stream keeps no
+# token, so a URI under one it holds, or a scope added or changed since, it is not told of.
+# Less than happened, for a scope it may hold, and never more than its token may read. A
+# stream made with no claims compares nothing, as resources/read does.
 #
 # A resource's update (3.7.4, dispatcher_resource_updated) comes from any thread with a URI,
 # and is queued: at most BOTE_LISTEN_QUEUE URIs, each one once, under a lock. The thread that
@@ -351,22 +354,33 @@ fn _bl_covers(sub, u) {
 }
 
 # 1 when one of slot `s`'s URIs covers `u`.
+# 1 when the room entry at `r` + `at` may be told of `u`, which requires the scopes `sc`, to
+# a stream made with claims: it is `u` exactly, flagged, and judged by those same scopes.
+fn _bl_entry_judged(r, at, u, sc) {
+    if (load8(r + at) != 1 || load64(r + at + 1) != sc) { return 0; }
+    return streq(r + at + 9, u);
+}
+
 # 1 when slot `s` is told of an update to `u`: a URI it holds covers it, and, made with
-# claims, a `u` that requires a scope is one it holds exactly, flagged (above).
+# claims, a `u` that requires a scope is one it holds exactly, judged by those scopes (above).
 fn _bl_slot_covers(s, u) {
     var r = load64(s + 280);
-    var scoped = 0 - 1;
+    var scoped = 0;
+    var sc = 0;
     var at = 0;
     var k = 0;
     while (k < load64(s + 296)) {
-        var e = r + at + 1;
+        var e = r + at + 9;
         if (_bl_covers(e, u) == 1) {
             if (load64(s + 312) == 0) { return 1; }
-            if (scoped < 0) { scoped = _dsp_uri_scoped(load64(s + 320), u); }
-            if (scoped == 0) { return 1; }
-            if (load8(r + at) == 1 && streq(e, u) == 1) { return 1; }
+            if (scoped == 0) {
+                sc = _dsp_uri_scopes(load64(s + 320), u);
+                scoped = 1;
+            }
+            if (sc == 0) { return 1; }
+            if (_bl_entry_judged(r, at, u, sc) == 1) { return 1; }
         }
-        at = at + strlen(e) + 2;
+        at = at + strlen(e) + 10;
         k = k + 1;
     }
     return 0;
@@ -394,7 +408,7 @@ fn _bl_keep_uris(a, s, ack, d) {
     store64(s + 320, d);
     var raw = jsonx_get_raw_a(a, jsonx_get_raw_a(a, ack, "notifications"), "resourceSubscriptions");
     if (raw == 0) { return 0; }
-    if (load64(s + 280) == 0) { store64(s + 280, alloc(BOTE_LISTEN_URI_ROOM + BOTE_LISTEN_URIS)); }
+    if (load64(s + 280) == 0) { store64(s + 280, alloc(BOTE_LISTEN_URI_ROOM + BOTE_LISTEN_URIS * 9)); }
     var room = load64(s + 280);
     var n = strlen(raw);
     var used = 0;
@@ -405,11 +419,14 @@ fn _bl_keep_uris(a, s, ack, d) {
         # Judged again as it is kept, with the claims the dispatcher judged it with, in one
         # look: what serves it may have changed since.
         if (u != 0 && dispatcher_resource_scopes_missing(d, u, claims) != 0) { u = 0; }
-        if (u != 0 && cnt < BOTE_LISTEN_URIS && used + strlen(u) + 2 <= BOTE_LISTEN_URI_ROOM + BOTE_LISTEN_URIS) {
+        if (u != 0 && cnt < BOTE_LISTEN_URIS && used + strlen(u) + 10 <= BOTE_LISTEN_URI_ROOM + BOTE_LISTEN_URIS * 9) {
+            var sc = 0;
+            if (claims != 0) { sc = _dsp_uri_scopes(d, u); }
             store8(room + used, 0);
-            if (claims != 0 && _dsp_uri_scoped(d, u) == 1) { store8(room + used, 1); }
-            memcpy(room + used + 1, u, strlen(u) + 1);
-            used = used + strlen(u) + 2;
+            if (sc != 0) { store8(room + used, 1); }
+            store64(room + used + 1, sc);
+            memcpy(room + used + 9, u, strlen(u) + 1);
+            used = used + strlen(u) + 10;
             cnt = cnt + 1;
         }
         i = _jx_array_next(raw, n, i);
@@ -448,12 +465,15 @@ fn _bl_each_update(x, a, s, nu, over, send_fp) {
         var at = 0;
         var k = 0;
         while (k < load64(s + 296)) {
-            var e = r + at + 1;
-            # Made with claims, a URI that requires a scope now, kept without one, is not told.
+            var e = r + at + 9;
+            # Made with claims, a URI that requires a scope now is told only as it was judged.
             var tell = 1;
-            if (load64(s + 312) == 1 && load8(r + at) == 0 && _dsp_uri_scoped(load64(s + 320), e) == 1) { tell = 0; }
+            if (load64(s + 312) == 1) {
+                var esc = _dsp_uri_scopes(load64(s + 320), e);
+                if (esc != 0 && _bl_entry_judged(r, at, e, esc) == 0) { tell = 0; }
+            }
             if (tell == 1 && _bl_send_one(x, a, s, e, send_fp) == 0) { return 0; }
-            at = at + strlen(e) + 2;
+            at = at + strlen(e) + 10;
             k = k + 1;
         }
         return 1;

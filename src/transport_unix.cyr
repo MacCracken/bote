@@ -53,9 +53,22 @@ var _unix_cbuf = 0;
 var _unix_cblen = 0;    # the slot holding how many bytes the buffer holds
 var _unix_from = 0;
 var _unix_seen = 0;
+var _unix_seen_id = 0;  # (3.7.6) as stdio's
+var _unix_tid = 0;
+
+# A request's progress (3.7.6): one line on the connection.
+fn _unix_progress(ctx, a, json) {
+    if (bote_conn_tid() != _unix_tid) { return 1; }
+    return _unix_reply(_unix_cfd, json);
+}
 
 fn _unix_cancelled(ctx, a, id) {
+    if (bote_conn_tid() != _unix_tid) { return 0; }
     if (bote_conn_gone(_unix_cfd, 0) == 1) { return 1; }
+    if (id != _unix_seen_id) {
+        _unix_seen = _unix_from;
+        _unix_seen_id = id;
+    }
     var blen = load64(_unix_cblen);
     var room = UNIX_BUF_SIZE - blen;
     if (room > 0 && bote_conn_readable(_unix_cfd) == 1) {
@@ -76,7 +89,9 @@ fn _unix_begin(from) {
     var a = bote_listen_line_begin(_unix_listen);
     _unix_from = from;
     _unix_seen = from;
+    _unix_seen_id = 0;
     bote_req_set_cancel(&_unix_cancelled, 0);
+    bote_req_set_progress(&_unix_progress, 0);
     return a;
 }
 
@@ -228,6 +243,7 @@ fn _unix_serve_client(cfd, dispatcher) {
     _unix_cfd = cfd;
     _unix_cbuf = buf;
     _unix_cblen = blen_slot;
+    _unix_tid = bote_conn_tid();
     var skipping = 0;
     var heard = clock_now_ms();
     while (1 == 1) {

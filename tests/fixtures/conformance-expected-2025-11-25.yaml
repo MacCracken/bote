@@ -13,7 +13,5 @@ server:
   - resources-subscribe
   - resources-unsubscribe
   - tools-call-with-logging
-  # Progress needs a stream on the response. Roadmap 3.7.x.
-  - tools-call-with-progress
   # Not scored. inputSchema cannot carry root keywords. Roadmap 3.8.x.
   - json-schema-2020-12

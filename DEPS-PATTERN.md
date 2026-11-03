@@ -243,6 +243,13 @@ with nothing. Both are in the core bundle. A transport whose messages are lines 
 socket can tell a client gone with `bote_conn_gone` (full bundle). Without a check nothing
 is ever cancelled, and every request is answered as before.
 
+Progress (3.7.6) is the same the other way: the consumer sets the writer its connection
+sends a notification through, `bote_req_set_progress(fp, ctx)`, `fp(ctx, a, json)` returning
+0 when it sent, below 0 when it failed and 1 when it has no stream for it, and a handler
+reports with `bote_progress(progress, total, message)`. Both are in the core bundle; the
+codec names the request's params, where its `progressToken` is. Without a writer a report
+is answered with 0 and nothing goes.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`

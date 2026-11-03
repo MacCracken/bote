@@ -1,0 +1,701 @@
+# bote_progress.tcyr — progress on a request's own stream (3.7.6): bote_progress and the
+# writer a transport sets, the token the request carried, the rule that progress increases,
+# nothing for a request cancelled or with no token, then the real loops: stdio, a Unix
+# connection and a WebSocket, a line or a frame each; the three HTTP handlers, whose
+# response turns into an SSE stream at the first notification and ends with the response,
+# on both eras, and stays JSON for a client that takes none; a client that leaves while
+# progress goes out; two workers apart; and the heap.
+#
+# Run: cyrius test tests/bote_progress.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+fn h_ok(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+
+# A handler that reports `_rp_n` times, 0, 10, 20 and on, out of 100, and keeps what each
+# report returned; `_rp_wait` ms between them.
+var _rp_n = 3;
+var _rp_wait = 0;
+var _rp_ret[8];
+fn h_report(args, claims) {
+    var i = 0;
+    while (i < _rp_n) {
+        var r = bote_progress(i * 10, 100, "step");
+        if (i < 8) { store64(&_rp_ret + i * 8, r); }
+        if (_rp_wait > 0) { sleep_ms(_rp_wait); }
+        i = i + 1;
+    }
+    return "{\"content\":[{\"type\":\"text\",\"text\":\"reported\"}]}";
+}
+
+# A handler that reports once, waits for its request to be cancelled, then reports again.
+var _rc_running = 0;
+var _rc_saw = 0;
+var _rc_after = 9;
+fn h_report_cancel(args, claims) {
+    bote_progress(1, 0 - 1, 0);
+    atomic_store(&_rc_running, 1);
+    var until = clock_now_ms() + 3000;
+    while (clock_now_ms() < until) {
+        if (bote_cancelled() == 1) {
+            atomic_store(&_rc_saw, 1);
+            _rc_after = bote_progress(2, 0 - 1, 0);
+            return "{\"content\":[]}";
+        }
+        sleep_ms(2);
+    }
+    return "{\"content\":[]}";
+}
+
+# A handler whose helper thread reports (3.7.6): the helper is answered with nothing, and
+# its own report goes.
+var _hp_helper = 9;
+var _hp_self = 9;
+fn _helper_reports(i) {
+    _hp_helper = bote_progress(1, 0 - 1, 0);
+    return 0;
+}
+fn h_helper(args, claims) {
+    thread_join(thread_create(&_helper_reports, 0));
+    _hp_self = bote_progress(2, 0 - 1, 0);
+    return "{\"content\":[{\"type\":\"text\",\"text\":\"helped\"}]}";
+}
+
+fn _tool(name) { return tool_def_new(name, "T", schema_new("object", 0, vec_new())); }
+
+fn _mk_d() {
+    var reg = tool_registry_new();
+    registry_register(reg, _tool("t_report"));
+    registry_register(reg, _tool("t_echo"));
+    registry_register(reg, _tool("t_cancel"));
+    registry_register(reg, _tool("t_helper"));
+    var d = dispatcher_new(reg);
+    dispatcher_handle(d, "t_report", &h_report);
+    dispatcher_handle(d, "t_echo", &h_ok);
+    dispatcher_handle(d, "t_cancel", &h_report_cancel);
+    dispatcher_handle(d, "t_helper", &h_helper);
+    return d;
+}
+
+fn _has(hay, needle) { return strstr(hay, needle) >= 0; }
+
+fn _cat3(a, b, c) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    str_builder_add_cstr(sb, c);
+    return str_data(str_builder_build(sb));
+}
+
+fn _count(hay, needle) {
+    var n = 0;
+    var at = strstr(hay, needle);
+    while (at >= 0) {
+        n = n + 1;
+        hay = hay + at + strlen(needle);
+        at = strstr(hay, needle);
+    }
+    return n;
+}
+
+var _META = "\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}";
+
+# A modern tools/call of `tool` with the raw id `id` and the raw progressToken `tok`, or none
+# when it is 0; and a legacy one.
+fn _call(id, tool, tok) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":");
+    str_builder_add_cstr(sb, id);
+    str_builder_add_cstr(sb, ",\"method\":\"tools/call\",\"params\":{\"name\":\"");
+    str_builder_add_cstr(sb, tool);
+    str_builder_add_cstr(sb, "\",\"arguments\":{},");
+    str_builder_add_cstr(sb, _META);
+    if (tok != 0) {
+        str_builder_add_cstr(sb, ",\"progressToken\":");
+        str_builder_add_cstr(sb, tok);
+    }
+    str_builder_add_cstr(sb, "}}}");
+    return str_data(str_builder_build(sb));
+}
+fn _lcall(id, tool, tok) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":");
+    str_builder_add_cstr(sb, id);
+    str_builder_add_cstr(sb, ",\"method\":\"tools/call\",\"params\":{\"name\":\"");
+    str_builder_add_cstr(sb, tool);
+    str_builder_add_cstr(sb, "\",\"arguments\":{}");
+    if (tok != 0) {
+        str_builder_add_cstr(sb, ",\"_meta\":{\"progressToken\":");
+        str_builder_add_cstr(sb, tok);
+        str_builder_add_cstr(sb, "}");
+    }
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}
+
+# The notification `progress` (of 100, with the message "step") for the raw token `tok`.
+fn _note(tok, progress) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":");
+    str_builder_add_cstr(sb, tok);
+    str_builder_add_cstr(sb, ",\"progress\":");
+    str_builder_add_int(sb, progress);
+    str_builder_add_cstr(sb, ",\"total\":100,\"message\":\"step\"}}");
+    return str_data(str_builder_build(sb));
+}
+
+# ---- a writer that keeps what it is given ------------------------------------------
+
+var _cap = 0;
+var _cap_len = 0;
+var _cap_n = 0;
+var _cap_fail = 0;
+fn _cap_write(ctx, a, json) {
+    if (_cap_fail == 1) { return 0 - 1; }
+    var n = strlen(json);
+    if (_cap_len + n + 2 < 262144) {
+        memcpy(_cap + _cap_len, json, n);
+        store8(_cap + _cap_len + n, 10);
+        _cap_len = _cap_len + n + 1;
+        store8(_cap + _cap_len, 0);
+    }
+    _cap_n = _cap_n + 1;
+    return 0;
+}
+fn _cap_reset() {
+    _cap_len = 0;
+    _cap_n = 0;
+    store8(_cap, 0);
+    return 0;
+}
+fn _drop_write(ctx, a, json) { return 0; }
+fn _none_write(ctx, a, json) { return 1; }
+
+# What the codec answers `body` with, the writer set: the reply, or "" for none.
+fn _run(d, body) {
+    var a = bote_req_begin();
+    bote_req_set_progress(&_cap_write, 0);
+    var r = codec_process_message_a(a, body, d, 0);
+    if (r == 0) { return ""; }
+    var out = alloc(strlen(r) + 1);
+    memcpy(out, r, strlen(r) + 1);
+    return out;
+}
+
+# ---- reading what a loop writes ----------------------------------------------------
+
+fn _rd_new(fd) {
+    var r = alloc(32);
+    store64(r, fd);
+    store64(r + 8, alloc(65537));
+    store64(r + 16, 0);
+    store64(r + 24, 0);
+    return r;
+}
+fn _rd_buf(r) { return load64(r + 8); }
+
+# How many times `needle` occurs in the `n` bytes at `hay`, NULs and all: a WebSocket
+# frame's length can hold a 0 byte.
+fn _bcount(hay, n, needle) {
+    var k = strlen(needle);
+    var c = 0;
+    var i = 0;
+    while (i + k <= n) {
+        if (memeq(hay + i, needle, k) == 1) {
+            c = c + 1;
+            i = i + k;
+        } else {
+            i = i + 1;
+        }
+    }
+    return c;
+}
+fn _rd_count(r, needle) { return _bcount(load64(r + 8), load64(r + 16), needle); }
+
+fn _rd_await(r, needle, ms) {
+    var until = clock_now_ms() + ms;
+    var pfd[8];
+    var ts[16];
+    while (1 == 1) {
+        var buf = load64(r + 8);
+        var got = load64(r + 16);
+        store8(buf + got, 0);
+        if (_bcount(buf, got, needle) > 0) { return 1; }
+        if (load64(r + 24) == 1) { return 0; }
+        var left = until - clock_now_ms();
+        if (left <= 0) { return 0; }
+        store32(&pfd, load64(r));
+        store16(&pfd + 4, 1);
+        store16(&pfd + 6, 0);
+        store64(&ts, left / 1000);
+        store64(&ts + 8, (left % 1000) * 1000000);
+        if (sys_ppoll(&pfd, 1, &ts, 0, 8) > 0) {
+            var k = sys_read(load64(r), buf + got, 65536 - got);
+            if (k <= 0) { store64(r + 24, 1); }
+            else { store64(r + 16, got + k); }
+        }
+    }
+    return 0;
+}
+fn _rd_eof(r, ms) {
+    _rd_await(r, "\x01\x02", ms);
+    return load64(r + 24);
+}
+fn _send_line(fd, s) {
+    sys_write(fd, s, strlen(s));
+    sys_write(fd, "\n", 1);
+    return 0;
+}
+
+#ifndef CYRIUS_TARGET_AGNOS
+var _st_d = 0;
+var _st_in = 0;
+var _st_out = 0;
+fn _stdio_thread(i) { return _stdio_serve(_st_d, _st_in, _st_out); }
+
+var _ux_d = 0;
+var _ux_fd = 0;
+fn _unix_thread(i) { return _unix_handle_client(_ux_fd, _ux_d); }
+
+var _ws_cfg = 0;
+var _ws_fd = 0;
+var _ws_req = 0;
+fn _ws_thread(i) { return _bote_ws_handler(_ws_cfg, _ws_fd, _ws_req, strlen(_ws_req)); }
+fn _ws_send(fd, payload) {
+    var n = strlen(payload);
+    var f = alloc(n + 16);
+    store8(f, 0x81);
+    var at = 2;
+    if (n < 126) { store8(f + 1, 0x80 | n); }
+    else {
+        store8(f + 1, 0x80 | 126);
+        store8(f + 2, (n >> 8) & 255);
+        store8(f + 3, n & 255);
+        at = 4;
+    }
+    store8(f + at, 0x11); store8(f + at + 1, 0x22); store8(f + at + 2, 0x33); store8(f + at + 3, 0x44);
+    var i = 0;
+    while (i < n) {
+        store8(f + at + 4 + i, load8(payload + i) ^ load8(f + at + (i & 3)));
+        i = i + 1;
+    }
+    sock_send_all(fd, f, at + 4 + n);
+    return 0;
+}
+
+# An HTTP handler (0 http, 1 streamable, 2 bridge) given `raw`, on a socketpair: what the
+# client read, the server's end closed after, as sandhi does.
+var _http_cfg = 0;
+var _strm_cfg = 0;
+var _brg_cfg = 0;
+var _hbuf = 0;
+fn _http_run(kind, raw) {
+    var n = strlen(raw);
+    memcpy(_hbuf, raw, n);
+    store8(_hbuf + n, 0);
+    var sp[16];
+    sys_socketpair(1, 1, 0, &sp);
+    var sa = load32(&sp);
+    var cl = load32(&sp + 4);
+    if (kind == 0) { _http_handle(_http_cfg, sa, _hbuf, n); }
+    elif (kind == 1) { _strm_handle(_strm_cfg, sa, _hbuf, n); }
+    else { _bridge_handle(_brg_cfg, sa, _hbuf, n); }
+    sys_close(sa);
+    var r = _rd_new(cl);
+    _rd_eof(r, 3000);
+    sys_close(cl);
+    return _rd_buf(r);
+}
+
+var _SSE = "Accept: application/json, text/event-stream\r\n";
+var _JSON = "Accept: application/json\r\n";
+fn _raw(kind, hdrs, body) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "POST ");
+    if (kind == 2) { str_builder_add_cstr(sb, "/"); }
+    else { str_builder_add_cstr(sb, "/mcp"); }
+    str_builder_add_cstr(sb, " HTTP/1.1\r\nHost: x\r\n");
+    if (kind == 2) { str_builder_add_cstr(sb, "Origin: http://localhost\r\n"); }
+    str_builder_add_cstr(sb, hdrs);
+    str_builder_add_cstr(sb, "Content-Length: ");
+    str_builder_add_int(sb, strlen(body));
+    str_builder_add_cstr(sb, "\r\n\r\n");
+    str_builder_add_cstr(sb, body);
+    return str_data(str_builder_build(sb));
+}
+var _MH = "MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: t_report\r\n";
+
+# The client's end of a cancel test: a modern call of t_cancel, on a thread.
+var _hc_kind = 0;
+var _hc_fd = 0;
+var _hc_raw = 0;
+fn _hc_thread(i) {
+    var n = strlen(_hc_raw);
+    memcpy(_hbuf, _hc_raw, n);
+    store8(_hbuf + n, 0);
+    if (_hc_kind == 0) { _http_handle(_http_cfg, _hc_fd, _hbuf, n); }
+    else { _strm_handle(_strm_cfg, _hc_fd, _hbuf, n); }
+    sys_close(_hc_fd);
+    return 0;
+}
+
+# Two streamable workers at once, each with its own token.
+var _tw_fd[2];
+var _tw_raw[2];
+var _tw_buf[2];
+fn _tw_thread(i) {
+    var raw = load64(&_tw_raw + i * 8);
+    var buf = load64(&_tw_buf + i * 8);
+    var n = strlen(raw);
+    memcpy(buf, raw, n);
+    store8(buf + n, 0);
+    _strm_handle(_strm_cfg, load64(&_tw_fd + i * 8), buf, n);
+    sys_close(load64(&_tw_fd + i * 8));
+    return 0;
+}
+#endif
+
+fn main() {
+    alloc_init();
+    _cap = alloc(262144);
+    var d = _mk_d();
+
+    # ---------------- bote_progress and the writer ----------------
+    bote_req_begin();
+    assert_eq(bote_progress(0, 100, 0), 0, "core: with no writer, nothing to send");
+    bote_req_set_progress(&_cap_write, 0);
+    _cap_reset();
+    assert_eq(bote_progress(0, 100, 0), 0, "core: with no request served, nothing");
+    bote_req_set_request_params("{\"name\":\"t\"}");
+    assert_eq(bote_progress(0, 100, 0), 0, "core: a request with no _meta asked for none");
+    bote_req_set_request_params("{\"_meta\":{\"other\":1}}");
+    assert_eq(bote_progress(0, 100, 0), 0, "core: ...nor one with no progressToken");
+    bote_req_set_request_params("{\"_meta\":[1]}");
+    assert_eq(bote_progress(0, 100, 0), 0, "core: ...nor one whose _meta is no object");
+    bote_req_set_request_params("{\"_meta\":{\"progressToken\":true}}");
+    assert_eq(bote_progress(0, 100, 0), 0, "core: ...nor a token that is no string or number");
+    bote_req_set_request_params("{\"_meta\":{\"progressToken\":null}}");
+    assert_eq(bote_progress(0, 100, 0), 0, "core: ...nor a null one");
+    assert_eq(_cap_n, 0, "core: and none went");
+    bote_req_set_request_params("{\"_meta\":{\"progressToken\":\"t1\"}}");
+    assert_eq(bote_progress(0, 100, 0), 1, "core: a token, and it goes");
+    assert_streq(_cap, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":\"t1\",\"progress\":0,\"total\":100}}\n", "core: ...stamped with the token, the progress and the total");
+    _cap_reset();
+    assert_eq(bote_progress(50, 0 - 1, "half \"way\"\n"), 1, "core: no total known, and a message");
+    assert_streq(_cap, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":\"t1\",\"progress\":50,\"message\":\"half \\\"way\\\"\\n\"}}\n", "core: ...no total, the message escaped");
+    _cap_reset();
+    assert_eq(bote_progress(50, 100, 0), 0 - 1, "core: the same progress again is refused: it MUST increase");
+    assert_eq(bote_progress(40, 100, 0), 0 - 1, "core: ...and less");
+    assert_eq(_cap_n, 0, "core: ...and nothing goes");
+    assert_eq(bote_req_progress_sent(), 2, "core: two sent");
+    _cap_fail = 1;
+    assert_eq(bote_progress(60, 100, 0), 0 - 1, "core: a connection that will not take it");
+    _cap_fail = 0;
+    assert_eq(bote_req_progress_sent(), 2, "core: ...is not counted sent");
+    assert_eq(bote_progress(60, 100, 0), 1, "core: ...and the same progress goes next time");
+    _cap_reset();
+    # A writer with no stream for it: nothing went, and nothing is counted.
+    bote_req_set_progress(&_none_write, 0);
+    assert_eq(bote_progress(70, 100, 0), 0, "core: a connection with no stream for it, nothing went");
+    assert_eq(bote_req_progress_sent(), 3, "core: ...and nothing counted");
+    bote_req_set_progress(&_cap_write, 0);
+    bote_req_set_request_params("{\"_meta\":{\"progressToken\":-7}}");
+    assert_eq(bote_progress(0, 0 - 1, 0), 1, "core: a number token");
+    assert(_has(_cap, "\"progressToken\":-7,\"progress\":0}"), "core: ...as sent");
+    _cap_reset();
+    bote_req_set_request_params("{\"_meta\":{\"progressToken\":\"a\\/b\"}}");
+    assert_eq(bote_progress(0, 0 - 1, 0), 1, "core: an escaped token");
+    assert(_has(_cap, "\"progressToken\":\"a\\/b\",") && jsonx_valid(_cap, _cap_len - 1) == 1, "core: ...as sent, valid JSON");
+    _cap_reset();
+    # A request already cancelled hears nothing more.
+    bote_req_set_request_params("{\"_meta\":{\"progressToken\":\"tc\"}}");
+    store64(bote_req_state() + BOTE_REQ_STATE_CANCEL + 24, 1);
+    assert_eq(bote_progress(0, 100, 0), 0, "core: a cancelled request sends no progress");
+    assert_eq(_cap_n, 0, "core: ...none at all");
+    store64(bote_req_state() + BOTE_REQ_STATE_CANCEL + 24, 0);
+    bote_req_begin();
+    bote_req_set_request_params("{\"_meta\":{\"progressToken\":\"tb\"}}");
+    assert_eq(bote_progress(0, 100, 0), 0, "core: a message begun clears the writer");
+    assert_eq(_cap_n, 0, "core: ...and nothing went");
+    # Each report's bytes go once it is sent.
+    bote_req_set_progress(&_drop_write, 0);
+    bote_req_set_request_params("{\"_meta\":{\"progressToken\":\"tm\"}}");
+    var longm = alloc(1100);
+    memset(longm, 34, 1024);
+    store8(longm + 1024, 0);
+    var m1[16];
+    var m2[16];
+    bote_req_mark(&m1);
+    var pi = 0;
+    while (pi < 1000) {
+        bote_progress(pi, 1000, longm);
+        pi = pi + 1;
+    }
+    bote_req_mark(&m2);
+    assert(load64(&m1) == load64(&m2) && load64(&m1 + 8) == load64(&m2 + 8), "core: a thousand reports of a kilobyte of quotes leave the arena where it was");
+    assert_eq(bote_req_progress_sent(), 1000, "core: ...each one sent");
+    bote_req_begin();
+
+    # ---------------- the codec ----------------
+    _cap_reset();
+    _rp_n = 3;
+    var cr = _run(d, _call("1", "t_report", "\"tok-1\""));
+    assert(_has(cr, "\"id\":1,\"result\""), "codec: the call answered");
+    assert_eq(_cap_n, 3, "codec: its three reports sent");
+    assert(_has(_cap, _note("\"tok-1\"", 0)) && _has(_cap, _note("\"tok-1\"", 20)), "codec: ...stamped with its token");
+    assert(load64(&_rp_ret) == 1 && load64(&_rp_ret + 16) == 1, "codec: ...each report said it went");
+    assert_eq(bote_progress(99, 100, 0), 0, "codec: once answered, nothing more for it");
+    _cap_reset();
+    _run(d, _call("2", "t_report", 0));
+    assert(_cap_n == 0 && load64(&_rp_ret) == 0, "codec: a call with no token reports nothing");
+    _cap_reset();
+    _run(d, _lcall("3", "t_report", "4"));
+    assert_eq(_cap_n, 3, "codec: legacy too");
+    _cap_reset();
+    var cb = _run(d, _cat3("[", _lcall("5", "t_report", "\"a\""), _cat3(",", _lcall("6", "t_report", "\"b\""), "]")));
+    assert(_has(cb, "\"id\":5") && _has(cb, "\"id\":6"), "codec: a batch answered");
+    assert(_count(_cap, "\"progressToken\":\"a\"") == 3 && _count(_cap, "\"progressToken\":\"b\"") == 3, "codec: ...each element with its own token, from 0 again");
+
+    #ifndef CYRIUS_TARGET_AGNOS
+    # ---------------- stdio ----------------
+    var ip[8];
+    var op[8];
+    sys_pipe(&ip);
+    sys_pipe(&op);
+    _st_d = d;
+    _st_in = load32(&ip);
+    _st_out = load32(&op + 4);
+    var sw = load32(&ip + 4);
+    var so = _rd_new(load32(&op));
+    var st = thread_create(&_stdio_thread, 0);
+    _rp_n = 3;
+    _send_line(sw, _call("1", "t_report", "\"s1\""));
+    assert_eq(_rd_await(so, "\"id\":1,\"result\"", 3000), 1, "stdio: answered");
+    var sb1 = _rd_buf(so);
+    assert_eq(_count(sb1, "notifications/progress"), 3, "stdio: its three reports, a line each");
+    assert(strstr(sb1, _note("\"s1\"", 20)) < strstr(sb1, "\"id\":1,\"result\""), "stdio: ...before the answer");
+    _send_line(sw, _call("2", "t_report", 0));
+    assert_eq(_rd_await(so, "\"id\":2,\"result\"", 3000), 1, "stdio: a call with no token");
+    assert_eq(_count(_rd_buf(so), "notifications/progress"), 3, "stdio: ...reports nothing");
+    _hp_helper = 9;
+    _hp_self = 9;
+    _send_line(sw, _call("3", "t_helper", "\"sh\""));
+    assert_eq(_rd_await(so, "\"id\":3,\"result\"", 3000), 1, "stdio: a handler with a helper, answered");
+    assert(_hp_helper == 0 && _hp_self == 1, "stdio: its helper thread's report is answered with nothing, its own goes");
+    assert(_count(_rd_buf(so), "\"progressToken\":\"sh\"") == 1 && _has(_rd_buf(so), "\"progress\":1,") == 0, "stdio: ...one report on the wire, the handler's");
+    sys_close(sw);
+    thread_join(st);
+    sys_close(_st_out);
+
+    # ---------------- a Unix socket ----------------
+    var up[16];
+    sys_socketpair(1, 1, 0, &up);
+    _ux_d = d;
+    _ux_fd = load32(&up);
+    var uc = load32(&up + 4);
+    var ur = _rd_new(uc);
+    var ut = thread_create(&_unix_thread, 0);
+    _send_line(uc, _call("1", "t_report", "\"u1\""));
+    assert_eq(_rd_await(ur, "\"id\":1,\"result\"", 3000), 1, "unix: answered");
+    assert_eq(_count(_rd_buf(ur), _cat3("\"progressToken\":\"u1\"", "", "")), 3, "unix: its three reports, a line each");
+    sys_close(uc);
+    thread_join(ut);
+    sys_close(_ux_fd);
+
+    # ---------------- a WebSocket ----------------
+    _ws_cfg = ws_config_new("/mcp", 0, 0);
+    store64(_ws_cfg + 40, d);
+    _ws_req = "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    var wp[16];
+    sys_socketpair(1, 1, 0, &wp);
+    _ws_fd = load32(&wp);
+    var wcl = load32(&wp + 4);
+    var wr = _rd_new(wcl);
+    var wt = thread_create(&_ws_thread, 0);
+    assert_eq(_rd_await(wr, "\r\n\r\n", 2000), 1, "ws: upgraded");
+    _ws_send(wcl, _call("1", "t_report", "\"w1\""));
+    assert_eq(_rd_await(wr, "\"id\":1,\"result\"", 3000), 1, "ws: answered");
+    assert_eq(_rd_count(wr, "\"progressToken\":\"w1\""), 3, "ws: its three reports, a frame each");
+    _hp_helper = 9;
+    _ws_send(wcl, _call("2", "t_helper", "\"wh\""));
+    assert_eq(_rd_await(wr, "\"id\":2,\"result\"", 3000), 1, "ws: a handler with a helper, answered");
+    assert(_hp_helper == 0 && _rd_count(wr, "\"progressToken\":\"wh\"") == 1, "ws: ...its helper's report answered with nothing");
+    sys_close(wcl);
+    thread_join(wt);
+    sys_close(_ws_fd);
+
+    # ---------------- HTTP ----------------
+    _hbuf = alloc(65536);
+    _http_cfg = http_config_new("/mcp", 0, 0);
+    store64(_http_cfg + 48, d);
+    _strm_cfg = streamable_config_new("/mcp", 0, 0);
+    store64(_strm_cfg + 56, d);
+    _strm_init();
+    var origins = vec_new();
+    vec_push(origins, "http://localhost");
+    _brg_cfg = bridge_config_new("127.0.0.1", 0);
+    bridge_config_with_dispatcher(_brg_cfg, d);
+    bridge_config_with_origins(_brg_cfg, origins);
+    var kind = 0;
+    while (kind < 3) {
+        var kn = "http: ";
+        if (kind == 1) { kn = "streamable: "; }
+        if (kind == 2) { kn = "bridge: "; }
+        _rp_n = 3;
+        var hs = _http_run(kind, _raw(kind, _cat3(_SSE, _MH, ""), _call("1", "t_report", "\"h1\"")));
+        assert(_has(hs, "HTTP/1.1 200") && _has(hs, "Content-Type: text/event-stream"), _cat3(kn, "a call with a token, reporting, is answered with an event stream", ""));
+        assert(_has(hs, "X-Accel-Buffering: no") && _has(hs, "Transfer-Encoding: chunked"), _cat3(kn, "...unbuffered, chunked", ""));
+        assert_eq(_count(hs, "HTTP/1.1 "), 1, _cat3(kn, "...one head for all of it", ""));
+        assert_eq(_count(hs, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\""), 3, _cat3(kn, "...its three reports as events", ""));
+        assert(strstr(hs, _note("\"h1\"", 20)) < strstr(hs, "\"id\":1,\"result\""), _cat3(kn, "...and then the response", ""));
+        assert(_has(hs, "\"id\":1,\"result\"") && _has(hs, "\r\n0\r\n\r\n"), _cat3(kn, "...which ends the stream", ""));
+        if (kind == 2) { assert(_has(hs, "Access-Control-Allow-Origin: http://localhost"), "bridge: ...with its CORS headers"); }
+        var hj = _http_run(kind, _raw(kind, _cat3(_JSON, _MH, ""), _call("2", "t_report", "\"h2\"")));
+        assert(_has(hj, "Content-Type: application/json") && _has(hj, "notifications/progress") == 0, _cat3(kn, "a client that takes no event stream hears no progress, and its answer", ""));
+        var hn = _http_run(kind, _raw(kind, _cat3(_SSE, _MH, ""), _call("3", "t_report", 0)));
+        assert(_has(hn, "Content-Type: application/json") && _has(hn, "\"id\":3,\"result\""), _cat3(kn, "a call with no token is answered as before", ""));
+        var hl = _http_run(kind, _raw(kind, _SSE, _lcall("4", "t_report", "\"h4\"")));
+        if (kind < 2) {
+            assert(_has(hl, "Content-Type: text/event-stream") && _count(hl, "\"progressToken\":\"h4\"") == 3 && _has(hl, "\"id\":4,\"result\""), _cat3(kn, "the legacy era too", ""));
+        } else {
+            assert(_has(hl, "Content-Type: application/json") && _has(hl, "notifications/progress") == 0, "bridge: its legacy contract stays one JSON reply");
+        }
+        kind = kind + 1;
+    }
+    # On a one-loop server a helper thread reaches the same request state: it is answered with
+    # nothing, and its report does not go out on the response (3.7.6).
+    _hp_helper = 9;
+    var hhm = "MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: t_helper\r\n";
+    var hh = _http_run(0, _raw(0, _cat3(_SSE, hhm, ""), _call("8", "t_helper", "\"hh\"")));
+    assert(_hp_helper == 0 && _count(hh, "\"progressToken\":\"hh\"") == 1 && _has(hh, "\"progress\":1,") == 0, "http: a helper thread's report is answered with nothing, the handler's goes");
+    # A client that leaves while progress goes out: cancelled, and sent nothing more.
+    kind = 0;
+    while (kind < 2) {
+        var cp[16];
+        sys_socketpair(1, 1, 0, &cp);
+        _hc_fd = load32(&cp);
+        var ccl = load32(&cp + 4);
+        _hc_kind = kind;
+        var crw = _call("7", "t_cancel", "\"hc\"");
+        var cmh = "MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: t_cancel\r\n";
+        _hc_raw = _raw(kind, _cat3(_SSE, cmh, ""), crw);
+        atomic_store(&_rc_running, 0);
+        atomic_store(&_rc_saw, 0);
+        _rc_after = 9;
+        var ct = thread_create(&_hc_thread, 0);
+        var crr = _rd_new(ccl);
+        assert_eq(_rd_await(crr, "\"progress\":1", 3000), 1, "cancel: the first report reached the client");
+        sock_shutdown(ccl, 1);
+        thread_join(ct);
+        _rd_eof(crr, 2000);
+        assert(atomic_load(&_rc_saw) == 1 && _rc_after == 0, "cancel: the client left, the handler saw it, and its next report went nowhere");
+        assert(_has(_rd_buf(crr), "\"progress\":2") == 0 && _has(_rd_buf(crr), "\"id\":7") == 0, "cancel: ...nothing more on the stream, no answer");
+        sys_close(ccl);
+        kind = kind + 1;
+    }
+    # The heap: a reporting call keeps no more than a quiet one, the bodies built first.
+    _rp_n = 3;
+    var hbody = _call("1", "t_report", "\"hp\"");
+    var qbody = _call("1", "t_report", 0);
+    _run(d, hbody);
+    _run(d, qbody);
+    var h1 = alloc_used();
+    var hi = 0;
+    while (hi < 10) {
+        _run(d, hbody);
+        hi = hi + 1;
+    }
+    var hrep = alloc_used() - h1;
+    var h2 = alloc_used();
+    hi = 0;
+    while (hi < 10) {
+        _run(d, qbody);
+        hi = hi + 1;
+    }
+    assert_eq(hrep, alloc_used() - h2, "heap: three reports a call keep nothing");
+
+    # ---------------- two workers ----------------
+    bote_conn_arm();
+    var tw0[16];
+    var tw1[16];
+    sys_socketpair(1, 1, 0, &tw0);
+    sys_socketpair(1, 1, 0, &tw1);
+    store64(&_tw_fd, load32(&tw0));
+    store64(&_tw_fd + 8, load32(&tw1));
+    store64(&_tw_raw, _raw(1, _cat3(_SSE, _MH, ""), _call("1", "t_report", "\"wa\"")));
+    store64(&_tw_raw + 8, _raw(1, _cat3(_SSE, _MH, ""), _call("2", "t_report", "\"wb\"")));
+    store64(&_tw_buf, alloc(65536));
+    store64(&_tw_buf + 8, alloc(65536));
+    _rp_n = 5;
+    _rp_wait = 10;
+    var ta = thread_create(&_tw_thread, 0);
+    var tb = thread_create(&_tw_thread, 1);
+    var ra = _rd_new(load32(&tw0 + 4));
+    var rb = _rd_new(load32(&tw1 + 4));
+    _rd_eof(ra, 5000);
+    _rd_eof(rb, 5000);
+    thread_join(ta);
+    thread_join(tb);
+    _rp_wait = 0;
+    assert(_count(_rd_buf(ra), "\"progressToken\":\"wa\"") == 5 && _has(_rd_buf(ra), "\"wb\"") == 0, "workers: each stream its own reports");
+    assert(_count(_rd_buf(rb), "\"progressToken\":\"wb\"") == 5 && _has(_rd_buf(rb), "\"wa\"") == 0, "workers: ...both of them");
+    #endif
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit_group(rc);

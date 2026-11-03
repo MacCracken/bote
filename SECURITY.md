@@ -74,6 +74,14 @@ The primary security-relevant surface areas are:
   check gives back what it allocated. A handler stops only if it asks (`bote_cancelled()`),
   and nothing more goes out for a request once one has: a client that cancels gets less, never
   more. The legacy HTTP path never asks, since 2025-11-25 says a disconnect is no cancellation.
+  Since **3.7.6** the check, and the writer progress goes through, answer nothing to a thread other
+  than the one serving the request: on a one-loop server a handler's helper thread reaches the same
+  request state, and through 3.7.5 its ask read the connection beside the loop.
+- **Progress** — since **3.7.6** a handler's reports go only on the request's own stream, for a
+  request that asked with a `progressToken`, and only while it runs: never on a listen stream, never
+  for a request cancelled or answered, never with a `progress` that does not increase. A report is
+  built on the request arena and gone once sent. On HTTP the response turns into an event stream only
+  for a client whose `Accept` takes one.
 - **Browsers** — since **3.4.15** every HTTP-family transport refuses a present
   `Origin` that is not on `BOTE_ALLOWED_ORIGINS` with 403, before anything else
   runs, and with no list set every present `Origin` is refused, except since **3.5.2**

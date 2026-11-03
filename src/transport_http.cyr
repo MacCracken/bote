@@ -177,7 +177,10 @@ fn _http_handle(config, cfd, buf, n) {
     var rpc_method = "";
     if (st != 0) { rpc_method = _http_peek_method(body); }
     if (_http_check_session(cfd, buf, n, config, rpc_method) != 0) { return 0; }
+    # A request's progress goes on the response to its POST (3.7.6, src/http_era.cyr).
+    var ps = bote_http_progress_begin(&hc);
     var resp = codec_process_message_a(bote_req_alloc(), body, http_config_dispatcher(config), load64(&claims_slot));
+    if (bote_http_progress_end(ps, resp) == 1) { return 0; }
 
     # A session exists once `initialize` has succeeded. Minted before dispatch,
     # a request the codec refused still got one.

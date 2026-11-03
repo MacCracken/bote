@@ -258,9 +258,41 @@ fn h_crawl(args, claims) {
 ```
 
 Once `bote_cancelled()` has said 1, nothing more goes out for the request, its response included, and a `tools/call`
-is audited as cancelled. Each call asks the connection once: a poll on HTTP and a Unix socket, and on stdio and a Unix
+is audited as cancelled. Ask from the handler's own thread: a thread it starts is answered with 0. Each call asks the connection once: a poll on HTTP and a Unix socket, and on stdio and a Unix
 socket a look at what has arrived. A handler that never asks is answered as before. `web_fetch` and `web_search` ask
 every 100 ms while they wait.
+
+### Progress
+
+A request that carries `_meta.progressToken` hears how it is going. A handler reports with
+`bote_progress(progress, total, message)`, `total` -1 when none is known and `message` 0 for none:
+
+```cyrius
+fn h_index(args, claims) {
+    var i = 0;
+    while (i < 100) {
+        # ... index one file ...
+        bote_progress(i + 1, 100, "indexing");
+        i = i + 1;
+    }
+    return content_text_response("indexed");
+}
+```
+
+It goes as `notifications/progress`, stamped with the request's token, on the request's own stream:
+
+- **HTTP:** the response to its POST becomes an SSE stream at the first report, the reports and then the response,
+  which ends it. This is on `http`, `streamable` and `bridge` for 2026-07-28, and on `http` and `streamable` for
+  2025-11-25.
+- **stdio, a Unix socket and a WebSocket:** a line or a frame each, before the answer.
+
+It returns 1 when it went, 0 when there is nothing to send it to, and -1 when it was refused:
+
+- **0, nothing to send it to:** no token, a client whose `Accept` takes no event stream, a request already cancelled, or
+  a call from another thread than the handler's.
+- **-1, refused:** a `progress` no greater than the last, which the spec says MUST increase, or a client gone.
+
+A request that reports nothing is answered exactly as before.
 
 ### Connection deadlines
 
@@ -359,7 +391,7 @@ property in the schema; registration checks the annotation, and HTTP checks the 
 the body. Do not mark a secret that way: every intermediary sees the header.
 
 The official MCP client works against bote on `http`, `streamable`, `bridge` and stdio, and the
-official conformance suite passes 25 of the 37 scenarios 2026-07-28 requires and 21 of the 30
+official conformance suite passes 26 of the 37 scenarios 2026-07-28 requires and 22 of the 30
 2025-11-25 requires. What fails is features bote lacks, listed with the reason in
 `tests/fixtures/conformance-expected-<revision>.yaml`. `./scripts/conformance.sh` reruns it all.
 
@@ -451,15 +483,15 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 5067 total across twenty-two files (+ a core-only drift smoke)
+### Tests — 5177 total across twenty-three files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5067 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5177 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 969 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/conformance.tcyr        # 218 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 91 — bearer + allowlist + JWT + PKCE validators, the head check
-cyrius test tests/bote_cancel.tcyr        # 96 — cancelling a request in flight: the check, the codec, stdio, unix, HTTP, a fetch's child
+cyrius test tests/bote_cancel.tcyr        # 109 — cancelling a request in flight: the check, the codec, stdio, unix, HTTP, a fetch's child
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fetch.tcyr         # 62 — a request made in a child: the record, the cap, the deadline, a real GET
 cyrius test tests/bote_fs_tools.tcyr      # 63 — fs_write / fs_read / fs_mkdir
@@ -469,8 +501,9 @@ cyrius test tests/bote_jwks.tcyr          # 49 — a jwks_uri: what it may be, a
 cyrius test tests/bote_jwt.tcyr           # 491 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_listen.tcyr        # 224 — subscriptions/listen: the filter, and real streams on the three HTTP handlers
-cyrius test tests/bote_listen_line.tcyr   # 186 — subscriptions/listen where the connection is the stream: stdio, unix, WebSocket
+cyrius test tests/bote_listen_line.tcyr   # 190 — subscriptions/listen where the connection is the stream: stdio, unix, WebSocket
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
+cyrius test tests/bote_progress.tcyr      # 93 — progress on a request's own stream: the writer, stdio, unix, WebSocket, HTTP's SSE response
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 61 — Streamable HTTP / SSE internals

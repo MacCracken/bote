@@ -70,6 +70,17 @@ async function exercise(label, transport, mode, want) {
   // bote sends -32002 on the legacy path, and this client reports both codes as -32602.
   ok(`${label} a missing resource`, gone && gone.code === -32602, gone && gone.code);
 
+  // (3.7.6) Progress on the request's own stream: the client asks with onprogress, and hears
+  // each report, in order, before its answer.
+  const seen = [];
+  const prog = await attempt(`${label} progress`, () => c.callTool({ name: 'test_tool_with_progress', arguments: {} }, { onprogress: p => seen.push(p.progress) }));
+  ok(`${label} progress answered`, prog && prog.content[0].text === 'done', prog);
+  // bote sends all three, then the answer. The client handles a response at once and a
+  // notification a tick later, so on stdio, where the last report and the answer arrive in one
+  // read, its _onresponse removes the progress handler first and that report is dropped.
+  const need = label.startsWith('stdio') ? 2 : 3;
+  ok(`${label} progress heard`, seen.length >= need && seen.every((v, i) => i === 0 || seen[i - 1] < v), seen);
+
   const done = await attempt(`${label} complete`, () => c.complete({ ref: { type: 'ref/prompt', name: 'test_prompt_with_arguments' }, argument: { name: 'arg1', value: 'par' } }));
   ok(`${label} completion`, done && done.completion.values.length === 3, done);
 
