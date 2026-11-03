@@ -242,7 +242,8 @@ that requires a scope only when it named that resource's URI itself.
 ### Cancellation
 
 A client can cancel a request it sent. On `http`, `streamable` and `bridge`, for MCP 2026-07-28, it closes its
-connection. On stdio and a Unix socket it sends `notifications/cancelled` naming the request. A handler runs to its
+connection. On stdio, a Unix socket and a WebSocket it sends `notifications/cancelled` naming the request. For
+2025-11-25 on `streamable` it sends that in a POST of its own, on the request's session. A handler runs to its
 end on the thread that called it, so a handler that runs long asks as it goes:
 
 ```cyrius
@@ -258,8 +259,8 @@ fn h_crawl(args, claims) {
 ```
 
 Once `bote_cancelled()` has said 1, nothing more goes out for the request, its response included, and a `tools/call`
-is audited as cancelled. Ask from the handler's own thread: a thread it starts is answered with 0. Each call asks the connection once: a poll on HTTP and a Unix socket, and on stdio and a Unix
-socket a look at what has arrived. A handler that never asks is answered as before. `web_fetch` and `web_search` ask
+is audited as cancelled. Ask from the handler's own thread: a thread it starts is answered with 0. Each call asks the connection once: a poll, and on stdio, a Unix socket and a
+WebSocket a look at what has arrived. A handler that never asks is answered as before. `web_fetch` and `web_search` ask
 every 100 ms while they wait.
 
 ### Progress
@@ -483,15 +484,15 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 5177 total across twenty-three files (+ a core-only drift smoke)
+### Tests — 5224 total across twenty-three files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5177 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5224 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 969 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/conformance.tcyr        # 218 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 91 — bearer + allowlist + JWT + PKCE validators, the head check
-cyrius test tests/bote_cancel.tcyr        # 109 — cancelling a request in flight: the check, the codec, stdio, unix, HTTP, a fetch's child
+cyrius test tests/bote_cancel.tcyr        # 137 — cancelling a request in flight: the check, the codec, stdio, unix, HTTP, a fetch's child
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fetch.tcyr         # 62 — a request made in a child: the record, the cap, the deadline, a real GET
 cyrius test tests/bote_fs_tools.tcyr      # 63 — fs_write / fs_read / fs_mkdir
@@ -501,9 +502,9 @@ cyrius test tests/bote_jwks.tcyr          # 49 — a jwks_uri: what it may be, a
 cyrius test tests/bote_jwt.tcyr           # 491 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_listen.tcyr        # 224 — subscriptions/listen: the filter, and real streams on the three HTTP handlers
-cyrius test tests/bote_listen_line.tcyr   # 190 — subscriptions/listen where the connection is the stream: stdio, unix, WebSocket
+cyrius test tests/bote_listen_line.tcyr   # 192 — subscriptions/listen where the connection is the stream: stdio, unix, WebSocket
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
-cyrius test tests/bote_progress.tcyr      # 93 — progress on a request's own stream: the writer, stdio, unix, WebSocket, HTTP's SSE response
+cyrius test tests/bote_progress.tcyr      # 110 — progress on a request's own stream: the writer, stdio, unix, WebSocket, HTTP's SSE response
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 61 — Streamable HTTP / SSE internals

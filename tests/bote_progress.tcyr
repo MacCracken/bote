@@ -115,6 +115,78 @@ fn h_helper(args, claims) {
     return "{\"content\":[{\"type\":\"text\",\"text\":\"helped\"}]}";
 }
 
+# A handler that works on the request arena while its helper thread asks and reports beside
+# it, the whole time (3.7.7, the 3.7.6 review): every block it made must hold what it wrote.
+var _ar_stop = 0;
+var _ar_bad = 0;
+var _ar_sent = 0;
+fn _ar_helper(i) {
+    var k = 0;
+    while (atomic_load(&_ar_stop) == 0) {
+        bote_cancelled();
+        if (bote_progress(1000 + k, 0 - 1, "helper") == 1) { _ar_sent = _ar_sent + 1; }
+        k = k + 1;
+    }
+    return 0;
+}
+fn h_arena(args, claims) {
+    atomic_store(&_ar_stop, 0);
+    var t = thread_create(&_ar_helper, 0);
+    var a = bote_req_alloc();
+    var bl[128];
+    var bad = 0;
+    var r = 0;
+    while (r < 5000) {
+        var m[16];
+        bote_req_mark(&m);
+        var j = 0;
+        while (j < 16) {
+            var p = alloc_via(a, 64);
+            store64(&bl + j * 8, p);
+            memset(p, (r * 16 + j) & 255, 64);
+            j = j + 1;
+        }
+        j = 0;
+        while (j < 16) {
+            var q = load64(&bl + j * 8);
+            var w = (r * 16 + j) & 255;
+            if (load8(q) != w || load8(q + 31) != w || load8(q + 63) != w) { bad = bad + 1; }
+            j = j + 1;
+        }
+        bote_req_release(&m);
+        r = r + 1;
+    }
+    atomic_store(&_ar_stop, 1);
+    thread_join(t);
+    _ar_bad = bad;
+    return "{\"content\":[]}";
+}
+
+# A report too long for a client that does not read: the write fails part way (3.7.7).
+var _bg_msg = 0;
+var _bg_ret = 9;
+var _bg_done = 0;
+var _bg_drained = 0;
+fn h_big(args, claims) {
+    _bg_ret = bote_progress(1, 0 - 1, _bg_msg);
+    # The client drains its socket before the answer would go, so an answer written after
+    # the cut would reach it, glued to the cut bytes.
+    atomic_store(&_bg_done, 1);
+    var until = clock_now_ms() + 3000;
+    while (atomic_load(&_bg_drained) == 0 && clock_now_ms() < until) { sleep_ms(2); }
+    return "{\"content\":[{\"type\":\"text\",\"text\":\"big\"}]}";
+}
+
+# Drain `fd` until it has been quiet for 100 ms: what the server wrote so far.
+fn _drain(r) {
+    while (_rd_await(r, "\x01\x02", 100) == 0 && load64(r + 24) == 0) {
+        var got = load64(r + 16);
+        _rd_await(r, "\x01\x02", 100);
+        if (load64(r + 16) == got) { return 0; }
+    }
+    return 0;
+}
+
 fn _tool(name) { return tool_def_new(name, "T", schema_new("object", 0, vec_new())); }
 
 fn _mk_d() {
@@ -123,11 +195,15 @@ fn _mk_d() {
     registry_register(reg, _tool("t_echo"));
     registry_register(reg, _tool("t_cancel"));
     registry_register(reg, _tool("t_helper"));
+    registry_register(reg, _tool("t_arena"));
+    registry_register(reg, _tool("t_big"));
     var d = dispatcher_new(reg);
     dispatcher_handle(d, "t_report", &h_report);
     dispatcher_handle(d, "t_echo", &h_ok);
     dispatcher_handle(d, "t_cancel", &h_report_cancel);
     dispatcher_handle(d, "t_helper", &h_helper);
+    dispatcher_handle(d, "t_arena", &h_arena);
+    dispatcher_handle(d, "t_big", &h_big);
     return d;
 }
 
@@ -537,6 +613,14 @@ fn main() {
     assert_eq(_rd_await(so, "\"id\":3,\"result\"", 3000), 1, "stdio: a handler with a helper, answered");
     assert(_hp_helper == 0 && _hp_self == 1, "stdio: its helper thread's report is answered with nothing, its own goes");
     assert(_count(_rd_buf(so), "\"progressToken\":\"sh\"") == 1 && _has(_rd_buf(so), "\"progress\":1,") == 0, "stdio: ...one report on the wire, the handler's");
+    # A helper thread asking and reporting the whole time the handler works on the arena: it
+    # is answered with nothing before it reaches the arena, so every block stays as written.
+    _ar_bad = 0;
+    _ar_sent = 0;
+    _send_line(sw, _call("4", "t_arena", "\"ar\""));
+    assert_eq(_rd_await(so, "\"id\":4,\"result\"", 20000), 1, "stdio: a handler whose helper asks and reports beside it, answered");
+    assert_eq(_ar_bad, 0, "stdio: ...every arena block it made holds what it wrote");
+    assert(_ar_sent == 0 && _count(_rd_buf(so), "\"progressToken\":\"ar\"") == 0, "stdio: ...and nothing the helper reported went out");
     sys_close(sw);
     thread_join(st);
     sys_close(_st_out);
@@ -554,6 +638,35 @@ fn main() {
     assert_eq(_count(_rd_buf(ur), _cat3("\"progressToken\":\"u1\"", "", "")), 3, "unix: its three reports, a line each");
     sys_close(uc);
     thread_join(ut);
+    sys_close(_ux_fd);
+    # A report the client will not take, cut short at the send deadline: the client is
+    # dropped, and no answer goes after the cut (3.7.7, the 3.7.6 review).
+    _bg_msg = alloc(300001);
+    memset(_bg_msg, 97, 300000);
+    store8(_bg_msg + 300000, 0);
+    var keep_send = BOTE_SEND_TIMEOUT_MS;
+    BOTE_SEND_TIMEOUT_MS = 200;
+    sys_socketpair(1, 1, 0, &up);
+    _ux_fd = load32(&up);
+    uc = load32(&up + 4);
+    var sbv[8];
+    store64(&sbv, 4096);
+    sys_setsockopt(_ux_fd, 1, 7, &sbv, 4);
+    bote_conn_send_deadline(_ux_fd);
+    _bg_ret = 9;
+    atomic_store(&_bg_done, 0);
+    atomic_store(&_bg_drained, 0);
+    _send_line(uc, _call("5", "t_big", "\"ub\""));
+    ut = thread_create(&_unix_thread, 0);
+    ur = _rd_new(uc);
+    while (atomic_load(&_bg_done) == 0) { sleep_ms(2); }
+    _drain(ur);
+    atomic_store(&_bg_drained, 1);
+    thread_join(ut);
+    assert_eq(_bg_ret, 0 - 1, "unix: a report cut short at the send deadline fails");
+    _rd_eof(ur, 3000);
+    assert_eq(_rd_count(ur, "\"id\":5"), 0, "unix: ...and the client is dropped, with no answer after the cut");
+    sys_close(uc);
     sys_close(_ux_fd);
 
     # ---------------- a WebSocket ----------------
@@ -577,6 +690,28 @@ fn main() {
     sys_close(wcl);
     thread_join(wt);
     sys_close(_ws_fd);
+    # The same for a frame cut short (3.7.7).
+    sys_socketpair(1, 1, 0, &wp);
+    _ws_fd = load32(&wp);
+    wcl = load32(&wp + 4);
+    sys_setsockopt(_ws_fd, 1, 7, &sbv, 4);
+    wr = _rd_new(wcl);
+    wt = thread_create(&_ws_thread, 0);
+    assert_eq(_rd_await(wr, "\r\n\r\n", 2000), 1, "ws: upgraded again");
+    _bg_ret = 9;
+    atomic_store(&_bg_done, 0);
+    atomic_store(&_bg_drained, 0);
+    _ws_send(wcl, _call("6", "t_big", "\"wb\""));
+    while (atomic_load(&_bg_done) == 0) { sleep_ms(2); }
+    _drain(wr);
+    atomic_store(&_bg_drained, 1);
+    thread_join(wt);
+    assert_eq(_bg_ret, 0 - 1, "ws: a report cut short at the send deadline fails");
+    _rd_eof(wr, 3000);
+    assert_eq(_rd_count(wr, "\"id\":6"), 0, "ws: ...and the client is dropped, with no answer after the cut");
+    sys_close(wcl);
+    sys_close(_ws_fd);
+    BOTE_SEND_TIMEOUT_MS = keep_send;
 
     # ---------------- HTTP ----------------
     _hbuf = alloc(65536);
@@ -606,6 +741,13 @@ fn main() {
         if (kind == 2) { assert(_has(hs, "Access-Control-Allow-Origin: http://localhost"), "bridge: ...with its CORS headers"); }
         var hj = _http_run(kind, _raw(kind, _cat3(_JSON, _MH, ""), _call("2", "t_report", "\"h2\"")));
         assert(_has(hj, "Content-Type: application/json") && _has(hj, "notifications/progress") == 0, _cat3(kn, "a client that takes no event stream hears no progress, and its answer", ""));
+        # Every Accept field is read, and a weight of 0 is a refusal (3.7.7).
+        var h2a = _http_run(kind, _raw(kind, _cat3("Accept: application/json\r\naccept:  text/event-stream\r\n", _MH, ""), _call("21", "t_report", "\"h21\"")));
+        assert(_has(h2a, "Content-Type: text/event-stream") && _count(h2a, "\"progressToken\":\"h21\"") == 3, _cat3(kn, "text/event-stream on a second Accept field", ""));
+        var hq0 = _http_run(kind, _raw(kind, _cat3("Accept: application/json, text/event-stream;q=0\r\n", _MH, ""), _call("22", "t_report", "\"h22\"")));
+        assert(_has(hq0, "Content-Type: application/json") && _has(hq0, "notifications/progress") == 0, _cat3(kn, "text/event-stream with q=0 is refused", ""));
+        var hq5 = _http_run(kind, _raw(kind, _cat3("Accept: application/json;q=0.9, TEXT/Event-Stream ; q=0.5\r\n", _MH, ""), _call("23", "t_report", "\"h23\"")));
+        assert(_has(hq5, "Content-Type: text/event-stream"), _cat3(kn, "...and with q=0.5, in another case, accepted", ""));
         var hn = _http_run(kind, _raw(kind, _cat3(_SSE, _MH, ""), _call("3", "t_report", 0)));
         assert(_has(hn, "Content-Type: application/json") && _has(hn, "\"id\":3,\"result\""), _cat3(kn, "a call with no token is answered as before", ""));
         var hl = _http_run(kind, _raw(kind, _SSE, _lcall("4", "t_report", "\"h4\"")));

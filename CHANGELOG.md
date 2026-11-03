@@ -18,6 +18,127 @@ have per release.
 
 _(empty)_
 
+## [3.7.7] — 2026-11-03 · Cancellation everywhere
+
+**Cancellation on a WebSocket, and on the legacy streamable path.** On a WebSocket a `notifications/cancelled` frame, a
+close frame, or a client gone cancels a request. The check reads only frames that have arrived whole, and keeps each one
+it reads for the loop, in its turn. For 2025-11-25 on `bote streamable`, a `notifications/cancelled` POST of its own
+reaches the request in flight on another worker, within the same session. With 3.7.5 and 3.7.6, every transport now
+carries cancellation and progress.
+
+**Five defects in 3.7.6 land ahead of it**, from an independent review of that release. The worst corrupted a handler's
+request arena: on a one-loop server its helper thread asked or reported through the shared request state. See the
+correction notice in 3.7.6.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Added
+
+- **On a WebSocket** (`src/transport_ws.cyr`), `_ws_cancelled`:
+  - It peeks at what the socket holds (`MSG_PEEK | MSG_DONTWAIT`) and reads a frame only once it is whole
+    (`_ws_frame_len`), never waiting for the rest of one.
+  - Each frame it reads is queued, `BOTE_WS_QUEUE` (16) in `BOTE_WS_QUEUE_BYTES` (64 KB). `_ws_next_frame` serves them in
+    order before the loop waits on the socket again, so a request or a ping read while looking is answered in its turn.
+  - A close frame, a client gone, or a `notifications/cancelled` naming the request cancels it. A batch's next request
+    looks again.
+- **On the legacy streamable path** (`src/session.cyr`, `src/transport_streamable.cyr`):
+  - A request with a session is entered in flight while it runs, by its session and its id as a value, with the word of
+    its worker's request state that `bote_cancelled` reads (`session_inflight_begin` / `_end` / `_cancel`).
+  - A `notifications/cancelled` POST on that session sets that word. A cancelled request's POST ends with no answer, as
+    2025-11-25 says it SHOULD.
+  - At most `BOTE_INFLIGHT_SLOTS` (64) are in flight a store, and a request that cannot be entered cannot be cancelled,
+    which the spec allows. The session store grows from 32 to 40 B.
+- **`codec_cancelled_id_a(a, p, n, params_out)`** (core): the `requestId` of a cancellation the codec would admit, for any
+  transport. **`codec_message_cancels_a(a, p, n, id)`** (core): one frame's.
+- **`bote_req_owner_here()`** (core), and the request state's +120, for the fix below. The state grows from 120 to 128 B.
+
+### Changed
+
+- The cancelled flag stays after the codec returns, for a transport that must close rather than answer. It is cleared by
+  the next message's begin and between a batch's requests, and no longer before a dispatch, where a cancellation from
+  another connection may already have set it.
+- `bote http`, which serves one request at a time, gives a cancellation POST no request in flight to reach: it is served
+  after the request it names, which has been answered. On `bote streamable` with workers it is matched.
+- `bote_conn_tid` is gone, its work done once in the core.
+
+### Fixed
+
+From the review of 3.7.6:
+
+- **A handler's helper thread still raced the handler on its request arena.** The guard was in each transport's check and
+  writer, but `bote_cancelled()` and `bote_progress()` mark, allocate on and release the arena before they reach either.
+  On a one-loop server every thread reaches the one request state, so a helper's ask rewound the arena over what the
+  handler had just made. The review's probe over the real stdio loop corrupted 191,296 of the handler's blocks with
+  `bote_cancelled`, and some in every run with `bote_progress`.
+  - The thread that sets a check or a writer is recorded (`bote_req_set_cancel`, `bote_req_set_progress`).
+  - Both functions answer any other thread with nothing, before they touch the arena.
+- **A listen stream could keep a scope list it was never judged by.** It judged a URI by one look at the registry and kept
+  the list from a second look, so a registration between the two left it holding the new list, and it was told. It now
+  judges by the list it keeps, from one look.
+- **A progress report cut short on a Unix socket or a WebSocket left the connection served.** The answer went straight
+  after the cut bytes, glued to a broken line or inside a frame's payload. The writer marks the connection broken, writes
+  nothing more, and the loop drops the client before it answers, as a failed listen write does.
+- **`Accept` was read from its first field only, and `text/event-stream;q=0` counted as yes.** Every field is read now,
+  and a weight of 0 refuses (RFC 9110 12.4.2, 12.5.1).
+- **The line scanner logged a DEBUG line for each malformed line it looked at**, before the codec logged it in its turn.
+
+### Security
+
+- The arena fix above: a handler that started a thread on stdio, a Unix socket, a WebSocket or a one-loop HTTP server
+  could corrupt its own request's memory through it.
+- The scope fix above.
+- A WebSocket's cancellation check reads only frames already whole, so a client cannot hold a handler on a frame it never
+  finishes. A legacy cancellation reaches only a request of the session it came on.
+
+### Tests
+
+- **5,224 assertions, from 5,177**, on x86_64 and under `qemu-aarch64`.
+  - **`tests/bote_cancel.tcyr`**, 137, from 109:
+    - A WebSocket with a listen line on it, so its loop waits on the socket and the line between messages:
+      - a cancellation frame read while the handler runs, and one naming another request;
+      - a request read past while looking, served in its turn;
+      - a batch's later request;
+      - a frame half sent, never waited for and served once whole;
+      - a helper thread answered with nothing;
+      - a ping queued and answered, a close frame, and a half-close;
+      - twelve cancellations on one connection, the queue emptied and used again.
+    - The legacy streamable path on two threads:
+      - another session's cancellation, and the same session's of another id, reaching nothing;
+      - the session's own cancellation ending the request's POST with no answer;
+      - an uncancelled request answered and gone from the table after.
+    - A malformed line looked at, logging nothing.
+  - **`tests/bote_progress.tcyr`**, 110, from 93:
+    - A helper thread asking and reporting the whole time its handler makes and checks arena blocks, 5,000 rounds, every
+      block as written. 3.7.6's tests joined the helper before the handler did anything, so the two never ran together.
+    - A report cut short at the send deadline, the client draining before the answer would go: unix and WebSocket drop
+      it, with no answer after the cut.
+    - `text/event-stream` on a second `Accept` field, `q=0` refused, and `q=0.5` in another case accepted.
+  - **`tests/bote_listen_line.tcyr`**, 192, from 190: a registration between the judging and the keeping, the stream
+    left with the list it was judged by, and not told.
+- **27 mutants, 27 killed.** Four first survived the tests, and the tests added for them kill them:
+  - a queue never emptied, which only a connection that queues more than sixteen frames shows;
+  - a cancellation matching any id of the session;
+  - and a progress write cut short with the connection kept, on unix and on WebSocket, which needed a client that drains
+    before the answer. That test also found 3.7.7's own first fix checking for the cut after the unix answer was written.
+- **The official suite** is where 3.7.6 left it. **The official client** passes 448 checks.
+
+### Performance
+
+**The request path costs what it did.** Interleaved A/B against 3.7.6, 15 rounds pinned to one core. Minimums, in ns:
+
+| Bench | 3.7.6 | 3.7.7 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 3,937 | 3,920 | −0.4% |
+| `codec_process_message_threaded` | 4,229 | 4,235 | +0.1% |
+| `dispatch_tools_call` | 2,058 | 2,061 | +0.1% |
+| `progress_report` | 1,804 | 2,178 | +20.7% |
+| `cancel_lines_scan` | 2,907 | 3,015 | +3.7% |
+
+`progress_report` pays for the fix above: one `gettid` a report, before the arena, and so does each `bote_cancelled()`. The
+setters record the thread once a message, so every message on a transport that sets a check pays one `gettid` too:
+3.7.6's "a request that reports nothing pays nothing" was not quite true either, at one `gettid` a POST. `cancel_lines_scan` reads each line with the codec's admission minus its log.
+`session_validate` (+7.0%) runs none of this patch's code and its 3.7.6 range spans the new minimum, which is layout.
+
 ## [3.7.6] — 2026-11-02 · Progress
 
 **A handler can report its progress, on the request's own stream.** A request that carries `_meta.progressToken` hears
@@ -35,6 +156,20 @@ changes to a resource it could no longer read, once the resource was registered 
 the correction notice in 3.7.5.
 
 The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+> ⚠ **Corrected at 3.7.7.** Five claims below were not true, found by an independent review of this release.
+> - "No longer races the connection's own reads and writes" and "answers another with nothing" held for the transports'
+>   checks and writers, and not for the request arena. `bote_cancelled()` and `bote_progress()` mark, allocate on and
+>   release it before they reach either, so a helper thread still corrupted the handler's memory on a one-loop server.
+> - "Told … only while that list still serves it" missed a registration between the look that judged a URI and the look
+>   that kept its list: the stream kept a list it was never judged by.
+> - On a Unix socket and a WebSocket a report cut short at the send deadline left the connection served, the answer
+>   written after the cut.
+> - "A client whose `Accept` names no `text/event-stream` hears no progress" read only the first `Accept` field, and took
+>   `q=0` as yes.
+> - On agnos, where a thread runs inline on its starter, the thread guard told nothing apart.
+>
+> Each is fixed in 3.7.7, the last made moot.
 
 ### Added
 

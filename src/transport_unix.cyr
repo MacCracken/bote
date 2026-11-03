@@ -54,16 +54,19 @@ var _unix_cblen = 0;    # the slot holding how many bytes the buffer holds
 var _unix_from = 0;
 var _unix_seen = 0;
 var _unix_seen_id = 0;  # (3.7.6) as stdio's
-var _unix_tid = 0;
+var _unix_out_broken = 0; # (3.7.7) 1 once a progress write failed: the connection is dropped
 
 # A request's progress (3.7.6): one line on the connection.
 fn _unix_progress(ctx, a, json) {
-    if (bote_conn_tid() != _unix_tid) { return 1; }
-    return _unix_reply(_unix_cfd, json);
+    # A notification cut short leaves the stream out of step (the 3.7.6 review): none more
+    # is written, and the loop drops the client before it answers.
+    if (_unix_out_broken == 1) { return 0 - 1; }
+    var r = _unix_reply(_unix_cfd, json);
+    if (r < 0) { _unix_out_broken = 1; }
+    return r;
 }
 
 fn _unix_cancelled(ctx, a, id) {
-    if (bote_conn_tid() != _unix_tid) { return 0; }
     if (bote_conn_gone(_unix_cfd, 0) == 1) { return 1; }
     if (id != _unix_seen_id) {
         _unix_seen = _unix_from;
@@ -109,6 +112,8 @@ fn _unix_process_lines(cfd, dispatcher, buf, blen_ptr) {
             var line_len = scanned - line_start;
             if (line_len > 0) {
                 var resp = codec_process_message_a(_unix_begin(scanned + 1), buf + line_start, dispatcher, 0);
+                # A report cut short (3.7.7): the stream is out of step, and no answer follows.
+                if (_unix_out_broken == 1) { return 0 - 1; }
                 if (resp != 0) {
                     if (_unix_reply(cfd, resp) < 0) { return 0 - 1; }
                 }
@@ -243,7 +248,7 @@ fn _unix_serve_client(cfd, dispatcher) {
     _unix_cfd = cfd;
     _unix_cbuf = buf;
     _unix_cblen = blen_slot;
-    _unix_tid = bote_conn_tid();
+    _unix_out_broken = 0;
     var skipping = 0;
     var heard = clock_now_ms();
     while (1 == 1) {
@@ -283,7 +288,7 @@ fn _unix_serve_client(cfd, dispatcher) {
             if (blen > 0) {
                 store8(buf + blen, 0);
                 var resp = codec_process_message_a(_unix_begin(blen), buf, dispatcher, 0);
-                if (resp != 0) { _unix_reply(cfd, resp); }
+                if (resp != 0 && _unix_out_broken == 0) { _unix_reply(cfd, resp); }
             }
             return 0;
         }

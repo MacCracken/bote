@@ -214,6 +214,125 @@ fn _ws_recheck_due(now, last) {
     return 0;
 }
 
+# ---- cancellation on a WebSocket (3.7.7) --------------------------------------------
+#
+# A client cancels a request with `notifications/cancelled` in a frame, which arrives while
+# the handler runs, among other frames, or it closes. The frame loop reads only between
+# messages, so the check (bote_cancelled, src/protocol.cyr) reads what has arrived whole:
+# it peeks at what the socket holds, without waiting, and a frame not all there yet, or one
+# larger than BOTE_WS_PEEK_MAX, ends the look. Each frame it reads is kept, in order, for
+# the loop to serve in its turn, up to BOTE_WS_QUEUE frames in BOTE_WS_QUEUE_BYTES; past
+# that the look stops, and a cancellation behind is not seen, which the spec allows. A
+# close frame, or a client gone, is a cancellation. This transport serves one connection
+# at a time, so the buffers are the process's, made once.
+var BOTE_WS_PEEK_MAX = 65536;
+var BOTE_WS_QUEUE = 16;
+var BOTE_WS_QUEUE_BYTES = 65536;
+var BOTE_MSG_PEEK = 2;
+var BOTE_MSG_DONTWAIT = 64;
+var _ws_peek = 0;       # what a peek copies
+var _ws_q = 0;          # the queued frames' payloads
+var _ws_q_ops = 0;      # each frame: +0 opcode, +8 offset in _ws_q, +16 length
+var _ws_q_n = 0;        # frames queued
+var _ws_q_head = 0;     # the next for the loop
+var _ws_q_used = 0;     # bytes of _ws_q used
+var _ws_q_seen = 0;     # how far a check has looked...
+var _ws_q_seen_id = 0;  # ...for which request
+var _ws_out_broken = 0; # (3.7.7) 1 once a progress frame failed: the connection is dropped
+
+fn _ws_q_reset() {
+    _ws_q_n = 0;
+    _ws_q_head = 0;
+    _ws_q_used = 0;
+    _ws_q_seen = 0;
+    _ws_q_seen_id = 0;
+    return 0;
+}
+
+# The length of the whole frame the `n` bytes at `p` begin with, header and payload, or 0
+# when it is not all there.
+fn _ws_frame_len(p, n) {
+    if (n < 2) { return 0; }
+    var b1 = load8(p + 1);
+    var len = b1 & 127;
+    var at = 2;
+    if (len == 126) {
+        if (n < 4) { return 0; }
+        len = (load8(p + 2) << 8) | load8(p + 3);
+        at = 4;
+    } elif (len == 127) {
+        if (n < 10) { return 0; }
+        if (load8(p + 2) != 0 || load8(p + 3) != 0 || load8(p + 4) != 0 || load8(p + 5) != 0) { return 0; }
+        len = (load8(p + 6) << 24) | (load8(p + 7) << 16) | (load8(p + 8) << 8) | load8(p + 9);
+        at = 10;
+    }
+    if ((b1 & 128) != 0) { at = at + 4; }
+    if (len > n || at + len > n) { return 0; }
+    return at + len;
+}
+
+# 1 when the queued frame `i` ends the request: a cancellation naming `id`, or a close.
+fn _ws_q_cancels(a, i, id) {
+    var e = _ws_q_ops + i * 24;
+    if (load64(e) == WS_OP_CLOSE) { return 1; }
+    if (load64(e) != WS_OP_TEXT) { return 0; }
+    return codec_message_cancels_a(a, _ws_q + load64(e + 8), load64(e + 16), id);
+}
+
+# The cancellation check, set for each frame the loop serves.
+fn _ws_cancelled(ws, a, id) {
+    var fd = ws_server_fd(ws);
+    if (bote_conn_gone(fd, 1) == 1) { return 1; }
+    # A batch's next request looks again through what is queued.
+    if (id != _ws_q_seen_id) {
+        _ws_q_seen = _ws_q_head;
+        _ws_q_seen_id = id;
+    }
+    while (_ws_q_seen < _ws_q_n) {
+        var hit = _ws_q_cancels(a, _ws_q_seen, id);
+        _ws_q_seen = _ws_q_seen + 1;
+        if (hit == 1) { return 1; }
+    }
+    if (_ws_peek == 0) {
+        _ws_peek = alloc(BOTE_WS_PEEK_MAX);
+        _ws_q = alloc(BOTE_WS_QUEUE_BYTES);
+        _ws_q_ops = alloc(BOTE_WS_QUEUE * 24);
+    }
+    while (_ws_q_n < BOTE_WS_QUEUE) {
+        var pn = sys_recvfrom(fd, _ws_peek, BOTE_WS_PEEK_MAX, BOTE_MSG_PEEK | BOTE_MSG_DONTWAIT, 0, 0);
+        if (pn <= 0) { return 0; }
+        var fl = _ws_frame_len(_ws_peek, pn);
+        if (fl <= 0 || fl > BOTE_WS_QUEUE_BYTES - _ws_q_used) { return 0; }
+        var op[8];
+        var got = ws_server_recv_frame(ws, _ws_q + _ws_q_used, BOTE_WS_QUEUE_BYTES - _ws_q_used, &op);
+        if (got < 0) { return 1; }
+        var e = _ws_q_ops + _ws_q_n * 24;
+        store64(e, load64(&op));
+        store64(e + 8, _ws_q_used);
+        store64(e + 16, got);
+        _ws_q_used = _ws_q_used + got;
+        _ws_q_n = _ws_q_n + 1;
+        _ws_q_seen = _ws_q_n;
+        if (_ws_q_cancels(a, _ws_q_n - 1, id) == 1) { return 1; }
+    }
+    return 0;
+}
+
+# The next frame the loop serves, read or queued: its payload in _ws_frame_buf, its length
+# (below 0 when the socket failed) and its opcode at *op_out.
+fn _ws_next_frame(ws, op_out) {
+    if (_ws_q_head < _ws_q_n) {
+        var e = _ws_q_ops + _ws_q_head * 24;
+        var n = load64(e + 16);
+        store64(op_out, load64(e));
+        memcpy(_ws_frame_buf, _ws_q + load64(e + 8), n);
+        _ws_q_head = _ws_q_head + 1;
+        if (_ws_q_head == _ws_q_n) { _ws_q_reset(); }
+        return n;
+    }
+    return ws_server_recv_frame(ws, _ws_frame_buf, WS_MAX_PAYLOAD, op_out);
+}
+
 # The next data frame as a cstr, in _ws_frame_buf, valid until the next call.
 # 0 when the peer closed, a frame broke a bound, or the socket failed, and BOTE_WS_CONTROL
 # once a ping or a pong is answered (3.7.4): the frame loop then waits on its listen line
@@ -225,7 +344,7 @@ fn _bote_ws_recv(ws) {
     if (_ws_frame_buf == 0) { _ws_frame_buf = alloc(WS_MAX_PAYLOAD + 1); }
     var op_slot[8];
     while (1 == 1) {
-        var n = ws_server_recv_frame(ws, _ws_frame_buf, WS_MAX_PAYLOAD, &op_slot);
+        var n = _ws_next_frame(ws, &op_slot);
         if (n < 0) { return 0; }
         var op = load64(&op_slot);
         if (op == WS_OP_CLOSE) {
@@ -256,10 +375,13 @@ fn _ws_listen_write(ws, json) {
 }
 
 # The progress writer (3.7.6): one frame, from the loop's own thread.
-var _ws_tid = 0;
 fn _ws_progress_write(ws, a, json) {
-    if (bote_conn_tid() != _ws_tid) { return 1; }
-    return _ws_listen_write(ws, json);
+    # A frame cut short leaves the stream out of step (the 3.7.6 review): none more goes,
+    # and the loop drops the client before it answers.
+    if (_ws_out_broken == 1) { return 0 - 1; }
+    var r = _ws_listen_write(ws, json);
+    if (r < 0) { _ws_out_broken = 1; }
+    return r;
 }
 
 # The presented token judged again when it is due (3.6.6), before a frame is served or a
@@ -403,8 +525,11 @@ fn _ws_frames(config, ws, cfd, ws_claims, ws_token, ws_held) {
     store64(&judged, clock_now_ms());
     var heard = clock_now_ms();
     var mark[16];
+    _ws_q_reset();
+    _ws_out_broken = 0;
     while (1 == 1) {
-        if (lc != 0) {
+        # A frame a cancellation check read is served before the socket is waited on.
+        if (lc != 0 && _ws_q_head == _ws_q_n) {
             var deadline = 0;
             if (idle_ms > 0) { deadline = heard + idle_ms; }
             var w = bote_listen_line_wait(lc, cfd, deadline);
@@ -430,8 +555,8 @@ fn _ws_frames(config, ws, cfd, ws_claims, ws_token, ws_held) {
         var a = bote_listen_line_begin(lc);
         if (ws_token == 1) { bote_req_note_token_kept(ws_claims, ws_kept); }
         # A request's progress goes on the connection, a frame each (3.7.6).
-        _ws_tid = bote_conn_tid();
         bote_req_set_progress(&_ws_progress_write, ws);
+        bote_req_set_cancel(&_ws_cancelled, ws);
         var msg = _bote_ws_recv(ws);
         if (msg == 0) { return 0; }
         heard = clock_now_ms();
@@ -439,7 +564,7 @@ fn _ws_frames(config, ws, cfd, ws_claims, ws_token, ws_held) {
         if (_ws_token_holds(config, ws, ws_held, &judged) == 0) { return 0; }
         var resp = codec_process_message_a(a, msg, ws_config_dispatcher(config), ws_claims);
         if (ws_token == 1) { ws_kept = bote_req_kept(); }
-        if (bote_listen_line_broken(lc) == 1) { return 0; }
+        if (bote_listen_line_broken(lc) == 1 || _ws_out_broken == 1) { return 0; }
         if (resp != 0) {
             # 3.4.3: a failed frame write (the send deadline firing, or the
             # peer gone) leaves the stream desynchronised mid-frame, so the

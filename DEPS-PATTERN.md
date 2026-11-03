@@ -239,7 +239,9 @@ answers after `bote_req_begin()`: `bote_req_set_cancel(fp, ctx)`, `fp(ctx, a, id
 when the request whose raw id is `id` has been cancelled. The codec names the request, and a
 handler asks through `bote_cancelled()`; once that has said 1 the codec answers the request
 with nothing. Both are in the core bundle. A transport whose messages are lines finds a
-`notifications/cancelled` among what it has read with `codec_lines_cancel_a`, and one on a
+`notifications/cancelled` among what it has read with `codec_lines_cancel_a`, one whose
+messages are frames with `codec_message_cancels_a` (3.7.7), and any reads the `requestId` of
+a cancellation the codec would admit with `codec_cancelled_id_a`, and one on a
 socket can tell a client gone with `bote_conn_gone` (full bundle). Without a check nothing
 is ever cancelled, and every request is answered as before.
 
@@ -248,7 +250,8 @@ sends a notification through, `bote_req_set_progress(fp, ctx)`, `fp(ctx, a, json
 0 when it sent, below 0 when it failed and 1 when it has no stream for it, and a handler
 reports with `bote_progress(progress, total, message)`. Both are in the core bundle; the
 codec names the request's params, where its `progressToken` is. Without a writer a report
-is answered with 0 and nothing goes.
+is answered with 0 and nothing goes. The thread that sets the check or the writer is the one
+whose asks and reports are answered (3.7.7): set them on the thread that serves the message.
 
 ## How to produce both bundles
 

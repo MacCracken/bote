@@ -69,14 +69,20 @@ The primary security-relevant surface areas are:
   streams told of 16 updates of a kilobyte URI, for the life of the process.
 - **Cancellation** — since **3.7.5** a client can end a request of its own early, and no
   other: on `http`, `streamable` and `bridge`, for MCP 2026-07-28, by closing its connection;
-  on stdio and a Unix socket by `notifications/cancelled` on its own connection. That is read
+  on stdio, a Unix socket and (3.7.7) a WebSocket by `notifications/cancelled` on its own
+  connection. Since **3.7.7**, for 2025-11-25 on `streamable`, by that in a POST of its own,
+  which reaches only a request of the session it came on: a session's requests are entered
+  while they run, by session and id, at most 64 at once a store. A WebSocket's check reads
+  only frames already whole, so a client cannot hold a handler on a frame it never finishes. That is read
   only from what has already arrived, within the transport's buffer, and each line once; the
   check gives back what it allocated. A handler stops only if it asks (`bote_cancelled()`),
   and nothing more goes out for a request once one has: a client that cancels gets less, never
   more. The legacy HTTP path never asks, since 2025-11-25 says a disconnect is no cancellation.
   Since **3.7.6** the check, and the writer progress goes through, answer nothing to a thread other
   than the one serving the request: on a one-loop server a handler's helper thread reaches the same
-  request state, and through 3.7.5 its ask read the connection beside the loop.
+  request state, and through 3.7.5 its ask read the connection beside the loop. Since **3.7.7** that
+  is decided before anything else, in `bote_cancelled` and `bote_progress` themselves: through 3.7.6
+  a helper's ask still marked and released the handler's request arena, and corrupted it.
 - **Progress** — since **3.7.6** a handler's reports go only on the request's own stream, for a
   request that asked with a `progressToken`, and only while it runs: never on a listen stream, never
   for a request cancelled or answered, never with a `progress` that does not increase. A report is

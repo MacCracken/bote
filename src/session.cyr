@@ -226,13 +226,15 @@ fn mcp_session_set_outbound(s, ptr) { store64(s + 32, ptr); return 0; }
 #   +24 lock        a mutex (3.7.0): a threaded server's workers share the store. Every
 #                   function below takes it; code that reads the map or the ids itself,
 #                   or what a session points at, holds it with session_store_lock.
+#   +32 inflight    (3.7.7) its requests in flight, made the first time one is entered
 # ================================================================
 fn session_store_new(timeout_ns) {
-    var st = alloc(32);
+    var st = alloc(40);
     store64(st, map_new());
     store64(st + 8, vec_new());
     store64(st + 16, timeout_ns);
     store64(st + 24, mutex_new());
+    store64(st + 32, 0);
     return st;
 }
 
@@ -358,4 +360,99 @@ fn _ses_prune(st, now) {
         }
     }
     return pruned;
+}
+
+# ================================================================
+# Requests in flight, for a cancellation in a POST of its own (3.7.7)
+# ================================================================
+#
+# 2025-11-25 cancels a request on Streamable HTTP with `notifications/cancelled` in a POST of
+# its own, on another connection, which on `bote streamable` another worker serves. While a
+# legacy request with a session runs it is entered here, by its session and its id as a
+# value, with the word of its worker's request state that says it is cancelled, which
+# bote_cancelled reads (src/protocol.cyr). A cancellation for that session and id sets it.
+# A request is entered only while an entry is free, BOTE_INFLIGHT_SLOTS of them a store, and
+# only with an id whose key fits; one that is not entered cannot be cancelled, which the
+# spec allows. A cancellation reaches only a request of the session it came on, whose id
+# only that session's client knows. Each entry is BOTE_INFLIGHT_ENTRY bytes: +0 1 while in
+# use, +8 the session, +16 the word to set, +24 the key's length, +32 the key.
+var BOTE_INFLIGHT_SLOTS = 64;
+var BOTE_INFLIGHT_KEY = 264;
+var BOTE_INFLIGHT_ENTRY = 296;
+
+# The store's table, with its lock held: made the first time.
+fn _ses_inflight_u(st) {
+    var t = load64(st + 32);
+    if (t == 0) {
+        t = alloc(BOTE_INFLIGHT_SLOTS * BOTE_INFLIGHT_ENTRY);
+        memset(t, 0, BOTE_INFLIGHT_SLOTS * BOTE_INFLIGHT_ENTRY);
+        store64(st + 32, t);
+    }
+    return t;
+}
+
+# Enter the request whose raw id is `id`, of the session `sess`, with `flag`, the word to set
+# when it is cancelled: its entry, or -1 when it could not be entered.
+fn session_inflight_begin(st, sess, id, flag) {
+    if (st == 0 || sess == 0 || id == 0 || flag == 0) { return 0 - 1; }
+    var m[16];
+    bote_req_mark(&m);
+    var key = bote_id_key_a(bote_req_alloc(), id, strlen(id));
+    var kl = strlen(key);
+    var slot = 0 - 1;
+    if (kl < BOTE_INFLIGHT_KEY) {
+        session_store_lock(st);
+        var t = _ses_inflight_u(st);
+        var i = 0;
+        while (i < BOTE_INFLIGHT_SLOTS && slot < 0) {
+            var e = t + i * BOTE_INFLIGHT_ENTRY;
+            if (load64(e) == 0) {
+                store64(e, 1);
+                store64(e + 8, sess);
+                store64(e + 16, flag);
+                store64(e + 24, kl);
+                memcpy(e + 32, key, kl + 1);
+                slot = i;
+            }
+            i = i + 1;
+        }
+        session_store_unlock(st);
+    }
+    bote_req_release(&m);
+    return slot;
+}
+
+# The request in entry `slot` is done.
+fn session_inflight_end(st, slot) {
+    if (st == 0 || slot < 0 || slot >= BOTE_INFLIGHT_SLOTS) { return 0; }
+    session_store_lock(st);
+    var t = load64(st + 32);
+    if (t != 0) { store64(t + slot * BOTE_INFLIGHT_ENTRY, 0); }
+    session_store_unlock(st);
+    return 0;
+}
+
+# The cancellation of the request whose raw id is `rid`, from the session `sess`: 1 when a
+# request of that session with that id was in flight, and is now told.
+fn session_inflight_cancel(st, sess, rid) {
+    if (st == 0 || sess == 0 || rid == 0) { return 0; }
+    var m[16];
+    bote_req_mark(&m);
+    var key = bote_id_key_a(bote_req_alloc(), rid, strlen(rid));
+    var kl = strlen(key);
+    var hit = 0;
+    session_store_lock(st);
+    var t = load64(st + 32);
+    var i = 0;
+    while (t != 0 && i < BOTE_INFLIGHT_SLOTS && hit == 0) {
+        var e = t + i * BOTE_INFLIGHT_ENTRY;
+        if (load64(e) == 1 && load64(e + 8) == sess && load64(e + 24) == kl && memeq(e + 32, key, kl) == 1) {
+            store64(load64(e + 16), 1);
+            hit = 1;
+        }
+        i = i + 1;
+    }
+    session_store_unlock(st);
+    bote_req_release(&m);
+    return hit;
 }

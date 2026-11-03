@@ -344,6 +344,18 @@ fn _strm_check_session(cfd, buf, blen, config, method) {
     return 0;
 }
 
+# The session a POST came on, or 0 (3.7.7).
+fn _strm_session_of(buf, n, config) {
+    var st = streamable_config_session_store(config);
+    if (st == 0) { return 0; }
+    var sid = sandhi_server_find_header_a(bote_req_alloc(), buf, n, "MCP-Session-Id");
+    if (sid == 0) { return 0; }
+    session_store_lock(st);
+    var s = map_get(session_store_sessions(st), sid);
+    session_store_unlock(st);
+    return s;
+}
+
 fn _strm_peek_method(body) {
     var m = jsonx_get_str_a(bote_req_alloc(), body, "method");
     if (m == 0) { return ""; }
@@ -441,11 +453,33 @@ fn _strm_handle_post(cfd, buf, n, config) {
 
     var extra = 0;
     var st = streamable_config_session_store(config);
+    # 2025-11-25 cancels a request with a POST of its own, on its session, which another
+    # worker serves (3.7.7, src/session.cyr): a request is entered while it runs, and a
+    # cancellation sets what bote_cancelled reads for it.
+    var slot = 0 - 1;
+    var sess = _strm_session_of(buf, n, config);
+    if (sess != 0) {
+        var cparams[8];
+        var crid = codec_cancelled_id_a(bote_req_alloc(), body, strlen(body), &cparams);
+        if (crid != 0) {
+            if (session_inflight_cancel(st, sess, crid) == 1) {
+                var cl[BOTE_LOG_LINE_BYTES];
+                bote_log_line(&cl, SK_TRACE, "request cancelled by the client");
+                bote_log_str(&cl, "id", crid);
+                bote_log_emit(&cl);
+            }
+        } elif (load8(body + _cdc_skip_ws(body, strlen(body), 0)) == 123) {
+            slot = session_inflight_begin(st, sess, jsonx_get_raw_a(bote_req_alloc(), body, "id"), bote_req_state() + BOTE_REQ_STATE_CANCEL + 24);
+        }
+    }
     # A request's progress goes on the response to its POST (3.7.6, src/http_era.cyr): a
     # session's pending notifications then wait for the next POST or GET.
     var ps = bote_http_progress_begin(&hc);
     var resp = codec_process_message_a(bote_req_alloc(), body, streamable_config_dispatcher(config), load64(&claims_slot));
+    session_inflight_end(st, slot);
     if (bote_http_progress_end(ps, resp) == 1) { return 0; }
+    # A request its client cancelled is not answered (2025-11-25: SHOULD NOT): its POST ends.
+    if (resp == 0 && bote_req_was_cancelled() == 1) { return 0; }
 
     # A session exists once `initialize` has succeeded. Minted before dispatch,
     # a request the codec refused still got one.

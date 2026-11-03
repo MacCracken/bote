@@ -232,11 +232,11 @@ fn _cdc_params_ok(raw) {
 # unusable id is answered with null (JSON-RPC 2.0 §5).
 fn _cdc_admit(line, err_out) { return _cdc_admit_a(default_alloc(), line, err_out); }
 
-fn _cdc_admit_a(a, line, err_out) {
+fn _cdc_admit_l_a(a, line, err_out, log) {
     store64(err_out, 0);
     var req = codec_parse_request_a(a, line);
     if (req == 0) {
-        bote_log_debug("request rejected: malformed JSON-RPC object");
+        if (log == 1) { bote_log_debug("request rejected: malformed JSON-RPC object"); }
         # JSON-RPC §5: the id is null only when it cannot be read.
         var eid = jsonx_get_raw_a(a, line, "id");
         if (eid == 0 || _cdc_id_ok(eid) == 0) { eid = "null"; }
@@ -266,6 +266,8 @@ fn _cdc_admit_a(a, line, err_out) {
     return req;
 }
 
+fn _cdc_admit_a(a, line, err_out) { return _cdc_admit_l_a(a, line, err_out, 1); }
+
 # Process a single request body. Returns serialized response cstr or 0 (notif).
 fn _cdc_process_single_a(a, line, dispatcher, claims) {
     # The clock is read only when DEBUG is on; at the default level the
@@ -289,10 +291,11 @@ fn _cdc_process_single_a(a, line, dispatcher, claims) {
     store64(rs + BOTE_REQ_STATE_PROGRESS + 16, 0);
     # A request its handler found cancelled gets nothing more, its response included
     # (MCP 2026-07-28: the server MUST NOT send any further messages for it).
-    if (load64(rs + BOTE_REQ_STATE_CANCEL + 24) == 1) {
-        store64(rs + BOTE_REQ_STATE_CANCEL + 24, 0);
-        return 0;
-    }
+    # The flag stays, for a transport that must close rather than answer (3.7.7): the next
+    # message's begin clears it, and a batch clears it between its requests. It is not
+    # cleared here before the dispatch: a cancellation from another connection may have
+    # landed already (src/session.cyr, session_inflight_cancel).
+    if (load64(rs + BOTE_REQ_STATE_CANCEL + 24) == 1) { return 0; }
     # A connection that is itself the stream takes a listen over, and hears its cancel
     # (3.7.3, a BoteStream in src/protocol.cyr). From the state already in hand.
     var st = load64(rs + BOTE_REQ_STATE_STREAM);
@@ -366,7 +369,11 @@ fn _cdc_holds(p, n, needle) {
 # is the id whose key is `want`. A line is copied and read only when it spells the method
 # plainly or holds an escape, which may spell it another way: the codec reads
 # `notifications\/cancelled` as the same method.
-fn _cdc_line_cancels_a(a, p, n, want) {
+# The raw `requestId` of the `n` bytes at `p` when they are one `notifications/cancelled`
+# the codec would admit, on `a`, or 0 (3.7.7, for any transport: a line, a WebSocket frame,
+# a POST's body). `params` is left at *params_out for the reason.
+fn codec_cancelled_id_a(a, p, n, params_out) {
+    store64(params_out, 0);
     if (n <= 0) { return 0; }
     if (_cdc_holds(p, n, "notifications/cancelled") == 0 && _cdc_holds(p, n, "\\") == 0) { return 0; }
     var line = alloc_via(a, n + 1);
@@ -375,19 +382,38 @@ fn _cdc_line_cancels_a(a, p, n, want) {
     if (jsonx_valid(line, n) == 0) { return 0; }
     # As the codec admits it (3.7.6): the scanner honored a `"jsonrpc":"1.0"` cancellation
     # the codec refuses (the 3.7.5 review).
+    # Without the line the codec logs when it serves it, in its turn (3.7.7).
     var err[8];
-    var req = _cdc_admit_a(a, line, &err);
+    var req = _cdc_admit_l_a(a, line, &err, 0);
     if (req == 0 || req_id(req) != 0 || req_method(req) == 0) { return 0; }
     if (streq(req_method(req), "notifications/cancelled") == 0 || req_params(req) == 0) { return 0; }
-    var rid = jsonx_get_raw_a(a, req_params(req), "requestId");
+    store64(params_out, req_params(req));
+    return jsonx_get_raw_a(a, req_params(req), "requestId");
+}
+
+fn _cdc_line_cancels_a(a, p, n, want) {
+    var params[8];
+    var rid = codec_cancelled_id_a(a, p, n, &params);
     if (rid == 0) { return 0; }
     if (streq(bote_id_key_a(a, rid, strlen(rid)), want) == 0) { return 0; }
+    var req_params_raw = load64(&params);
     var ln[BOTE_LOG_LINE_BYTES];
     bote_log_line(&ln, SK_TRACE, "request cancelled by the client");
-    var why = jsonx_get_str_dec_a(a, req_params(req), "reason");
+    var why = jsonx_get_str_dec_a(a, req_params_raw, "reason");
     if (why != 0) { bote_log_str(&ln, "reason", why); }
     bote_log_emit(&ln);
     return 1;
+}
+
+# 1 when the `n` bytes at `p`, one message, cancel the request whose raw id is `id`: a
+# WebSocket frame (3.7.7). What it reads goes once it is read.
+fn codec_message_cancels_a(a, p, n, id) {
+    if (id == 0) { return 0; }
+    var m[16];
+    bote_arena_mark(a, &m);
+    var hit = _cdc_line_cancels_a(a, p, n, bote_id_key_a(a, id, strlen(id)));
+    bote_arena_release(a, &m);
+    return hit;
 }
 
 # For a transport whose messages are lines (stdio, a Unix socket): 1 when a complete line
@@ -441,6 +467,8 @@ fn bote_progress(progress, total, message) {
     var params = load64(s + BOTE_REQ_STATE_PROGRESS + 16);
     if (fp == 0 || params == 0) { return 0; }
     if (load64(s + BOTE_REQ_STATE_CANCEL + 24) == 1) { return 0; }
+    # Off the serving thread, nothing, before the arena is touched (3.7.7).
+    if (sys_gettid() != load64(s + BOTE_REQ_STATE_OWNER)) { return 0; }
     var a = bote_req_alloc();
     var m[16];
     bote_req_mark(&m);
@@ -551,6 +579,8 @@ fn codec_process_message_a(a, input, dispatcher, claims) {
             } else {
                 var single = _cdc_process_single_a(a, elem, dispatcher, claims);
                 if (single != 0) { vec_push_a(a, responses, single); }
+                # One request's cancellation is not the next one's (3.7.7).
+                bote_req_set_request_id(0);
             }
             ei = ei + 1;
         }

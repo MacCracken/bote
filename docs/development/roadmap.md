@@ -33,29 +33,12 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.7.7 — Cancellation on WebSocket and on the legacy HTTP path**, the two items left in 3.7.x below,
-which close the line. Then 3.8.0.
-
-## 3.7.x — Threaded dispatch and `subscriptions/listen`
-
-`bote streamable` serves on worker threads since 3.7.0, and since 3.7.1 everything a request reaches in bote is safe there.
-`subscriptions/listen` is whole since 3.7.4: list changes and resource updates, on every transport, its HTTP streams held by
-a hub thread off the serving threads and, on stdio, unix and WebSocket, the connection itself the stream. **Large: small
-bites.** The other transports' buffers (`_ws_frame_buf`, `_ws_token_buf`, `_unix_buf`, stdio's) matter only if those
-transports take workers too.
-
-Cancellation (3.7.5) and progress (3.7.6) are cooperative, a handler that asks `bote_cancelled()` and
-reports with `bote_progress()` as it works, on every transport but these:
-
-1. **Cancellation on WebSocket.** A `notifications/cancelled` frame, or a close frame, read while a
-   handler runs. The loop reads frames only between messages, so the check needs to read a frame and
-   keep it for the loop, as stdio's keeps lines. WebSocket is not an MCP transport.
-2. **Cancellation on the legacy HTTP path.** 2025-11-25 cancels with a `notifications/cancelled` POST of
-   its own, on another connection and, on streamable, another worker. Matching it to the request in
-   flight needs a table of them per session. The spec lets a server ignore it, and bote does.
+**3.8.0 — `outputSchema`**, the first item of 3.8.x below.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
-`resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption.
+`resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
+for stdio, unix and WebSocket: their buffers (`_ws_frame_buf`, `_ws_token_buf`, `_ws_q`, `_unix_buf`,
+stdio's) are each one connection's, and a worker per connection would need a home for each.
 
 ## 3.8.x — The tool surface
 

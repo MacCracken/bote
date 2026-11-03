@@ -61,6 +61,7 @@ include "src/transport_http.cyr"
 include "src/transport_unix.cyr"
 include "src/bridge.cyr"
 include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
 
 fn h_ok(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
 
@@ -230,6 +231,24 @@ fn _rd_new(fd) {
 fn _rd_buf(r) { return load64(r + 8); }
 
 # Read from `r` until it holds `needle`, or `ms` pass, or it ends: 1 when it holds it.
+# How many times `needle` occurs in the `n` bytes at `hay`, NULs and all: a WebSocket
+# frame's length can hold a 0 byte.
+fn _bcount(hay, n, needle) {
+    var k = strlen(needle);
+    var c = 0;
+    var i = 0;
+    while (i + k <= n) {
+        if (memeq(hay + i, needle, k) == 1) {
+            c = c + 1;
+            i = i + k;
+        } else {
+            i = i + 1;
+        }
+    }
+    return c;
+}
+fn _rd_count(r, needle) { return _bcount(load64(r + 8), load64(r + 16), needle); }
+
 fn _rd_await(r, needle, ms) {
     var until = clock_now_ms() + ms;
     var pfd[8];
@@ -238,7 +257,7 @@ fn _rd_await(r, needle, ms) {
         var buf = load64(r + 8);
         var got = load64(r + 16);
         store8(buf + got, 0);
-        if (strstr(buf, needle) >= 0) { return 1; }
+        if (_bcount(buf, got, needle) > 0) { return 1; }
         if (load64(r + 24) == 1) { return 0; }
         var left = until - clock_now_ms();
         if (left <= 0) { return 0; }
@@ -277,6 +296,77 @@ fn _stdio_thread(i) { return _stdio_serve(_st_d, _st_in, _st_out); }
 var _ux_d = 0;
 var _ux_fd = 0;
 fn _unix_thread(i) { return _unix_handle_client(_ux_fd, _ux_d); }
+
+# A WebSocket connection on a thread (3.7.7), and a masked client frame of opcode `op`.
+var _ws_cfg = 0;
+var _ws_fd = 0;
+var _ws_req = "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+fn _ws_thread(i) { return _bote_ws_handler(_ws_cfg, _ws_fd, _ws_req, strlen(_ws_req)); }
+fn _ws_frame(fd, op, payload) {
+    var n = strlen(payload);
+    var f = alloc(n + 16);
+    store8(f, 0x80 | op);
+    var at = 2;
+    if (n < 126) { store8(f + 1, 0x80 | n); }
+    else {
+        store8(f + 1, 0x80 | 126);
+        store8(f + 2, (n >> 8) & 255);
+        store8(f + 3, n & 255);
+        at = 4;
+    }
+    store8(f + at, 0x11); store8(f + at + 1, 0x22); store8(f + at + 2, 0x33); store8(f + at + 3, 0x44);
+    var i = 0;
+    while (i < n) {
+        store8(f + at + 4 + i, load8(payload + i) ^ load8(f + at + (i & 3)));
+        i = i + 1;
+    }
+    sock_send_all(fd, f, at + 4 + n);
+    return 0;
+}
+fn _ws_text(fd, payload) { return _ws_frame(fd, 1, payload); }
+
+# A masked text frame of `payload`, at `f`: its length.
+fn _ws_frame_bytes(f, payload) {
+    var n = strlen(payload);
+    store8(f, 0x81);
+    store8(f + 1, 0x80 | n);
+    store8(f + 2, 0x11); store8(f + 3, 0x22); store8(f + 4, 0x33); store8(f + 5, 0x44);
+    var i = 0;
+    while (i < n) {
+        store8(f + 6 + i, load8(payload + i) ^ load8(f + 2 + (i & 3)));
+        i = i + 1;
+    }
+    return 6 + n;
+}
+
+# A legacy cancellation POSTed on streamable, from the main thread: what came back.
+fn _http_cancel_post(hdrs, id) {
+    var raw = _raw(1, hdrs, _cancel(id));
+    var b = alloc(strlen(raw) + 1);
+    memcpy(b, raw, strlen(raw) + 1);
+    var sp[16];
+    sys_socketpair(1, 1, 0, &sp);
+    _strm_handle(_lc_cfg, load32(&sp), b, strlen(raw));
+    sys_close(load32(&sp));
+    var r = _rd_new(load32(&sp + 4));
+    _rd_eof(r, 2000);
+    sys_close(load32(&sp + 4));
+    return _rd_buf(r);
+}
+
+# A legacy streamable POST on a thread, for a request a POST of its own cancels (3.7.7).
+var _lc_fd = 0;
+var _lc_raw = 0;
+var _lc_buf = 0;
+fn _lc_thread(i) {
+    var n = strlen(_lc_raw);
+    memcpy(_lc_buf, _lc_raw, n);
+    store8(_lc_buf + n, 0);
+    _strm_handle(_lc_cfg, _lc_fd, _lc_buf, n);
+    sys_close(_lc_fd);
+    return 0;
+}
+var _lc_cfg = 0;
 
 # An HTTP handler (0 http, 1 streamable, 2 bridge) given the request in `_hh_raw`, on the
 # server end `_hh_fd`, which it closes after, as sandhi does.
@@ -423,7 +513,9 @@ fn main() {
     assert_streq(_run_ck(d, _call("5", "t_wait")), "", "codec: a request its handler found cancelled is not answered");
     assert_eq(atomic_load(&_hw_saw), 1, "codec: ...the handler saw it");
     assert(_ck_id != 0 && streq(_ck_id, "5") == 1, "codec: the check is asked about the request's id");
-    assert_eq(bote_req_was_cancelled(), 0, "codec: and forgets it once the message is done");
+    assert_eq(bote_req_was_cancelled(), 1, "codec: and says so to the transport, which may have to close (3.7.7)");
+    bote_req_begin();
+    assert_eq(bote_req_was_cancelled(), 0, "codec: ...until the next message begins");
     assert_eq(_au_n, n0 + 1, "codec: the call audited");
     assert(tool_call_event_success(_au_last) == 0 && tool_call_event_error(_au_last) != 0 && streq(tool_call_event_error(_au_last), "cancelled") == 1, "codec: ...as cancelled, not completed");
     _ck_reset(1);
@@ -470,6 +562,14 @@ fn main() {
     assert_eq(codec_lines_cancel_a(la, asreq, strlen(asreq), "\"x\"", &done), 0, "lines: a request by that name is no notification");
     var v1 = "{\"jsonrpc\":\"1.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"x\"}}\n";
     assert_eq(codec_lines_cancel_a(la, v1, strlen(v1), "\"x\"", &done), 0, "lines: a jsonrpc the codec refuses (3.7.6)");
+    # A malformed line looked at, before it is served, logs nothing: the codec logs it in its
+    # turn (3.7.7).
+    var mal = "{\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"x\"}}\n";
+    sakshi_set_level(SK_DEBUG);
+    _lg_reset();
+    codec_lines_cancel_a(la, mal, strlen(mal), "\"x\"", &done);
+    assert_eq(_lg_len, 0, "lines: a malformed line looked at logs nothing");
+    sakshi_set_level(SK_INFO);
     var bad = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"x\"}\n";
     assert_eq(codec_lines_cancel_a(la, bad, strlen(bad), "\"x\"", &done), 0, "lines: invalid JSON");
     var batch = "[{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"x\"}}]\n";
@@ -678,6 +778,109 @@ fn main() {
     sys_close(_ux_fd);
     assert(atomic_load(&_hw_saw) == 1 && clock_now_ms() - t0 < 2000, "unix: a client that closed has cancelled");
 
+    # ---------------- a WebSocket (3.7.7) ----------------
+    _ws_cfg = ws_config_new("/mcp", 0, 0);
+    store64(_ws_cfg + 40, d);
+    # With a listen line, so the loop waits on the socket and the line between messages.
+    ws_config_with_listen(_ws_cfg, bote_listen_line_new(4));
+    var wsp[16];
+    sys_socketpair(1, 1, 0, &wsp);
+    _ws_fd = load32(&wsp);
+    var wsc = load32(&wsp + 4);
+    var wsr = _rd_new(wsc);
+    var wst = thread_create(&_ws_thread, 0);
+    assert_eq(_rd_await(wsr, "\r\n\r\n", 2000), 1, "ws: upgraded");
+    _hw_reset(3000);
+    t0 = clock_now_ms();
+    _ws_text(wsc, _call("1", "t_wait"));
+    _hw_await(2000);
+    _ws_text(wsc, _call("2", "t_echo"));
+    _ws_text(wsc, _cancel("1"));
+    _ws_text(wsc, _ping("3"));
+    assert_eq(_rd_await(wsr, "\"id\":3,\"result\"", 3000), 1, "ws: served on after a cancellation");
+    assert(atomic_load(&_hw_saw) == 1 && clock_now_ms() - t0 < 2000, "ws: a cancellation in a frame, read while the handler ran");
+    assert_eq(_rd_count(wsr, "\"id\":1"), 0, "ws: ...and nothing sent for the request");
+    assert_eq(_rd_count(wsr, "\"id\":2,\"result\""), 1, "ws: a request read past while looking is served in its turn");
+    _hw_reset(300);
+    _ws_text(wsc, _call("4", "t_wait"));
+    _hw_await(2000);
+    _ws_text(wsc, _cancel("44"));
+    assert_eq(_rd_await(wsr, "\"id\":4,\"result\"", 3000), 1, "ws: a cancellation of another request");
+    assert_eq(atomic_load(&_hw_saw), 0, "ws: ...the request runs to its end");
+    # Many cancellations on one connection: the queue empties and is used again.
+    var wrk = 0;
+    while (wrk < 12) {
+        _hw_reset(3000);
+        var wid = _cat3("\"r", _cat3("", "", ""), "");
+        wid = _cat3("\"rr", "", "");
+        var widn = alloc(16);
+        store8(widn, 34); store8(widn + 1, 114); store8(widn + 2, 97 + wrk); store8(widn + 3, 34); store8(widn + 4, 0);
+        _ws_text(wsc, _call(widn, "t_wait"));
+        _hw_await(2000);
+        _ws_text(wsc, _cancel(widn));
+        _ws_text(wsc, _ping(_cat3("", "", "99")));
+        _rd_await(wsr, "\"id\":99,\"result\"", 3000);
+        store64(wsr + 16, 0);
+        if (atomic_load(&_hw_saw) == 1) { wrk = wrk + 1; } else { wrk = 100; }
+    }
+    assert_eq(wrk, 12, "ws: twelve cancellations on one connection, each one heard");
+    # A batch's later request, cancelled while an earlier one runs and asks.
+    _hw_reset(400);
+    _ws_text(wsc, _cat3("[", _lcall("6", "t_wait"), _cat3(",", _lcall("7", "t_wait"), "]")));
+    _hw_await(2000);
+    _ws_text(wsc, _cancel("7"));
+    _ws_text(wsc, _ping("8"));
+    assert_eq(_rd_await(wsr, "\"id\":8,\"result\"", 3000), 1, "ws: served on after a batch");
+    assert(_rd_count(wsr, "\"id\":6,\"result\"") == 1 && _rd_count(wsr, "\"id\":7") == 0, "ws: a batch's later request cancelled while an earlier one ran and asked");
+    # A frame not all there yet is not waited for: the request runs to its end, answered
+    # before the rest of the frame is sent.
+    _hw_reset(300);
+    _ws_text(wsc, _call("9", "t_wait"));
+    _hw_await(2000);
+    var pf = alloc(512);
+    var pfl = _ws_frame_bytes(pf, _ping("10"));
+    sock_send_all(wsc, pf, 6);
+    assert_eq(_rd_await(wsr, "\"id\":9,\"result\"", 3000), 1, "ws: a frame half sent while the handler runs is not waited for");
+    sock_send_all(wsc, pf + 6, pfl - 6);
+    assert_eq(_rd_await(wsr, "\"id\":10,\"result\"", 3000), 1, "ws: ...and is served once whole");
+    # A helper thread the handler starts is answered with nothing.
+    _hh_helper = 9;
+    _hh_self = 9;
+    _ws_text(wsc, _call("11", "t_helper"));
+    _ws_text(wsc, _cancel("11"));
+    _ws_text(wsc, _ping("12"));
+    assert_eq(_rd_await(wsr, "\"id\":12,\"result\"", 3000), 1, "ws: served on after the helper");
+    assert(_hh_helper == 0 && _hh_self == 1, "ws: a helper thread asking is answered with nothing; the handler hears the cancellation");
+    # A ping read while looking is answered in its turn; a close ends the request.
+    _hw_reset(3000);
+    _ws_text(wsc, _call("5", "t_wait"));
+    _hw_await(2000);
+    _ws_frame(wsc, 9, "hi");
+    _ws_frame(wsc, 8, "");
+    thread_join(wst);
+    _rd_eof(wsr, 2000);
+    assert_eq(atomic_load(&_hw_saw), 1, "ws: a close frame while the handler runs cancels its request");
+    assert(_rd_count(wsr, "\x8a\x02hi") == 1, "ws: ...a ping read before it is answered");
+    assert_eq(_rd_count(wsr, "\"id\":5"), 0, "ws: ...and nothing sent for the request");
+    sys_close(wsc);
+    sys_close(_ws_fd);
+    # A client that shuts its sending side, as TCP shows a close, has cancelled.
+    sys_socketpair(1, 1, 0, &wsp);
+    _ws_fd = load32(&wsp);
+    wsc = load32(&wsp + 4);
+    wsr = _rd_new(wsc);
+    wst = thread_create(&_ws_thread, 0);
+    _rd_await(wsr, "\r\n\r\n", 2000);
+    _hw_reset(3000);
+    t0 = clock_now_ms();
+    _ws_text(wsc, _call("13", "t_wait"));
+    _hw_await(2000);
+    sock_shutdown(wsc, 1);
+    thread_join(wst);
+    assert(atomic_load(&_hw_saw) == 1 && clock_now_ms() - t0 < 2000, "ws: a client that closed has cancelled");
+    sys_close(wsc);
+    sys_close(_ws_fd);
+
     # ---------------- HTTP ----------------
     _hh_buf = alloc(65536);
     _http_cfg = http_config_new("/mcp", 0, 0);
@@ -774,6 +977,56 @@ fn main() {
     var wr0 = _rd_new(load32(&tw0 + 4));
     _rd_eof(wr0, 2000);
     assert_eq(strlen(_rd_buf(wr0)), 0, "workers: the one that closed is sent nothing");
+
+    # ---------------- the legacy path's cancellation, a POST of its own (3.7.7) ----------------
+    var lst = session_store_default();
+    _lc_cfg = streamable_config_new("/mcp", 0, 0);
+    streamable_config_with_session_store(_lc_cfg, lst);
+    store64(_lc_cfg + 56, d);
+    _lc_buf = alloc(65536);
+    var lsid = session_store_create(lst, "2025-11-25");
+    var losid = session_store_create(lst, "2025-11-25");
+    var lhdr = _cat3("Accept: application/json, text/event-stream\r\nMCP-Session-Id: ", lsid, "\r\n");
+    var lohdr = _cat3("Accept: application/json, text/event-stream\r\nMCP-Session-Id: ", losid, "\r\n");
+    var lcp[16];
+    sys_socketpair(1, 1, 0, &lcp);
+    _lc_fd = load32(&lcp);
+    var lcl = load32(&lcp + 4);
+    _lc_raw = _raw(1, lhdr, _lcall("41", "t_wait"));
+    _hw_reset(3000);
+    t0 = clock_now_ms();
+    var lt = thread_create(&_lc_thread, 0);
+    _hw_await(2000);
+    # Another session's cancellation of the same id reaches nothing.
+    var lother = _http_cancel_post(lohdr, "41");
+    assert(_has(lother, "HTTP/1.1 202"), "legacy: another session's cancellation is accepted");
+    sleep_ms(50);
+    assert_eq(atomic_load(&_hw_saw), 0, "legacy: ...and cancels nothing of this session's");
+    # This session's cancellation of another id reaches nothing either.
+    _http_cancel_post(lhdr, "40");
+    sleep_ms(50);
+    assert_eq(atomic_load(&_hw_saw), 0, "legacy: ...nor does the session's cancellation of another id");
+    var lmine = _http_cancel_post(lhdr, "41");
+    assert(_has(lmine, "HTTP/1.1 202"), "legacy: the session's own cancellation, a POST of its own");
+    thread_join(lt);
+    assert(atomic_load(&_hw_saw) == 1 && clock_now_ms() - t0 < 2000, "legacy: ...reaches the request on another worker");
+    var lr = _rd_new(lcl);
+    _rd_eof(lr, 2000);
+    assert_eq(strlen(_rd_buf(lr)), 0, "legacy: ...whose POST ends with no answer");
+    sys_close(lcl);
+    # A request that was not cancelled is answered, and its entry is gone after it.
+    sys_socketpair(1, 1, 0, &lcp);
+    _lc_fd = load32(&lcp);
+    lcl = load32(&lcp + 4);
+    _lc_raw = _raw(1, lhdr, _lcall("42", "t_wait"));
+    _hw_reset(200);
+    lt = thread_create(&_lc_thread, 0);
+    thread_join(lt);
+    lr = _rd_new(lcl);
+    _rd_eof(lr, 2000);
+    assert(_has(_rd_buf(lr), "\"id\":42,\"result\""), "legacy: an uncancelled request is answered");
+    assert_eq(session_inflight_cancel(lst, session_store_validate(lst, lsid), "42"), 0, "legacy: ...and nothing is in flight for it after");
+    sys_close(lcl);
     #endif
     sakshi_clear_emit_hook();
     return assert_summary();

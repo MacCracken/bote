@@ -439,19 +439,88 @@ fn bote_http_send_accepted(cfd, extra) {
 # the response; request-scoped notifications never go on a listen stream). The response
 # stays one JSON object until the handler reports, so a request that reports nothing is
 # answered as before, and one whose client does not accept `text/event-stream` hears no
-# progress, which is looked at only when the handler first reports. A ProgressStream (32 B,
+# progress, which is looked at only when the handler first reports. A ProgressStream (24 B,
 # on the request arena): +0 the bote_http_ctx, +8 1 once the SSE head has gone, +16 1 once
-# a write to the client failed, 2 when the client takes no SSE, +24 the serving thread: a
-# helper thread the handler starts reaches the same request state on a one-loop server, and
-# is answered with nothing (src/conn.cyr, bote_conn_tid).
+# a write to the client failed, 2 when the client takes no SSE. A thread other than the
+# one serving the request never reaches it (src/protocol.cyr, bote_req_owner_here).
 var BOTE_HTTP_SSE_PRE = "event: message\ndata: ";
 var BOTE_HTTP_SSE_HEAD = "Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\n";
 
-# 1 when the request in `hc` accepts an SSE response.
+fn _he_lc(c) {
+    if (c >= 65 && c <= 90) { return c + 32; }
+    return c;
+}
+
+# 1 when the `n` bytes at `p` are `lit` (lower case), whatever their case.
+fn _he_ieq(p, lit, n) {
+    var i = 0;
+    while (i < n) {
+        if (_he_lc(load8(p + i)) != load8(lit + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# 1 when the `n` bytes at `p`, a weight's value, are 0: `0`, `0.`, `0.0`, `0.00` or `0.000`.
+fn _he_q_zero(p, n) {
+    if (n < 1 || load8(p) != 48) { return 0; }
+    var i = 1;
+    if (i < n && load8(p + i) == 46) { i = i + 1; }
+    while (i < n && load8(p + i) == 48) { i = i + 1; }
+    return i == n;
+}
+
+# 1 when the `n` bytes at `p`, an `Accept` field's value, list `text/event-stream` with a
+# weight that is not 0 (RFC 9110 12.5.1, 12.4.2).
+fn _he_accept_sse(p, n) {
+    var i = 0;
+    while (i < n) {
+        var e = i;
+        while (e < n && load8(p + e) != 44) { e = e + 1; }
+        var b = i;
+        while (b < e && (load8(p + b) == 32 || load8(p + b) == 9)) { b = b + 1; }
+        if (e - b >= 17 && _he_ieq(p + b, "text/event-stream", 17) == 1) {
+            var t = b + 17;
+            while (t < e && (load8(p + t) == 32 || load8(p + t) == 9)) { t = t + 1; }
+            if (t == e || load8(p + t) == 59) {
+                var zero = 0;
+                while (t < e) {
+                    if (load8(p + t) == 59) {
+                        var q = t + 1;
+                        while (q < e && (load8(p + q) == 32 || load8(p + q) == 9)) { q = q + 1; }
+                        if (q + 2 <= e && _he_lc(load8(p + q)) == 113 && load8(p + q + 1) == 61) {
+                            var v = q + 2;
+                            var ve = v;
+                            while (ve < e && load8(p + ve) != 59 && load8(p + ve) != 32 && load8(p + ve) != 9) { ve = ve + 1; }
+                            if (_he_q_zero(p + v, ve - v) == 1) { zero = 1; }
+                        }
+                    }
+                    t = t + 1;
+                }
+                if (zero == 0) { return 1; }
+            }
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+
+# 1 when the request in `hc` accepts an SSE response: `text/event-stream` with a weight that
+# is not 0, in any of its `Accept` fields (3.7.7: through 3.7.6 the first field alone was
+# read, and `q=0` was taken as yes; the 3.7.6 review).
 fn bote_http_accepts_sse(hc) {
-    var acc = _he_header_a(bote_req_alloc(), _he_buf(hc), _he_n(hc), "Accept");
-    if (acc == 0) { return 0; }
-    if (strstr(acc, "text/event-stream") >= 0) { return 1; }
+    var buf = _he_buf(hc);
+    var n = _he_n(hc);
+    var i = 0;
+    while (i < n) {
+        var e = i;
+        while (e < n && load8(buf + e) != 10) { e = e + 1; }
+        var le = e;
+        if (le > i && load8(buf + le - 1) == 13) { le = le - 1; }
+        if (le == i) { return 0; }
+        if (le - i > 7 && _he_ieq(buf + i, "accept:", 7) == 1 && _he_accept_sse(buf + i + 7, le - i - 7) == 1) { return 1; }
+        i = e + 1;
+    }
     return 0;
 }
 
@@ -470,7 +539,6 @@ fn _he_sse_send(a, cfd, json) {
 # The writer bote_progress sends through (src/protocol.cyr): the SSE head the first time,
 # or 1, no stream for it, for a client that takes none.
 fn _he_progress_write(ps, a, json) {
-    if (bote_conn_tid() != load64(ps + 24)) { return 1; }
     if (load64(ps + 16) == 1) { return 0 - 1; }
     if (load64(ps + 16) == 2) { return 1; }
     var hc = load64(ps);
@@ -502,11 +570,10 @@ fn _he_progress_write(ps, a, json) {
 
 # Before the dispatch: the writer, and the ProgressStream it writes through.
 fn bote_http_progress_begin(hc) {
-    var ps = alloc_via(bote_req_alloc(), 32);
+    var ps = alloc_via(bote_req_alloc(), 24);
     store64(ps, hc);
     store64(ps + 8, 0);
     store64(ps + 16, 0);
-    store64(ps + 24, bote_conn_tid());
     bote_req_set_progress(&_he_progress_write, ps);
     return ps;
 }
@@ -529,7 +596,6 @@ fn bote_http_progress_end(ps, json) {
 # the server MUST treat a client's disconnect as one. The legacy path never asks: there a
 # disconnect is not a cancellation, and bote's HTTP transports end with the response.
 fn _he_cancelled(ps, a, id) {
-    if (bote_conn_tid() != load64(ps + 24)) { return 0; }
     return bote_conn_gone(_he_cfd(load64(ps)), 1);
 }
 

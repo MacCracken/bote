@@ -83,6 +83,19 @@ fn h_res(uri, claims) { return "{\"contents\":[]}"; }
 # A scope check (3.6.3's shape): the claims hold a scope they name.
 fn _sc_has(claims, scope, ctx) { return strstr(claims, scope) >= 0; }
 
+# One that, the first time it judges, registers the resource again with another scope, as
+# another thread could between two looks (3.7.7, the 3.7.6 review).
+var _flip_d = 0;
+var _flip_list = 0;
+var _flip_done = 0;
+fn _sc_flip(claims, scope, ctx) {
+    if (_flip_done == 0) {
+        _flip_done = 1;
+        dispatcher_register_resource(_flip_d, resource_def_with_required_scopes(resource_def_new("fl://doc", "f", "F", "text/plain"), _flip_list), &h_res);
+    }
+    return strstr(claims, scope) >= 0;
+}
+
 fn _has(hay, needle) { return strstr(hay, needle) >= 0; }
 
 fn _cat3(a, b, c) {
@@ -829,6 +842,26 @@ fn main() {
     assert(_has(_cap, _upd("\"sp://t/43\"", "\"nt\"")), "scopes: with no token, a prefix covers what it covers");
     bote_listen_line_detach(spc);
     _cap_reset();
+
+    # The list a stream is judged by is the list it keeps: a registration between the two
+    # looks leaves it with the one it was judged by, which then no longer serves (3.7.7).
+    var fld = _mk_d(1);
+    dispatcher_set_scope_check(fld, &_sc_flip, 0);
+    var flread = vec_new();
+    vec_push(flread, "p:read");
+    _flip_list = vec_new();
+    vec_push(_flip_list, "p:admin");
+    _flip_d = fld;
+    _flip_done = 0;
+    dispatcher_register_resource(fld, resource_def_with_required_scopes(resource_def_new("fl://doc", "f", "F", "text/plain"), flread), &h_res);
+    var fla = bote_req_begin();
+    bote_req_set_listen_claims("token=p:read");
+    var fls = alloc(BOTE_LISTEN_SLOT_BYTES);
+    store64(fls + 280, 0);
+    _bl_keep_uris(fla, fls, "{\"notifications\":{\"resourceSubscriptions\":[\"fl://doc\"]}}", fld);
+    assert(_flip_done == 1 && load64(load64(fls + 280) + 1) == flread, "scopes: kept with the list it was judged by");
+    assert_eq(_bl_slot_covers(fls, "fl://doc"), 0, "scopes: ...which no longer serves it, so it is not told");
+    bote_req_begin();
 
     # Ids by value, and a value holding a NUL by its spelling (3.7.5).
     var ika = bote_req_begin();

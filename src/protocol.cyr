@@ -105,15 +105,18 @@ fn resp_success(id, result) {
 #   +96 params  the raw params of the request being served, where its progressToken is
 #   +104 last   the last `progress` sent for it
 #   +112 sent   how many progress notifications have gone for it
+#   +120 owner  (3.7.7) the thread that set the check or the writer: bote_cancelled and
+#               bote_progress answer any other with nothing, before they touch the arena
 # A transport that serves one message at a time uses the process's block. A server
 # that serves on worker threads (3.7.0, src/conn.cyr) sets _bote_req_state_fp to a
 # function returning the calling thread's block, before its first worker starts.
-var BOTE_REQ_STATE_BYTES = 120;
+var BOTE_REQ_STATE_BYTES = 128;
 var BOTE_REQ_STATE_WHY = 24;
 var BOTE_REQ_STATE_STREAM = 32;
 var BOTE_REQ_STATE_CANCEL = 40;
 var BOTE_REQ_STATE_PROGRESS = 80;
-var _bote_req_g[15];
+var BOTE_REQ_STATE_OWNER = 120;
+var _bote_req_g[16];
 var _bote_req_state_fp = 0;
 
 fn bote_req_state() {
@@ -361,6 +364,7 @@ fn bote_req_begin() {
     store64(s + BOTE_REQ_STATE_PROGRESS + 16, 0);
     store64(s + BOTE_REQ_STATE_PROGRESS + 24, 0);
     store64(s + BOTE_REQ_STATE_PROGRESS + 32, 0);
+    store64(s + BOTE_REQ_STATE_OWNER, 0);
     return al;
 }
 
@@ -378,6 +382,8 @@ fn bote_req_set_progress(fp, ctx) {
     var s = bote_req_state();
     store64(s + BOTE_REQ_STATE_PROGRESS, fp);
     store64(s + BOTE_REQ_STATE_PROGRESS + 8, ctx);
+    # Once a message: bote_req_begin clears it, and the other setter may have set it.
+    if (fp != 0 && load64(s + BOTE_REQ_STATE_OWNER) == 0) { store64(s + BOTE_REQ_STATE_OWNER, sys_gettid()); }
     return 0;
 }
 
@@ -423,7 +429,19 @@ fn bote_req_set_cancel(fp, ctx) {
     var s = bote_req_state();
     store64(s + BOTE_REQ_STATE_CANCEL, fp);
     store64(s + BOTE_REQ_STATE_CANCEL + 8, ctx);
+    # Once a message: bote_req_begin clears it, and the other setter may have set it.
+    if (fp != 0 && load64(s + BOTE_REQ_STATE_OWNER) == 0) { store64(s + BOTE_REQ_STATE_OWNER, sys_gettid()); }
     return 0;
+}
+
+# 1 when the calling thread is the one that set this message's check or writer (3.7.7). On
+# a one-loop server every thread reaches the process's one request state, and a handler's
+# helper thread that asked through it marked, allocated on and released the handler's
+# arena beside the handler (the 3.7.6 review: blocks overwritten in every run). It is asked
+# first, before the arena. On agnos a thread runs inline on its starter, which is then the
+# same thread.
+fn bote_req_owner_here() {
+    return sys_gettid() == load64(bote_req_state() + BOTE_REQ_STATE_OWNER);
 }
 
 # The request now being served, by its raw id (the codec's), and not cancelled yet.
@@ -449,6 +467,7 @@ fn bote_cancelled() {
     if (load64(s + BOTE_REQ_STATE_CANCEL + 24) == 1) { return 1; }
     var fp = load64(s + BOTE_REQ_STATE_CANCEL);
     if (fp == 0 || load64(s + BOTE_REQ_STATE_CANCEL + 16) == 0) { return 0; }
+    if (sys_gettid() != load64(s + BOTE_REQ_STATE_OWNER)) { return 0; }
     var m[16];
     bote_req_mark(&m);
     var r = fncall3(fp, load64(s + BOTE_REQ_STATE_CANCEL + 8), bote_req_alloc(), load64(s + BOTE_REQ_STATE_CANCEL + 16));

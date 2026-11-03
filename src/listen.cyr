@@ -416,12 +416,16 @@ fn _bl_keep_uris(a, s, ack, d) {
     var i = _jx_skip_ws(raw, n, 1);
     while (i < n && load8(raw + i) != 93) {
         var u = _dsp_listen_uri_a(a, raw, n, i);
-        # Judged again as it is kept, with the claims the dispatcher judged it with, in one
-        # look: what serves it may have changed since.
-        if (u != 0 && dispatcher_resource_scopes_missing(d, u, claims) != 0) { u = 0; }
+        # Judged again as it is kept, with the claims the dispatcher judged it with: what
+        # serves it may have changed since. The list it is judged by is the list it keeps,
+        # from one look (3.7.7): judged by one and keeping another, a registration between
+        # the two left a stream with a list it was never judged by (the 3.7.6 review).
+        var sc = 0;
+        if (u != 0 && claims != 0) {
+            sc = _dsp_uri_scopes(d, u);
+            if (_dsp_scopes_lacking(d, sc, claims) != 0) { u = 0; }
+        }
         if (u != 0 && cnt < BOTE_LISTEN_URIS && used + strlen(u) + 10 <= BOTE_LISTEN_URI_ROOM + BOTE_LISTEN_URIS * 9) {
-            var sc = 0;
-            if (claims != 0) { sc = _dsp_uri_scopes(d, u); }
             store8(room + used, 0);
             if (sc != 0) { store8(room + used, 1); }
             store64(room + used + 1, sc);
