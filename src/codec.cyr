@@ -276,6 +276,22 @@ fn _cdc_process_single_a(a, line, dispatcher, claims) {
     if (req == 0) { return load64(&err_slot); }
     var resp = dispatcher_dispatch_a(a, dispatcher, req, claims);
     if (dbg == 1) { _cdc_log_request_a(a, req, resp, t0); }
+    # A connection that is itself the stream takes a listen over, and hears its cancel
+    # (3.7.3, a BoteStream in src/protocol.cyr).
+    var st = bote_req_stream();
+    if (st > 1) {
+        if (resp == 0) {
+            if (streq(req_method(req), "notifications/cancelled") == 1) {
+                var cid = 0;
+                if (req_params(req) != 0) { cid = jsonx_get_raw_a(a, req_params(req), "requestId"); }
+                bote_stream_cancel_a(st, a, cid);
+            }
+            return 0;
+        }
+        if (resp_error_obj(resp) == 0 && streq(req_method(req), "subscriptions/listen") == 1) {
+            return bote_stream_open_a(st, a, req, resp);
+        }
+    }
     if (resp == 0) { return 0; }
     return codec_serialize_response_a(a, resp);
 }
@@ -336,6 +352,9 @@ fn codec_process_message_a(a, input, dispatcher, claims) {
         if (n > CODEC_MAX_BATCH) {
             return _cdc_invalid_request_a(a, "batch too large");
         }
+        # A batch carries no stream: 2026-07-28 has no batches, and an answer in an array
+        # cannot be one.
+        bote_req_set_stream(0);
         var responses = vec_new_a(a);
         var ei = 0;
         while (ei < n) {

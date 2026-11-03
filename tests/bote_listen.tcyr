@@ -391,6 +391,9 @@ fn _heap_done(kind, cfg, raw, c) {
     return (alloc_used() - before) / 10;
 }
 
+# A hub thread that does not start (3.7.3).
+fn _no_spawn(fp, arg) { return 0; }
+
 # ---- many at once ---------------------------------------------------------------
 
 var LT_N = 4;
@@ -520,12 +523,21 @@ fn main() {
     assert_eq(bote_req_stream(), 0, "stream flag: a new message clears it");
 
     # What server/discover says, and the legacy initialize it leaves alone.
+    # It follows the message's transport (3.7.3): a hub on the dispatcher and a message on
+    # HTTP, which carries it.
+    bote_req_begin();
+    bote_req_set_stream(1);
     var disc = codec_process_message(_mb("server/discover"), dm, 0);
     assert(_has(disc, "\"tools\":{\"listChanged\":true}"), "discover: tools listChanged with a carrier");
     assert(_has(disc, "\"prompts\":{\"listChanged\":true}"), "discover: prompts listChanged");
     assert(_has(disc, "\"resources\":{\"listChanged\":true}"), "discover: resources listChanged");
+    bote_req_begin();
+    var disc_nt = codec_process_message(_mb("server/discover"), dm, 0);
+    assert(_has(disc_nt, "listChanged") == 0, "discover: none for a message on a transport that cannot carry the stream, a hub or not");
+    bote_req_set_stream(1);
     var disc0 = codec_process_message(_mb("server/discover"), _mk_d(1), 0);
-    assert(_has(disc0, "\"resources\":{}") && _has(disc0, "listChanged") == 0, "discover: none without one");
+    assert(_has(disc0, "\"resources\":{}") && _has(disc0, "listChanged") == 0, "discover: none on HTTP without a hub");
+    bote_req_begin();
     var init = codec_process_message(_INIT, dm, 0);
     assert(_has(init, "\"result\"") && _has(init, "listChanged") == 0, "initialize: unchanged by a carrier");
     var dn = _mk_d(1);
@@ -749,6 +761,74 @@ fn main() {
     assert_eq(_cl_eof(ce, 2000), 1, "stopped: closed by the server");
     assert(_has(_cl_buf(ce), "acknowledged"), "stopped: after what it was sent");
     _cl_close(ce);
+
+    # ---------------- what the 3.7.2 review found (3.7.3) ----------------
+    # The socket a stream will be is held before anything is sent: one that cannot be is a
+    # JSON refusal, and no acknowledgement.
+    var keep_dup = _bl_dup_cmd;
+    _bl_dup_cmd = 0 - 1;
+    _cl_open(ce, 0, hc, _post(_lb("\"dup\"", _TOOLS)), 0);
+    _cl_eof(ce, 2000);
+    assert(_cl_status(ce) == 200 && _has(_cl_buf(ce), _cat3("\"code\":-32603,\"message\":\"", BOTE_LISTEN_HELD, "\"")), "held: a socket that cannot be kept is refused aloud");
+    assert(_has(_cl_buf(ce), "text/event-stream") == 0 && _has(_cl_buf(ce), "acknowledged") == 0, "held: ...before any acknowledgement");
+    assert_eq(bote_listen_open(h), 0, "held: ...and its slot is free");
+    _cl_close(ce);
+    _bl_dup_cmd = keep_dup;
+    # Close-on-exec on what a stream and a wake pipe hold.
+    _cl_open(ce, 0, hc, _post(_lb("\"cx\"", _TOOLS)), 0);
+    _cl_await(ce, "acknowledged", 2000);
+    var cx_fd = 0 - 1;
+    var cxi = 0;
+    while (cxi < 4) {
+        if (load64(_bl_slot(h, cxi)) >= 0) { cx_fd = load64(_bl_slot(h, cxi)); }
+        cxi = cxi + 1;
+    }
+    assert(cx_fd >= 0 && (sys_fcntl(cx_fd, F_GETFD, 0) & FD_CLOEXEC) != 0, "cloexec: a parked stream's socket");
+    assert((sys_fcntl(load64(h + 40), F_GETFD, 0) & FD_CLOEXEC) != 0 && (sys_fcntl(load64(h + 48), F_GETFD, 0) & FD_CLOEXEC) != 0, "cloexec: the hub's wake pipe");
+    _cl_close(ce);
+    _await_open(h, 0, 2000);
+    # A stream honors what its acknowledgement said, not a second look: here the
+    # acknowledgement says nothing, the filter asks for prompts and the dispatcher has them.
+    var ma = bote_req_begin();
+    var merr[8];
+    var mreq = _cdc_admit_a(ma, _lb("\"m\"", "{\"promptsListChanged\":true}"), &merr);
+    var mresp = resp_success_a(ma, "\"m\"", "{\"notifications\":{}}");
+    var msp[16];
+    sys_socketpair(1, 1, 0, &msp);
+    var mhc[48];
+    bote_http_ctx(&mhc, load32(&msp), "http", "", 0, 0);
+    assert_eq(bote_listen_http(h, &mhc, mreq, mresp, d), 0, "ack: served");
+    sys_close(load32(&msp));
+    store64(ce, load32(&msp + 4));
+    store64(ce + 16, 0);
+    store64(ce + 24, 0);
+    assert_eq(_cl_eof(ce, 2000), 1, "ack: an acknowledgement of nothing ends the stream at once");
+    assert(_has(_cl_buf(ce), "\"resultType\":\"complete\""), "ack: ...with its result");
+    assert_eq(bote_listen_open(h), 0, "ack: ...holding nothing");
+    _cl_close(ce);
+    assert_eq(_bl_ack_mask("{\"notifications\":{\"toolsListChanged\":true,\"resourcesListChanged\":true}}"), BOTE_LISTEN_TOOLS | BOTE_LISTEN_RESOURCES, "ack: its bits");
+    # A hub thread that cannot start ends every stream parked meanwhile, not its own alone.
+    var hz = bote_listen_hub_new(4);
+    var dz = _mk_d(0);
+    dispatcher_set_listen(dz, hz);
+    var hcz = http_config_new("/mcp", 0, 0);
+    store64(hcz + 48, dz);
+    var bp[16];
+    sys_socketpair(1, 1, 0, &bp);
+    var bs = _bl_reserve(hz);
+    _bl_park(hz, bs, load32(&bp), BOTE_LISTEN_TOOLS, "\"other\"", 7);
+    store64(hz + 56, 0);
+    _bl_spawn = &_no_spawn;
+    _cl_open(ce, 0, hcz, _post(_lb("\"z\"", _TOOLS)), 0);
+    assert_eq(_cl_eof(ce, 2000), 1, "start: with no hub thread the new stream ends");
+    assert_eq(bote_listen_open(hz), 0, "start: ...and so does one parked meanwhile");
+    var bcl = _cl_new();
+    store64(bcl, load32(&bp + 4));
+    assert_eq(_cl_eof(bcl, 2000), 1, "start: ...whose client hears it close");
+    assert_eq(atomic_load(hz + 56), 0, "start: and the next stream may try again");
+    _bl_spawn = &thread_create;
+    _cl_close(ce);
+    _cl_close(bcl);
 
     # ---------------- the heap ----------------
     assert_eq(_heap_per(0, hc, _post(_lb("\"a\"", _TOOLS)), h, 0, ce), 0, "heap: a stream opened and closed keeps nothing");

@@ -18,6 +18,121 @@ have per release.
 
 _(empty)_
 
+## [3.7.3] — 2026-11-02 · Listen everywhere
+
+**`subscriptions/listen` on stdio, unix and WebSocket**, where the connection is itself the stream. A listen's
+acknowledgement is its first message on the connection, each change it asked for goes out between the replies to other
+requests, from whatever thread made it, and `notifications/cancelled` naming the listen's id ends it. Every transport now
+carries listen, and `listChanged` is advertised where, and only where, it is delivered.
+
+**The official suite's listen checks all pass**, on `http` and `streamable`: the acknowledgement first, the id stamped, the
+filter honored, and a tool change and a prompt change delivered. They had probed 3.7.2's streams all along, but needed the
+two hooks the suite calls to make a change, which the fixture now has. The official client opens a listen on all four of
+its transports and hears a change on each.
+
+**Six defects in 3.7.2 land ahead of it**, from an independent review of that release, none of them severe. See the
+correction notice in 3.7.2, which also corrects a claim this release does not fix: over TCP a client that stops reading
+keeps its stream for days.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Added
+
+- **A ListenLine** (`src/listen.cyr`), for a connection that is the stream:
+  - `bote_listen_line_new(max)`; `bote_listen_line_attach(c, d, write_fp, ctx)` and `_detach`, around each connection.
+  - `bote_listen_line_begin(c)`, which a transport calls in place of `bote_req_begin()`.
+  - `bote_listen_line_wait` / `_await(c, fd, deadline)`, which poll the connection and the line's wake pipe together,
+    and write the changes meanwhile; `bote_listen_line_deliver`.
+  - Its middle is laid out as a hub's, so `bote_listen_sink` serves both. An id already open is `-32600`; past
+    `BOTE_LISTEN_MAX` a connection's listens get `-32603`; a cancel matches the listen's id byte for byte.
+- **A BoteStream** (`src/protocol.cyr`, core): `bote_stream_new(open_fp, cancel_fp, ctx)`, `bote_stream_open_a`,
+  `bote_stream_cancel_a`. The request state's stream is 0, 1 for an HTTP transport, or a BoteStream, and the codec hands a
+  single message's accepted listen and any `notifications/cancelled` to it, so the core knows the shape and not what is
+  behind it. A batch carries none.
+- `transport_stdio_with_listen(line)`, `transport_unix_with_listen(line)` and `ws_config_with_listen(c, line)` (WsConfig grows
+  to 80 B). The binary gives each of the three a line, `BOTE_LISTEN_MAX` subscriptions a connection, logged at INFO.
+- stdio's loop is `_stdio_serve(d, in_fd, out_fd)`, which a test drives over pipes.
+- `test_trigger_tool_change` and `test_trigger_prompt_change` in the conformance fixture: the suite's hooks, each a real
+  registration. The fixture wires listen on every mode.
+
+### Changed
+
+- **`subscriptions/listen` and `server/discover`'s `listChanged` follow the message's transport** (`_dsp_listen_here`): an
+  HTTP transport with a hub on the dispatcher, or a connection carrying a BoteStream.
+- **With a line, the Unix and WebSocket idle deadlines count from what the client last sent**, not from the changes bote sent
+  it; the WebSocket's token is judged again before a change goes out, as before a frame is served (`_ws_token_holds`).
+- The WebSocket frame loop is `_ws_frames`.
+- **`BOTE_LISTEN_MAX` is held to 65,536** (`BOTE_LISTEN_MAX_BOUND`) with a WARN: every slot is made at startup.
+- `tests/bote_transport_unix.tcyr` and `tests/bote_ws.tcyr` include `http_era.cyr` and `listen.cyr`, which the transports now
+  reach.
+
+### Fixed
+
+From the review of 3.7.2:
+
+- **A listen stream was acknowledged before its socket was held**, and cut off, with no word in the log, when the process had
+  no descriptor to spare. The socket is held first, with `F_DUPFD_CLOEXEC`, and one that cannot be is a `-32603` and a WARN.
+- **A stream judged its filter again after its acknowledgement had**, so a prompt or resource registered between the two made
+  the acknowledgement say nothing honored and the stream stay open, then hear a change it had been told it would not. A
+  stream honors what its acknowledgement said (`_bl_ack_mask`).
+- **`server/discover` advertised `listChanged` on a transport that answers listen with `-32601`**, when one dispatcher is served
+  on HTTP and another transport.
+- **A hub thread that could not start ended its own stream and not one another worker parked meanwhile**, which was left with
+  nobody to serve it. Every parked stream ends, before and after the next caller may try again.
+- **The parked sockets and the wake pipes were inherited by any program an embedder's runner executes.** They are close-on-exec.
+  A child forked without an exec, as bote's own fetch is, still holds them until it exits.
+- **A hub that could not be made, or a `BOTE_LISTEN_MAX` past what memory allows, was silent**: listen answered `-32601` with
+  no line. It logs an ERROR now.
+
+### Security
+
+- **The listen fixes above**, none of which a client could turn into more than a stream cut off or held open.
+- **Over TCP a client that stops reading is not seen for days**, and one that reads its keepalives never is, so one client can
+  hold every stream slot. `BOTE_LISTEN_MAX` bounds memory and sockets, not who holds them. A stream's age or a bound per
+  client is an open decision on the roadmap; the TypeScript SDK's server has neither.
+
+### Tests
+
+- **4,842 assertions, from 4,730**, on x86_64 and under `qemu-aarch64`.
+  - **`tests/bote_listen_line.tcyr`**, 97, new:
+    - A line through the codec: the acknowledgement exactly, a number id, an id already open, the capacity, nothing
+      honored, the id bound, a filter that is none, legacy, a batch, a message not begun on the line.
+    - `server/discover` on the line and off it.
+    - Changes to each subscription by what it asked for, in slot order. A cancel by a string id, a number id and a whole
+      id, never by its start.
+    - A change waiting when the connection goes, a failed write, detach and attach.
+    - 0 heap bytes for an open and its cancel, and for each refusal with 60 KB in it.
+    - Waiting on two at once: the deadline, input, a change, a closed peer.
+    - The real stdio loop on a thread over pipes, with a change from another thread written while the client is quiet,
+      a cancel, a listen still open at EOF, and four threads changing the tools beside fifty replies, every line one whole
+      message.
+    - A Unix connection, its idle deadline from the client's last line, changes or not.
+    - A WebSocket: frames, a token that stops holding closing the connection with 1008 before a change goes out, and the
+      idle deadline from the last frame.
+  - **`tests/bote_listen.tcyr`**, 184, from 169: a socket that cannot be held, close-on-exec on a stream and the wake pipe,
+    an acknowledgement of nothing ending the stream whatever the filter, a hub thread that does not start ending another
+    worker's stream, and `listChanged` following the transport.
+- **38 mutants, all killed.** Four first survived, each on a missing case: a change waiting at detach, a number id matched by
+  its start, a stdio listen open at EOF, and a test that restored the duplicate's command by hand.
+- **`scripts/transport-smoke.sh`**: a listen over stdio, unix and ws, its cancel, and `BOTE_LISTEN_MAX` held to its bound.
+- **The official suite** passes 133 checks on 2026-07-28, from 128, every listen check among them, with the same scenarios
+  failing; the official client passes 422 checks, from 410.
+
+### Performance
+
+**The request path costs what it did.** Interleaved A/B against 3.7.2, 15 rounds pinned to an idle core. Minimums, in ns:
+
+| Bench | 3.7.2 | 3.7.3 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 3,940 | 3,945 | +0.1% |
+| `codec_process_message_arena` | 3,886 | 3,917 | +0.8% |
+| `codec_process_message_threaded` | 4,225 | 4,264 | +0.9% |
+| `http_era_modern` | 11,038 | 11,024 | −0.1% |
+| `listen_filter` | 3,715 | 3,698 | −0.5% |
+
+Every message through the codec now reads the request's stream word once. Rows that run none of this patch's code moved
+further (`validate_compiled_nested` +4.9%, `jsonx_get_raw_nested` +4.5%, `codec_parse_request` −3.1%), which is layout.
+
 ## [3.7.2] — 2026-11-02 · Listen streams
 
 **`subscriptions/listen` on `http`, `bridge` and `streamable`.** It is MCP 2026-07-28's way to hear of changes, in place
@@ -34,6 +149,16 @@ scope for a token without it, when the tool was registered while the call was in
 3.7.1. And CI had never run three of the test files: `bote_fetch` (3.6.5), `bote_jwks` (3.6.6) and `bote_threads` (3.7.0).
 
 The handler ABI and the stated minimum cyrius are unchanged.
+
+> ⚠ **Corrected at 3.7.3.** Three claims below were not true, found by an independent review of this release. "A client that
+> stops reading loses its stream" holds on a socketpair and not over TCP: the client's receive window takes about a megabyte
+> first, which at one keepalive every 15 s is days, and a client that reads its keepalives is never dropped, so one client can
+> hold every slot. That is an open decision on the roadmap, not fixed in 3.7.3. "`server/discover` advertises `listChanged`
+> once a carrier is set" advertised it on a transport that shares the dispatcher and answers listen with `-32601`. And "with
+> nothing honored the stream ends at once" missed a prompt or resource registered between the acknowledgement and the stream's
+> own look at the filter, when the acknowledgement said nothing and the stream stayed. A stream acknowledged before its socket
+> was held was also cut off, with no word in the log, when the process had no descriptor to spare. All but the first are fixed
+> in 3.7.3.
 
 ### Added
 

@@ -41,6 +41,32 @@
 #   +96 polled        max + 1 slot pointers, beside the pollfds
 # A slot (BOTE_LISTEN_SLOT_BYTES): +0 fd, -1 when free and -2 while a worker opens it,
 # +8 the BOTE_LISTEN_* bits it honors, +16 the id's length, +24 the id, a raw JSON literal.
+#
+# Where the connection is itself the stream, on stdio, a Unix socket or a WebSocket (3.7.3),
+# there is no hub thread: a ListenLine holds that connection's subscriptions, and the loop
+# that serves the connection writes their changes, between its replies. Each subscription is
+# a slot as above, its +0 1 while it is open. The transport hands the codec the line's
+# BoteStream for each message (bote_listen_line_begin), and the codec gives it a listen the
+# dispatcher accepted and a `notifications/cancelled` (src/codec.cyr). The loop waits on its
+# connection and on the line's wake pipe at once (bote_listen_line_await), so a change made
+# on another thread is written while the connection is quiet. The acknowledgement is the
+# listen's first message on the connection, as on HTTP, and `notifications/cancelled` naming
+# the listen's id ends it, after which the server sends nothing more for it.
+#
+# ListenLine (96 B), its middle laid out as a hub's, so the sink and the wake pipe are
+# shared:
+#   +0  stream        its BoteStream (src/protocol.cyr)
+#   +8  slots         `max` of BOTE_LISTEN_SLOT_BYTES
+#   +16 max
+#   +24 open          slots holding a subscription
+#   +32 pending       as a hub's
+#   +40 wake_rd
+#   +48 wake_wr
+#   +56 dispatcher    the connection's, set when one is attached
+#   +64 write         fn(ctx, json) → 0, or below 0 when the connection would not take it
+#   +72 next          as a hub's
+#   +80 write ctx
+#   +88 frame         BOTE_LISTEN_FRAME_MAX bytes
 
 var BOTE_LISTEN_MAX_DEFAULT = 256;
 var BOTE_LISTEN_KEEPALIVE_MS = 15000;
@@ -49,6 +75,12 @@ var BOTE_LISTEN_SLOT_BYTES = 288;
 var BOTE_LISTEN_FRAME_MAX = 1024;
 var BOTE_LISTEN_SUB_KEY = "io.modelcontextprotocol/subscriptionId";
 var BOTE_LISTEN_ID_LONG = "a subscriptions/listen id is at most 256 bytes";
+var BOTE_LISTEN_ID_OPEN = "a subscriptions/listen with this id is open";
+var BOTE_LISTEN_FULL = "Subscription limit reached";
+var BOTE_LISTEN_HELD = "internal error: the stream could not be held open";
+var BOTE_LISTEN_MAX_BOUND = 65536;
+var BOTE_LISTEN_SSE_PRE = "event: message\ndata: ";
+var BOTE_LISTEN_SSE_POST = "\n\n";
 
 # The change a published topic is, as a BOTE_LISTEN_* bit, or 0.
 fn _bl_kind(topic) {
@@ -79,6 +111,13 @@ fn bote_listen_hub_with_keepalive(h, ms) {
 fn bote_listen_hub_new(max) { return 0; }
 fn bote_listen_sink(h, next) { return next; }
 fn bote_listen_http(h, hc, req, resp, d) { return resp_error_a(bote_req_alloc(), req_id(req), 0 - 32601, "method not found: subscriptions/listen"); }
+fn bote_listen_line_new(max) { return 0; }
+fn bote_listen_line_begin(c) { return bote_req_begin(); }
+fn bote_listen_line_attach(c, d, write_fp, ctx) { return 0; }
+fn bote_listen_line_detach(c) { return 0; }
+fn bote_listen_line_await(c, fd, deadline) { return 1; }
+fn bote_listen_line_wait(c, fd, deadline) { return 1; }
+fn bote_listen_line_deliver(c) { return 0; }
 #endif
 
 #ifndef CYRIUS_TARGET_AGNOS
@@ -90,6 +129,21 @@ fn _bl_nonblock(fd) {
     if (fl < 0) { return fl; }
     return sys_fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
+
+# What a stream or a wake pipe holds lives for hours, so no program an embedder's runner
+# executes inherits it (3.7.3): close-on-exec, and the wake pipe's ends non-blocking too.
+# A child forked with no exec still holds them until it exits. The duplicate of a stream's
+# socket is made with F_DUPFD_CLOEXEC (1030 on Linux), through `_bl_dup_cmd`, which a test
+# makes fail.
+var _bl_dup_cmd = 1030;
+
+fn _bl_wake_end(fd) {
+    sys_fcntl(fd, F_SETFD, FD_CLOEXEC);
+    return _bl_nonblock(fd);
+}
+
+# What starts the hub thread, thread_create unless a test makes it fail.
+var _bl_spawn = &thread_create;
 
 # A hub for at most `max` streams, or 0 for none.
 fn bote_listen_hub_new(max) {
@@ -119,8 +173,8 @@ fn bote_listen_hub_new(max) {
     store64(h + 80, pfd);
     store64(h + 88, frame);
     store64(h + 96, polled);
-    _bl_nonblock(load64(h + 40));
-    _bl_nonblock(load64(h + 48));
+    _bl_wake_end(load64(h + 40));
+    _bl_wake_end(load64(h + 48));
     return h;
 }
 
@@ -152,9 +206,9 @@ fn _bl_publish(h, topic, payload) {
     return 0;
 }
 
-# The EventSink that carries the dispatcher's changes to `h`'s streams and passes every
-# event on to `next`. Its list-only flag is `next`'s, or set when there is none. With no
-# hub, `next` itself.
+# The EventSink that carries the dispatcher's changes to `h`'s streams, a hub's or a
+# ListenLine's, and passes every event on to `next`. Its list-only flag is `next`'s, or set
+# when there is none. With no hub, `next` itself.
 fn bote_listen_sink(h, next) {
     if (h == 0) { return next; }
     store64(h + 72, next);
@@ -190,6 +244,12 @@ fn _bl_release(h, s) {
     store64(s, 0 - 1);
     mutex_unlock(load64(h));
     return 0;
+}
+
+# A stream that never opened: its slot back, and the socket it would have been closed.
+fn _bl_drop(h, s, fd) {
+    if (fd >= 0) { sys_close(fd); }
+    return _bl_release(h, s);
 }
 
 fn _bl_park(h, s, fd, mask, id, idl) {
@@ -254,19 +314,28 @@ fn _bl_chunk(out, payload, n) {
     return load64(&at);
 }
 
+# The change notification `method` for the subscription in slot `s`, appended to `buf` at
+# *at: its JSON-RPC message.
+fn _bl_note(buf, at, s, method) {
+    _bl_puts(buf, at, "{\"jsonrpc\":\"2.0\",\"method\":\"");
+    _bl_puts(buf, at, method);
+    _bl_puts(buf, at, "\",\"params\":{\"_meta\":{\"");
+    _bl_puts(buf, at, BOTE_LISTEN_SUB_KEY);
+    _bl_puts(buf, at, "\":");
+    _bl_put(buf, at, s + 24, load64(s + 16));
+    _bl_puts(buf, at, "}}}");
+    return 0;
+}
+
 # One change notification for the stream in slot `s`, as a chunk, in the hub's frame
 # buffer. Its length.
 fn _bl_change_frame(h, s, method) {
     var ev[512];
     var at[8];
     store64(&at, 0);
-    _bl_puts(&ev, &at, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"");
-    _bl_puts(&ev, &at, method);
-    _bl_puts(&ev, &at, "\",\"params\":{\"_meta\":{\"");
-    _bl_puts(&ev, &at, BOTE_LISTEN_SUB_KEY);
-    _bl_puts(&ev, &at, "\":");
-    _bl_put(&ev, &at, s + 24, load64(s + 16));
-    _bl_puts(&ev, &at, "}}}\n\n");
+    _bl_puts(&ev, &at, "event: message\ndata: ");
+    _bl_note(&ev, &at, s, method);
+    _bl_puts(&ev, &at, "\n\n");
     return _bl_chunk(load64(h + 88), &ev, load64(&at));
 }
 
@@ -278,12 +347,13 @@ fn _bl_send(s, p, n) {
 
 # ---- the HTTP side --------------------------------------------------------------
 
-# The acknowledgement for `id`, from `ack`, the params the dispatcher made, as an SSE event
-# on `a`.
-fn _bl_ack_event_a(a, ack, id) {
+# The acknowledgement for `id`, from `ack`, the params the dispatcher made, between `pre`
+# and `post`, on `a`: an SSE event, or the bare message.
+fn _bl_ack_a(a, ack, id, pre, post) {
     var sb = str_builder_new_a(a);
     _sb_grow_a(a, sb, strlen(ack) + strlen(id) + 160);
-    str_builder_add_cstr(sb, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":{");
+    str_builder_add_cstr(sb, pre);
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":{");
     # `ack` is {"notifications":{...}}: its members, then the stamp.
     var i = 1;
     while (i < strlen(ack) - 1) {
@@ -294,15 +364,19 @@ fn _bl_ack_event_a(a, ack, id) {
     str_builder_add_cstr(sb, BOTE_LISTEN_SUB_KEY);
     str_builder_add_cstr(sb, "\":");
     str_builder_add_cstr(sb, id);
-    str_builder_add_cstr(sb, "}}}\n\n");
+    str_builder_add_cstr(sb, "}}}");
+    str_builder_add_cstr(sb, post);
     return str_data(str_builder_build_a(a, sb));
 }
 
-# The stream's result, which ends it, for `id`, as an SSE event on `a`.
-fn _bl_result_event_a(a, id, d) {
+fn _bl_ack_event_a(a, ack, id) { return _bl_ack_a(a, ack, id, BOTE_LISTEN_SSE_PRE, BOTE_LISTEN_SSE_POST); }
+
+# The stream's result, which ends it, for `id`, between `pre` and `post`, on `a`.
+fn _bl_result_a(a, id, d, pre, post) {
     var sb = str_builder_new_a(a);
     _sb_grow_a(a, sb, strlen(id) * 2 + 512);
-    str_builder_add_cstr(sb, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":");
+    str_builder_add_cstr(sb, pre);
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":");
     str_builder_add_cstr(sb, id);
     str_builder_add_cstr(sb, ",\"result\":{\"resultType\":\"complete\",\"_meta\":{\"");
     str_builder_add_cstr(sb, BOTE_LISTEN_SUB_KEY);
@@ -310,16 +384,48 @@ fn _bl_result_event_a(a, id, d) {
     str_builder_add_cstr(sb, id);
     str_builder_add_cstr(sb, ",\"io.modelcontextprotocol/serverInfo\":");
     _dsp_emit_server_info(sb, d);
-    str_builder_add_cstr(sb, "}}}\n\n");
+    str_builder_add_cstr(sb, "}}}");
+    str_builder_add_cstr(sb, post);
     return str_data(str_builder_build_a(a, sb));
 }
 
+fn _bl_result_event_a(a, id, d) { return _bl_result_a(a, id, d, BOTE_LISTEN_SSE_PRE, BOTE_LISTEN_SSE_POST); }
+
+# Every parked stream, ended: nobody serves them.
+fn _bl_close_all(h, why) {
+    mutex_lock(load64(h));
+    var i = 0;
+    while (i < load64(h + 16)) {
+        var s = _bl_slot(h, i);
+        if (load64(s) >= 0) { _bl_close_held(h, s, why); }
+        i = i + 1;
+    }
+    mutex_unlock(load64(h));
+    return 0;
+}
+
+# The hub thread, started by the first stream: 1 once it runs. When it cannot start, every
+# stream parked meanwhile ends, before and after the next caller may try again (3.7.3): a
+# stream another worker parked while this start was failing was left with nobody to serve it.
 fn _bl_start(h) {
     if (atomic_load(h + 56) == 1 || atomic_cas(h + 56, 0, 1) == 0) { return 1; }
-    if (thread_create(&_bl_run, h) != 0) { return 1; }
-    atomic_store(h + 56, 0);
+    if (fncall2(_bl_spawn, &_bl_run, h) != 0) { return 1; }
     bote_log(SK_ERROR, "listen: the hub thread did not start; its streams are not served");
+    _bl_close_all(h, "no hub thread");
+    atomic_store(h + 56, 0);
+    _bl_close_all(h, "no hub thread");
     return 0;
+}
+
+# The BOTE_LISTEN_* bits the acknowledgement's params `ack` name: bote_listen_ack_params_a's
+# own bytes. A stream honors what its first message said it would (3.7.3): judged again, a
+# prompt registered between the two made the acknowledgement say nothing and the stream stay.
+fn _bl_ack_mask(ack) {
+    var m = 0;
+    if (strstr(ack, "\"toolsListChanged\":true") >= 0) { m = m | BOTE_LISTEN_TOOLS; }
+    if (strstr(ack, "\"promptsListChanged\":true") >= 0) { m = m | BOTE_LISTEN_PROMPTS; }
+    if (strstr(ack, "\"resourcesListChanged\":true") >= 0) { m = m | BOTE_LISTEN_RESOURCES; }
+    return m;
 }
 
 # Serve the listen request `req`, which the dispatcher `d` accepted with `resp`, on the HTTP
@@ -330,8 +436,10 @@ fn bote_listen_http(h, hc, req, resp, d) {
     var id = req_id(req);
     var idl = strlen(id);
     if (idl > BOTE_LISTEN_ID_MAX) { return resp_error_a(a, id, 0 - 32602, BOTE_LISTEN_ID_LONG); }
-    var mask = dispatcher_listen_mask_a(a, d, req_params(req));
+    var mask = _bl_ack_mask(resp_result(resp));
+    var cfd = _he_cfd(hc);
     var s = 0;
+    var fd = 0 - 1;
     if (mask != 0) {
         s = _bl_reserve(h);
         if (s == 0) {
@@ -339,10 +447,20 @@ fn bote_listen_http(h, hc, req, resp, d) {
             bote_log_line(&wl, SK_WARN, "subscriptions/listen refused: every stream slot is taken");
             bote_log_int(&wl, "max", load64(h + 16));
             bote_log_emit(&wl);
-            return resp_error_a(a, id, 0 - 32603, "Subscription limit reached");
+            return resp_error_a(a, id, 0 - 32603, BOTE_LISTEN_FULL);
+        }
+        # The socket the stream will be, held before anything is sent (3.7.3): a client was
+        # acknowledged and then cut off, with no word in the log, when it could not be.
+        fd = sys_fcntl(cfd, _bl_dup_cmd, 3);
+        if (fd < 0) {
+            _bl_release(h, s);
+            var dl[BOTE_LOG_LINE_BYTES];
+            bote_log_line(&dl, SK_WARN, "subscriptions/listen refused: the stream's socket could not be held");
+            bote_log_int(&dl, "errno", 0 - fd);
+            bote_log_emit(&dl);
+            return resp_error_a(a, id, 0 - 32603, BOTE_LISTEN_HELD);
         }
     }
-    var cfd = _he_cfd(hc);
     var hdr = "Cache-Control: no-cache\r\n";
     if (_he_extra(hc) != 0) {
         var hb = str_builder_new_a(a);
@@ -350,24 +468,17 @@ fn bote_listen_http(h, hc, req, resp, d) {
         str_builder_add_cstr_a(a, hb, _he_extra(hc));
         hdr = str_data(str_builder_build_a(a, hb));
     }
-    if (sandhi_server_send_chunked_start_a(a, cfd, HTTP_OK, "text/event-stream", hdr) < 0) { return _bl_release(h, s); }
+    if (sandhi_server_send_chunked_start_a(a, cfd, HTTP_OK, "text/event-stream", hdr) < 0) { return _bl_drop(h, s, fd); }
     var ack = _bl_ack_event_a(a, resp_result(resp), id);
-    if (sandhi_server_send_chunk(cfd, ack, strlen(ack)) < 0) { return _bl_release(h, s); }
+    if (sandhi_server_send_chunk(cfd, ack, strlen(ack)) < 0) { return _bl_drop(h, s, fd); }
     if (mask == 0) {
         var res = _bl_result_event_a(a, id, d);
         sandhi_server_send_chunk(cfd, res, strlen(res));
         sandhi_server_send_chunked_end(cfd);
         return 0;
     }
-    var fd = sys_fcntl(cfd, F_DUPFD, 3);
-    if (fd < 0) { return _bl_release(h, s); }
     _bl_park(h, s, fd, mask, id, idl);
-    if (_bl_start(h) == 0) {
-        mutex_lock(load64(h));
-        _bl_close_held(h, s, "no hub thread");
-        mutex_unlock(load64(h));
-        return 0;
-    }
+    if (_bl_start(h) == 0) { return 0; }
     _bl_wake(h);
     var ln[BOTE_LOG_LINE_BYTES];
     bote_log_line(&ln, SK_DEBUG, "listen stream opened");
@@ -497,5 +608,236 @@ fn _bl_run(h) {
         }
     }
     return 0;
+}
+
+# ---- a connection that is itself the stream (3.7.3) -----------------------------------
+
+# A ListenLine for at most `max` subscriptions on one connection at a time, or 0 for none.
+fn bote_listen_line_new(max) {
+    if (max <= 0) { return 0; }
+    var c = alloc(96);
+    var slots = alloc(max * BOTE_LISTEN_SLOT_BYTES);
+    var frame = alloc(BOTE_LISTEN_FRAME_MAX);
+    var fds[8];
+    if (c == 0 || slots == 0 || frame == 0 || sys_pipe(&fds) < 0) { return 0; }
+    var i = 0;
+    while (i < max) {
+        store64(slots + i * BOTE_LISTEN_SLOT_BYTES, 0 - 1);
+        i = i + 1;
+    }
+    store64(c, bote_stream_new(&_bll_open, &_bll_cancel, c));
+    store64(c + 8, slots);
+    store64(c + 16, max);
+    store64(c + 24, 0);
+    store64(c + 32, 0);
+    store64(c + 40, load32(&fds));
+    store64(c + 48, load32(&fds + 4));
+    store64(c + 56, 0);
+    store64(c + 64, 0);
+    store64(c + 72, 0);
+    store64(c + 80, 0);
+    store64(c + 88, frame);
+    _bl_wake_end(load64(c + 40));
+    _bl_wake_end(load64(c + 48));
+    return c;
+}
+
+# Start a message on the connection `c` serves: bote_req_begin, and the line's BoteStream
+# for the codec while a connection is attached. With no line, bote_req_begin alone.
+fn bote_listen_line_begin(c) {
+    var a = bote_req_begin();
+    if (c != 0 && load64(c + 64) != 0) { bote_req_set_stream(load64(c)); }
+    return a;
+}
+
+# No subscription, and nothing pending from before.
+fn _bll_clear(c) {
+    var i = 0;
+    while (i < load64(c + 16)) {
+        store64(_bl_slot(c, i), 0 - 1);
+        i = i + 1;
+    }
+    atomic_store(c + 24, 0);
+    _bl_take_pending(c);
+    var drain[64];
+    while (sys_read(load64(c + 40), &drain, 64) > 0) { }
+    return 0;
+}
+
+# The connection `c` serves from now, on the dispatcher `d`, written to through
+# write_fp(ctx, json). It starts with no subscription.
+fn bote_listen_line_attach(c, d, write_fp, ctx) {
+    if (c == 0) { return 0; }
+    _bll_clear(c);
+    store64(c + 56, d);
+    store64(c + 64, write_fp);
+    store64(c + 80, ctx);
+    return 0;
+}
+
+# The connection has gone, and its subscriptions with it.
+fn bote_listen_line_detach(c) {
+    if (c == 0) { return 0; }
+    var n = atomic_load(c + 24);
+    _bll_clear(c);
+    store64(c + 64, 0);
+    store64(c + 80, 0);
+    if (n > 0) {
+        var ln[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&ln, SK_DEBUG, "listen subscriptions ended");
+        bote_log_str(&ln, "reason", "gone");
+        bote_log_int(&ln, "count", n);
+        bote_log_emit(&ln);
+    }
+    return 0;
+}
+
+# The open subscription whose id is the `idl` bytes at `id`, or 0.
+fn _bll_find(c, id, idl) {
+    var i = 0;
+    while (i < load64(c + 16)) {
+        var s = _bl_slot(c, i);
+        if (load64(s) == 1 && load64(s + 16) == idl && memeq(s + 24, id, idl) == 1) { return s; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _bll_free_slot(c) {
+    var i = 0;
+    while (i < load64(c + 16)) {
+        var s = _bl_slot(c, i);
+        if (load64(s) == 0 - 1) { return s; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _bll_refuse_a(a, id, code, msg) { return codec_serialize_response_a(a, resp_error_a(a, id, code, msg)); }
+
+# The BoteStream's open: the listen `req`, which the dispatcher accepted with `resp`, on
+# the connection `c` serves. 0 once its first messages are written, or the reply to send
+# instead: the id too long, the id already open, or every slot taken.
+fn _bll_open(c, a, req, resp) {
+    var id = req_id(req);
+    var idl = strlen(id);
+    if (idl > BOTE_LISTEN_ID_MAX) { return _bll_refuse_a(a, id, 0 - 32602, BOTE_LISTEN_ID_LONG); }
+    if (_bll_find(c, id, idl) != 0) { return _bll_refuse_a(a, id, 0 - 32600, BOTE_LISTEN_ID_OPEN); }
+    var d = load64(c + 56);
+    var mask = _bl_ack_mask(resp_result(resp));
+    var s = 0;
+    if (mask != 0) {
+        s = _bll_free_slot(c);
+        if (s == 0) {
+            var wl[BOTE_LOG_LINE_BYTES];
+            bote_log_line(&wl, SK_WARN, "subscriptions/listen refused: every subscription slot is taken");
+            bote_log_int(&wl, "max", load64(c + 16));
+            bote_log_emit(&wl);
+            return _bll_refuse_a(a, id, 0 - 32603, BOTE_LISTEN_FULL);
+        }
+    }
+    var w = load64(c + 64);
+    var ctx = load64(c + 80);
+    if (fncall2(w, ctx, _bl_ack_a(a, resp_result(resp), id, "", "")) < 0) { return 0; }
+    if (mask == 0) {
+        fncall2(w, ctx, _bl_result_a(a, id, d, "", ""));
+        return 0;
+    }
+    store64(s + 8, mask);
+    store64(s + 16, idl);
+    memcpy(s + 24, id, idl);
+    store64(s, 1);
+    atomic_store(c + 24, load64(c + 24) + 1);
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_DEBUG, "listen subscription opened");
+    bote_log_int(&ln, "honored", mask);
+    bote_log_int(&ln, "open", load64(c + 24));
+    bote_log_emit(&ln);
+    return 0;
+}
+
+# The BoteStream's cancel: `id`, a `notifications/cancelled`'s raw `requestId`, ends the
+# subscription it names, compared byte for byte with the listen's id as it was sent. Any
+# other is a request the line does not hold.
+fn _bll_cancel(c, a, id) {
+    if (id == 0) { return 0; }
+    var s = _bll_find(c, id, strlen(id));
+    if (s == 0) { return 0; }
+    store64(s, 0 - 1);
+    atomic_store(c + 24, load64(c + 24) - 1);
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_DEBUG, "listen subscription ended");
+    bote_log_str(&ln, "reason", "cancelled");
+    bote_log_int(&ln, "open", load64(c + 24));
+    bote_log_emit(&ln);
+    return 0;
+}
+
+# Wait on the connection's `fd` and on the line's wake pipe at once, until `deadline`, a
+# clock_now_ms time, or for as long as it takes when that is 0: 1 when `fd` has input or
+# has closed, 2 when changes are waiting, 0 when the deadline passed. A poll that fails is
+# taken as input, which the read then answers.
+fn bote_listen_line_wait(c, fd, deadline) {
+    var pfd[16];
+    while (1 == 1) {
+        store32(&pfd, fd);
+        store16(&pfd + 4, _BL_POLLIN);
+        store16(&pfd + 6, 0);
+        store32(&pfd + 8, load64(c + 40));
+        store16(&pfd + 12, _BL_POLLIN);
+        store16(&pfd + 14, 0);
+        var r = 0;
+        if (deadline == 0) {
+            r = sys_ppoll(&pfd, 2, 0, 0, 8);
+        } else {
+            var left = deadline - clock_now_ms();
+            if (left <= 0) { return 0; }
+            r = _bl_poll(&pfd, 2, left);
+        }
+        if (r < 0) { return 1; }
+        if (r > 0) {
+            if (_bl_fired(&pfd, 1) == 1) { return 2; }
+            if (_bl_fired(&pfd, 0) == 1) { return 1; }
+        }
+    }
+    return 1;
+}
+
+# Write each subscription the changes waiting that it asked for: 0, or -1 when the
+# connection would not take one.
+fn bote_listen_line_deliver(c) {
+    var drain[64];
+    while (sys_read(load64(c + 40), &drain, 64) > 0) { }
+    var bits = _bl_take_pending(c);
+    if (bits == 0 || load64(c + 64) == 0) { return 0; }
+    var f = load64(c + 88);
+    var at[8];
+    var i = 0;
+    while (i < load64(c + 16)) {
+        var s = _bl_slot(c, i);
+        var b = 1;
+        while (b <= BOTE_LISTEN_RESOURCES && load64(s) == 1) {
+            if ((bits & b) != 0 && (load64(s + 8) & b) != 0) {
+                store64(&at, 0);
+                _bl_note(f, &at, s, _bl_method(b));
+                store8(f + load64(&at), 0);
+                if (fncall2(load64(c + 64), load64(c + 80), f) < 0) { return 0 - 1; }
+            }
+            b = b * 2;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# bote_listen_line_wait, writing the changes as they come: 1 when `fd` has input or has
+# closed, 0 when the deadline passed, -1 when the connection would not take a change.
+fn bote_listen_line_await(c, fd, deadline) {
+    while (1 == 1) {
+        var w = bote_listen_line_wait(c, fd, deadline);
+        if (w != 2) { return w; }
+        if (bote_listen_line_deliver(c) < 0) { return 0 - 1; }
+    }
+    return 1;
 }
 #endif

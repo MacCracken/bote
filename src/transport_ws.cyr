@@ -40,6 +40,8 @@ include "lib/ws_server.cyr"
 #   +48 bearer_validator  fn ptr (token, ctx) → claims | 0, or 0 to disable
 #   +56 bearer_ctx        i64 ctx passed verbatim to validator
 #   +64 idle_ms           frame-loop receive deadline, 0 = none (3.3.7)
+#   +72 listen            a ListenLine for `subscriptions/listen` over each
+#                         connection (3.7.3, src/listen.cyr), or 0
 #
 # Bearer auth applies on the upgrade HTTP request only, not per-frame —
 # WS has a single Upgrade and the connection's identity is fixed at
@@ -47,7 +49,7 @@ include "lib/ws_server.cyr"
 # ================================================================
 
 fn ws_config_new(path, addr, port) {
-    var c = alloc(72);
+    var c = alloc(80);
     store64(c, path);
     store64(c + 8, addr);
     store64(c + 16, port);
@@ -66,6 +68,7 @@ fn ws_config_new(path, addr, port) {
     # _bote_ws_handler for why an inherited HTTP-shaped deadline is wrong
     # for a long-lived frame loop.
     store64(c + 64, 0);
+    store64(c + 72, 0);
     return c;
 }
 
@@ -98,6 +101,8 @@ fn ws_config_bearer_ctx(c)       { return load64(c + 56); }
 # long an idle peer can do that; it does not make the server concurrent.
 fn ws_config_with_idle_ms(c, ms)  { store64(c + 64, ms); return c; }
 fn ws_config_idle_ms(c)           { return load64(c + 64); }
+fn ws_config_with_listen(c, l)    { store64(c + 72, l); return c; }
+fn ws_config_listen(c)            { return load64(c + 72); }
 
 # ================================================================
 # Middleware — same shape as transport_http, run pre-upgrade
@@ -233,6 +238,33 @@ fn _bote_ws_recv(ws) {
     return 0;
 }
 
+# The listen line's writer: one message, one text frame. A frame not sent whole leaves the
+# stream out of step, so the caller drops the connection.
+fn _ws_listen_write(ws, json) {
+    var sr = ws_server_send_text(ws, json);
+    if (sr < 0) {
+        bote_conn_log_send_drop("ws", sr);
+        return sr;
+    }
+    return 0;
+}
+
+# The presented token judged again when it is due (3.6.6), before a frame is served or a
+# change goes out: 1 while it holds, 0 once it has failed and the connection is closed with
+# 1008. *judged is when it was last judged.
+fn _ws_token_holds(config, ws, held, judged) {
+    if (held == 0) { return 1; }
+    var now = clock_now_ms();
+    if (_ws_recheck_due(now, load64(judged)) == 0) { return 1; }
+    if (fncall2(ws_config_bearer_validator(config), held, ws_config_bearer_ctx(config)) == 0) {
+        bote_log_warn("ws token no longer valid; connection closed");
+        _ws_send_close_policy(ws);
+        return 0;
+    }
+    store64(judged, now);
+    return 1;
+}
+
 # ================================================================
 # Upgrade handler — invoked per connection by sandhi's serve loop
 # ================================================================
@@ -338,27 +370,43 @@ fn _bote_ws_handler(config, cfd, buf, n) {
     # without this every reply waits on the peer's delayed ACK: about 40 ms.
     sock_set_nodelay(cfd, 1);
 
-    # Each frame is one JSON-RPC message. Loop until peer closes or the
-    # socket errors out (ws_server_recv returns 0). The first frame to hand a handler
-    # the token makes its one heap copy, and every later frame hands over that one.
+    var lc = ws_config_listen(config);
+    bote_listen_line_attach(lc, ws_config_dispatcher(config), &_ws_listen_write, ws);
+    var r = _ws_frames(config, ws, cfd, ws_claims, ws_token, ws_held);
+    bote_listen_line_detach(lc);
+    return r;
+}
+
+# Each frame is one JSON-RPC message. Loop until peer closes or the socket errors out
+# (_bote_ws_recv returns 0). The first frame to hand a handler the token makes its one heap
+# copy, and every later frame hands over that one. With a listen line, the loop waits on the
+# socket and the line at once, and writes a change while the client is quiet (3.7.3); the
+# idle deadline still counts from the client's last frame.
+fn _ws_frames(config, ws, cfd, ws_claims, ws_token, ws_held) {
+    var lc = ws_config_listen(config);
+    var idle_ms = ws_config_idle_ms(config);
     var ws_kept = 0;
-    var ws_judged = clock_now_ms();
+    var judged[8];
+    store64(&judged, clock_now_ms());
+    var heard = clock_now_ms();
     while (1 == 1) {
-        a = bote_req_begin();
+        if (lc != 0) {
+            var deadline = 0;
+            if (idle_ms > 0) { deadline = heard + idle_ms; }
+            var w = bote_listen_line_wait(lc, cfd, deadline);
+            while (w == 2) {
+                if (_ws_token_holds(config, ws, ws_held, &judged) == 0) { return 0; }
+                if (bote_listen_line_deliver(lc) < 0) { return 0; }
+                w = bote_listen_line_wait(lc, cfd, deadline);
+            }
+            if (w == 0) { return 0; }
+        }
+        var a = bote_listen_line_begin(lc);
         if (ws_token == 1) { bote_req_note_token_kept(ws_claims, ws_kept); }
         var msg = _bote_ws_recv(ws);
         if (msg == 0) { return 0; }
-        if (ws_held != 0) {
-            var now = clock_now_ms();
-            if (_ws_recheck_due(now, ws_judged) == 1) {
-                if (fncall2(ws_fp, ws_held, ws_config_bearer_ctx(config)) == 0) {
-                    bote_log_warn("ws token no longer valid; connection closed");
-                    _ws_send_close_policy(ws);
-                    return 0;
-                }
-                ws_judged = now;
-            }
-        }
+        heard = clock_now_ms();
+        if (_ws_token_holds(config, ws, ws_held, &judged) == 0) { return 0; }
         var resp = codec_process_message_a(a, msg, ws_config_dispatcher(config), ws_claims);
         if (ws_token == 1) { ws_kept = bote_req_kept(); }
         if (resp != 0) {

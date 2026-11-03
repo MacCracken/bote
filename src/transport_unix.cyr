@@ -36,6 +36,12 @@ fn _unix_reply(cfd, resp) {
     return 0;
 }
 
+# `subscriptions/listen` over each connection (3.7.3): a ListenLine (src/listen.cyr), or 0,
+# when the method is not found. Set before transport_unix_run. A client's subscriptions end
+# with its connection.
+var _unix_listen = 0;
+fn transport_unix_with_listen(c) { _unix_listen = c; return c; }
+
 # Process complete (newline-terminated) lines in the per-connection buffer.
 # Returns 1 if any was processed, 0 if none, and -1 when a reply could not be
 # written: the caller then drops the connection.
@@ -49,7 +55,7 @@ fn _unix_process_lines(cfd, dispatcher, buf, blen_ptr) {
             store8(buf + scanned, 0);
             var line_len = scanned - line_start;
             if (line_len > 0) {
-                var resp = codec_process_message_a(bote_req_begin(), buf + line_start, dispatcher, 0);
+                var resp = codec_process_message_a(bote_listen_line_begin(_unix_listen), buf + line_start, dispatcher, 0);
                 if (resp != 0) {
                     if (_unix_reply(cfd, resp) < 0) { return 0 - 1; }
                 }
@@ -161,12 +167,29 @@ fn _unix_backoff_next(cur_ms) {
 # One connection is served at a time, so one read buffer serves them all.
 var _unix_buf = 0;
 fn _unix_handle_client(cfd, dispatcher) {
+    bote_listen_line_attach(_unix_listen, dispatcher, &_unix_reply, cfd);
+    var r = _unix_serve_client(cfd, dispatcher);
+    bote_listen_line_detach(_unix_listen);
+    return r;
+}
+
+# The idle deadline's line, from the wait or the read: the same either way.
+fn _unix_log_idle() {
+    var rl[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&rl, SK_DEBUG, "unix client idle; closed");
+    bote_log_int(&rl, "idle_ms", BOTE_UNIX_IDLE_MS);
+    bote_log_emit(&rl);
+    return 0;
+}
+
+fn _unix_serve_client(cfd, dispatcher) {
     if (_unix_buf == 0) { _unix_buf = alloc(UNIX_BUF_SIZE); }
     var buf = _unix_buf;
     var blen_store[8];
     var blen_slot = &blen_store;
     store64(blen_slot, 0);
     var skipping = 0;
+    var heard = clock_now_ms();
     while (1 == 1) {
         var blen = load64(blen_slot);
         var space = UNIX_BUF_SIZE - blen;
@@ -177,18 +200,24 @@ fn _unix_handle_client(cfd, dispatcher) {
             blen = 0;
             space = UNIX_BUF_SIZE;
         }
+        # With subscriptions possible, changes go out while the client is quiet; the idle
+        # deadline still counts from what the client last sent.
+        if (_unix_listen != 0) {
+            var deadline = 0;
+            if (BOTE_UNIX_IDLE_MS > 0) { deadline = heard + BOTE_UNIX_IDLE_MS; }
+            var w = bote_listen_line_await(_unix_listen, cfd, deadline);
+            if (w < 0) { return 0; }
+            if (w == 0) { return _unix_log_idle(); }
+        }
         var n_t, n_v = sock_recv(cfd, buf + blen, space);
+        heard = clock_now_ms();
         if (is_err_result(n_t) == 1) {
             # EAGAIN is the opt-in idle deadline (BOTE_UNIX_IDLE_MS) firing;
             # anything else is the peer going away. Either way, close.
+            if (n_v == BOTE_ERRNO_EAGAIN) { return _unix_log_idle(); }
             var rl[BOTE_LOG_LINE_BYTES];
-            if (n_v == BOTE_ERRNO_EAGAIN) {
-                bote_log_line(&rl, SK_DEBUG, "unix client idle; closed");
-                bote_log_int(&rl, "idle_ms", BOTE_UNIX_IDLE_MS);
-            } else {
-                bote_log_line(&rl, SK_DEBUG, "unix client read failed; closed");
-                bote_log_int(&rl, "errno", n_v);
-            }
+            bote_log_line(&rl, SK_DEBUG, "unix client read failed; closed");
+            bote_log_int(&rl, "errno", n_v);
             bote_log_emit(&rl);
             return 0;
         }
@@ -197,7 +226,7 @@ fn _unix_handle_client(cfd, dispatcher) {
             # EOF — flush any final unterminated line.
             if (blen > 0) {
                 store8(buf + blen, 0);
-                var resp = codec_process_message_a(bote_req_begin(), buf, dispatcher, 0);
+                var resp = codec_process_message_a(bote_listen_line_begin(_unix_listen), buf, dispatcher, 0);
                 if (resp != 0) { _unix_reply(cfd, resp); }
             }
             return 0;

@@ -1,0 +1,752 @@
+# bote_listen_line.tcyr — `subscriptions/listen` where the connection is itself the stream
+# (3.7.3): a ListenLine (src/listen.cyr) through the codec, then the real stdio, Unix and
+# WebSocket loops on threads of their own over pipes and socketpairs, read with a deadline:
+# the acknowledgement as the first message, changes written while the client is quiet, a
+# `notifications/cancelled` ending one, the refusals, the idle deadline, the token judged
+# before a change goes out, and the heap.
+#
+# Run: cyrius test tests/bote_listen_line.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/auth.cyr"
+include "src/jwt.cyr"
+include "src/conn.cyr"
+include "src/http_era.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_unix.cyr"
+include "src/transport_ws.cyr"
+
+fn h_ok(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+fn h_prompt(args, claims) { return "{\"messages\":[]}"; }
+fn h_res(uri, claims) { return "{\"contents\":[]}"; }
+
+fn _has(hay, needle) { return strstr(hay, needle) >= 0; }
+
+fn _cat3(a, b, c) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    str_builder_add_cstr(sb, c);
+    return str_data(str_builder_build(sb));
+}
+
+fn _rep(s, n) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < n) {
+        str_builder_add_cstr(sb, s);
+        i = i + 1;
+    }
+    return str_data(str_builder_build(sb));
+}
+
+# How many times `needle` occurs in the `n` bytes at `hay`, NULs and all.
+fn _bcount(hay, n, needle) {
+    var k = strlen(needle);
+    var c = 0;
+    var i = 0;
+    while (i + k <= n) {
+        if (memeq(hay + i, needle, k) == 1) {
+            c = c + 1;
+            i = i + k;
+        } else {
+            i = i + 1;
+        }
+    }
+    return c;
+}
+
+fn _count(hay, needle) {
+    var n = 0;
+    var at = strstr(hay, needle);
+    while (at >= 0) {
+        n = n + 1;
+        hay = hay + at + strlen(needle);
+        at = strstr(hay, needle);
+    }
+    return n;
+}
+
+fn _num(prefix, i) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_int(sb, i);
+    return str_data(str_builder_build(sb));
+}
+
+fn _mk_d(lists) {
+    var reg = tool_registry_new();
+    registry_register(reg, tool_def_new("t_echo", "Echo", schema_new("object", 0, vec_new())));
+    var d = dispatcher_new(reg);
+    dispatcher_handle(d, "t_echo", &h_ok);
+    if (lists == 1) {
+        dispatcher_register_prompt(d, prompt_def_new("p_one", "One", vec_new()), &h_prompt);
+        dispatcher_register_resource(d, resource_def_new("res://a", "a", "A", "text/plain"), &h_res);
+    }
+    return d;
+}
+
+fn _tool(name) { return tool_def_new(name, "T", schema_new("object", 0, vec_new())); }
+
+var _META = "\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}";
+var _ALL = "{\"toolsListChanged\":true,\"promptsListChanged\":true,\"resourcesListChanged\":true}";
+var _TOOLS = "{\"toolsListChanged\":true}";
+var _TL = "notifications/tools/list_changed";
+var _PL = "notifications/prompts/list_changed";
+
+fn _lb(id, filter) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":");
+    str_builder_add_cstr(sb, id);
+    str_builder_add_cstr(sb, ",\"method\":\"subscriptions/listen\",\"params\":{");
+    str_builder_add_cstr(sb, _META);
+    if (filter != 0) {
+        str_builder_add_cstr(sb, ",\"notifications\":");
+        str_builder_add_cstr(sb, filter);
+    }
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}
+
+fn _cancel(id) { return _cat3("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":", id, "}}"); }
+
+fn _mb(method) { return _cat3("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"", method, _cat3("\",\"params\":{", _META, "}}")); }
+
+# The acknowledgement and a change, for the subscription `id`, as the bytes go out.
+fn _ack(honored, id) { return _cat3("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":{\"notifications\":", honored, _cat3(",\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":", id, "}}}")); }
+fn _note(method, id) { return _cat3("{\"jsonrpc\":\"2.0\",\"method\":\"", method, _cat3("\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":", id, "}}}")); }
+
+# ---- a writer that keeps what it is given ---------------------------------------
+
+var _cap = 0;
+var _cap_len = 0;
+var _cap_fail = 0;
+fn _cap_write(ctx, json) {
+    if (_cap_fail == 1) { return 0 - 1; }
+    var n = strlen(json);
+    memcpy(_cap + _cap_len, json, n);
+    store8(_cap + _cap_len + n, 10);
+    _cap_len = _cap_len + n + 1;
+    store8(_cap + _cap_len, 0);
+    return 0;
+}
+fn _cap_reset() {
+    _cap_len = 0;
+    store8(_cap, 0);
+    return 0;
+}
+
+# What the codec answers `body` with on `c`'s connection to `d`: the reply, or "" for none.
+fn _run(c, d, body) {
+    var r = codec_process_message_a(bote_listen_line_begin(c), body, d, 0);
+    if (r == 0) { return ""; }
+    var out = alloc(strlen(r) + 1);
+    memcpy(out, r, strlen(r) + 1);
+    return out;
+}
+
+fn _run_plain(d, body) {
+    var r = codec_process_message_a(bote_req_begin(), body, d, 0);
+    if (r == 0) { return ""; }
+    var out = alloc(strlen(r) + 1);
+    memcpy(out, r, strlen(r) + 1);
+    return out;
+}
+
+# Bytes a message through `c` leaves on the heap, `body` built beforehand.
+fn _heap_per(c, d, body) {
+    codec_process_message_a(bote_listen_line_begin(c), body, d, 0);
+    _cap_reset();
+    var before = alloc_used();
+    var i = 0;
+    while (i < 10) {
+        codec_process_message_a(bote_listen_line_begin(c), body, d, 0);
+        _cap_reset();
+        i = i + 1;
+    }
+    return (alloc_used() - before) / 10;
+}
+
+#ifndef CYRIUS_TARGET_AGNOS
+# ---- a reader with a deadline ---------------------------------------------------
+
+# A reader (32 B): +0 fd, +8 what it has read, +16 how many bytes, +24 1 once ended.
+fn _rd_new(fd) {
+    var r = alloc(32);
+    store64(r, fd);
+    store64(r + 8, alloc(262145));
+    store64(r + 16, 0);
+    store64(r + 24, 0);
+    return r;
+}
+fn _rd_buf(r) { return load64(r + 8); }
+fn _rd_count(r, needle) { return _bcount(load64(r + 8), load64(r + 16), needle); }
+
+# Read from `r` until it holds `needle` `n` times, or `ms` pass, or it ends: 1 when it did.
+fn _rd_await_n(r, needle, n, ms) {
+    var until = clock_now_ms() + ms;
+    var pfd[8];
+    var ts[16];
+    while (1 == 1) {
+        var buf = load64(r + 8);
+        var got = load64(r + 16);
+        store8(buf + got, 0);
+        if (_bcount(buf, got, needle) >= n) { return 1; }
+        if (load64(r + 24) == 1) { return 0; }
+        var left = until - clock_now_ms();
+        if (left <= 0) { return 0; }
+        store32(&pfd, load64(r));
+        store16(&pfd + 4, 1);
+        store16(&pfd + 6, 0);
+        store64(&ts, left / 1000);
+        store64(&ts + 8, (left % 1000) * 1000000);
+        if (sys_ppoll(&pfd, 1, &ts, 0, 8) > 0) {
+            var k = sys_read(load64(r), buf + got, 262144 - got);
+            if (k <= 0) { store64(r + 24, 1); }
+            else { store64(r + 16, got + k); }
+        }
+    }
+    return 0;
+}
+fn _rd_await(r, needle, ms) { return _rd_await_n(r, needle, 1, ms); }
+fn _rd_eof(r, ms) {
+    _rd_await(r, "\x01\x02", ms);
+    return load64(r + 24);
+}
+
+fn _send_line(fd, s) {
+    sys_write(fd, s, strlen(s));
+    sys_write(fd, "\n", 1);
+    return 0;
+}
+
+# ---- the loops, on threads of their own -----------------------------------------
+
+var _st_d = 0;
+var _st_in = 0;
+var _st_out = 0;
+fn _stdio_thread(i) { return _stdio_serve(_st_d, _st_in, _st_out); }
+
+var _ux_d = 0;
+var _ux_fd = 0;
+var _ux_done = 0;
+fn _unix_thread(i) {
+    _unix_handle_client(_ux_fd, _ux_d);
+    atomic_store(&_ux_done, clock_now_ms());
+    return 0;
+}
+
+var _ws_cfg = 0;
+var _ws_fd = 0;
+var _ws_req = 0;
+var _ws_done = 0;
+fn _ws_thread(i) {
+    _bote_ws_handler(_ws_cfg, _ws_fd, _ws_req, strlen(_ws_req));
+    atomic_store(&_ws_done, clock_now_ms());
+    return 0;
+}
+
+var _ws_ok = 1;
+fn _ws_tok(token, ctx) {
+    if (_ws_ok == 1) { return token; }
+    return 0;
+}
+
+# A masked client text frame holding `payload`, at `dst`. Its length.
+fn _ws_client_frame(dst, payload) {
+    var n = strlen(payload);
+    store8(dst, 0x81);
+    var at = 2;
+    if (n < 126) { store8(dst + 1, 0x80 | n); }
+    else {
+        store8(dst + 1, 0x80 | 126);
+        store8(dst + 2, (n >> 8) & 255);
+        store8(dst + 3, n & 255);
+        at = 4;
+    }
+    store8(dst + at, 0x11); store8(dst + at + 1, 0x22); store8(dst + at + 2, 0x33); store8(dst + at + 3, 0x44);
+    var i = 0;
+    while (i < n) {
+        store8(dst + at + 4 + i, load8(payload + i) ^ load8(dst + at + (i & 3)));
+        i = i + 1;
+    }
+    return at + 4 + n;
+}
+
+fn _ws_send(fd, payload) {
+    var f = alloc(strlen(payload) + 16);
+    sock_send_all(fd, f, _ws_client_frame(f, payload));
+    return 0;
+}
+
+# Changes from four threads at once, each tool its own.
+var _ch_d = 0;
+var _go = 0;
+fn _changer(i) {
+    while (atomic_load(&_go) == 0) { }
+    var k = 0;
+    while (k < 50) {
+        dispatcher_register_tool(_ch_d, _tool(_num(_num("ch_", i), k)), &h_ok);
+        k = k + 1;
+    }
+    return 0;
+}
+#endif
+
+fn main() {
+    alloc_init();
+    _cap = alloc(1048576);
+
+    # ---------------- the line, through the codec ----------------
+    assert_eq(bote_listen_line_new(0), 0, "line: none for no subscriptions");
+    var d = _mk_d(1);
+    var c = bote_listen_line_new(2);
+    #ifndef CYRIUS_TARGET_AGNOS
+    assert(c != 0 && bote_listen_open(c) == 0, "line: made, empty");
+    dispatcher_set_events(d, bote_listen_sink(c, 0));
+    assert(_has(_run(c, d, _lb("1", _TOOLS)), "\"code\":-32601"), "line: no method until a connection is attached");
+    bote_listen_line_attach(c, d, &_cap_write, 0);
+    _cap_reset();
+
+    var r = _run(c, d, _lb("\"a\"", _TOOLS));
+    assert(streq(r, "") == 1, "open: nothing in the reply's place");
+    assert(streq(_cap, _cat3(_ack("{\"toolsListChanged\":true}", "\"a\""), "\n", "")) == 1, "open: the acknowledgement, the first message, stamped");
+    assert_eq(bote_listen_open(c), 1, "open: one held");
+    _cap_reset();
+    assert(_has(_run(c, d, _lb("\"a\"", _ALL)), _cat3("\"code\":-32600,\"message\":\"", BOTE_LISTEN_ID_OPEN, "\"")), "open: an id already open is refused");
+    assert(_cap_len == 0 && bote_listen_open(c) == 1, "open: ...and opens nothing");
+    assert(streq(_run(c, d, _lb("2", _ALL)), "") == 1, "open: a number id");
+    assert(_has(_cap, _ack("{\"toolsListChanged\":true,\"promptsListChanged\":true,\"resourcesListChanged\":true}", "2")), "open: ...stamped as a number, all three honored");
+    _cap_reset();
+    assert(_has(_run(c, d, _lb("\"c\"", _TOOLS)), "\"code\":-32603,\"message\":\"Subscription limit reached\""), "full: -32603");
+    assert(_cap_len == 0, "full: no acknowledgement");
+    assert(streq(_run(c, d, _lb("\"e\"", "{\"resourceSubscriptions\":[\"file:///x\"]}")), "") == 1, "nothing honored: no reply in its place");
+    assert(_has(_cap, _cat3(_ack("{}", "\"e\""), "\n{\"jsonrpc\":\"2.0\",\"id\":\"e\",\"result\":{\"resultType\":\"complete\",\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":\"e\",\"io.modelcontextprotocol/serverInfo\":{", "")), "nothing honored: the acknowledgement, then the result that ends it");
+    assert_eq(bote_listen_open(c), 2, "nothing honored: even when full, and holds no slot");
+    _cap_reset();
+    assert(_has(_run(c, d, _lb(_cat3("\"", _rep("i", 255), "\""), _TOOLS)), BOTE_LISTEN_ID_LONG), "id: 257 bytes is refused");
+    assert(_has(_run(c, d, _lb("\"x\"", "[]")), "\"code\":-32602"), "a filter that is none: -32602");
+    assert(_has(_run(c, d, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"subscriptions/listen\",\"params\":{\"notifications\":{}}}"), "\"code\":-32601"), "legacy: no such method");
+    assert(_has(_run(c, d, _cat3("[", _lb("\"b\"", _TOOLS), "]")), "\"code\":-32601"), "a batch carries no stream");
+    assert(_has(_run_plain(d, _lb("\"p\"", _TOOLS)), "\"code\":-32601"), "a message not begun on the line carries none");
+    assert(_cap_len == 0 && bote_listen_open(c) == 2, "refusals: nothing written, nothing opened");
+    assert(_has(_run(c, d, _mb("server/discover")), "\"tools\":{\"listChanged\":true}"), "discover: listChanged on the line");
+    assert(_has(_run_plain(d, _mb("server/discover")), "listChanged") == 0, "discover: ...and not off it");
+
+    # Changes: each subscription the kinds it asked for, stamped with its id.
+    dispatcher_register_tool(d, _tool("t_new"), &h_ok);
+    assert(atomic_load(c + 32) != 0, "change: pending");
+    assert_eq(bote_listen_line_deliver(c), 0, "change: delivered");
+    assert(streq(_cap, _cat3(_note(_TL, "\"a\""), "\n", _cat3(_note(_TL, "2"), "\n", ""))) == 1, "change: a tool, to both, in slot order, one line each");
+    assert_eq(atomic_load(c + 32), 0, "change: taken");
+    _cap_reset();
+    dispatcher_register_prompt(d, prompt_def_new("p_new", "N", vec_new()), &h_prompt);
+    bote_listen_line_deliver(c);
+    assert(streq(_cap, _cat3(_note(_PL, "2"), "\n", "")) == 1, "change: a prompt, only to the one that asked");
+    _cap_reset();
+    assert_eq(bote_listen_line_deliver(c), 0, "change: nothing waiting writes nothing");
+    assert_eq(_cap_len, 0, "change: ...nothing");
+
+    # A cancel ends the subscription it names, and nothing else.
+    assert(streq(_run(c, d, _cancel("\"a\"")), "") == 1, "cancel: no reply");
+    assert_eq(bote_listen_open(c), 1, "cancel: one left");
+    dispatcher_register_tool(d, _tool("t_two"), &h_ok);
+    bote_listen_line_deliver(c);
+    assert(streq(_cap, _cat3(_note(_TL, "2"), "\n", "")) == 1, "cancel: the cancelled one is told nothing more");
+    _cap_reset();
+    _run(c, d, _cancel("\"zz\""));
+    _run(c, d, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{}}");
+    _run(c, d, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\"}");
+    assert_eq(bote_listen_open(c), 1, "cancel: an id it does not hold, none, or no params, ends nothing");
+    _run(c, d, _cancel("2"));
+    assert_eq(bote_listen_open(c), 0, "cancel: a number id");
+    _run(c, d, _lb("\"ab\"", _TOOLS));
+    _run(c, d, _cancel("\"a\""));
+    _run(c, d, _cancel("\"abc\""));
+    assert_eq(bote_listen_open(c), 1, "cancel: an id is matched whole, not by its start");
+    _run(c, d, _cancel("\"ab\""));
+    assert_eq(bote_listen_open(c), 0, "cancel: ...and then ends");
+    _run(c, d, _lb("12", _TOOLS));
+    _run(c, d, _cancel("1"));
+    assert_eq(bote_listen_open(c), 1, "cancel: a number id is matched whole too");
+    _run(c, d, _cancel("12"));
+    _cap_reset();
+    dispatcher_register_tool(d, _tool("t_three"), &h_ok);
+    assert_eq(atomic_load(c + 32), 0, "change: with none open, kept for nobody");
+
+    # A connection that will not take a change.
+    _run(c, d, _lb("\"f\"", _TOOLS));
+    _cap_fail = 1;
+    dispatcher_register_tool(d, _tool("t_four"), &h_ok);
+    assert_eq(bote_listen_line_deliver(c), 0 - 1, "write: a failed one is reported");
+    _cap_fail = 0;
+    _cap_reset();
+    dispatcher_register_tool(d, _tool("t_left"), &h_ok);
+    assert(atomic_load(c + 32) != 0, "detach: with a change still waiting");
+    bote_listen_line_detach(c);
+    assert_eq(atomic_load(c + 32), 0, "detach: ...which goes with the connection");
+    assert_eq(bote_listen_open(c), 0, "detach: nothing held");
+    assert(_has(_run(c, d, _lb("\"g\"", _TOOLS)), "\"code\":-32601"), "detach: and the method is gone with the connection");
+    dispatcher_register_tool(d, _tool("t_five"), &h_ok);
+    bote_listen_line_attach(c, d, &_cap_write, 0);
+    assert(bote_listen_open(c) == 0 && atomic_load(c + 32) == 0, "attach: a connection starts with nothing open or pending");
+
+    # A listen honors what its acknowledgement said (3.7.3): nothing here, whatever its filter.
+    var ma = bote_listen_line_begin(c);
+    var merr[8];
+    var mreq = _cdc_admit_a(ma, _lb("\"m\"", "{\"promptsListChanged\":true}"), &merr);
+    _cap_reset();
+    assert_eq(_bll_open(c, ma, mreq, resp_success_a(ma, "\"m\"", "{\"notifications\":{}}")), 0, "ack: served");
+    assert(_has(_cap, _ack("{}", "\"m\"")) && _has(_cap, "\"resultType\":\"complete\""), "ack: an acknowledgement of nothing, then the result");
+    assert_eq(bote_listen_open(c), 0, "ack: ...holding nothing");
+    assert((sys_fcntl(load64(c + 40), F_GETFD, 0) & FD_CLOEXEC) != 0 && (sys_fcntl(load64(c + 48), F_GETFD, 0) & FD_CLOEXEC) != 0, "cloexec: the line's wake pipe");
+    _cap_reset();
+
+    # The heap: an open and its cancel keep nothing, nor does any refusal.
+    var hb = _lb("\"h\"", _TOOLS);
+    var hc = _cancel("\"h\"");
+    _run(c, d, hb);
+    _run(c, d, hc);
+    _cap_reset();
+    var hbefore = alloc_used();
+    var hi = 0;
+    while (hi < 10) {
+        codec_process_message_a(bote_listen_line_begin(c), hb, d, 0);
+        codec_process_message_a(bote_listen_line_begin(c), hc, d, 0);
+        _cap_reset();
+        hi = hi + 1;
+    }
+    assert_eq((alloc_used() - hbefore) / 10, 0, "heap: an open and its cancel keep nothing");
+    var big = _rep("x", 60000);
+    assert_eq(_heap_per(c, d, _lb(_cat3("\"", big, "\""), _TOOLS)), 0, "heap: a 60 KB id, refused");
+    assert_eq(_heap_per(c, d, _lb("1", _cat3("{\"toolsListChanged\":\"", big, "\"}"))), 0, "heap: a 60 KB value in the filter, refused");
+    assert_eq(_heap_per(c, d, _lb("1", _cat3("{\"resourceSubscriptions\":[\"", big, "\"]}"))), 0, "heap: 60 KB of subscriptions, honored as nothing");
+    _run(c, d, _lb("\"o1\"", _TOOLS));
+    _run(c, d, _lb("\"o2\"", _TOOLS));
+    assert_eq(_heap_per(c, d, _lb("1", _cat3("{\"toolsListChanged\":true,\"resourceSubscriptions\":[\"", big, "\"]}"))), 0, "heap: refused when full, 60 KB of it");
+    assert_eq(_heap_per(c, d, _cancel(_cat3("\"", big, "\""))), 0, "heap: a cancel naming 60 KB");
+    dispatcher_register_tool(d, _tool("t_six"), &h_ok);
+    bote_listen_line_deliver(c);
+    _cap_reset();
+    var dbefore = alloc_used();
+    hi = 0;
+    while (hi < 10) {
+        dispatcher_deregister_tool(d, "t_six");
+        bote_listen_line_deliver(c);
+        _cap_reset();
+        hi = hi + 1;
+    }
+    assert(alloc_used() - dbefore < 4096, "heap: a delivery keeps nothing but the dispatcher's event");
+    bote_listen_line_detach(c);
+
+    # ---------------- waiting on two at once ----------------
+    var wp[16];
+    sys_socketpair(1, 1, 0, &wp);
+    var wa = load32(&wp);
+    var wb = load32(&wp + 4);
+    bote_listen_line_attach(c, d, &_cap_write, 0);
+    var t0 = clock_now_ms();
+    assert_eq(bote_listen_line_wait(c, wa, clock_now_ms() + 60), 0, "wait: the deadline passes");
+    assert(clock_now_ms() - t0 >= 55, "wait: ...not before it");
+    assert_eq(bote_listen_line_wait(c, wa, clock_now_ms() - 1), 0, "wait: a deadline gone already");
+    sys_write(wb, "x", 1);
+    assert_eq(bote_listen_line_wait(c, wa, 0), 1, "wait: input");
+    var drain[8];
+    sys_read(wa, &drain, 1);
+    _run(c, d, _lb("\"w\"", _TOOLS));
+    _cap_reset();
+    dispatcher_register_tool(d, _tool("t_wait"), &h_ok);
+    assert_eq(bote_listen_line_wait(c, wa, clock_now_ms() + 1000), 2, "wait: a change");
+    assert_eq(bote_listen_line_await(c, wa, clock_now_ms() + 60), 0, "await: writes it and waits on");
+    assert(streq(_cap, _cat3(_note(_TL, "\"w\""), "\n", "")) == 1, "await: ...having written it");
+    sys_close(wb);
+    assert_eq(bote_listen_line_await(c, wa, 0), 1, "await: a closed peer is input");
+    sys_close(wa);
+    bote_listen_line_detach(c);
+    _cap_reset();
+
+    # ---------------- stdio, on a thread ----------------
+    var sd = _mk_d(1);
+    var sc = bote_listen_line_new(4);
+    dispatcher_set_events(sd, bote_listen_sink(sc, 0));
+    transport_stdio_with_listen(sc);
+    var ip[8];
+    var op[8];
+    sys_pipe(&ip);
+    sys_pipe(&op);
+    _st_d = sd;
+    _st_in = load32(&ip);
+    _st_out = load32(&op + 4);
+    var sw = load32(&ip + 4);
+    var so = _rd_new(load32(&op));
+    var st = thread_create(&_stdio_thread, 0);
+    _send_line(sw, _lb("\"listen:1\"", _TOOLS));
+    assert_eq(_rd_await(so, _ack("{\"toolsListChanged\":true}", "\"listen:1\""), 2000), 1, "stdio: the acknowledgement");
+    _send_line(sw, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}");
+    assert_eq(_rd_await(so, "\"id\":3,\"result\"", 2000), 1, "stdio: a reply beside it");
+    dispatcher_register_tool(sd, _tool("s_new"), &h_ok);
+    assert_eq(_rd_await(so, _note(_TL, "\"listen:1\""), 2000), 1, "stdio: a change from another thread, written while the client is quiet");
+    _send_line(sw, _cancel("\"listen:1\""));
+    _send_line(sw, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/list\"}");
+    assert_eq(_rd_await(so, "\"id\":4,\"result\"", 2000), 1, "stdio: the cancel read");
+    dispatcher_register_tool(sd, _tool("s_after"), &h_ok);
+    _send_line(sw, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/list\"}");
+    assert_eq(_rd_await(so, "\"id\":5,\"result\"", 2000), 1, "stdio: still serving");
+    assert_eq(_rd_count(so, _TL), 1, "stdio: nothing more for the cancelled one");
+    sys_close(sw);
+    thread_join(st);
+    sys_close(_st_out);
+    assert_eq(_rd_eof(so, 2000), 1, "stdio: ends at EOF");
+    assert_eq(bote_listen_open(sc), 0, "stdio: its subscriptions with it");
+    # Every line a whole message: one writer.
+    var lines = _rd_buf(so);
+    var lbad = 0;
+    var ls = 0;
+    var li = 0;
+    var ln = strlen(lines);
+    while (li < ln) {
+        if (load8(lines + li) == 10) {
+            if (jsonx_valid(lines + ls, li - ls) == 0) { lbad = lbad + 1; }
+            ls = li + 1;
+        }
+        li = li + 1;
+    }
+    assert_eq(lbad, 0, "stdio: every line one whole message");
+
+    # Changes from four threads at once, beside the loop's own replies.
+    sys_pipe(&ip);
+    sys_pipe(&op);
+    _st_in = load32(&ip);
+    _st_out = load32(&op + 4);
+    sw = load32(&ip + 4);
+    so = _rd_new(load32(&op));
+    _ch_d = sd;
+    st = thread_create(&_stdio_thread, 0);
+    _send_line(sw, _lb("\"many\"", _TOOLS));
+    _rd_await(so, "acknowledged", 2000);
+    _go = 0;
+    var cts = alloc(32);
+    var ci = 0;
+    while (ci < 4) {
+        store64(cts + ci * 8, thread_create(&_changer, ci));
+        ci = ci + 1;
+    }
+    atomic_store(&_go, 1);
+    var qi = 0;
+    while (qi < 50) {
+        _send_line(sw, "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"ping\"}");
+        qi = qi + 1;
+    }
+    ci = 0;
+    while (ci < 4) {
+        thread_join(load64(cts + ci * 8));
+        ci = ci + 1;
+    }
+    _send_line(sw, "{\"jsonrpc\":\"2.0\",\"id\":\"last\",\"method\":\"ping\"}");
+    dispatcher_register_tool(sd, _tool("s_final"), &h_ok);
+    assert_eq(_rd_await(so, "\"id\":\"last\",\"result\"", 5000), 1, "threads: every reply came");
+    assert_eq(_rd_await_n(so, "\"id\":8,\"result\"", 50, 5000), 1, "threads: all fifty");
+    sys_close(sw);
+    thread_join(st);
+    sys_close(_st_out);
+    _rd_eof(so, 2000);
+    assert(_rd_count(so, _note(_TL, "\"many\"")) >= 1, "threads: the changes were told");
+    assert_eq(bote_listen_open(sc), 0, "stdio: a listen still open at EOF ends with the connection");
+    lines = _rd_buf(so);
+    lbad = 0;
+    ls = 0;
+    li = 0;
+    ln = strlen(lines);
+    while (li < ln) {
+        if (load8(lines + li) == 10) {
+            if (jsonx_valid(lines + ls, li - ls) == 0) { lbad = lbad + 1; }
+            ls = li + 1;
+        }
+        li = li + 1;
+    }
+    assert_eq(lbad, 0, "threads: every line one whole message, with changes from four threads");
+    transport_stdio_with_listen(0);
+
+    # ---------------- a Unix connection, on a thread ----------------
+    var ud = _mk_d(0);
+    var uc = bote_listen_line_new(4);
+    dispatcher_set_events(ud, bote_listen_sink(uc, 0));
+    transport_unix_with_listen(uc);
+    var up[16];
+    sys_socketpair(1, 1, 0, &up);
+    _ux_d = ud;
+    _ux_fd = load32(&up);
+    var ucl = load32(&up + 4);
+    var ur = _rd_new(ucl);
+    var ut = thread_create(&_unix_thread, 0);
+    _send_line(ucl, _lb("\"u\"", _TOOLS));
+    assert_eq(_rd_await(ur, _ack("{\"toolsListChanged\":true}", "\"u\""), 2000), 1, "unix: the acknowledgement");
+    dispatcher_register_tool(ud, _tool("u_new"), &h_ok);
+    assert_eq(_rd_await(ur, _note(_TL, "\"u\""), 2000), 1, "unix: a change while the client is quiet");
+    _send_line(ucl, _cancel("\"u\""));
+    _send_line(ucl, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
+    assert_eq(_rd_await(ur, "\"id\":2,\"result\"", 2000), 1, "unix: served after the cancel");
+    sys_close(ucl);
+    thread_join(ut);
+    sys_close(_ux_fd);
+    assert_eq(bote_listen_open(uc), 0, "unix: its subscriptions end with the connection");
+    # The idle deadline counts from what the client last sent, not from the changes.
+    BOTE_UNIX_IDLE_MS = 300;
+    sys_socketpair(1, 1, 0, &up);
+    _ux_fd = load32(&up);
+    ucl = load32(&up + 4);
+    ur = _rd_new(ucl);
+    ut = thread_create(&_unix_thread, 0);
+    _send_line(ucl, _lb("\"idle\"", _TOOLS));
+    _rd_await(ur, "acknowledged", 2000);
+    var it0 = clock_now_ms();
+    _ux_done = 0;
+    var ik = 0;
+    while (ik < 20 && atomic_load(&_ux_done) == 0) {
+        dispatcher_register_tool(ud, _tool(_num("u_idle_", ik)), &h_ok);
+        _rd_await(ur, "\x01\x02", 50);
+        ik = ik + 1;
+    }
+    thread_join(ut);
+    sys_close(_ux_fd);
+    assert(atomic_load(&_ux_done) != 0, "idle: a client that sends nothing is closed, changes or not");
+    var iel = atomic_load(&_ux_done) - it0;
+    assert(iel >= 250 && iel < 900, "idle: ...at the deadline");
+    assert(_rd_count(ur, _note(_TL, "\"idle\"")) >= 2, "idle: the changes went out meanwhile");
+    sys_close(ucl);
+    # A client that sends something late has its deadline counted from then.
+    sys_socketpair(1, 1, 0, &up);
+    _ux_fd = load32(&up);
+    ucl = load32(&up + 4);
+    ur = _rd_new(ucl);
+    _ux_done = 0;
+    it0 = clock_now_ms();
+    ut = thread_create(&_unix_thread, 0);
+    _send_line(ucl, _lb("\"late\"", _TOOLS));
+    _rd_await(ur, "acknowledged", 2000);
+    sleep_ms(200);
+    _send_line(ucl, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}");
+    _rd_await(ur, "\"id\":3", 2000);
+    thread_join(ut);
+    sys_close(_ux_fd);
+    sys_close(ucl);
+    iel = atomic_load(&_ux_done) - it0;
+    assert(iel >= 450 && iel < 1200, "idle: counted from the client's last line, not its first");
+    BOTE_UNIX_IDLE_MS = 0;
+    transport_unix_with_listen(0);
+
+    # ---------------- a WebSocket, on a thread ----------------
+    var wd = _mk_d(0);
+    var wc = bote_listen_line_new(4);
+    dispatcher_set_events(wd, bote_listen_sink(wc, 0));
+    _ws_cfg = ws_config_new("/mcp", 0, 0);
+    store64(_ws_cfg + 40, wd);
+    ws_config_with_bearer_validator(_ws_cfg, &_ws_tok, 0);
+    ws_config_with_listen(_ws_cfg, wc);
+    _ws_req = "GET /mcp HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer wtok\r\n\r\n";
+    var wsp[16];
+    sys_socketpair(1, 1, 0, &wsp);
+    _ws_fd = load32(&wsp);
+    var wcl = load32(&wsp + 4);
+    var wr = _rd_new(wcl);
+    _ws_ok = 1;
+    var keep_recheck = BOTE_WS_RECHECK_MS;
+    BOTE_WS_RECHECK_MS = 0;
+    var wt = thread_create(&_ws_thread, 0);
+    assert_eq(_rd_await(wr, "\r\n\r\n", 2000), 1, "ws: upgraded");
+    _ws_send(wcl, _lb("\"ws1\"", _TOOLS));
+    assert_eq(_rd_await(wr, _ack("{\"toolsListChanged\":true}", "\"ws1\""), 2000), 1, "ws: the acknowledgement, a frame");
+    dispatcher_register_tool(wd, _tool("w_new"), &h_ok);
+    assert_eq(_rd_await(wr, _note(_TL, "\"ws1\""), 2000), 1, "ws: a change while the client is quiet");
+    var before_deny = load64(wr + 16);
+    _ws_ok = 0;
+    dispatcher_register_tool(wd, _tool("w_denied"), &h_ok);
+    assert_eq(_rd_await(wr, "token no longer valid", 2000), 1, "ws: a token that no longer holds ends the connection before a change goes out");
+    thread_join(wt);
+    var wbuf = _rd_buf(wr);
+    assert(memeq(wbuf + before_deny, "\x88", 1) == 1, "ws: ...with a close frame");
+    assert(memeq(wbuf + before_deny + 2, "\x03\xf0", 2) == 1, "ws: ...code 1008");
+    assert(_has(wbuf + before_deny, "token no longer valid"), "ws: ...and its reason");
+    assert_eq(_rd_count(wr, _TL), 1, "ws: and no change after the token failed");
+    sys_close(_ws_fd);
+    sys_close(wcl);
+    assert_eq(bote_listen_open(wc), 0, "ws: its subscriptions end with the connection");
+    BOTE_WS_RECHECK_MS = keep_recheck;
+    # The idle deadline, with changes going out: from the client's last frame.
+    _ws_ok = 1;
+    ws_config_with_idle_ms(_ws_cfg, 300);
+    sys_socketpair(1, 1, 0, &wsp);
+    _ws_fd = load32(&wsp);
+    wcl = load32(&wsp + 4);
+    wr = _rd_new(wcl);
+    _ws_done = 0;
+    var wt0 = clock_now_ms();
+    wt = thread_create(&_ws_thread, 0);
+    _rd_await(wr, "\r\n\r\n", 2000);
+    _ws_send(wcl, _lb("\"wi\"", _TOOLS));
+    _rd_await(wr, "acknowledged", 2000);
+    sleep_ms(200);
+    _ws_send(wcl, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}");
+    _rd_await(wr, "\"id\":3", 2000);
+    var wk = 0;
+    while (wk < 30 && atomic_load(&_ws_done) == 0) {
+        dispatcher_register_tool(wd, _tool(_num("w_idle_", wk)), &h_ok);
+        _rd_await(wr, "\x01\x02", 50);
+        wk = wk + 1;
+    }
+    thread_join(wt);
+    sys_close(_ws_fd);
+    sys_close(wcl);
+    var wel = atomic_load(&_ws_done) - wt0;
+    assert(atomic_load(&_ws_done) != 0 && wel >= 450 && wel < 1200, "ws idle: closed at the deadline from the client's last frame, changes or not");
+    assert(_rd_count(wr, _note(_TL, "\"wi\"")) >= 2, "ws idle: the changes went out meanwhile");
+    ws_config_with_idle_ms(_ws_cfg, 0);
+    #endif
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit_group(rc);

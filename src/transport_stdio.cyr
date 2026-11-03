@@ -6,6 +6,20 @@
 var STDIO_BUF_SIZE = 131072;
 var _stdio_buf = 0;
 var _stdio_buf_len = 0;
+var _stdio_out = 1;
+
+# `subscriptions/listen` over this connection (3.7.3): a ListenLine (src/listen.cyr), or 0,
+# when the method is not found. Set before transport_stdio_run. While it is set the loop
+# waits on stdin and on the line at once, and writes a change between its replies.
+var _stdio_listen = 0;
+fn transport_stdio_with_listen(c) { _stdio_listen = c; return c; }
+
+# The line's writer: one message, one line.
+fn _stdio_listen_write(fd, json) {
+    if (sys_write(fd, json, strlen(json)) < 0) { return 0 - 1; }
+    if (sys_write(fd, "\n", 1) < 0) { return 0 - 1; }
+    return 0;
+}
 
 fn _stdio_init() {
     if (_stdio_buf == 0) {
@@ -28,10 +42,10 @@ fn _stdio_process_lines(dispatcher) {
             store8(_stdio_buf + scanned, 0);
             if (line_len > 0) {
                 var line_ptr = _stdio_buf + line_start;
-                var resp = codec_process_message_a(bote_req_begin(), line_ptr, dispatcher, 0);
+                var resp = codec_process_message_a(bote_listen_line_begin(_stdio_listen), line_ptr, dispatcher, 0);
                 if (resp != 0) {
-                    sys_write(1, resp, strlen(resp));
-                    sys_write(1, "\n", 1);
+                    sys_write(_stdio_out, resp, strlen(resp));
+                    sys_write(_stdio_out, "\n", 1);
                 }
                 processed = 1;
             }
@@ -52,28 +66,41 @@ fn _stdio_process_lines(dispatcher) {
 
 # Run the stdio transport loop. Reads stdin until EOF, dispatches each
 # newline-terminated message, writes responses to stdout.
-fn transport_stdio_run(dispatcher) {
+fn transport_stdio_run(dispatcher) { return _stdio_serve(dispatcher, 0, 1); }
+
+# The loop over `in_fd` and `out_fd`, the connection's two ends.
+fn _stdio_serve(dispatcher, in_fd, out_fd) {
     _stdio_init();
+    _stdio_out = out_fd;
+    bote_listen_line_attach(_stdio_listen, dispatcher, &_stdio_listen_write, out_fd);
+    var r = _stdio_loop(dispatcher, in_fd);
+    bote_listen_line_detach(_stdio_listen);
+    return r;
+}
+
+fn _stdio_loop(dispatcher, in_fd) {
     var skipping = 0;
     while (1 == 1) {
         var space = STDIO_BUF_SIZE - _stdio_buf_len;
         if (space <= 0) {
             var over = codec_line_too_long();
-            sys_write(1, over, strlen(over));
-            sys_write(1, "\n", 1);
+            sys_write(_stdio_out, over, strlen(over));
+            sys_write(_stdio_out, "\n", 1);
             skipping = 1;
             _stdio_buf_len = 0;
             space = STDIO_BUF_SIZE;
         }
-        var n = sys_read(0, _stdio_buf + _stdio_buf_len, space);
+        # A client gone from stdout is gone.
+        if (_stdio_listen != 0 && bote_listen_line_await(_stdio_listen, in_fd, 0) < 0) { return 0; }
+        var n = sys_read(in_fd, _stdio_buf + _stdio_buf_len, space);
         if (n <= 0) {
             # EOF — process any final line that lacks a trailing newline
             if (_stdio_buf_len > 0) {
                 store8(_stdio_buf + _stdio_buf_len, 0);
-                var resp = codec_process_message_a(bote_req_begin(), _stdio_buf, dispatcher, 0);
+                var resp = codec_process_message_a(bote_listen_line_begin(_stdio_listen), _stdio_buf, dispatcher, 0);
                 if (resp != 0) {
-                    sys_write(1, resp, strlen(resp));
-                    sys_write(1, "\n", 1);
+                    sys_write(_stdio_out, resp, strlen(resp));
+                    sys_write(_stdio_out, "\n", 1);
                 }
             }
             return 0;

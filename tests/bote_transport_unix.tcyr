@@ -40,7 +40,12 @@ include "src/audit.cyr"
 include "src/dispatch.cyr"
 include "src/codec.cyr"
 include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/auth.cyr"
 include "src/conn.cyr"
+include "src/http_era.cyr"
+include "src/listen.cyr"
 include "src/transport_unix.cyr"
 
 # ---- sakshi capture (3.4.3 drop-line assertions) ---------------------------

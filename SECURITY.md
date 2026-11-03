@@ -35,9 +35,22 @@ The primary security-relevant surface areas are:
   and at most `BOTE_LISTEN_MAX` (256) are open at once; past that a listen gets
   `-32603`. Each holds one socket and keeps nothing on the heap. The thread never
   waits on a client: a frame the socket cannot take whole ends that stream, as does a
-  client that closes or sends anything. Leave the process's file limit room for
+  client that closes or sends anything. Over TCP that frame comes only once the
+  client's receive window is full, about a megabyte, which at one keepalive every
+  15 s is days: a client that stops reading keeps its stream that long, and one that
+  reads its keepalives keeps it for good. So the bound is on memory and sockets, not on
+  who holds the slots, and one client can hold them all (roadmap, open decisions).
+  Since **3.7.3** the socket a stream will be is held, close-on-exec, before anything
+  is sent, and one that cannot be is refused with `-32603` and a WARN. Leave the process's file limit room for
   `BOTE_LISTEN_MAX` sockets beside the rest. A stream's token is checked when it
   opens and not again; it carries only that a list changed, never what is in it.
+  Since **3.7.3** a listen on stdio, a Unix socket or a WebSocket is the connection
+  itself: at most `BOTE_LISTEN_MAX` per connection, nothing per listen on the heap, and
+  the changes written by the connection's own loop, under the same send deadline as its
+  replies, so a client that stops reading is dropped as it was. On a WebSocket the token
+  is judged again before a change goes out, as before a frame is served, so a connection
+  whose token has expired is closed with 1008 rather than told of a change. The idle
+  deadlines count from what the client last sent, not from what bote sent it.
 - **Browsers** — since **3.4.15** every HTTP-family transport refuses a present
   `Origin` that is not on `BOTE_ALLOWED_ORIGINS` with 403, before anything else
   runs, and with no list set every present `Origin` is refused, except since **3.5.2**

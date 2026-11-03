@@ -34,21 +34,19 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.7.3 — `subscriptions/listen` on stdio, unix and WebSocket.** The rest of item 1 of 3.7.x below for the list changes.
+**3.7.4 — `resourceSubscriptions` and `notifications/resources/updated`.** The rest of item 1 of 3.7.x below.
 
 ## 3.7.x — Threaded dispatch and `subscriptions/listen`
 
 `bote streamable` serves on worker threads since 3.7.0, and since 3.7.1 everything a request reaches in bote is safe there.
-`subscriptions/listen` serves list changes on `http`, `bridge` and `streamable` since 3.7.2, its streams held by a hub
-thread off the serving threads. **Large: small bites.** The other transports' buffers (`_ws_frame_buf`, `_ws_token_buf`,
-`_unix_buf`, stdio's) matter only if those transports take workers too.
+`subscriptions/listen` serves list changes on every transport: on `http`, `bridge` and `streamable` since 3.7.2, its streams
+held by a hub thread off the serving threads, and on stdio, unix and WebSocket since 3.7.3, where the connection is the
+stream and its own loop writes the changes. **Large: small bites.** The other transports' buffers (`_ws_frame_buf`,
+`_ws_token_buf`, `_unix_buf`, stdio's) matter only if those transports take workers too.
 
-1. `subscriptions/listen` where the connection is the stream: stdio, unix and WebSocket. On stdio the acknowledgement is
-   the reply's first message and `notifications/cancelled` naming the listen request's id ends the subscription; the
-   changes go out between the replies to other requests, so the line transports need a writer the hub can reach. Then
-   `resourceSubscriptions` and `notifications/resources/updated`, which need `resources.subscribe` advertised and a way
-   for an embedder to say a resource changed. Until then the filter's `resourceSubscriptions` is checked and never
-   honored.
+1. `resourceSubscriptions` and `notifications/resources/updated`, which need `resources.subscribe` advertised and a way for
+   an embedder to say a resource changed: a call that names a URI, matched against each subscription's list, with the
+   bound a list of URIs needs. Until then the filter's `resourceSubscriptions` is checked and never honored.
 2. Cancellation: on Streamable HTTP closing the response stream cancels the request, and on stdio
    `notifications/cancelled`. `bote_cancel_token_*` is the data layer.
 3. `notifications/progress` on a request's own response stream.
@@ -76,8 +74,11 @@ Not planned, because the current spec removes or deprecates them: the held-open 
   them, with the resource bounds the spec asks for on `$ref` and composition.
 - **What a valid tool call still leaves on the heap.** A request costs bote nothing that outlives it, except
   `args` and whatever a handler allocates, because the 2.0 ABI lets a handler keep both. bote's own
-  libro and fs handlers need not: give them the request arena, and bound the binary. The ABI change that
-  would bound every handler is a 4.0 matter.
+  libro, fs and web handlers need not: give them the request arena, and bound the binary. `fs_read` of a
+  70 KB file keeps about 140 KB, its escaped result, for good, and `web_fetch`'s results are the same shape:
+  build the result after the read buffer on the arena, move it down to the mark, and release past it, once
+  nothing that keeps a result (a resumption buffer) is in the way. The ABI change that would bound every
+  handler is a 4.0 matter.
 
 ## 3.9.x — Bote's own rules
 
@@ -94,7 +95,10 @@ Not planned, because the current spec removes or deprecates them: the held-open 
 - **A completion handler reads `ref` itself.** bote picks the prompt or template whose scopes a
   `completion/complete` needs from the first `ref`, as its one key scanner reads every key, and hands the
   handler the params as sent. A handler that reads a repeated `ref` last-wins answers for a target other
-  than the one judged. Refuse a repeated `ref`, or hand the handler the one bote read.
+  than the one judged. Refuse a repeated `ref`, or hand the handler the one bote read. It is also judged in
+  one look and served in another: a scoped prompt registered between the two gets completions for a token
+  without the scope, the race 3.7.2 closed for `tools/call`, `prompts/get` and `resources/read`. Handing the
+  handler what bote judged closes both.
 
 ## Open decisions (no version)
 
@@ -107,6 +111,17 @@ Not planned, because the current spec removes or deprecates them: the held-open 
   the full set, or the fs and web tools become stdio-and-unix-only. Nothing technical holds it any more:
   bote's own tools are safe on streamable's worker threads since 3.7.1. `scripts/transport-smoke.sh` pins
   the current shape.
+- **How long a listen stream may be held, and by whom.** Over TCP a client that stops reading is not seen
+  until its receive window is full, about a megabyte, which at one keepalive every 15 s is days; and a client
+  that reads its keepalives is never dropped. So `BOTE_LISTEN_MAX` bounds memory, not whether another client
+  can listen: one client opening 256 streams takes every slot. A stream's age (the server ends it with its
+  result, and the client listens again), a bound per client or per token, or both. Either changes what a
+  client that never listens again sees, and the TypeScript SDK's server has neither.
+- **A change between the acknowledgement and the park.** A change made after a listen's acknowledgement is
+  built and before its stream is parked reaches the streams already open and not that one. A review's probe
+  missed none in 400 rounds of a change the instant the client saw its acknowledgement, and a client lists
+  after its acknowledgement; counting a reserved slot as open, with bits per slot applied at park, would close
+  it.
 - **`libro_retention`'s archive.** `chain_apply_retention` returns what it removed, and the tool drops
   it, so "archived" means deleted. It also ignores `claims`. It reaches nothing in the binary, whose
   chain is empty, but an embedder with an audit sink gets a destructive tool any client can call. Hand

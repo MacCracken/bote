@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.7.2 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.7.3 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
 > ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not. Every other table here is against 2025-11-25.
 
@@ -60,7 +60,7 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | `serverInfo` in `result._meta["io.modelcontextprotocol/serverInfo"]` | ✅ (3.5.0) |
 | A missing resource is `-32602`, never `-32002` | ✅ (3.5.0) — `-32002` stays on the legacy path |
 | `ping` and `initialize` are gone | ✅ (3.5.0) — a modern `ping` is `-32601`. An `initialize` selects the legacy path whatever `_meta` it carries, so it never lands on a revision that has no `initialize` |
-| `listChanged` advertised only where it is delivered | ✅ (3.5.0) none; (3.7.2) `server/discover` advertises it for tools, prompts and resources on `http`, `bridge` and `streamable`, which carry `subscriptions/listen`, and on no other transport |
+| `listChanged` advertised only where it is delivered | ✅ (3.5.0) none; (3.7.2) `server/discover` advertises it for tools, prompts and resources on `http`, `bridge` and `streamable`, which carry `subscriptions/listen`; (3.7.3) and on stdio, unix and WebSocket. It follows the message's transport, not the dispatcher, so a dispatcher served on two transports advertises it only on the one that delivers |
 | `tools/list` in a deterministic order | ✅ registration order, in both eras |
 | Every POST: `MCP-Protocol-Version` and `Mcp-Method`, and `Mcp-Name` on `tools/call`, `resources/read` and `prompts/get`. Missing, invalid or disagreeing with the body is `400` + `-32020` | ✅ (3.5.1) `src/http_era.cyr`, on `bote http`, `bote streamable` and (3.5.2) `bote bridge`. Names are case-insensitive, values case-sensitive. A field on two lines combines into a value that matches nothing, so it is refused (3.5.2) |
 | `Mcp-Name` in the `=?base64?…?=` sentinel, decoded before the comparison | ✅ (3.5.1) lower-case markers only, canonical Base64 only |
@@ -78,7 +78,8 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | `@modelcontextprotocol/conformance`, by its frozen requirement list | ⏳ (3.5.3) **25 of 37** on 2026-07-28, **21 of 30** on 2025-11-25, the same on `http` and `streamable`. What fails is a feature bote lacks: `InputRequiredResult`, progress, sampling and elicitation, logging, subscriptions. `tests/fixtures/conformance-expected-<revision>.yaml` lists each, and why |
 | `subscriptions/listen`: each kind opt-in, never one not asked for, the honored subset acknowledged first in `notifications/subscriptions/acknowledged`, every message stamped with `io.modelcontextprotocol/subscriptionId`, keepalives | ✅ (3.7.2) on `http`, `bridge` and `streamable`, for `toolsListChanged`, `promptsListChanged` and `resourcesListChanged`, each honored only where that list exists. A filter that is not one is `-32602`; past `BOTE_LISTEN_MAX` streams, `-32603` "Subscription limit reached", the TypeScript SDK's words. With nothing honored the stream ends at once with its result, as the SDK does. A client that closes, sends anything, or stops reading loses its stream. `: keepalive` every `BOTE_LISTEN_KEEPALIVE_MS` (15 s, the SDK's) |
 | `resourceSubscriptions` and `notifications/resources/updated` | ⏳ checked as a list of strings and never honored, since `resources.subscribe` is not advertised (roadmap 3.7.x) |
-| `subscriptions/listen` on stdio, unix and WebSocket | ⏳ `-32601` there (roadmap 3.7.3) |
+| `subscriptions/listen` on stdio, unix and WebSocket | ✅ (3.7.3) the connection is the stream: the acknowledgement is the listen's first message on it, the changes go out between the replies to other requests, from whatever thread made them, and `notifications/cancelled` naming the listen's id ends it, matched byte for byte. An id already open is `-32600`; past `BOTE_LISTEN_MAX` a connection's listens get `-32603`. With nothing honored, the acknowledgement and then the result. A listen in a batch is `-32601`: 2026-07-28 has no batches. On WebSocket the token is judged again before a change goes out, as before a frame is served |
+| The suite's listen checks (`sep-2575-*` in `server-stateless`) | ✅ (3.7.3) all six on `http` and `streamable`: the acknowledgement first, the id stamped, the filter honored, and a tool and a prompt change delivered through the suite's `test_trigger_tool_change` and `test_trigger_prompt_change`, which the fixture now has |
 
 ---
 

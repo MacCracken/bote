@@ -219,13 +219,15 @@ BOTE_WORKERS=8 ./build/bote streamable 8392
 
 ### Listen streams
 
-On `http`, `bridge` and `streamable`, a client of MCP 2026-07-28 can send `subscriptions/listen` naming the
-list changes it wants, `toolsListChanged`, `promptsListChanged` and `resourcesListChanged`, and keep the
-response open as an event stream: an acknowledgement of what bote honors first, then a notification for
-each change it asked for. One thread holds every stream, so a stream holds no worker. `BOTE_LISTEN_MAX`
-(default 256) bounds how many are open at once, each one socket, and `0` turns the method off;
-`BOTE_LISTEN_KEEPALIVE_MS` (default 15000) is how often each stream gets a keepalive comment. A client that
-closes, sends anything, or stops reading loses its stream.
+A client of MCP 2026-07-28 can send `subscriptions/listen` naming the list changes it wants,
+`toolsListChanged`, `promptsListChanged` and `resourcesListChanged`, and hear of each as it happens:
+first an acknowledgement of what bote honors, then a notification for each change it asked for, until it
+sends `notifications/cancelled` naming the listen. On `http`, `bridge` and `streamable` the response stays
+open as an event stream, and one thread holds every stream, so a stream holds no worker; a client that
+closes or sends anything loses its stream, and so does one that stops reading, once its socket will take no
+more, and `BOTE_LISTEN_KEEPALIVE_MS` (default 15000) is how often each gets a keepalive comment. On stdio, unix and `ws` the connection is the stream, and the
+changes go out between the replies. `BOTE_LISTEN_MAX` (default 256, at most 65536) bounds the streams open at
+once over HTTP, and the listens one connection holds elsewhere; `0` turns the method off.
 
 ```sh
 BOTE_LISTEN_MAX=64 BOTE_LISTEN_KEEPALIVE_MS=30000 ./build/bote http 8390
@@ -313,7 +315,7 @@ bote implements [MCP](https://modelcontextprotocol.io/) over JSON-RPC 2.0.
 | `completion/complete` | Completion capability | Argument completion values |
 | `ping` | Keepalive | Empty result — answered even on a dispatcher with no registries wired |
 | `server/discover` | 2026-07-28 only | Supported versions and capabilities, with the cache hints |
-| `subscriptions/listen` | 2026-07-28 only, on `http`, `bridge` and `streamable` | An event stream: the acknowledgement, then a notification for each list change asked for |
+| `subscriptions/listen` | 2026-07-28 only | The acknowledgement, then a notification for each list change asked for: an event stream on HTTP, the connection itself on stdio, unix and `ws` |
 
 Supported MCP protocol versions: `2024-11-05`, `2025-03-26`, `2025-06-18`,
 `2025-11-25` (default) — the same list for `initialize` negotiation and for the
@@ -420,9 +422,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 4730 total across twenty files (+ a core-only drift smoke)
+### Tests — 4842 total across twenty-one files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 4730 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 4842 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 969 — core protocol/dispatch/codec/schema/session/transports
@@ -436,7 +438,8 @@ cyrius test tests/bote_http_era.tcyr      # 1833 — MCP 2026-07-28 on HTTP, on 
 cyrius test tests/bote_jwks.tcyr          # 49 — a jwks_uri: what it may be, and real fetches from a child
 cyrius test tests/bote_jwt.tcyr           # 491 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
-cyrius test tests/bote_listen.tcyr        # 169 — subscriptions/listen: the filter, and real streams on the three HTTP handlers
+cyrius test tests/bote_listen.tcyr        # 184 — subscriptions/listen: the filter, and real streams on the three HTTP handlers
+cyrius test tests/bote_listen_line.tcyr   # 97 — subscriptions/listen where the connection is the stream: stdio, unix, WebSocket
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter

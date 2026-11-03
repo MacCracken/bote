@@ -72,6 +72,21 @@ async function exercise(label, transport, mode, want) {
 
   const done = await attempt(`${label} complete`, () => c.complete({ ref: { type: 'ref/prompt', name: 'test_prompt_with_arguments' }, argument: { name: 'arg1', value: 'par' } }));
   ok(`${label} completion`, done && done.completion.values.length === 3, done);
+
+  // subscriptions/listen (3.7.3), which only 2026-07-28 has: the acknowledgement names what is
+  // honored, a tool registered meanwhile is a change the client hears, and close() cancels.
+  if (want === NEW) {
+    let heard = 0;
+    c.setNotificationHandler('notifications/tools/list_changed', () => { heard++; });
+    const sub = await attempt(`${label} listen`, () => c.listen({ toolsListChanged: true, promptsListChanged: true }));
+    ok(`${label} listen honored`, sub && sub.honoredFilter.toolsListChanged === true && sub.honoredFilter.promptsListChanged === true, sub && sub.honoredFilter);
+    await attempt(`${label} change the tools`, () => c.callTool({ name: 'test_trigger_tool_change', arguments: {} }));
+    for (let i = 0; i < 60 && heard === 0; i++) { await new Promise(r => setTimeout(r, 50)); }
+    ok(`${label} a change heard`, heard >= 1, heard);
+    if (sub) { await attempt(`${label} listen close`, () => sub.close()); }
+    const after = await attempt(`${label} after the listen`, () => c.callTool({ name: 'test_simple_text', arguments: {} }));
+    ok(`${label} still served after the listen`, after && after.content[0].text.startsWith('This is a simple'), after);
+  }
   await attempt(`${label} close`, () => c.close());
   console.log(`${fails === before ? 'ok  ' : 'FAIL'} ${label.padEnd(20)} ${version}`);
 }

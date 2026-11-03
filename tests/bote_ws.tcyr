@@ -51,6 +51,8 @@ include "src/session.cyr"
 include "src/auth.cyr"
 include "src/jwt.cyr"
 include "src/conn.cyr"
+include "src/http_era.cyr"
+include "src/listen.cyr"
 include "src/transport_ws.cyr"
 
 # ---- 3.4.3 send-deadline helpers --------------------------------------------

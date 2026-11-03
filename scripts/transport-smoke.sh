@@ -26,7 +26,8 @@
 #     with BOTE_WORKERS=0, holds BOTE_WORKERS to its bound, and serves sixteen
 #     clients at once while a jwks_uri is fetched every second from its workers (3.7.0);
 #   - a subscriptions/listen stream on http, bridge and streamable: its acknowledgement,
-#     keepalives, a client that goes, and -32601 over stdio (3.7.2).
+#     keepalives, a client that goes (3.7.2); and over stdio, unix and ws, where the
+#     connection is the stream: the acknowledgement first and a cancel that ends it (3.7.3).
 # Needs curl and python3. CI runs it as the "Transport smoke" step.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -574,8 +575,44 @@ r=$(curl -s -N --max-time 1 "${MV[@]}" -H 'Mcp-Method: subscriptions/listen' -d 
 for _ in $(seq 1 20); do grep -q 'listen stream closed reason=gone open=0' "$L/listen.err" && break; sleep 0.1; done
 grep -q 'listen streams max=256 keepalive_ms=200' "$L/listen.err" && grep -q 'listen stream opened honored=1 open=1' "$L/listen.err" \
   && grep -q 'listen stream closed reason=gone open=0' "$L/listen.err" || err "listen: the log does not show a stream opened and its client gone: $(grep listen "$L/listen.err")"
-r=$(printf '%s\n' "$LB" | timeout 5 $B stdio 2>/dev/null)
-echo "$r" | grep -q '"code":-32601' || err "listen over stdio is not -32601: $r"
+# Where the connection is the stream (3.7.3): the acknowledgement is the first message on it,
+# a cancel ends the subscription, and the connection goes on serving.
+LC='{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"s1"}}'
+LPING='{"jsonrpc":"2.0","id":2,"method":"ping"}'
+r=$(printf '%s\n%s\n%s\n' "$LB" "$LC" "$LPING" | BOTE_LOG=debug timeout 5 $B stdio 2> "$L/stdio-listen.held")
+echo "$r" | sed -n 1p | grep -qF "$LACK" && echo "$r" | sed -n 2p | grep -q '"id":2,"result":{}' \
+  || err "listen over stdio: not the acknowledgement, then the ping's reply: $r"
+grep -q 'listen subscription ended reason=cancelled open=0' "$L/stdio-listen.held" || err "listen over stdio: the cancel did not end it: $(grep listen "$L/stdio-listen.held")"
+# BOTE_LISTEN_MAX is held to its bound: each slot is made at startup.
+printf '%s\n' "$LPING" | BOTE_LISTEN_MAX=99999999 timeout 5 $B stdio > /dev/null 2> "$L/listen-max.held"
+grep -q 'BOTE_LISTEN_MAX past its bound; holding it there max=99999999 bound=65536' "$L/listen-max.held" && grep -q 'listen subscriptions max=65536' "$L/listen-max.held" \
+  || err "listen: BOTE_LISTEN_MAX not held to its bound: $(cat "$L/listen-max.held")"
+r=$(python3 -I -c 'import socket,sys
+s=socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])
+s.sendall(sys.argv[2].encode()+b"\n"+sys.argv[3].encode()+b"\n"+sys.argv[4].encode()+b"\n"); b=b""
+while b.count(b"\n")<2:
+    c=s.recv(4096)
+    if not c: break
+    b+=c
+print(b.decode().strip())' "$sock" "$LB" "$LC" "$LPING")
+echo "$r" | sed -n 1p | grep -qF "$LACK" && echo "$r" | sed -n 2p | grep -q '"id":2,"result":{}' \
+  || err "listen over unix: not the acknowledgement, then the ping's reply: $r"
+r=$(python3 -I -c 'import base64,os,socket,struct,sys
+s=socket.create_connection(("127.0.0.1",18393),3); s.settimeout(3)
+k=base64.b64encode(os.urandom(16)).decode()
+s.sendall(("GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n\r\n"%k).encode())
+b=b""
+while b"\r\n\r\n" not in b: b+=s.recv(4096)
+b=b.split(b"\r\n\r\n",1)[1]
+p=sys.argv[1].encode(); m=os.urandom(4)
+h=b"\x81"+(bytes([128|len(p)]) if len(p)<126 else bytes([254])+struct.pack(">H",len(p)))
+s.sendall(h+m+bytes(c^m[i%4] for i,c in enumerate(p)))
+while len(b)<4: b+=s.recv(4096)
+n=b[1]&127; o=2
+if n==126: n=struct.unpack(">H",b[2:4])[0]; o=4
+while len(b)<o+n: b+=s.recv(4096)
+print(b[o:o+n].decode())' "$LB")
+echo "$r" | grep -qF "$LACK" || err "listen over ws: no acknowledgement: $r"
 
 for f in "$L"/*.err; do grep -q 'transport failed' "$f" && err "$(basename "$f"): $(grep 'transport failed' "$f")"; done
 [ $fail -eq 0 ] || exit 1

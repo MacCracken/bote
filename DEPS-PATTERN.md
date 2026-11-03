@@ -221,6 +221,16 @@ Use the `_a` forms (`codec_process_message_a(bote_req_begin(), ...)`) to put the
 there too; the plain forms put it on the heap. A threaded server calls `bote_conn_arm()`
 once, before its first thread, so each thread has an arena of its own.
 
+To carry `subscriptions/listen` over a connection of its own (3.7.3), such a consumer, on
+the full bundle, makes a ListenLine (`bote_listen_line_new(max)`), chains its sink into
+the dispatcher's events (`dispatcher_set_events(d, bote_listen_sink(line, dispatcher_event_sink(d)))`),
+attaches each connection with a writer (`bote_listen_line_attach(line, d, write_fp, ctx)`,
+`write_fp(ctx, json)` sending one message), starts each message with
+`bote_listen_line_begin(line)` in place of `bote_req_begin()`, waits for input with
+`bote_listen_line_await(line, fd, deadline)`, which writes the changes meanwhile, and
+detaches when the connection ends. The core bundle has no listen: a message dispatched
+without a stream answers `subscriptions/listen` as a method not found.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`

@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.7.2"; }
+fn _bote_server_version() { return "3.7.3"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -1118,9 +1118,9 @@ fn _build_discover_result_a(a, d) {
     str_builder_add_cstr(sb, "{\"resultType\":\"complete\",\"supportedVersions\":");
     _mcp_emit_versions(sb);
     str_builder_add_cstr(sb, ",\"capabilities\":");
-    # The changes a listen stream carries, once something carries one (3.7.2).
-    var lc = 0;
-    if (dispatcher_listen(d) != 0) { lc = 1; }
+    # The changes a listen stream carries, where this message's transport carries one
+    # (3.7.2; 3.7.3).
+    var lc = _dsp_listen_here(d);
     _build_capabilities_lc(sb, d, lc);
     str_builder_add_cstr(sb, ",");
     _dsp_emit_modern_meta(sb, d);
@@ -1413,12 +1413,22 @@ fn bote_listen_ack_params_a(a, mask) {
     return str_data(str_builder_build_a(a, sb));
 }
 
-# A subscriptions/listen request: -32601 where no transport carries the stream, or this
-# message did not come on one that does (bote_req_stream), -32602 for a filter that is not
-# one, else a response whose result is the acknowledgement's params, for the transport to
-# open the stream with. It is no answer to send as it is.
+# 1 when this message came on a transport that can carry a listen stream for `d`
+# (bote_req_stream): an HTTP transport, when `d` has a hub (3.7.2), or a connection that
+# is itself the stream (3.7.3).
+fn _dsp_listen_here(d) {
+    var st = bote_req_stream();
+    if (st == 0) { return 0; }
+    if (st == 1) { return dispatcher_listen(d) != 0; }
+    return 1;
+}
+
+# A subscriptions/listen request: -32601 where this message's transport carries no stream
+# (_dsp_listen_here), -32602 for a filter that is not one, else a response whose result is
+# the acknowledgement's params, for the transport to open the stream with. It is no answer
+# to send as it is.
 fn _dsp_listen_a(a, d, id, params) {
-    if (dispatcher_listen(d) == 0 || bote_req_stream() == 0) { return resp_error_a(a, id, 0 - 32601, "method not found: subscriptions/listen"); }
+    if (_dsp_listen_here(d) == 0) { return resp_error_a(a, id, 0 - 32601, "method not found: subscriptions/listen"); }
     var mask = dispatcher_listen_mask_a(a, d, params);
     if (mask < 0) { return resp_error_a(a, id, 0 - 32602, DSP_LISTEN_FILTER); }
     return resp_success_a(a, id, bote_listen_ack_params_a(a, mask));

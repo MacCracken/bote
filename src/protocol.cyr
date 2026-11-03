@@ -88,7 +88,10 @@ fn resp_success(id, result) {
 #   +8  token   the token an accepted request presented, on the arena
 #   +16 kept    its copy on the heap, once a handler has been handed one
 #   +24 why     why this thread's last bote_fetch_in_child failed (src/fetch.cyr), or 0
-#   +32 stream  1 while a transport that can hold a stream open dispatches the message
+#   +32 stream  what can hold a `subscriptions/listen` stream open for this message: 0,
+#               nothing; 1, an HTTP transport, which opens it itself once the dispatcher
+#               has accepted it (3.7.2); or a BoteStream, a connection that is the stream
+#               (3.7.3), whose functions the codec calls
 # A transport that serves one message at a time uses the process's block. A server
 # that serves on worker threads (3.7.0, src/conn.cyr) sets _bote_req_state_fp to a
 # function returning the calling thread's block, before its first worker starts.
@@ -326,16 +329,33 @@ fn bote_req_begin() {
     return al;
 }
 
-# Whether the message being dispatched came on a transport that can hold a stream open
-# (3.7.2). That transport sets it around the dispatch, and only then is
+# What can hold a stream open for the message being dispatched (3.7.2): 0, 1 or a
+# BoteStream, as above. The transport sets it around the dispatch, and only then is
 # `subscriptions/listen` served: a dispatcher one embedder serves on HTTP and on stdio
-# answers it on stdio as a method it does not have.
+# answers it on stdio as a method it does not have, unless stdio carries streams too.
 fn bote_req_set_stream(on) {
     store64(bote_req_state() + BOTE_REQ_STATE_STREAM, on);
     return on;
 }
 
 fn bote_req_stream() { return load64(bote_req_state() + BOTE_REQ_STATE_STREAM); }
+
+# A BoteStream (3.7.3), 24 B: how a connection that is itself the stream, stdio's, a Unix
+# socket's or a WebSocket's, takes a listen over. +0 open, fn(ctx, a, req, resp): what to
+# send in the place of `resp`, the dispatcher's acceptance, or 0 for nothing, when it has
+# written the stream's first messages itself; +8 cancel, fn(ctx, a, request_id), the raw
+# `requestId` of a `notifications/cancelled`, or 0; +16 ctx. The codec calls them
+# (src/codec.cyr), so the core knows the shape and not what is behind it.
+fn bote_stream_new(open_fp, cancel_fp, ctx) {
+    var st = alloc(24);
+    store64(st, open_fp);
+    store64(st + 8, cancel_fp);
+    store64(st + 16, ctx);
+    return st;
+}
+
+fn bote_stream_open_a(st, a, req, resp) { return fncall4(load64(st), load64(st + 16), a, req, resp); }
+fn bote_stream_cancel_a(st, a, id) { return fncall3(load64(st + 8), load64(st + 16), a, id); }
 
 # The token noted for this message, or 0.
 fn bote_req_token() { return load64(bote_req_state() + 8); }

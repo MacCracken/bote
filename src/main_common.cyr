@@ -557,14 +557,44 @@ fn bote_main_workers_from_env() {
     return n;
 }
 
+# BOTE_LISTEN_MAX, held to BOTE_LISTEN_MAX_BOUND (65536) with a WARN (3.7.3): each slot is
+# made at startup, so 4,000,000 was a gigabyte before the first client.
+fn _bote_main_listen_max() {
+    var max = _bote_env_count("BOTE_LISTEN_MAX", BOTE_LISTEN_MAX_DEFAULT);
+    if (max > BOTE_LISTEN_MAX_BOUND) {
+        var wl[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&wl, SK_WARN, "BOTE_LISTEN_MAX past its bound; holding it there");
+        bote_log_int(&wl, "max", max);
+        bote_log_int(&wl, "bound", BOTE_LISTEN_MAX_BOUND);
+        bote_log_emit(&wl);
+        max = BOTE_LISTEN_MAX_BOUND;
+    }
+    return max;
+}
+
+# No hub or line: 0 means none asked for; anything else could not be made, which is said.
+# agnos has none to make (src/listen.cyr), which is not an error.
+fn _bote_main_listen_none(max) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    if (max > 0) {
+        var el[BOTE_LOG_LINE_BYTES];
+        bote_log_line(&el, SK_ERROR, "listen: no room for the streams; subscriptions/listen is not served");
+        bote_log_int(&el, "max", max);
+        bote_log_emit(&el);
+    }
+    return 0;
+}
+
 # BOTE_LISTEN_MAX (3.7.2): how many `subscriptions/listen` streams an HTTP-family mode
 # holds at once, BOTE_LISTEN_MAX_DEFAULT (256) when unset, 0 for none, when the method is
 # not found. BOTE_LISTEN_KEEPALIVE_MS, how often each stream gets a keepalive comment (15000).
 # The hub, which `d` then carries its streams and its changes through, or 0. Logged at INFO.
 fn bote_main_listen(d) {
-    var max = _bote_env_count("BOTE_LISTEN_MAX", BOTE_LISTEN_MAX_DEFAULT);
+    var max = _bote_main_listen_max();
     var h = bote_listen_hub_new(max);
-    if (h == 0) { return 0; }
+    if (h == 0) { return _bote_main_listen_none(max); }
     bote_listen_hub_with_keepalive(h, _bote_env_ms("BOTE_LISTEN_KEEPALIVE_MS", BOTE_LISTEN_KEEPALIVE_MS));
     dispatcher_set_listen(d, h);
     dispatcher_set_events(d, bote_listen_sink(h, dispatcher_event_sink(d)));
@@ -574,6 +604,21 @@ fn bote_main_listen(d) {
     bote_log_int(&ln, "keepalive_ms", load64(h + 64));
     bote_log_emit(&ln);
     return h;
+}
+
+# The same for a transport whose connection is itself the stream, stdio, unix and ws
+# (3.7.3): a ListenLine, BOTE_LISTEN_MAX the subscriptions one connection may hold, which
+# `d` then carries its changes through, or 0. Logged at INFO.
+fn bote_main_listen_line(d) {
+    var max = _bote_main_listen_max();
+    var c = bote_listen_line_new(max);
+    if (c == 0) { return _bote_main_listen_none(max); }
+    dispatcher_set_events(d, bote_listen_sink(c, dispatcher_event_sink(d)));
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_INFO, "listen subscriptions");
+    bote_log_int(&ln, "max", max);
+    bote_log_emit(&ln);
+    return c;
 }
 
 # The startup line. `port` 0 and `path` 0 are omitted.

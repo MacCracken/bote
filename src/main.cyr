@@ -185,6 +185,8 @@ fn main() {
         var wcfg = ws_config_new("/mcp", INADDR_LOOPBACK(), wport);
         ws_config_with_allowed_origins(wcfg, allowed_origins);
         ws_config_with_idle_ms(wcfg, _bote_env_ms("BOTE_WS_IDLE_MS", 0));
+        # subscriptions/listen over each connection (3.7.3).
+        ws_config_with_listen(wcfg, bote_main_listen_line(wdisp));
         if (bearer_fp != 0) { ws_config_with_bearer_validator(wcfg, bearer_fp, bearer_ctx); }
         bote_main_log_start("ws", wport, 0, bearer_fp != 0);
         return bote_main_log_exit("ws", transport_ws_run(wdisp, wcfg));
@@ -224,6 +226,7 @@ fn main() {
             bote_log_error("usage: bote unix <socket-path>");
             return 2;
         }
+        transport_unix_with_listen(bote_main_listen_line(dispatcher));
         bote_main_log_start("unix", 0, arg, 0);
         return bote_main_log_exit("unix", transport_unix_run(dispatcher, arg));
     }
@@ -246,6 +249,7 @@ fn main() {
         bote_log_str(&un, "modes", "stdio http unix bridge streamable ws");
         bote_log_emit(&un);
     }
+    transport_stdio_with_listen(bote_main_listen_line(dispatcher));
     bote_main_log_start("stdio", 0, 0, 0);
     return bote_main_log_exit("stdio", transport_stdio_run(dispatcher));
 }

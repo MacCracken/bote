@@ -169,6 +169,28 @@ fn _tool(d, name, desc, fp) {
 
 fn _arg(name, desc) { return prompt_arg_new(name, desc, 1); }
 
+# The suite's hooks for a list change on a subscriptions/listen stream (3.7.3): each call
+# registers a tool, or a prompt, of its own, a change a listening client is then told of.
+var _fx_d = 0;
+var _fx_added = 0;
+fn _fx_name(prefix) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_int(sb, _fx_added);
+    _fx_added = _fx_added + 1;
+    return str_data(str_builder_build(sb));
+}
+
+fn t_trigger_tool(args, claims) {
+    dispatcher_register_tool(_fx_d, tool_def_new(_fx_name("test_added_tool_"), "Added by test_trigger_tool_change", schema_new("object", 0, vec_new())), &t_simple);
+    return content_text_response("tool list changed");
+}
+
+fn t_trigger_prompt(args, claims) {
+    dispatcher_register_prompt(_fx_d, prompt_def_new(_fx_name("test_added_prompt_"), "Added by test_trigger_prompt_change", vec_new()), &p_simple);
+    return content_text_response("prompt list changed");
+}
+
 fn fixture_dispatcher() {
     var d = dispatcher_new(tool_registry_new());
     dispatcher_set_server_info(d, "bote-conformance-fixture", _bote_server_version());
@@ -199,7 +221,18 @@ fn fixture_dispatcher() {
     dispatcher_register_resource(d, resource_def_new("test://static-binary", "static-binary", "A binary resource", "image/png"), &r_binary);
     dispatcher_register_resource_template(d, resource_template_new(_TEMPLATE, "template", "A template", "application/json"), &r_template);
     dispatcher_set_completion(d, &complete);
+    _tool(d, "test_trigger_tool_change", "Registers a tool", &t_trigger_tool);
+    _tool(d, "test_trigger_prompt_change", "Registers a prompt", &t_trigger_prompt);
+    _fx_d = d;
     return d;
+}
+
+# subscriptions/listen on every mode, as the binary has it (3.7.3).
+fn _fx_hub(d) {
+    var h = bote_listen_hub_new(64);
+    dispatcher_set_listen(d, h);
+    dispatcher_set_events(d, bote_listen_sink(h, dispatcher_event_sink(d)));
+    return h;
 }
 
 fn _port(arg, dflt) {
@@ -222,6 +255,7 @@ fn main() {
     var arg = 0;
     if (argc() > 2) { arg = argv(2); }
     if (streq(mode, "http") == 1) {
+        _fx_hub(d);
         var hcfg = http_config_new("/mcp", INADDR_LOOPBACK(), _port(arg, 8395));
         http_config_with_session_store(hcfg, session_store_default());
         return transport_http_run(d, hcfg);
@@ -255,14 +289,19 @@ fn main() {
         return transport_http_run(d, acfg);
     }
     if (streq(mode, "bridge") == 1) {
+        _fx_hub(d);
         return transport_bridge_run(d, bridge_config_new(INADDR_LOOPBACK(), _port(arg, 8397)));
     }
     if (streq(mode, "streamable") == 1) {
+        _fx_hub(d);
         var st = session_store_default();
         var cfg = streamable_config_new("/mcp", INADDR_LOOPBACK(), _port(arg, 8396));
         streamable_config_with_session_store(cfg, st);
         return transport_streamable_run(d, cfg);
     }
+    var line = bote_listen_line_new(64);
+    dispatcher_set_events(d, bote_listen_sink(line, dispatcher_event_sink(d)));
+    transport_stdio_with_listen(line);
     return transport_stdio_run(d);
 }
 
