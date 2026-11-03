@@ -11,6 +11,9 @@
 #                                    there is deliberately NO manifest edit.
 #   2. src/dispatch.cyr              _bote_server_version() literal — the string
 #                                    the MCP `initialize` handshake reports.
+#   2b. docs/spec-compliance.md      the `**Bote Version**:` header, which CI's
+#                                    version-consistency step checks (missed by hand
+#                                    at 3.3.14 and 3.7.2).
 #   3. CHANGELOG.md                  renames `## [Unreleased]` to the dated
 #                                    version header and seeds a fresh empty
 #                                    `## [Unreleased]` on top (bote's 2.7.0
@@ -75,6 +78,17 @@ if [ -f src/dispatch.cyr ]; then
     fi
 fi
 
+# 2b. docs/spec-compliance.md — its header names the release, and CI fails when it
+#     names another. Asserts the NEW value, as above.
+if [ -f docs/spec-compliance.md ]; then
+    sed -i "s/\*\*Bote Version\*\*: [0-9][0-9.]* /**Bote Version**: $NEW /" docs/spec-compliance.md
+    if ! grep -q "\*\*Bote Version\*\*: $NEW " docs/spec-compliance.md; then
+        echo "ERROR: docs/spec-compliance.md's header does not name Bote Version $NEW —" >&2
+        echo "       update it by hand." >&2
+        exit 1
+    fi
+fi
+
 # 3. CHANGELOG.md — bote's 2.7.0 accumulator convention: the `## [Unreleased]`
 #    section accrues entries during the cycle; at release we RENAME it to the
 #    dated version header and seed a fresh empty `## [Unreleased]` on top.
@@ -126,6 +140,7 @@ echo ""
 echo "Updated:"
 echo "  VERSION"
 echo "  src/dispatch.cyr (_bote_server_version)"
+echo "  docs/spec-compliance.md (Bote Version header)"
 case "$CHANGELOG_STATE" in
     seeded)  echo "  CHANGELOG.md (## [$NEW] section seeded — fill in the headline + notes)" ;;
     present) echo "  CHANGELOG.md (## [$NEW] section already present — left as-is)" ;;

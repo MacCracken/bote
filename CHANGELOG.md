@@ -77,6 +77,8 @@ The handler ABI and the stated minimum cyrius are unchanged.
 - **A thread waiting on the registries' lock yields every 64 turns** (`BOTE_RW_SPINS`).
 - **sigil's P-256 tables are built once for the process** (`_jwt_p256_warm`), not for every EC key of every set that changes.
 - **CI runs every test file in `tests/`, by glob.** The list it kept had missed three since each was added.
+- **`scripts/version-bump.sh` rewrites `docs/spec-compliance.md`'s `Bote Version` header** and fails if it does not name the
+  new release. CI checks that header, and it was missed by hand at 3.3.14 and again at this release.
 - SECURITY.md said scopes gate `tools/call` only and that a WebSocket checks its token once. Both stopped being true at
   3.6.6, and the section above them already said so.
 
