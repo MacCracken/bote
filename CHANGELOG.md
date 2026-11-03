@@ -18,6 +18,162 @@ have per release.
 
 _(empty)_
 
+## [3.7.5] — 2026-11-02 · Cancellation
+
+**A client can cancel a request in flight.** On `http`, `streamable` and `bridge`, for MCP 2026-07-28, a client that
+closes its connection has cancelled its request, which the spec says the server MUST treat as one. On stdio and a Unix
+socket the client sends `notifications/cancelled` naming the request. A handler runs to its end on the thread that called
+it, so cancelling one is cooperative. A handler that runs long asks `bote_cancelled()` as it goes. Once that says 1, bote
+sends nothing more for the request, its response included, and audits a `tools/call` as cancelled. bote's own
+`web_fetch` and `web_search` ask while they wait on their child, and end it.
+
+**Five defects in 3.7.4 land ahead of it**, from an independent review of that release. The worst let a token without a
+resource's scope subscribe to its URI, or to a prefix above it, and hear every change, which also gave away the URIs
+behind a scoped template. 3.7.4's fix for a change made while a listen opened held on stdio, unix and WebSocket, and not
+on HTTP. See the correction notice in 3.7.4.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Added
+
+- **`bote_cancelled()`** (core, `src/protocol.cyr`): 1 when the client has cancelled the request the calling thread is
+  serving. Each call asks the connection once, a poll or a look at what has arrived, and a 1 stays 1.
+  - The transport answers through `bote_req_set_cancel(fp, ctx)`, set after `bote_req_begin`.
+  - The codec names the request (`bote_req_set_request_id`).
+  - `bote_req_cancel_live()` and `bote_req_was_cancelled()` read the state.
+  - The request state grows from 40 to 80 B: the check, its context, the request's id, whether it was cancelled, and
+    the claims a listen was judged with.
+- **`bote_arena_mark(a, m)` / `bote_arena_release(a, m)`** (core): `bote_req_mark` for any bote arena, and nothing on an
+  allocator that is not one.
+- **`codec_lines_cancel_a(a, p, n, id, done)`** (core): for a transport whose messages are lines, 1 when a complete line
+  of what it has read cancels the request `id`.
+  - A line is copied and read only when it spells the method plainly or holds an escape. Each line's reading is given
+    back once it is read.
+  - The lines stay where they are, to be served in their turn.
+  - `bote_id_key_a`, the id as a value, moves here from `src/listen.cyr`.
+- **`bote_conn_gone(fd, half)`** and **`bote_conn_readable(fd)`** (`src/conn.cyr`): poll(2) with no wait. With `half`, a
+  client that closed its sending side counts as gone, which is all TCP shows of a close. 0 on agnos, which has no poll.
+- **On the transports:**
+  - `bote_http_serve_modern` asks `bote_conn_gone(cfd, 1)`.
+  - stdio reads in what stdin has ready, without waiting, while there is room, and looks through the lines past the
+    message, each once. An end of stdin it reads is no cancellation: a client may send its last request and close
+    stdin before it reads the answer. The loop remembers that end, since a terminal's is read once.
+  - A Unix socket does the same, and a client that closed both ways has cancelled. One that only shut its sending
+    side still gets its answers. A line its check read is served in the same pass.
+- **`BOTE_FETCH_CANCEL_MS`** (100, `src/fetch.cyr`): a request whose client can cancel it asks that often while it waits
+  on a child, and a cancelled one ends the child (`bote_fetch_why()` is `"cancelled"`).
+- `fuzz/cancel_lines.fcyr`: the line scanner against a reference drawn from the same grammar.
+
+### Changed
+
+- A request a handler found cancelled is answered with nothing on every transport. A cancelled `tools/call` is audited
+  and published as a failure with the error `"cancelled"`, and its DEBUG line says `status=cancelled`. A request whose
+  handler never asks is answered: a cancellation that arrives after the work is done may be ignored.
+- The legacy path on HTTP never asks: 2025-11-25 says a disconnect is no cancellation, and its `notifications/cancelled`
+  is a POST of its own, which bote does not match to the request (roadmap).
+- `web_fetch` and `web_search` log a cancelled request at TRACE, not WARN: the request's own line reports it.
+- A listen stream's slot grows from 312 to 328 B: whether its listen was made with claims, and the dispatcher that judged
+  it. Its URI room takes a flag byte per URI.
+
+### Fixed
+
+From the review of 3.7.4:
+
+- **A token without a resource's scope heard of every change to it.** `resourceSubscriptions` was not judged by the scopes
+  `resources/read` enforces. A token without them was honored the URI, or a prefix above it such as `sp:/`, and told of
+  each update, which also named the URIs a scoped template serves and no list shows. Now a listen's URIs are judged with
+  its claims by what would serve them, and judged again as the stream keeps them. A stream made with claims is told of an
+  update to a URI that requires a scope only when it holds that URI exactly and the scope held when it listened. A
+  stream keeps no token, so it is not told of one through a prefix, nor of a URI whose scope came after it listened:
+  less than happened for a token that has the scope, never more than it may read (roadmap).
+- **On HTTP a change made as a stream parked could still reach nobody.** The park counted the stream open with a plain
+  store and then read the count of changes. A change counted itself and then read the open streams. x86 let each read pass
+  the other side's write, so neither saw the other. The review's probe lost 112 to 266 changes in 400,000. The park counts
+  with an atomic add, and both sides fence between the write and the read. A ListenLine was sound: its acknowledgement
+  is written by the thread that counted the listen open.
+- **The thread that writes the streams kept every frame of a pass on its arena**, for the life of the process: 38.3 MB
+  for 256 streams told of 16 updates of a kilobyte URI, and 13.8 MB for one overflow of 256 streams holding 32 URIs. Each
+  frame's bytes now go once it is sent (`_bl_send_one`).
+- **A connection's queued updates outlived it.** A ListenLine's queue and its overflow survived a detach, so the next
+  connection on a Unix socket or a WebSocket was told of updates made before it listened.
+- **`"\u0000a"` and `"\\u0000a"` were one id**: a value holding a NUL fell back to its spelling, which was another id's
+  value. Such a value is now keyed by its spelling, apart from both.
+
+### Security
+
+- The scope fix above. Through 3.7.4, on a server whose resources require scopes, any token that could open a listen could
+  learn when each protected resource changed, and the URIs behind a scoped template.
+- The arena fix above, a memory bound a client with `BOTE_LISTEN_MAX` streams could push to gigabytes at the bound of 65536.
+- Cancellation lets a client end its own request early, and no other: by closing its own connection, or with a
+  notification on it. The check reads only what has already arrived, within the transport's buffer, each line once.
+
+### Tests
+
+- **5,067 assertions, from 4,938**, on x86_64 and under `qemu-aarch64`.
+  - **`tests/bote_cancel.tcyr`**, 96, new:
+    - `bote_cancelled` and the check: none set, no request served, a yes that stays yes without asking again, the
+      context and the id, a begin clearing them, and a thousand asks that allocate 4 KB each leaving the arena where it was.
+    - The codec: no answer for a request found cancelled, the id it names, the call audited as cancelled, a handler that
+      never asks answered, the legacy era, one element of a batch, and the DEBUG line.
+    - `codec_lines_cancel_a`: ids by value through `\u` and `\/` escapes, a number that is not the string, the words
+      inside another message's arguments, a request by that name, invalid JSON, a batch, a line not yet whole, the
+      method spelled with escapes, 0 heap bytes for a hundred reads of 64 long lines, and one arena chunk for them.
+    - The real loops on threads: stdio and a Unix connection with a cancellation sent after the handler began and with the
+      request, one naming another, ids by value, an end of stdin and a half-close answered, a close cancelling; the three
+      HTTP handlers with a client that waits, half-closes and closes, the legacy path never asking; a fetch's child ended
+      at the third ask and reaped; two streamable workers, one cancelled and the other answered in full.
+  - **`tests/bote_listen.tcyr`**, 224, from 217:
+    - A park raced against a change and against an update, 300,000 rounds each, the change's delay swept across the
+      park's write and read. 3.7.4's plain store lost 8 to 69 a run, every run; none now.
+    - A scoped resource's update on HTTP. 16 streams told of 16 kilobyte URIs on one chunk of the arena, where the pass
+      took 2.4 MB.
+  - **`tests/bote_listen_line.tcyr`**, 186, from 160: a resource's scopes for its updates, with a token without the
+    scope, one with it (exact URIs only: not through a prefix, not for a scope added since, not a deeper URI that needs
+    another scope) and none; an overflow; the judgement again as a stream keeps its URIs. A connection's queue and
+    overflow gone at detach. NUL ids by their spelling.
+- **`fuzz/cancel_lines.fcyr`**, the fourteenth harness: 30,000 rounds of up to six lines from a grammar against a reference.
+  Before release it found the scanner's first look skipping `notifications\/cancelled`, a spelling the codec reads as the
+  method. `fuzz/http_era.fcyr` and `fuzz/oauth_metadata.fcyr` include `src/conn.cyr`, which `http_era.cyr` now calls.
+- **52 mutants, 46 killed.** Of the rest, two found code that did nothing, which is gone. One forgets an end of stdin a
+  check read, which only a terminal shows, since a pipe's end is read again. Three remove a fence after an atomic add,
+  which on x86 is already a full barrier; they are there for aarch64. Three first survived, and tests added for them
+  kill them:
+  - 3.7.4's plain store in the park, until the race test swept the change's delay across the window. Lockstep alone never
+    lost one.
+  - A NUL id keyed as the empty string.
+  - A scoped URI held as a prefix of a deeper one that needs another scope.
+- **The official client** passes 434 checks. The suite is where 3.7.4 left it.
+
+### Performance
+
+**The request path costs what it did.** Interleaved A/B against 3.7.4, 15 rounds pinned to one core. Minimums, in ns:
+
+| Bench | 3.7.4 | 3.7.5 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 3,916 | 3,951 | +0.9% |
+| `codec_process_message_threaded` | 4,215 | 4,228 | +0.3% |
+| `dispatch_tools_call` | 2,046 | 2,062 | +0.8% |
+| `http_era_modern` | 10,946 | 11,075 | +1.2% |
+
+Rows that run none of this patch's code moved further (`jsonx_get_str_flat` +4.9%, `dispatch_tools_list` +2.9%,
+`validate_compiled_nested` −3.5%), which is layout. To tell the two apart, the same tree with the codec's and the
+dispatcher's cancellation lines taken out was interleaved against it, 11 rounds, layout held:
+
+| Bench | Without | 3.7.5 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 3,925 | 3,948 | +0.6% |
+| `codec_process_message_arena` | 3,917 | 3,909 | −0.2% |
+| `codec_process_message_threaded` | 4,243 | 4,229 | −0.3% |
+| `dispatch_tools_call` | 2,072 | 2,064 | −0.4% |
+
+The first build looked the request state up three times a message, and cost 1.2% to 1.7% against that control, the most
+on a worker, where the state is a thread-local lookup. The codec now looks it up once and reads the stream word from it,
+which saves the lookup `bote_req_stream()` made. The dispatcher reads the cancelled flag only for a sink.
+
+Two new rows: `cancel_lines_scan`, 2,915 ns, for four lines past the message, one a cancellation of another request read
+in full; and `cancel_check_socket`, 541 ns, one poll, which is what a handler pays for each ask on HTTP and a Unix socket.
+A handler asks between steps of its work, not within them.
+
 ## [3.7.4] — 2026-11-02 · Resource updates
 
 **`subscriptions/listen` is whole: `resourceSubscriptions` and `notifications/resources/updated`.** A client names the URIs
@@ -31,6 +187,16 @@ changes once its client pinged. See the correction notice in 3.7.3. **And a chan
 could reach nobody**, on every carrier since it was added: the aarch64 sweep lost one in 3 runs of 3.
 
 The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+> ⚠ **Corrected at 3.7.5.** Four claims below were not true, found by an independent review of this release. "A change
+> made while a listen was opened could reach nobody" was fixed on a ListenLine and not on HTTP: the park counted its stream
+> open with a plain store and then read the count of changes, and x86 let the read pass the store, so a change made at
+> that instant was raised for no stream and owed to none (112 to 266 in 400,000 in the review's probe). "An update
+> allocates nothing" held for the heap and not for the writing thread's arena, which kept every frame of a pass: 38 MB for
+> 256 streams told of 16 kilobyte URIs. "The acknowledgement lists those bote honors" honored URIs a token could not read:
+> no resource's or template's required scopes were judged, so a token without them heard of every change, by name or
+> through a prefix, and learned the URIs behind a scoped template. And listen ids "compared by value" took `"\u0000a"` and
+> `"\\u0000a"` for one. The review also found a connection's queued updates outliving it. Each is fixed in 3.7.5.
 
 ### Added
 

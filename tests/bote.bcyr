@@ -292,6 +292,14 @@ fn b_listen_filter() {
     return bote_listen_ack_params_a(a, dispatcher_listen_mask_a(a, _b_dispatcher, _b_listen_params));
 }
 
+# 3.7.5: what a line transport's cancellation check reads, four lines past the message and
+# none cancelling it; and what one ask costs on a socket, a poll.
+var _b_cancel_lines = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":9}}\n{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"ping\"}\n";
+var _b_cancel_done[1];
+fn b_cancel_lines_scan() { return codec_lines_cancel_a(bote_req_begin(), _b_cancel_lines, strlen(_b_cancel_lines), "1", &_b_cancel_done); }
+var _b_cancel_sp[2];
+fn b_cancel_check_socket() { return bote_conn_gone(load32(&_b_cancel_sp), 1); }
+
 fn _bench_setup() {
     var reg = tool_registry_new();
     var s = schema_new("object", 0, vec_new());
@@ -547,6 +555,13 @@ fn main() {
     var b37 = bench_new("listen_filter");
     bench_run(b37, &b_listen_filter, 100000);
     vec_push(benches, b37);
+    var b38 = bench_new("cancel_lines_scan");
+    bench_run(b38, &b_cancel_lines_scan, 100000);
+    vec_push(benches, b38);
+    sys_socketpair(1, 1, 0, &_b_cancel_sp);
+    var b39 = bench_new("cancel_check_socket");
+    bench_run(b39, &b_cancel_check_socket, 100000);
+    vec_push(benches, b39);
     bote_conn_arm();
     thread_join(thread_create(&_b_thread_nop, 0));
     var b36 = bench_new("codec_process_message_threaded");

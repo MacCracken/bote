@@ -1,0 +1,234 @@
+# Fuzz: codec_lines_cancel_a (3.7.5) finds a `notifications/cancelled` naming a request among
+# the lines a line transport has read past it, and keeps nothing.
+#
+# A round draws a request id, a string or a number, spelled plainly or with an escape, and
+# up to six lines of the kinds a client sends: the cancellation of that request, spelled
+# another way, its members in another order or with whitespace between; the cancellation of
+# another request, or of the string where the id is the number; a request named
+# `notifications/cancelled`; a call whose arguments hold the same words; the cancellation cut
+# short, or inside a batch; a ping. The last line may lack its newline. A reference made from
+# the same choices says what must be found. Four properties, each with its own exit code:
+#
+#   10   the answer is the reference's: 1 exactly when a complete line cancels the request;
+#   11   *done is the bytes the complete lines take, the part after the last newline left;
+#   20   a round leaves nothing on the heap: every line is read on the request arena;
+#   30   the rounds drew each answer two thousand times at least.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+
+alloc_init();
+
+# A small, fixed generator: the run is the same every time.
+var _rng = 1442695040888963407;
+fn _rand() {
+    _rng = _rng ^ (_rng << 13);
+    _rng = _rng ^ (_rng >> 7);
+    _rng = _rng ^ (_rng << 17);
+    if (_rng < 0) { return 0 - _rng; }
+    return _rng;
+}
+
+fn _add(a, sb, s) { return str_builder_add_cstr_a(a, sb, s); }
+
+# One byte, as a string on `a`: the builder's own byte add grows on the heap.
+fn _byte(a, sb, c) {
+    var p = alloc_via(a, 2);
+    store8(p, c);
+    store8(p + 1, 0);
+    return _add(a, sb, p);
+}
+
+# The id `n` (a digit) as a string or a number, spelled one of three ways, or plainly.
+fn _id(a, num, n, how) {
+    var sb = str_builder_new_a(a);
+    var d = 48 + n;
+    if (num == 1) {
+        _byte(a, sb, d);
+        return str_data(str_builder_build_a(a, sb));
+    }
+    if (how == 4) {
+        _add(a, sb, "\"");
+        _byte(a, sb, d);
+        _add(a, sb, "\"");
+        return str_data(str_builder_build_a(a, sb));
+    }
+    if (how == 1) { _add(a, sb, "\"\\u0072eq-"); }
+    elif (how == 2) { _add(a, sb, "\"req\\u002d"); }
+    elif (how == 3) { _add(a, sb, "\"r\\u0065q\\/"); }
+    else { _add(a, sb, "\"req-"); }
+    if (how == 3) {
+        # "r\u0065q\/N" is "req/N": another id, unless the request is spelled the same way.
+        _byte(a, sb, d);
+        _add(a, sb, "\"");
+        return str_data(str_builder_build_a(a, sb));
+    }
+    _byte(a, sb, d);
+    _add(a, sb, "\"");
+    return str_data(str_builder_build_a(a, sb));
+}
+
+# A cancellation of the raw id `rid`, its members in one of three arrangements.
+fn _cancel(a, sb, rid, how) {
+    if (how == 1) {
+        _add(a, sb, "{ \"params\" : { \"reason\" : \"gave \\\"up\\\"\\nlater\" , \"requestId\" : ");
+        _add(a, sb, rid);
+        _add(a, sb, " } , \"method\" : \"notifications/cancelled\" , \"jsonrpc\" : \"2.0\" }");
+        return 0;
+    }
+    if (how == 2) {
+        _add(a, sb, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications\\/cancelled\",\"params\":{\"requestId\":");
+        _add(a, sb, rid);
+        _add(a, sb, "}}");
+        return 0;
+    }
+    _add(a, sb, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":");
+    _add(a, sb, rid);
+    _add(a, sb, ",\"reason\":\"x\"}}");
+    return 0;
+}
+
+# One line of kind `k` for the request `n` (a string unless `num`), into `sb`: 1 when it
+# cancels the request.
+fn _line(a, sb, k, num, n) {
+    var other = (n + 1 + _rand() % 8) % 10;
+    if (k == 0) {
+        _cancel(a, sb, _id(a, num, n, _rand() % 3), _rand() % 3);
+        return 1;
+    }
+    if (k == 1) {
+        _cancel(a, sb, _id(a, num, other, _rand() % 3), _rand() % 3);
+        return 0;
+    }
+    if (k == 2) {
+        # "7" where the id is 7, and 7 where it is "req-7".
+        if (num == 1) { _cancel(a, sb, _id(a, 0, n, 4), 0); }
+        else { _cancel(a, sb, _id(a, 1, n, 0), 0); }
+        return 0;
+    }
+    if (k == 3) {
+        _add(a, sb, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":");
+        _add(a, sb, _id(a, num, n, 0));
+        _add(a, sb, "}}");
+        return 0;
+    }
+    if (k == 4) {
+        _add(a, sb, "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"t\",\"arguments\":{\"method\":\"notifications/cancelled\",\"requestId\":");
+        _add(a, sb, _id(a, num, n, 0));
+        _add(a, sb, "}}}");
+        return 0;
+    }
+    if (k == 5) {
+        _add(a, sb, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":");
+        _add(a, sb, _id(a, num, n, 0));
+        return 0;
+    }
+    if (k == 6) {
+        _add(a, sb, "[");
+        _cancel(a, sb, _id(a, num, n, 0), 0);
+        _add(a, sb, "]");
+        return 0;
+    }
+    if (k == 7) {
+        # "req/N" cancels "req-N" never.
+        if (num == 0) {
+            _cancel(a, sb, _id(a, 0, n, 3), 0);
+            return 0;
+        }
+    }
+    _add(a, sb, "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}");
+    return 0;
+}
+
+# A round: its buffer at *buf_out and its length, the request's raw id, and the reference.
+fn _round(a, buf_out, len_out, id_out, want_out, done_out) {
+    var num = _rand() % 2;
+    var n = _rand() % 10;
+    store64(id_out, _id(a, num, n, _rand() % 3));
+    var sb = str_builder_new_a(a);
+    var lines = 1 + _rand() % 6;
+    var partial = _rand() % 3 == 0;
+    var want = 0;
+    var done = 0;
+    var i = 0;
+    while (i < lines) {
+        var k = _rand() % 9;
+        var hit = _line(a, sb, k, num, n);
+        if (i < lines - 1 || partial == 0) {
+            _add(a, sb, "\n");
+            if (hit == 1) { want = 1; }
+            done = load64(sb + 8);
+        }
+        i = i + 1;
+    }
+    var s = str_builder_build_a(a, sb);
+    store64(buf_out, str_data(s));
+    store64(len_out, str_len(s));
+    store64(want_out, want);
+    store64(done_out, done);
+    return 0;
+}
+
+var buf[8];
+var blen[8];
+var rid[8];
+var want[8];
+var wdone[8];
+var done[8];
+# A round first, so the arena has the chunk every later round uses.
+var a0 = bote_req_begin();
+_round(a0, &buf, &blen, &rid, &want, &wdone);
+codec_lines_cancel_a(a0, load64(&buf), load64(&blen), load64(&rid), &done);
+var before = alloc_used();
+var yes = 0;
+var no = 0;
+var round = 0;
+while (round < 30000) {
+    var a = bote_req_begin();
+    _round(a, &buf, &blen, &rid, &want, &wdone);
+    var got = codec_lines_cancel_a(a, load64(&buf), load64(&blen), load64(&rid), &done);
+    if (got != load64(&want)) { sys_exit(10); }
+    if (load64(&done) != load64(&wdone)) { sys_exit(11); }
+    if (got == 1) { yes = yes + 1; }
+    else { no = no + 1; }
+    round = round + 1;
+}
+if (alloc_used() != before) { sys_exit(20); }
+if (yes < 2000 || no < 2000) { sys_exit(30); }
+
+sys_exit(0);

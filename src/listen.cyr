@@ -44,7 +44,17 @@
 # (3.7.4) +280 its room for the URIs of `resourceSubscriptions` it honors, made the first
 # time a stream on the slot has any and kept for the next, so a stream allocates nothing
 # after the first, +288 the bytes used there, +296 how many, each a decoded string and NUL,
-# (3.7.4) +304 the BOTE_LISTEN_* kinds it is owed: changes made while it was being opened.
+# (3.7.4) +304 the BOTE_LISTEN_* kinds it is owed: changes made while it was being opened,
+# (3.7.5) +312 1 when its listen was judged with claims, +320 the dispatcher that judged it.
+# In the room each URI is a flag byte, the URI and its NUL: the flag is 1 when what serves
+# the URI required a scope as it was kept, which the listen's claims held.
+#
+# A resource that requires a scope (3.7.5): the dispatcher honors no URI the listen's claims
+# may not read, and a stream whose listen was made with claims is told of an update to a
+# URI that requires a scope only when it holds that URI exactly, kept with its flag: a
+# stream keeps no token, so a URI under one it holds, or a scope added since, it is not
+# told of. Less than happened, for a scope it may hold, and never more than its token may
+# read. A stream made with no claims compares nothing, as resources/read does.
 #
 # A resource's update (3.7.4, dispatcher_resource_updated) comes from any thread with a URI,
 # and is queued: at most BOTE_LISTEN_QUEUE URIs, each one once, under a lock. The thread that
@@ -98,7 +108,7 @@
 var BOTE_LISTEN_MAX_DEFAULT = 256;
 var BOTE_LISTEN_KEEPALIVE_MS = 15000;
 var BOTE_LISTEN_ID_MAX = 256;
-var BOTE_LISTEN_SLOT_BYTES = 312;
+var BOTE_LISTEN_SLOT_BYTES = 328;
 var BOTE_LISTEN_FRAME_MAX = 1024;
 var BOTE_LISTEN_SUB_KEY = "io.modelcontextprotocol/subscriptionId";
 var BOTE_LISTEN_ID_LONG = "a subscriptions/listen id is at most 256 bytes";
@@ -230,10 +240,17 @@ fn _bl_raise(h, bit) {
     return _bl_wake(h);
 }
 
-# A change with no stream open tells nobody, and is not kept for the first to open.
+# A change with no stream open tells nobody, and is not kept for the first to open. It is
+# counted, and the count is made visible before the open streams are read (3.7.5): a park
+# does the same the other way round (_bl_park), so one of the two sees the other. Without
+# the fences x86 let either read come before its own write was seen, and a change made as
+# a stream parked reached nobody, 1 in about 3,500 on x86 (found by the 3.7.4 review).
 fn _bl_publish(h, topic, payload) {
     var bit = _bl_kind(topic);
-    if (bit != 0) { atomic_fetch_add(h + 152, 1); }
+    if (bit != 0) {
+        atomic_fetch_add(h + 152, 1);
+        atomic_fence();
+    }
     if (bit != 0 && atomic_load(h + 24) > 0) { _bl_raise(h, bit); }
     var next = load64(h + 72);
     if (next != 0) { event_sink_publish(next, topic, payload); }
@@ -282,6 +299,7 @@ fn _bl_queued(q, cnt, uri) {
 # The update of `uri`, queued for `x`'s subscriptions, and the writing thread woken.
 fn _bl_queue(x, uri) {
     atomic_fetch_add(x + 152, 1);
+    atomic_fence();
     if (atomic_load(x + 24) <= 0) { return 0; }
     var n = strlen(uri);
     mutex_lock(load64(x + 128));
@@ -333,26 +351,50 @@ fn _bl_covers(sub, u) {
 }
 
 # 1 when one of slot `s`'s URIs covers `u`.
+# 1 when slot `s` is told of an update to `u`: a URI it holds covers it, and, made with
+# claims, a `u` that requires a scope is one it holds exactly, flagged (above).
 fn _bl_slot_covers(s, u) {
     var r = load64(s + 280);
+    var scoped = 0 - 1;
     var at = 0;
     var k = 0;
     while (k < load64(s + 296)) {
-        if (_bl_covers(r + at, u) == 1) { return 1; }
-        at = at + strlen(r + at) + 1;
+        var e = r + at + 1;
+        if (_bl_covers(e, u) == 1) {
+            if (load64(s + 312) == 0) { return 1; }
+            if (scoped < 0) { scoped = _dsp_uri_scoped(load64(s + 320), u); }
+            if (scoped == 0) { return 1; }
+            if (load8(r + at) == 1 && streq(e, u) == 1) { return 1; }
+        }
+        at = at + strlen(e) + 2;
         k = k + 1;
     }
     return 0;
 }
 
+# One update to the stream in slot `s`, by `send_fp`, its frame on `a` and gone once sent:
+# a pass kept every frame until its end, 38 MB for 256 streams (the 3.7.4 review). 1 when
+# the stream took it.
+fn _bl_send_one(x, a, s, u, send_fp) {
+    var m[16];
+    bote_arena_mark(a, &m);
+    var ok = fncall4(send_fp, x, a, s, u);
+    bote_arena_release(a, &m);
+    return ok;
+}
+
 # The URIs the acknowledgement `ack` lists, kept in slot `s`'s room: how many. The
 # dispatcher bounded them to fit; none clears what a stream before kept there.
-fn _bl_keep_uris(a, s, ack) {
+fn _bl_keep_uris(a, s, ack, d) {
     store64(s + 288, 0);
     store64(s + 296, 0);
+    var claims = bote_req_listen_claims();
+    store64(s + 312, 0);
+    if (claims != 0) { store64(s + 312, 1); }
+    store64(s + 320, d);
     var raw = jsonx_get_raw_a(a, jsonx_get_raw_a(a, ack, "notifications"), "resourceSubscriptions");
     if (raw == 0) { return 0; }
-    if (load64(s + 280) == 0) { store64(s + 280, alloc(BOTE_LISTEN_URI_ROOM)); }
+    if (load64(s + 280) == 0) { store64(s + 280, alloc(BOTE_LISTEN_URI_ROOM + BOTE_LISTEN_URIS)); }
     var room = load64(s + 280);
     var n = strlen(raw);
     var used = 0;
@@ -360,9 +402,14 @@ fn _bl_keep_uris(a, s, ack) {
     var i = _jx_skip_ws(raw, n, 1);
     while (i < n && load8(raw + i) != 93) {
         var u = _dsp_listen_uri_a(a, raw, n, i);
-        if (u != 0 && used + strlen(u) + 1 <= BOTE_LISTEN_URI_ROOM) {
-            memcpy(room + used, u, strlen(u) + 1);
-            used = used + strlen(u) + 1;
+        # Judged again as it is kept, with the claims the dispatcher judged it with, in one
+        # look: what serves it may have changed since.
+        if (u != 0 && dispatcher_resource_scopes_missing(d, u, claims) != 0) { u = 0; }
+        if (u != 0 && cnt < BOTE_LISTEN_URIS && used + strlen(u) + 2 <= BOTE_LISTEN_URI_ROOM + BOTE_LISTEN_URIS) {
+            store8(room + used, 0);
+            if (claims != 0 && _dsp_uri_scoped(d, u) == 1) { store8(room + used, 1); }
+            memcpy(room + used + 1, u, strlen(u) + 1);
+            used = used + strlen(u) + 2;
             cnt = cnt + 1;
         }
         i = _jx_array_next(raw, n, i);
@@ -401,8 +448,12 @@ fn _bl_each_update(x, a, s, nu, over, send_fp) {
         var at = 0;
         var k = 0;
         while (k < load64(s + 296)) {
-            if (fncall4(send_fp, x, a, s, r + at) == 0) { return 0; }
-            at = at + strlen(r + at) + 1;
+            var e = r + at + 1;
+            # Made with claims, a URI that requires a scope now, kept without one, is not told.
+            var tell = 1;
+            if (load64(s + 312) == 1 && load8(r + at) == 0 && _dsp_uri_scoped(load64(s + 320), e) == 1) { tell = 0; }
+            if (tell == 1 && _bl_send_one(x, a, s, e, send_fp) == 0) { return 0; }
+            at = at + strlen(e) + 2;
             k = k + 1;
         }
         return 1;
@@ -411,7 +462,7 @@ fn _bl_each_update(x, a, s, nu, over, send_fp) {
     var j = 0;
     while (j < nu) {
         var u = q + j * BOTE_LISTEN_ENTRY;
-        if (_bl_slot_covers(s, u) == 1 && fncall4(send_fp, x, a, s, u) == 0) { return 0; }
+        if (_bl_slot_covers(s, u) == 1 && _bl_send_one(x, a, s, u, send_fp) == 0) { return 0; }
         j = j + 1;
     }
     return 1;
@@ -461,7 +512,9 @@ fn _bl_park(h, s, fd, mask, id, idl, seen) {
     memcpy(s + 24, id, idl);
     store64(s + 304, 0);
     store64(s, fd);
-    store64(h + 24, load64(h + 24) + 1);
+    # Counted open, and the count seen, before `seen` is read (see _bl_publish).
+    atomic_fetch_add(h + 24, 1);
+    atomic_fence();
     var owe = 0;
     if (atomic_load(h + 152) != seen) {
         store64(s + 304, mask);
@@ -476,7 +529,7 @@ fn _bl_park(h, s, fd, mask, id, idl, seen) {
 fn _bl_close_held(h, s, why) {
     sys_close(load64(s));
     store64(s, 0 - 1);
-    store64(h + 24, load64(h + 24) - 1);
+    atomic_fetch_add(h + 24, 0 - 1);
     var ln[BOTE_LOG_LINE_BYTES];
     bote_log_line(&ln, SK_DEBUG, "listen stream closed");
     bote_log_str(&ln, "reason", why);
@@ -708,7 +761,7 @@ fn bote_listen_http(h, hc, req, resp, d) {
         sandhi_server_send_chunked_end(cfd);
         return 0;
     }
-    _bl_keep_uris(a, s, resp_result(resp));
+    _bl_keep_uris(a, s, resp_result(resp), d);
     _bl_park(h, s, fd, mask, id, idl, seen);
     if (_bl_start(h) == 0) { return 0; }
     _bl_wake(h);
@@ -919,6 +972,12 @@ fn _bll_clear(c) {
     }
     atomic_store(c + 24, 0);
     store64(c + 96, 0);
+    # Nor any update queued for the connection before (3.7.5): the next one's first pass
+    # told its subscriptions of updates made before they listened.
+    mutex_lock(load64(c + 128));
+    store64(c + 112, 0);
+    store64(c + 120, 0);
+    mutex_unlock(load64(c + 128));
     _bl_take_pending(c);
     var drain[64];
     while (sys_read(load64(c + 40), &drain, 64) > 0) { }
@@ -963,33 +1022,13 @@ fn bote_listen_line_detach(c) {
     return 0;
 }
 
-# The id at `raw`, `n` bytes, as the value it is, on `a` (3.7.4): a string decoded and marked
-# apart from a number, so "a/b" and "a\/b" are one id and "1" and 1 are two. JSON-RPC
-# compares ids by value; through 3.7.3 they were compared byte for byte.
-fn _bll_key_a(a, raw, n) {
-    var k = alloc_via(a, n + 2);
-    if (n > 0 && load8(raw) == 34) {
-        var cp = alloc_via(a, n + 1);
-        memcpy(cp, raw, n);
-        store8(cp + n, 0);
-        var dec = _jx_str_dec_at_a(a, cp, n, 0);
-        store8(k, 115);
-        memcpy(k + 1, dec, strlen(dec) + 1);
-        return k;
-    }
-    store8(k, 110);
-    memcpy(k + 1, raw, n);
-    store8(k + 1 + n, 0);
-    return k;
-}
-
 # The open subscription whose id is the value of the `idl` bytes at `id`, or 0.
 fn _bll_find_a(c, a, id, idl) {
-    var want = _bll_key_a(a, id, idl);
+    var want = bote_id_key_a(a, id, idl);
     var i = 0;
     while (i < load64(c + 16)) {
         var s = _bl_slot(c, i);
-        if (load64(s) == 1 && streq(_bll_key_a(a, s + 24, load64(s + 16)), want) == 1) { return s; }
+        if (load64(s) == 1 && streq(bote_id_key_a(a, s + 24, load64(s + 16)), want) == 1) { return s; }
         i = i + 1;
     }
     return 0;
@@ -1035,7 +1074,7 @@ fn _bll_open(c, a, req, resp) {
     # raised for it, and written after it by this loop: through 3.7.3 a change the instant
     # the client read the acknowledgement could find none open, and be kept for nobody.
     if (mask != 0) {
-        _bl_keep_uris(a, s, resp_result(resp));
+        _bl_keep_uris(a, s, resp_result(resp), load64(c + 56));
         store64(s + 8, mask);
         store64(s + 16, idl);
         memcpy(s + 24, id, idl);

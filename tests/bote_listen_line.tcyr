@@ -80,6 +80,8 @@ fn h_count(args, claims) {
 }
 fn h_prompt(args, claims) { return "{\"messages\":[]}"; }
 fn h_res(uri, claims) { return "{\"contents\":[]}"; }
+# A scope check (3.6.3's shape): the claims hold a scope they name.
+fn _sc_has(claims, scope, ctx) { return strstr(claims, scope) >= 0; }
 
 fn _has(hay, needle) { return strstr(hay, needle) >= 0; }
 
@@ -696,6 +698,124 @@ fn main() {
     bote_listen_line_deliver(rsc);
     assert_eq(_count(_cap, _UL), 4, "overflow: a URI too long to queue overflows it too");
     _cap_reset();
+    # A connection's queued updates end with it (3.7.5): the next connection's subscriptions
+    # are told of nothing that happened before they listened, an overflow included.
+    var dtd = _mk_d(1);
+    var dtc = bote_listen_line_new(4);
+    dispatcher_set_events(dtd, bote_listen_sink(dtc, 0));
+    bote_listen_line_attach(dtc, dtd, &_cap_write, 0);
+    _run(dtc, dtd, _lb("\"old\"", "{\"resourceSubscriptions\":[\"res://old\"]}"));
+    dispatcher_resource_updated(dtd, "res://old");
+    assert_eq(atomic_load(dtc + 112), 1, "detach: an update queued for the connection");
+    bote_listen_line_detach(dtc);
+    assert(atomic_load(dtc + 112) == 0 && atomic_load(dtc + 120) == 0, "detach: ...is gone with it");
+    bote_listen_line_attach(dtc, dtd, &_cap_write, 0);
+    _cap_reset();
+    _run(dtc, dtd, _lb("\"new\"", "{\"resourceSubscriptions\":[\"res://old\",\"res://new\"]}"));
+    _cap_reset();
+    dispatcher_resource_updated(dtd, "res://new");
+    bote_listen_line_deliver(dtc);
+    assert(streq(_cap, _cat3(_upd("\"res://new\"", "\"new\""), "\n", "")) == 1, "detach: the next connection hears only what happened after it listened");
+    dispatcher_resource_updated(dtd, _long_uri(0, 1025));
+    assert_eq(atomic_load(dtc + 120), 1, "detach: an overflow");
+    bote_listen_line_detach(dtc);
+    bote_listen_line_attach(dtc, dtd, &_cap_write, 0);
+    _run(dtc, dtd, _lb("\"n2\"", "{\"resourceSubscriptions\":[\"res://x\",\"res://y\"]}"));
+    _cap_reset();
+    dispatcher_resource_updated(dtd, "res://x");
+    bote_listen_line_deliver(dtc);
+    assert(streq(_cap, _cat3(_upd("\"res://x\"", "\"n2\""), "\n", "")) == 1, "detach: ...nor a connection's overflow");
+    bote_listen_line_detach(dtc);
+    _cap_reset();
+    # A resource's scopes hold for its updates (3.7.5). The 3.7.4 review: a token without a
+    # resource's scope was honored its URI, and the URIs a scoped template serves, and heard
+    # each change to them, by name or through a prefix above them.
+    var spd = _mk_d(1);
+    dispatcher_set_scope_check(spd, &_sc_has, 0);
+    var spsc = vec_new();
+    vec_push(spsc, "p:secret");
+    dispatcher_register_resource(spd, resource_def_with_required_scopes(resource_def_new("sp://secret", "s", "S", "text/plain"), spsc), &h_res);
+    dispatcher_register_resource_template(spd, resource_template_with_required_scopes(resource_template_new("sp://t/{id}", "t", "T", "text/plain"), spsc), &h_res);
+    dispatcher_register_resource(spd, resource_def_new("sp://open", "o", "O", "text/plain"), &h_res);
+    var spc = bote_listen_line_new(4);
+    dispatcher_set_events(spd, bote_listen_sink(spc, 0));
+    var spf = "{\"resourceSubscriptions\":[\"sp://secret\",\"sp://t/42\",\"sp:/\",\"sp://open\",\"sp://later\"]}";
+    bote_listen_line_attach(spc, spd, &_cap_write, 0);
+    _cap_reset();
+    codec_process_message_a(bote_listen_line_begin(spc), _lb("\"np\"", spf), spd, "token=x");
+    assert(_has(_cap, "\"resourceSubscriptions\":[\"sp:/\",\"sp://open\",\"sp://later\"]"), "scopes: a token without the scope is not honored what it may not read");
+    _cap_reset();
+    dispatcher_resource_updated(spd, "sp://secret");
+    dispatcher_resource_updated(spd, "sp://t/43");
+    dispatcher_resource_updated(spd, "sp://open");
+    bote_listen_line_deliver(spc);
+    assert(_has(_cap, "sp://secret") == 0 && _has(_cap, "sp://t/43") == 0, "scopes: ...nor told of it through a prefix it holds");
+    assert(streq(_cap, _cat3(_upd("\"sp://open\"", "\"np\""), "\n", "")) == 1, "scopes: ...and told, once, of what it may read");
+    _cap_reset();
+    dispatcher_resource_updated(spd, _long_uri(0, 1025));
+    bote_listen_line_deliver(spc);
+    assert(_has(_cap, "sp://secret") == 0 && _count(_cap, _UL) == 3, "scopes: an overflow tells it only what it holds");
+    bote_listen_line_detach(spc);
+    # A token with the scope: honored all, told of each URI it holds exactly. A URI that
+    # requires the scope under a prefix it holds is not told: a stream keeps no token.
+    bote_listen_line_attach(spc, spd, &_cap_write, 0);
+    _cap_reset();
+    codec_process_message_a(bote_listen_line_begin(spc), _lb("\"wp\"", spf), spd, "token=p:secret");
+    assert(_has(_cap, "\"resourceSubscriptions\":[\"sp://secret\",\"sp://t/42\",\"sp:/\",\"sp://open\",\"sp://later\"]"), "scopes: a token with the scope is honored them all");
+    # A scope that comes to a URI after the listen is not the listen's.
+    dispatcher_register_resource(spd, resource_def_with_required_scopes(resource_def_new("sp://later", "l", "L", "text/plain"), spsc), &h_res);
+    # Nor is one under a URI it holds that requires another scope.
+    var spdeep = vec_new();
+    vec_push(spdeep, "p:deep");
+    dispatcher_register_resource_template(spd, resource_template_with_required_scopes(resource_template_new("sp://t/{id}/deep", "d", "D", "text/plain"), spdeep), &h_res);
+    _cap_reset();
+    dispatcher_resource_updated(spd, "sp://secret");
+    dispatcher_resource_updated(spd, "sp://t/42");
+    dispatcher_resource_updated(spd, "sp://t/43");
+    dispatcher_resource_updated(spd, "sp://later");
+    dispatcher_resource_updated(spd, "sp://t/42/deep");
+    bote_listen_line_deliver(spc);
+    assert(_has(_cap, "sp://t/42/deep") == 0, "scopes: ...nor of one under a URI it holds that requires another scope");
+    assert(_has(_cap, _upd("\"sp://secret\"", "\"wp\"")) && _has(_cap, _upd("\"sp://t/42\"", "\"wp\"")), "scopes: ...told of each it holds exactly");
+    assert(_has(_cap, "sp://t/43") == 0, "scopes: ...not of one that requires the scope through a prefix");
+    assert(_has(_cap, "sp://later") == 0, "scopes: ...nor of one whose scope came after the listen");
+    _cap_reset();
+    dispatcher_resource_updated(spd, _long_uri(0, 1025));
+    bote_listen_line_deliver(spc);
+    assert(_has(_cap, _upd("\"sp://secret\"", "\"wp\"")) && _has(_cap, "sp://later") == 0, "scopes: an overflow tells it what it holds, and not that one");
+    bote_listen_line_detach(spc);
+    # What a stream keeps is judged again as it is kept, with the listen's claims: what serves
+    # a URI may change between the dispatcher's look and the stream's.
+    var kja = bote_req_begin();
+    bote_req_set_listen_claims("token=x");
+    var kjs = alloc(BOTE_LISTEN_SLOT_BYTES);
+    store64(kjs + 280, 0);
+    assert_eq(_bl_keep_uris(kja, kjs, "{\"notifications\":{\"resourceSubscriptions\":[\"sp://secret\",\"sp://open\"]}}", spd), 1, "scopes: kept, judged again: not what the claims may not read");
+    assert_eq(load64(kjs + 312), 1, "scopes: ...and the stream marked as made with claims");
+    bote_req_set_listen_claims("token=p:secret");
+    assert_eq(_bl_keep_uris(kja, kjs, "{\"notifications\":{\"resourceSubscriptions\":[\"sp://secret\",\"sp://open\"]}}", spd), 2, "scopes: ...all of it, for claims that hold the scope");
+    assert(load8(load64(kjs + 280)) == 1 && load8(load64(kjs + 280) + 13) == 0, "scopes: ...the scoped one flagged, the open one not");
+    bote_req_begin();
+    # With no token in play nothing is compared, as resources/read compares nothing.
+    bote_listen_line_attach(spc, spd, &_cap_write, 0);
+    _cap_reset();
+    codec_process_message_a(bote_listen_line_begin(spc), _lb("\"nt\"", spf), spd, 0);
+    _cap_reset();
+    dispatcher_resource_updated(spd, "sp://t/43");
+    bote_listen_line_deliver(spc);
+    assert(_has(_cap, _upd("\"sp://t/43\"", "\"nt\"")), "scopes: with no token, a prefix covers what it covers");
+    bote_listen_line_detach(spc);
+    _cap_reset();
+
+    # Ids by value, and a value holding a NUL by its spelling (3.7.5).
+    var ika = bote_req_begin();
+    assert(streq(bote_id_key_a(ika, "\"\\u0000a\"", 9), bote_id_key_a(ika, "\"\\\\u0000a\"", 10)) == 0, "id: a NUL's escape is not the spelling of another's value");
+    assert(streq(bote_id_key_a(ika, "\"a\\/b\"", 6), bote_id_key_a(ika, "\"a/b\"", 5)) == 1, "id: an escape is its value");
+    assert(streq(bote_id_key_a(ika, "\"\\u0000a\"", 9), bote_id_key_a(ika, "\"\\u0000a\"", 9)) == 1, "id: ...and a NUL's, its spelling");
+    assert(streq(bote_id_key_a(ika, "\"\\u0000a\"", 9), bote_id_key_a(ika, "\"\\u0000b\"", 9)) == 0, "id: two values that a NUL begins are two ids");
+    assert(streq(bote_id_key_a(ika, "\"\\u0000a\"", 9), bote_id_key_a(ika, "\"\"", 2)) == 0, "id: ...and neither is the empty string");
+    assert(streq(bote_id_key_a(ika, "7", 1), bote_id_key_a(ika, "\"7\"", 3)) == 0, "id: a number is not the string");
+
     # Bounds: BOTE_LISTEN_URIS of them, and what fits in BOTE_LISTEN_URI_ROOM.
     var rsmany = vec_new();
     var rsmi = 0;

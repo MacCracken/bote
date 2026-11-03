@@ -175,7 +175,9 @@ fn _cdc_log_request_a(a, req, resp, t0) {
             bote_log_str(&ln, "tool", jsonx_get_str_a(a, req_params(req), "name"));
         }
     }
-    if (resp == 0) {
+    if (bote_req_was_cancelled() == 1) {
+        bote_log_str(&ln, "status", "cancelled");
+    } elif (resp == 0) {
         bote_log_str(&ln, "status", "notification");
     } elif (resp_error_obj(resp) != 0) {
         bote_log_str(&ln, "status", "error");
@@ -274,11 +276,22 @@ fn _cdc_process_single_a(a, line, dispatcher, claims) {
     var err_slot[8];
     var req = _cdc_admit_a(a, line, &err_slot);
     if (req == 0) { return load64(&err_slot); }
+    # The request, named for its cancellation check (3.7.5): the state once, for every
+    # message, since on a worker it is a thread-local lookup.
+    var rs = bote_req_state();
+    store64(rs + BOTE_REQ_STATE_CANCEL + 16, req_id(req));
     var resp = dispatcher_dispatch_a(a, dispatcher, req, claims);
     if (dbg == 1) { _cdc_log_request_a(a, req, resp, t0); }
+    store64(rs + BOTE_REQ_STATE_CANCEL + 16, 0);
+    # A request its handler found cancelled gets nothing more, its response included
+    # (MCP 2026-07-28: the server MUST NOT send any further messages for it).
+    if (load64(rs + BOTE_REQ_STATE_CANCEL + 24) == 1) {
+        store64(rs + BOTE_REQ_STATE_CANCEL + 24, 0);
+        return 0;
+    }
     # A connection that is itself the stream takes a listen over, and hears its cancel
-    # (3.7.3, a BoteStream in src/protocol.cyr).
-    var st = bote_req_stream();
+    # (3.7.3, a BoteStream in src/protocol.cyr). From the state already in hand.
+    var st = load64(rs + BOTE_REQ_STATE_STREAM);
     if (st > 1) {
         if (resp == 0) {
             if (streq(req_method(req), "notifications/cancelled") == 1) {
@@ -294,6 +307,107 @@ fn _cdc_process_single_a(a, line, dispatcher, claims) {
     }
     if (resp == 0) { return 0; }
     return codec_serialize_response_a(a, resp);
+}
+
+# ---- cancellation on a line transport (3.7.5) ---------------------------------------
+
+# A request id as a value, on `a`, from its `n` raw bytes: "s" and the decoded string, or
+# "n" and the raw number, so `"a/b"` and `"a\/b"` are one id and `7` and `"7"` are two.
+# JSON-RPC compares ids by value. A string whose value holds a NUL is "r" and its spelling:
+# a C string cannot hold the value, and its spelling must not pass for another's value
+# (`"\u0000a"` was `"\\u0000a"` through 3.7.4). Numbers are compared as spelled.
+fn bote_id_key_a(a, raw, n) {
+    var k = alloc_via(a, n + 2);
+    if (n > 0 && load8(raw) == 34) {
+        var cp = alloc_via(a, n + 1);
+        memcpy(cp, raw, n);
+        store8(cp + n, 0);
+        var s = _jx_str_at_a(a, cp, n, 0);
+        if (s == 0) { s = ""; }
+        var sl = strlen(s);
+        var dec = s;
+        if (_jx_has_escape(s, sl) == 1) {
+            dec = alloc_via(a, sl + 1);
+            var dn = _jx_unescape_into(s, sl, dec);
+            if (strlen(dec) != dn) {
+                store8(k, 114);
+                memcpy(k + 1, raw, n);
+                store8(k + 1 + n, 0);
+                return k;
+            }
+        }
+        store8(k, 115);
+        memcpy(k + 1, dec, strlen(dec) + 1);
+        return k;
+    }
+    store8(k, 110);
+    memcpy(k + 1, raw, n);
+    store8(k + 1 + n, 0);
+    return k;
+}
+
+# 1 when the `n` bytes at `p` hold `needle`.
+fn _cdc_holds(p, n, needle) {
+    var k = strlen(needle);
+    var c0 = load8(needle);
+    var i = 0;
+    while (i + k <= n) {
+        if (load8(p + i) == c0 && memeq(p + i, needle, k) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 when the `n` bytes at `p`, one line, are a `notifications/cancelled` whose `requestId`
+# is the id whose key is `want`. A line is copied and read only when it spells the method
+# plainly or holds an escape, which may spell it another way: the codec reads
+# `notifications\/cancelled` as the same method.
+fn _cdc_line_cancels_a(a, p, n, want) {
+    if (n <= 0) { return 0; }
+    if (_cdc_holds(p, n, "notifications/cancelled") == 0 && _cdc_holds(p, n, "\\") == 0) { return 0; }
+    var line = alloc_via(a, n + 1);
+    memcpy(line, p, n);
+    store8(line + n, 0);
+    if (jsonx_valid(line, n) == 0) { return 0; }
+    var req = codec_parse_request_a(a, line);
+    if (req == 0 || req_id(req) != 0 || req_method(req) == 0) { return 0; }
+    if (streq(req_method(req), "notifications/cancelled") == 0 || req_params(req) == 0) { return 0; }
+    var rid = jsonx_get_raw_a(a, req_params(req), "requestId");
+    if (rid == 0) { return 0; }
+    if (streq(bote_id_key_a(a, rid, strlen(rid)), want) == 0) { return 0; }
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_TRACE, "request cancelled by the client");
+    var why = jsonx_get_str_dec_a(a, req_params(req), "reason");
+    if (why != 0) { bote_log_str(&ln, "reason", why); }
+    bote_log_emit(&ln);
+    return 1;
+}
+
+# For a transport whose messages are lines (stdio, a Unix socket): 1 when a complete line
+# of the `n` bytes at `p` cancels the request whose raw id is `id`. *done is set to the
+# bytes the complete lines take, which a later look need not read again. The lines stay
+# where they are, for the transport to serve in their turn: a cancellation it then reads
+# names a request already answered, or one already cancelled, and is ignored.
+fn codec_lines_cancel_a(a, p, n, id, done) {
+    store64(done, 0);
+    if (id == 0) { return 0; }
+    var want = bote_id_key_a(a, id, strlen(id));
+    var i = 0;
+    var start = 0;
+    var hit = 0;
+    var m[16];
+    while (i < n) {
+        if (load8(p + i) == 10) {
+            # Each line's reading goes once it is read: a buffer of them costs one at a time.
+            bote_arena_mark(a, &m);
+            if (hit == 0 && _cdc_line_cancels_a(a, p + start, i - start, want) == 1) { hit = 1; }
+            bote_arena_release(a, &m);
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    store64(done, start);
+    return hit;
 }
 
 # Walk a top-level JSON array (cstr starting with `[`); for each element,

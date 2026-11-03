@@ -131,18 +131,29 @@ fn _bf_poll_in(fd, ms) {
     return r;
 }
 
+# While a request its client can cancel waits on a child (3.7.5), it asks every
+# BOTE_FETCH_CANCEL_MS whether it has been, and a cancelled one ends the child.
+var BOTE_FETCH_CANCEL_MS = 100;
+
 # Read exactly `n` bytes into `p` by the deadline `end` (clock_now_ms), or 0 for none.
 # 1, or 0 with the reason set; *eof is set to 1 when a read stopped at the end of the
 # pipe: the child has closed it, by exiting.
 fn _bf_read_all(fd, p, n, end, eof) {
     var got = 0;
+    var live = bote_req_cancel_live();
     while (got < n) {
         var ms = 0 - 1;
         if (end != 0) {
             ms = end - clock_now_ms();
             if (ms <= 0) { _bf_why("deadline"); return 0; }
         }
-        var pr = _bf_poll_in(fd, ms);
+        var slice = ms;
+        if (live == 1 && (slice < 0 || slice > BOTE_FETCH_CANCEL_MS)) { slice = BOTE_FETCH_CANCEL_MS; }
+        var pr = _bf_poll_in(fd, slice);
+        if (pr == 0 && slice != ms) {
+            if (bote_cancelled() == 1) { _bf_why("cancelled"); return 0; }
+            continue;
+        }
         if (pr == 0) { _bf_why("deadline"); return 0; }
         if (pr < 0) { _bf_why("poll"); return 0; }
         var r = sys_read(fd, p + got, n - got);

@@ -43,7 +43,7 @@ The primary security-relevant surface areas are:
   Since **3.7.3** the socket a stream will be is held, close-on-exec, before anything
   is sent, and one that cannot be is refused with `-32603` and a WARN. Leave the process's file limit room for
   `BOTE_LISTEN_MAX` sockets beside the rest. A stream's token is checked when it
-  opens and not again; it carries only that a list changed, never what is in it.
+  opens and not again; it carries only that a list or a resource changed, never what is in it.
   Since **3.7.3** a listen on stdio, a Unix socket or a WebSocket is the connection
   itself: at most `BOTE_LISTEN_MAX` per connection, nothing per listen on the heap, and
   the changes written by the connection's own loop, under the same send deadline as its
@@ -57,6 +57,23 @@ The primary security-relevant surface areas are:
   and the whole is at most `BOTE_LISTEN_MAX` rooms. An update carries a URI and no
   payload, waits in a queue of 16 per hub or connection, and one that cannot be queued
   tells every subscription of every URI it holds rather than being lost.
+  Since **3.7.5** a resource's required scopes hold for its updates. A listen made with a
+  token is honored no URI the token may not read, judged by what would serve it as
+  `resources/read` judges it, and is told of an update to a URI that requires a scope only
+  when it holds that URI exactly: a stream keeps no token, so it is not told of one through a
+  prefix, nor of a URI whose scope came after it listened. Through 3.7.4 a token without the
+  scope heard of every change to a scoped resource, by name or through a prefix, and learned
+  the URIs behind a scoped template. A listen made with no token compares nothing, as
+  `resources/read` does. The thread that writes the streams gives each frame's bytes back
+  once it is sent, so a pass costs one frame: through 3.7.4 it kept them all, 38 MB for 256
+  streams told of 16 updates of a kilobyte URI, for the life of the process.
+- **Cancellation** — since **3.7.5** a client can end a request of its own early, and no
+  other: on `http`, `streamable` and `bridge`, for MCP 2026-07-28, by closing its connection;
+  on stdio and a Unix socket by `notifications/cancelled` on its own connection. That is read
+  only from what has already arrived, within the transport's buffer, and each line once; the
+  check gives back what it allocated. A handler stops only if it asks (`bote_cancelled()`),
+  and nothing more goes out for a request once one has: a client that cancels gets less, never
+  more. The legacy HTTP path never asks, since 2025-11-25 says a disconnect is no cancellation.
 - **Browsers** — since **3.4.15** every HTTP-family transport refuses a present
   `Origin` that is not on `BOTE_ALLOWED_ORIGINS` with 403, before anything else
   runs, and with no list set every present `Origin` is refused, except since **3.5.2**

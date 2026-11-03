@@ -431,6 +431,11 @@ fn bote_http_send_accepted(cfd, extra) {
     return 0;
 }
 
+# MCP 2026-07-28 on Streamable HTTP: closing the response stream is the cancellation, and
+# the server MUST treat a client's disconnect as one. The legacy path never asks: there a
+# disconnect is not a cancellation, and bote's HTTP transports end with the response.
+fn _he_cancelled(cfd, a, id) { return bote_conn_gone(cfd, 1); }
+
 # Answer a request bote_http_era admitted. Sessions play no part: this revision
 # has none, so `Mcp-Session-Id` and `Last-Event-ID` are ignored and none is minted.
 fn bote_http_serve_modern(hc, req, dispatcher, claims) {
@@ -438,11 +443,21 @@ fn bote_http_serve_modern(hc, req, dispatcher, claims) {
     var dbg = bote_log_enabled(SK_DEBUG);
     var t0 = 0;
     if (dbg == 1) { t0 = clock_now_ns(); }
-    # This connection can hold a `subscriptions/listen` stream open (3.7.2).
+    # This connection can hold a `subscriptions/listen` stream open (3.7.2), and a client
+    # that closes it has cancelled its request (3.7.5).
     bote_req_set_stream(1);
+    bote_req_set_cancel(&_he_cancelled, _he_cfd(hc));
+    bote_req_set_request_id(req_id(req));
     var resp = dispatcher_dispatch_a(a, dispatcher, req, claims);
     bote_req_set_stream(0);
+    bote_req_set_cancel(0, 0);
     if (dbg == 1) { _cdc_log_request_a(a, req, resp, t0); }
+    # Nothing more goes out for a cancelled request: its client has gone.
+    if (bote_req_was_cancelled() == 1) {
+        bote_req_set_request_id(0);
+        return 0;
+    }
+    bote_req_set_request_id(0);
     if (resp == 0) { return bote_http_send_accepted(_he_cfd(hc), _he_extra(hc)); }
     # A listen the dispatcher accepted opens a stream, not a reply (3.7.2, src/listen.cyr).
     if (resp_error_obj(resp) == 0 && dispatcher_listen(dispatcher) != 0 && streq(req_method(req), "subscriptions/listen") == 1) {

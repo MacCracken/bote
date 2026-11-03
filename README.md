@@ -49,7 +49,7 @@ apps don't each reimplement the same protocol.
 | **Typed MCP content blocks** — text / image / audio / resource / resource_link / blob | ✅ |
 | **`HostRegistry` + SSRF guard** — IPv4 + IPv6 blocklists for loopback, private, link-local, cloud-metadata | ✅ |
 | **Audit / events sinks** — fn-pointer + ctx adapters, libro + majra wired | ✅ |
-| **Streaming primitives** — `ProgressUpdate`, `CancellationToken`, progress notifications | data layer ✅ / streamable on worker threads ✅ (3.7.0) / held-open streams ⏳ (roadmap 3.7.x) |
+| **Streaming primitives** — `ProgressUpdate`, `CancellationToken`, progress notifications | data layer ✅ / streamable on worker threads ✅ (3.7.0) / `subscriptions/listen` ✅ (3.7.2–3.7.4) / cancellation ✅ (3.7.5) / progress on a request's stream ⏳ (roadmap 3.7.6) |
 | **OAuth 2.1 substrate** — bearer (RFC 6750), Protected Resource Metadata (RFC 9728), JWT access tokens, HS256, RS256 and ES256, with audience, issuer, `exp` and `nbf` checks (RFC 8707, RFC 7519), PKCE-S256 helpers | ✅ |
 | **Sandbox runner** — fn-pointer + ctx adapter (kavach-shaped), noop default | ✅ in `dist/bote.cyr` (3.3.13); not in the core bundle |
 
@@ -235,6 +235,32 @@ it falls under, is told.
 ```sh
 BOTE_LISTEN_MAX=64 BOTE_LISTEN_KEEPALIVE_MS=30000 ./build/bote http 8390
 ```
+
+A listen made with a token is honored only the URIs the token may read, and is told of an update to a resource
+that requires a scope only when it named that resource's URI itself.
+
+### Cancellation
+
+A client can cancel a request it sent. On `http`, `streamable` and `bridge`, for MCP 2026-07-28, it closes its
+connection. On stdio and a Unix socket it sends `notifications/cancelled` naming the request. A handler runs to its
+end on the thread that called it, so a handler that runs long asks as it goes:
+
+```cyrius
+fn h_crawl(args, claims) {
+    var i = 0;
+    while (i < 1000) {
+        if (bote_cancelled() == 1) { return content_text_response("stopped"); }
+        # ... one step of the work ...
+        i = i + 1;
+    }
+    return content_text_response("done");
+}
+```
+
+Once `bote_cancelled()` has said 1, nothing more goes out for the request, its response included, and a `tools/call`
+is audited as cancelled. Each call asks the connection once: a poll on HTTP and a Unix socket, and on stdio and a Unix
+socket a look at what has arrived. A handler that never asks is answered as before. `web_fetch` and `web_search` ask
+every 100 ms while they wait.
 
 ### Connection deadlines
 
@@ -425,14 +451,15 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 4938 total across twenty-one files (+ a core-only drift smoke)
+### Tests — 5067 total across twenty-two files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 4938 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5067 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 969 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/conformance.tcyr        # 218 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 91 — bearer + allowlist + JWT + PKCE validators, the head check
+cyrius test tests/bote_cancel.tcyr        # 96 — cancelling a request in flight: the check, the codec, stdio, unix, HTTP, a fetch's child
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fetch.tcyr         # 62 — a request made in a child: the record, the cap, the deadline, a real GET
 cyrius test tests/bote_fs_tools.tcyr      # 63 — fs_write / fs_read / fs_mkdir
@@ -441,8 +468,8 @@ cyrius test tests/bote_http_era.tcyr      # 1833 — MCP 2026-07-28 on HTTP, on 
 cyrius test tests/bote_jwks.tcyr          # 49 — a jwks_uri: what it may be, and real fetches from a child
 cyrius test tests/bote_jwt.tcyr           # 491 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
-cyrius test tests/bote_listen.tcyr        # 217 — subscriptions/listen: the filter, and real streams on the three HTTP handlers
-cyrius test tests/bote_listen_line.tcyr   # 160 — subscriptions/listen where the connection is the stream: stdio, unix, WebSocket
+cyrius test tests/bote_listen.tcyr        # 224 — subscriptions/listen: the filter, and real streams on the three HTTP handlers
+cyrius test tests/bote_listen_line.tcyr   # 186 — subscriptions/listen where the connection is the stream: stdio, unix, WebSocket
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
@@ -510,6 +537,7 @@ cyrius fuzz fuzz/ssrf_ipv6.fcyr
 cyrius fuzz fuzz/http_head.fcyr
 cyrius fuzz fuzz/req_arena.fcyr
 cyrius fuzz fuzz/listen_filter.fcyr
+cyrius fuzz fuzz/cancel_lines.fcyr
 # 1 passed, 0 failed each
 ```
 

@@ -234,6 +234,15 @@ changed is announced with `dispatcher_resource_updated(d, uri)` (3.7.4), which r
 the listens through the dispatcher's event sinks: a sink of the consumer's own hears it
 through `event_sink_with_updated`, and one with no such hook does not.
 
+To let a client cancel a request (3.7.5), such a consumer sets the check its connection
+answers after `bote_req_begin()`: `bote_req_set_cancel(fp, ctx)`, `fp(ctx, a, id)` saying 1
+when the request whose raw id is `id` has been cancelled. The codec names the request, and a
+handler asks through `bote_cancelled()`; once that has said 1 the codec answers the request
+with nothing. Both are in the core bundle. A transport whose messages are lines finds a
+`notifications/cancelled` among what it has read with `codec_lines_cancel_a`, and one on a
+socket can tell a client gone with `bote_conn_gone` (full bundle). Without a check nothing
+is ever cancelled, and every request is answered as before.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`

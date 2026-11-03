@@ -1,0 +1,702 @@
+# bote_cancel.tcyr — cancelling a request in flight (3.7.5): bote_cancelled() and the check a
+# transport sets, the codec answering nothing for a request found cancelled, a cancelled
+# tools/call audited as one, the line scanner stdio and the Unix socket share, then the real
+# loops on threads of their own: stdio and a Unix connection with `notifications/cancelled`,
+# the three HTTP handlers with a client that closes, the legacy path that never asks, a
+# fetch's child ended, two workers apart, and the heap.
+#
+# Run: cyrius test tests/bote_cancel.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+
+fn h_ok(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+
+# A handler that works until it is cancelled, or `_hw_cap` ms pass, asking as it goes.
+var _hw_cap = 3000;
+var _hw_running = 0;
+var _hw_saw = 0;
+var _hw_checks = 0;
+fn h_wait(args, claims) {
+    atomic_store(&_hw_running, 1);
+    var until = clock_now_ms() + _hw_cap;
+    while (clock_now_ms() < until) {
+        _hw_checks = _hw_checks + 1;
+        if (bote_cancelled() == 1) {
+            atomic_store(&_hw_saw, 1);
+            return "{\"content\":[{\"type\":\"text\",\"text\":\"stopped\"}]}";
+        }
+        sleep_ms(2);
+    }
+    return "{\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}";
+}
+
+fn _hw_reset(cap) {
+    _hw_cap = cap;
+    atomic_store(&_hw_running, 0);
+    atomic_store(&_hw_saw, 0);
+    _hw_checks = 0;
+    return 0;
+}
+
+# Wait up to `ms` for h_wait to start: 1 when it has.
+fn _hw_await(ms) {
+    var until = clock_now_ms() + ms;
+    while (atomic_load(&_hw_running) == 0) {
+        if (clock_now_ms() >= until) { return 0; }
+        sleep_ms(1);
+    }
+    return 1;
+}
+
+# The last tool call audited.
+var _au_n = 0;
+var _au_last = 0;
+fn _au_log(ctx, ev) {
+    _au_n = _au_n + 1;
+    _au_last = ev;
+    return 0;
+}
+
+fn _tool(name) { return tool_def_new(name, "T", schema_new("object", 0, vec_new())); }
+
+fn _mk_d() {
+    var reg = tool_registry_new();
+    registry_register(reg, _tool("t_wait"));
+    registry_register(reg, _tool("t_echo"));
+    var d = dispatcher_new(reg);
+    dispatcher_handle(d, "t_wait", &h_wait);
+    dispatcher_handle(d, "t_echo", &h_ok);
+    dispatcher_set_audit(d, audit_sink_new(&_au_log, 0));
+    return d;
+}
+
+fn _has(hay, needle) { return strstr(hay, needle) >= 0; }
+
+fn _cat3(a, b, c) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    str_builder_add_cstr(sb, c);
+    return str_data(str_builder_build(sb));
+}
+
+var _META = "\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}";
+
+# A modern tools/call of `tool` with the raw id `id`, and a legacy one.
+fn _call(id, tool) { return _cat3(_cat3("{\"jsonrpc\":\"2.0\",\"id\":", id, ",\"method\":\"tools/call\",\"params\":{\"name\":\""), tool, _cat3("\",\"arguments\":{},", _META, "}}")); }
+fn _lcall(id, tool) { return _cat3(_cat3("{\"jsonrpc\":\"2.0\",\"id\":", id, ",\"method\":\"tools/call\",\"params\":{\"name\":\""), tool, "\",\"arguments\":{}}}"); }
+fn _ping(id) { return _cat3("{\"jsonrpc\":\"2.0\",\"id\":", id, ",\"method\":\"ping\"}"); }
+fn _cancel(id) { return _cat3("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":", id, ",\"reason\":\"the user gave up\"}}"); }
+
+# ---- a check that says yes after `_ck_after` asks ---------------------------------
+
+var _ck_calls = 0;
+var _ck_after = 1;
+var _ck_ctx = 0;
+var _ck_id = 0;
+var _ck_alloc = 0;
+var _ck_only = 0;   # when set, yes only for this raw id
+fn _ck(ctx, a, id) {
+    _ck_calls = _ck_calls + 1;
+    _ck_ctx = ctx;
+    _ck_id = id;
+    if (_ck_alloc > 0) { alloc_via(a, _ck_alloc); }
+    if (_ck_only != 0 && (id == 0 || streq(id, _ck_only) == 0)) { return 0; }
+    if (_ck_calls >= _ck_after) { return 1; }
+    return 0;
+}
+
+fn _ck_reset(after) {
+    _ck_calls = 0;
+    _ck_after = after;
+    _ck_ctx = 0;
+    _ck_id = 0;
+    _ck_alloc = 0;
+    _ck_only = 0;
+    return 0;
+}
+
+# What the codec answers `body` with, the check set: the reply, or "" for none.
+fn _run_ck(d, body) {
+    var a = bote_req_begin();
+    bote_req_set_cancel(&_ck, 5);
+    var r = codec_process_message_a(a, body, d, 0);
+    if (r == 0) { return ""; }
+    var out = alloc(strlen(r) + 1);
+    memcpy(out, r, strlen(r) + 1);
+    return out;
+}
+
+# ---- log lines, kept --------------------------------------------------------------
+
+var _lg = 0;
+var _lg_len = 0;
+fn _lg_hook(ts, level, category, msg, msg_len, sixth) {
+    if (_lg_len + msg_len + 2 < 65536) {
+        memcpy(_lg + _lg_len, msg, msg_len);
+        store8(_lg + _lg_len + msg_len, 10);
+        _lg_len = _lg_len + msg_len + 1;
+        store8(_lg + _lg_len, 0);
+    }
+    return 0;
+}
+fn _lg_reset() {
+    _lg_len = 0;
+    store8(_lg, 0);
+    return 0;
+}
+
+# ---- reading what a loop writes ---------------------------------------------------
+
+fn _rd_new(fd) {
+    var r = alloc(32);
+    store64(r, fd);
+    store64(r + 8, alloc(65537));
+    store64(r + 16, 0);
+    store64(r + 24, 0);
+    return r;
+}
+fn _rd_buf(r) { return load64(r + 8); }
+
+# Read from `r` until it holds `needle`, or `ms` pass, or it ends: 1 when it holds it.
+fn _rd_await(r, needle, ms) {
+    var until = clock_now_ms() + ms;
+    var pfd[8];
+    var ts[16];
+    while (1 == 1) {
+        var buf = load64(r + 8);
+        var got = load64(r + 16);
+        store8(buf + got, 0);
+        if (strstr(buf, needle) >= 0) { return 1; }
+        if (load64(r + 24) == 1) { return 0; }
+        var left = until - clock_now_ms();
+        if (left <= 0) { return 0; }
+        store32(&pfd, load64(r));
+        store16(&pfd + 4, 1);
+        store16(&pfd + 6, 0);
+        store64(&ts, left / 1000);
+        store64(&ts + 8, (left % 1000) * 1000000);
+        if (sys_ppoll(&pfd, 1, &ts, 0, 8) > 0) {
+            var k = sys_read(load64(r), buf + got, 65536 - got);
+            if (k <= 0) { store64(r + 24, 1); }
+            else { store64(r + 16, got + k); }
+        }
+    }
+    return 0;
+}
+fn _rd_eof(r, ms) {
+    _rd_await(r, "\x01\x02", ms);
+    return load64(r + 24);
+}
+
+fn _send_line(fd, s) {
+    sys_write(fd, s, strlen(s));
+    sys_write(fd, "\n", 1);
+    return 0;
+}
+
+#ifndef CYRIUS_TARGET_AGNOS
+# ---- the loops, on threads of their own -------------------------------------------
+
+var _st_d = 0;
+var _st_in = 0;
+var _st_out = 0;
+fn _stdio_thread(i) { return _stdio_serve(_st_d, _st_in, _st_out); }
+
+var _ux_d = 0;
+var _ux_fd = 0;
+fn _unix_thread(i) { return _unix_handle_client(_ux_fd, _ux_d); }
+
+# An HTTP handler (0 http, 1 streamable, 2 bridge) given the request in `_hh_raw`, on the
+# server end `_hh_fd`, which it closes after, as sandhi does.
+var _hh_kind = 0;
+var _hh_fd = 0;
+var _hh_raw = 0;
+var _hh_buf = 0;
+var _http_cfg = 0;
+var _strm_cfg = 0;
+var _brg_cfg = 0;
+fn _hh_thread(i) {
+    var n = strlen(_hh_raw);
+    memcpy(_hh_buf, _hh_raw, n);
+    store8(_hh_buf + n, 0);
+    if (_hh_kind == 0) { _http_handle(_http_cfg, _hh_fd, _hh_buf, n); }
+    elif (_hh_kind == 1) { _strm_handle(_strm_cfg, _hh_fd, _hh_buf, n); }
+    else { _bridge_handle(_brg_cfg, _hh_fd, _hh_buf, n); }
+    sys_close(_hh_fd);
+    return 0;
+}
+
+fn _raw(kind, hdrs, body) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "POST ");
+    if (kind == 2) { str_builder_add_cstr(sb, "/"); }
+    else { str_builder_add_cstr(sb, "/mcp"); }
+    str_builder_add_cstr(sb, " HTTP/1.1\r\nHost: x\r\n");
+    if (kind == 2) { str_builder_add_cstr(sb, "Origin: http://localhost\r\n"); }
+    str_builder_add_cstr(sb, hdrs);
+    str_builder_add_cstr(sb, "Content-Length: ");
+    str_builder_add_int(sb, strlen(body));
+    str_builder_add_cstr(sb, "\r\n\r\n");
+    str_builder_add_cstr(sb, body);
+    return str_data(str_builder_build(sb));
+}
+
+var _MH = "MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: t_wait\r\n";
+
+# Serve a modern or a legacy call of t_wait on handler `kind`; `how` 0 the client waits,
+# 1 shuts its sending side once the handler runs, 2 closes. What the client read, or "".
+fn _http_try(kind, modern, how) {
+    var sp[16];
+    sys_socketpair(1, 1, 0, &sp);
+    _hh_fd = load32(&sp);
+    var cl = load32(&sp + 4);
+    _hh_kind = kind;
+    if (modern == 1) { _hh_raw = _raw(kind, _MH, _call("1", "t_wait")); }
+    else { _hh_raw = _raw(kind, "", _lcall("1", "t_wait")); }
+    var t = thread_create(&_hh_thread, 0);
+    _hw_await(2000);
+    if (how == 1) { sock_shutdown(cl, 1); }
+    if (how == 2) {
+        sys_close(cl);
+        thread_join(t);
+        return "";
+    }
+    var r = _rd_new(cl);
+    _rd_eof(r, 5000);
+    thread_join(t);
+    sys_close(cl);
+    return _rd_buf(r);
+}
+
+# Two streamable workers at once, each on a request state of its own (3.7.0).
+var _tw_fd[2];
+var _tw_raw[2];
+var _tw_buf[2];
+fn _tw_thread(i) {
+    var raw = load64(&_tw_raw + i * 8);
+    var buf = load64(&_tw_buf + i * 8);
+    var n = strlen(raw);
+    memcpy(buf, raw, n);
+    store8(buf + n, 0);
+    _strm_handle(_strm_cfg, load64(&_tw_fd + i * 8), buf, n);
+    sys_close(load64(&_tw_fd + i * 8));
+    return 0;
+}
+
+# A child that sleeps `ctx` ms, then answers.
+fn _c_sleeps(ctx, rec) {
+    sleep_ms(ctx);
+    return bote_fetch_put_int(rec, 7);
+}
+
+fn _children() {
+    var st[8];
+    var w = sys_waitpid(0 - 1, &st, 1);
+    if (w == 0 - 10) { return 0; }
+    return 1;
+}
+#endif
+
+fn main() {
+    alloc_init();
+    _lg = alloc(65536);
+    sakshi_set_emit_hook(&_lg_hook);
+    var d = _mk_d();
+
+    # ---------------- bote_cancelled and the check ----------------
+    bote_req_begin();
+    assert_eq(bote_cancelled(), 0, "core: with no check, never cancelled");
+    assert_eq(bote_req_cancel_live(), 0, "core: ...and nothing can say");
+    _ck_reset(3);
+    bote_req_set_cancel(&_ck, 77);
+    assert_eq(bote_cancelled(), 0, "core: with no request served, not asked");
+    assert_eq(_ck_calls, 0, "core: ...the check not called");
+    bote_req_set_request_id("\"r1\"");
+    assert_eq(bote_req_cancel_live(), 1, "core: a check set can say");
+    assert_eq(bote_cancelled(), 0, "core: the first ask, no");
+    assert_eq(bote_cancelled(), 0, "core: the second, no");
+    assert_eq(bote_cancelled(), 1, "core: the third, yes");
+    assert_eq(_ck_ctx, 77, "core: the check gets its context");
+    assert(_ck_id != 0 && streq(_ck_id, "\"r1\"") == 1, "core: ...and the request's raw id");
+    assert_eq(bote_cancelled(), 1, "core: a yes stays yes");
+    assert_eq(_ck_calls, 3, "core: ...without asking again");
+    assert_eq(bote_req_was_cancelled(), 1, "core: and is remembered");
+    bote_req_set_request_id("\"r2\"");
+    assert_eq(bote_req_was_cancelled(), 0, "core: the next request is not cancelled");
+    bote_req_begin();
+    assert_eq(bote_req_cancel_live(), 0, "core: a message begun clears the check");
+    assert_eq(bote_cancelled(), 0, "core: ...and the request");
+    # What a check allocates on the arena goes when it returns: a handler may ask in a loop.
+    _ck_reset(1000000);
+    _ck_alloc = 4096;
+    bote_req_set_cancel(&_ck, 0);
+    bote_req_set_request_id("1");
+    var m1[16];
+    var m2[16];
+    bote_req_mark(&m1);
+    var ai = 0;
+    while (ai < 1000) {
+        bote_cancelled();
+        ai = ai + 1;
+    }
+    bote_req_mark(&m2);
+    assert(load64(&m1) == load64(&m2) && load64(&m1 + 8) == load64(&m2 + 8), "core: a thousand asks that allocate 4 KB each leave the arena where it was");
+    assert_eq(_ck_calls, 1000, "core: ...each one asked");
+    bote_req_begin();
+
+    # ---------------- the codec ----------------
+    _ck_reset(1);
+    _hw_reset(2000);
+    var n0 = _au_n;
+    assert_streq(_run_ck(d, _call("5", "t_wait")), "", "codec: a request its handler found cancelled is not answered");
+    assert_eq(atomic_load(&_hw_saw), 1, "codec: ...the handler saw it");
+    assert(_ck_id != 0 && streq(_ck_id, "5") == 1, "codec: the check is asked about the request's id");
+    assert_eq(bote_req_was_cancelled(), 0, "codec: and forgets it once the message is done");
+    assert_eq(_au_n, n0 + 1, "codec: the call audited");
+    assert(tool_call_event_success(_au_last) == 0 && tool_call_event_error(_au_last) != 0 && streq(tool_call_event_error(_au_last), "cancelled") == 1, "codec: ...as cancelled, not completed");
+    _ck_reset(1);
+    assert(_has(_run_ck(d, _call("6", "t_echo")), "\"id\":6,\"result\""), "codec: a handler that never asks is answered");
+    assert_eq(_ck_calls, 0, "codec: ...and nothing asked for it");
+    _ck_reset(1);
+    _hw_reset(2000);
+    assert(_has(_run_ck(d, _lcall("7", "t_wait")), "") && atomic_load(&_hw_saw) == 1, "codec: legacy too, where the transport can say");
+    # A batch, legacy: the element found cancelled has no place in the reply.
+    _ck_reset(1);
+    _ck_only = "1";
+    _hw_reset(300);
+    var br = _run_ck(d, _cat3("[", _lcall("1", "t_wait"), _cat3(",", _lcall("2", "t_wait"), "]")));
+    assert(_has(br, "\"id\":2,\"result\"") && _has(br, "\"id\":1") == 0, "codec: in a batch only the cancelled element goes unanswered");
+    # The request's line says it was cancelled.
+    sakshi_set_level(SK_DEBUG);
+    _lg_reset();
+    _ck_reset(1);
+    _hw_reset(2000);
+    _run_ck(d, _call("8", "t_wait"));
+    assert(_has(_lg, "request method=tools/call id=8 tool=t_wait status=cancelled"), "codec: the request's DEBUG line says cancelled");
+    sakshi_set_level(SK_INFO);
+
+    # ---------------- the line scanner ----------------
+    var la = bote_req_begin();
+    var done[8];
+    var cx = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"x\"}}\n";
+    assert_eq(codec_lines_cancel_a(la, cx, strlen(cx), "\"x\"", &done), 1, "lines: a cancellation naming the request");
+    assert_eq(load64(&done), strlen(cx), "lines: ...every complete line read");
+    assert_eq(codec_lines_cancel_a(la, cx, strlen(cx), "\"y\"", &done), 0, "lines: one naming another");
+    assert_eq(codec_lines_cancel_a(la, cx, strlen(cx), 0, &done), 0, "lines: no request, nothing cancelled");
+    var esc = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"a\\/b\"}}\n";
+    assert_eq(codec_lines_cancel_a(la, esc, strlen(esc), "\"a/b\"", &done), 1, "lines: ids by value, an escape and all");
+    var uesc = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"\\u0078\"}}\n";
+    assert_eq(codec_lines_cancel_a(la, uesc, strlen(uesc), "\"x\"", &done), 1, "lines: ...a \\u escape too");
+    var mesc = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications\\/cancell\\u0065d\",\"params\":{\"requestId\":\"x\"}}\n";
+    assert_eq(codec_lines_cancel_a(la, mesc, strlen(mesc), "\"x\"", &done), 1, "lines: the method spelled with escapes, as the codec reads it");
+    var num = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":7}}\n";
+    assert_eq(codec_lines_cancel_a(la, num, strlen(num), "7", &done), 1, "lines: a number id");
+    assert_eq(codec_lines_cancel_a(la, num, strlen(num), "\"7\"", &done), 0, "lines: ...is not the string");
+    var inner = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"t\",\"arguments\":{\"method\":\"notifications/cancelled\",\"requestId\":\"x\"}}}\n";
+    assert_eq(codec_lines_cancel_a(la, inner, strlen(inner), "\"x\"", &done), 0, "lines: the words inside another message's arguments");
+    var asreq = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"x\"}}\n";
+    assert_eq(codec_lines_cancel_a(la, asreq, strlen(asreq), "\"x\"", &done), 0, "lines: a request by that name is no notification");
+    var bad = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"x\"}\n";
+    assert_eq(codec_lines_cancel_a(la, bad, strlen(bad), "\"x\"", &done), 0, "lines: invalid JSON");
+    var batch = "[{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"x\"}}]\n";
+    assert_eq(codec_lines_cancel_a(la, batch, strlen(batch), "\"x\"", &done), 0, "lines: a batch");
+    var noid = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"reason\":\"x\"}}\n";
+    assert_eq(codec_lines_cancel_a(la, noid, strlen(noid), "\"x\"", &done), 0, "lines: no requestId");
+    var part = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"x\"}}";
+    assert_eq(codec_lines_cancel_a(la, part, strlen(part), "\"x\"", &done), 0, "lines: a line not yet whole");
+    assert_eq(load64(&done), 0, "lines: ...is left to read again");
+    var two = _cat3(_ping("1"), "\n", _cat3(cx, part, ""));
+    assert_eq(codec_lines_cancel_a(la, two, strlen(two), "\"x\"", &done), 1, "lines: a cancellation after another line");
+    assert_eq(load64(&done), strlen(two) - strlen(part), "lines: ...the whole lines read, the part left");
+    # On the arena: 64 lines of 1 KB ids, read a hundred times, keep nothing on the heap.
+    var big = str_builder_new();
+    var bi = 0;
+    var longid = alloc(1100);
+    store8(longid, 34);
+    memset(longid + 1, 97, 1024);
+    store8(longid + 1025, 34);
+    store8(longid + 1026, 0);
+    while (bi < 64) {
+        str_builder_add_cstr(big, _cancel(longid));
+        str_builder_add_cstr(big, "\n");
+        bi = bi + 1;
+    }
+    var bigs = str_data(str_builder_build(big));
+    var fresh = bote_req_arena_new();
+    codec_lines_cancel_a(fresh, bigs, strlen(bigs), "\"zz\"", &done);
+    assert_eq(bote_req_arena_bytes(fresh), BOTE_REQ_CHUNK, "lines: 64 long lines read on an arena of one chunk, each gone once read");
+    codec_lines_cancel_a(bote_req_begin(), bigs, strlen(bigs), "\"zz\"", &done);
+    var hb = alloc_used();
+    bi = 0;
+    while (bi < 100) {
+        var ba = bote_req_begin();
+        codec_lines_cancel_a(ba, bigs, strlen(bigs), "\"zz\"", &done);
+        bi = bi + 1;
+    }
+    assert_eq(alloc_used() - hb, 0, "lines: reading 64 long cancellations a hundred times keeps no heap");
+    # A cancelled call keeps no more than an answered one.
+    _hw_reset(1);
+    _ck_reset(1);
+    _run_ck(d, _call("1", "t_wait"));
+    var h1 = alloc_used();
+    bi = 0;
+    while (bi < 10) {
+        _hw_reset(2000);
+        _ck_reset(1);
+        _run_ck(d, _call(longid, "t_wait"));
+        bi = bi + 1;
+    }
+    var hcan = alloc_used() - h1;
+    var h2 = alloc_used();
+    bi = 0;
+    while (bi < 10) {
+        _hw_reset(1);
+        _ck_reset(1000000);
+        _run_ck(d, _call(longid, "t_wait"));
+        bi = bi + 1;
+    }
+    var hans = alloc_used() - h2;
+    assert(hcan <= hans, "codec: a cancelled call keeps no more heap than an answered one");
+
+    #ifndef CYRIUS_TARGET_AGNOS
+    # ---------------- stdio ----------------
+    var ip[8];
+    var op[8];
+    sys_pipe(&ip);
+    sys_pipe(&op);
+    _st_d = d;
+    _st_in = load32(&ip);
+    _st_out = load32(&op + 4);
+    var sw = load32(&ip + 4);
+    var so = _rd_new(load32(&op));
+    var st = thread_create(&_stdio_thread, 0);
+    _hw_reset(3000);
+    var t0 = clock_now_ms();
+    _send_line(sw, _call("1", "t_wait"));
+    _hw_await(2000);
+    _send_line(sw, _cancel("1"));
+    _send_line(sw, _ping("2"));
+    assert_eq(_rd_await(so, "\"id\":2,\"result\"", 3000), 1, "stdio: served on after a cancellation");
+    assert_eq(atomic_load(&_hw_saw), 1, "stdio: the handler saw its request cancelled");
+    assert(clock_now_ms() - t0 < 2000, "stdio: ...well before it would have finished");
+    assert_eq(_has(_rd_buf(so), "\"id\":1"), 0, "stdio: nothing sent for the cancelled request");
+    # The request and its cancellation in one write, before the handler has begun.
+    _hw_reset(3000);
+    var both = _cat3(_call("3", "t_wait"), "\n", _cat3(_cancel("3"), "\n", _cat3(_ping("4"), "\n", "")));
+    sys_write(sw, both, strlen(both));
+    assert_eq(_rd_await(so, "\"id\":4,\"result\"", 3000), 1, "stdio: a request and its cancellation sent together");
+    assert(atomic_load(&_hw_saw) == 1 && _has(_rd_buf(so), "\"id\":3") == 0, "stdio: ...the first ask finds it");
+    # A cancellation of another request.
+    _hw_reset(300);
+    _send_line(sw, _call("5", "t_wait"));
+    _hw_await(2000);
+    _send_line(sw, _cancel("55"));
+    assert_eq(_rd_await(so, "\"id\":5,\"result\"", 3000), 1, "stdio: a cancellation naming another request");
+    assert(atomic_load(&_hw_saw) == 0 && _has(_rd_buf(so), "done"), "stdio: ...the request runs to its end");
+    # By value: "a/b" cancelled as "a\/b"; and 7 is not "7".
+    _hw_reset(3000);
+    _send_line(sw, _call("\"a/b\"", "t_wait"));
+    _hw_await(2000);
+    _send_line(sw, _cancel("\"a\\/b\""));
+    _send_line(sw, _ping("6"));
+    assert_eq(_rd_await(so, "\"id\":6,\"result\"", 3000), 1, "stdio: served on");
+    assert(atomic_load(&_hw_saw) == 1 && _has(_rd_buf(so), "\"id\":\"a/b\"") == 0, "stdio: a cancellation spelled another way");
+    _hw_reset(300);
+    _send_line(sw, _call("7", "t_wait"));
+    _hw_await(2000);
+    _send_line(sw, _cancel("\"7\""));
+    assert_eq(_rd_await(so, "\"id\":7,\"result\"", 3000), 1, "stdio: a string 7 does not cancel the number");
+    # The end of stdin while a request runs is no cancellation: the answer still goes out,
+    # and the loop then ends.
+    _hw_reset(300);
+    var na = _au_n;
+    _send_line(sw, _call("8", "t_wait"));
+    _hw_await(2000);
+    sys_close(sw);
+    assert_eq(_rd_await(so, "\"id\":8,\"result\"", 3000), 1, "stdio: stdin closed while a request runs, and it is answered");
+    assert_eq(atomic_load(&_hw_saw), 0, "stdio: ...not cancelled");
+    thread_join(st);
+    sys_close(_st_out);
+    assert_eq(_rd_eof(so, 2000), 1, "stdio: and the loop ends at the end it read");
+    assert(_au_n == na + 1 && tool_call_event_success(_au_last) == 1, "stdio: audited as completed");
+
+    # ---------------- a Unix socket ----------------
+    var up[16];
+    sys_socketpair(1, 1, 0, &up);
+    _ux_d = d;
+    _ux_fd = load32(&up);
+    var uc = load32(&up + 4);
+    var ur = _rd_new(uc);
+    var ut = thread_create(&_unix_thread, 0);
+    _hw_reset(3000);
+    _send_line(uc, _call("1", "t_wait"));
+    _hw_await(2000);
+    _send_line(uc, _cancel("1"));
+    _send_line(uc, _ping("2"));
+    assert_eq(_rd_await(ur, "\"id\":2,\"result\"", 3000), 1, "unix: served on after a cancellation");
+    assert(atomic_load(&_hw_saw) == 1 && _has(_rd_buf(ur), "\"id\":1") == 0, "unix: the request cancelled, and nothing sent for it");
+    # A client that shuts its sending side still gets its answer.
+    _hw_reset(300);
+    _send_line(uc, _call("3", "t_wait"));
+    _hw_await(2000);
+    sock_shutdown(uc, 1);
+    assert_eq(_rd_await(ur, "\"id\":3,\"result\"", 3000), 1, "unix: a client that shut its sending side is answered");
+    assert_eq(atomic_load(&_hw_saw), 0, "unix: ...not cancelled");
+    thread_join(ut);
+    sys_close(uc);
+    sys_close(_ux_fd);
+    # One that closes both ways cancels.
+    sys_socketpair(1, 1, 0, &up);
+    _ux_fd = load32(&up);
+    uc = load32(&up + 4);
+    ut = thread_create(&_unix_thread, 0);
+    _hw_reset(3000);
+    t0 = clock_now_ms();
+    _send_line(uc, _call("4", "t_wait"));
+    _hw_await(2000);
+    sys_close(uc);
+    thread_join(ut);
+    sys_close(_ux_fd);
+    assert(atomic_load(&_hw_saw) == 1 && clock_now_ms() - t0 < 2000, "unix: a client that closed has cancelled");
+
+    # ---------------- HTTP ----------------
+    _hh_buf = alloc(65536);
+    _http_cfg = http_config_new("/mcp", 0, 0);
+    store64(_http_cfg + 48, d);
+    _strm_cfg = streamable_config_new("/mcp", 0, 0);
+    store64(_strm_cfg + 56, d);
+    _strm_init();
+    var origins = vec_new();
+    vec_push(origins, "http://localhost");
+    _brg_cfg = bridge_config_new("127.0.0.1", 0);
+    bridge_config_with_dispatcher(_brg_cfg, d);
+    bridge_config_with_origins(_brg_cfg, origins);
+    var kind = 0;
+    while (kind < 3) {
+        var kn = "http";
+        if (kind == 1) { kn = "streamable"; }
+        if (kind == 2) { kn = "bridge"; }
+        _hw_reset(300);
+        var stay = _http_try(kind, 1, 0);
+        assert(_has(stay, "HTTP/1.1 200") && _has(stay, "done"), _cat3(kn, ": a client that waits is answered", ""));
+        assert_eq(atomic_load(&_hw_saw), 0, _cat3(kn, ": ...not cancelled", ""));
+        _hw_reset(3000);
+        t0 = clock_now_ms();
+        var shut = _http_try(kind, 1, 1);
+        assert_eq(atomic_load(&_hw_saw), 1, _cat3(kn, ": a client that closed its side has cancelled", ""));
+        assert(strlen(shut) == 0 && clock_now_ms() - t0 < 2000, _cat3(kn, ": ...and is sent nothing", ""));
+        _hw_reset(3000);
+        _http_try(kind, 1, 2);
+        assert_eq(atomic_load(&_hw_saw), 1, _cat3(kn, ": one that closed both ways too", ""));
+        _hw_reset(300);
+        var leg = _http_try(kind, 0, 1);
+        assert(atomic_load(&_hw_saw) == 0 && _has(leg, "done"), _cat3(kn, ": the legacy path never asks: a disconnect is no cancellation there", ""));
+        kind = kind + 1;
+    }
+
+    # ---------------- a fetch's child ----------------
+    var cur[24];
+    bote_req_begin();
+    _ck_reset(3);
+    bote_req_set_cancel(&_ck, 0);
+    bote_req_set_request_id("1");
+    t0 = clock_now_ms();
+    assert_eq(bote_fetch_in_child(&_c_sleeps, 5000, 4096, 10000, &cur), 0, "fetch: a cancelled request ends its child's wait");
+    var fel = clock_now_ms() - t0;
+    assert(fel >= 200 && fel < 1500, "fetch: ...asking every 100 ms, the third ask");
+    assert(bote_fetch_why() != 0 && streq(bote_fetch_why(), "cancelled") == 1, "fetch: ...and says why");
+    assert_eq(_children(), 0, "fetch: the child is ended and reaped");
+    bote_req_begin();
+    _ck_reset(1);
+    assert_eq(bote_fetch_in_child(&_c_sleeps, 50, 4096, 10000, &cur), 1, "fetch: with no check, it waits as before");
+    assert_eq(_ck_calls, 0, "fetch: ...asking nothing");
+
+    # ---------------- two workers ----------------
+    # Each worker's request state is its own (3.7.0), and so is its check: one client that
+    # closes cancels its request and not the other's.
+    bote_conn_arm();
+    var tw0[16];
+    var tw1[16];
+    sys_socketpair(1, 1, 0, &tw0);
+    sys_socketpair(1, 1, 0, &tw1);
+    store64(&_tw_fd, load32(&tw0));
+    store64(&_tw_fd + 8, load32(&tw1));
+    store64(&_tw_raw, _raw(1, _MH, _call("1", "t_wait")));
+    store64(&_tw_raw + 8, _raw(1, _MH, _call("2", "t_wait")));
+    store64(&_tw_buf, alloc(65536));
+    store64(&_tw_buf + 8, alloc(65536));
+    _hw_reset(600);
+    var wa = thread_create(&_tw_thread, 0);
+    var wb = thread_create(&_tw_thread, 1);
+    _hw_await(2000);
+    sleep_ms(50);
+    sock_shutdown(load32(&tw0 + 4), 1);
+    var wr = _rd_new(load32(&tw1 + 4));
+    _rd_eof(wr, 5000);
+    thread_join(wa);
+    thread_join(wb);
+    assert(_has(_rd_buf(wr), "\"id\":2,\"result\"") && _has(_rd_buf(wr), "done"), "workers: the other client is answered in full");
+    var wr0 = _rd_new(load32(&tw0 + 4));
+    _rd_eof(wr0, 2000);
+    assert_eq(strlen(_rd_buf(wr0)), 0, "workers: the one that closed is sent nothing");
+    #endif
+    sakshi_clear_emit_hook();
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit_group(rc);

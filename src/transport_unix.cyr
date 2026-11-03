@@ -42,20 +42,58 @@ fn _unix_reply(cfd, resp) {
 var _unix_listen = 0;
 fn transport_unix_with_listen(c) { _unix_listen = c; return c; }
 
+var UNIX_BUF_SIZE = 131072;
+
+# Cancellation (3.7.5), as on stdio (src/transport_stdio.cyr): a `notifications/cancelled`
+# naming the request, among the complete lines that have arrived past it, read in without
+# waiting while there is room; or a client that has closed the connection, both ways, and
+# will not read the answer. One that only shut its sending side still gets its answers.
+var _unix_cfd = 0 - 1;
+var _unix_cbuf = 0;
+var _unix_cblen = 0;    # the slot holding how many bytes the buffer holds
+var _unix_from = 0;
+var _unix_seen = 0;
+
+fn _unix_cancelled(ctx, a, id) {
+    if (bote_conn_gone(_unix_cfd, 0) == 1) { return 1; }
+    var blen = load64(_unix_cblen);
+    var room = UNIX_BUF_SIZE - blen;
+    if (room > 0 && bote_conn_readable(_unix_cfd) == 1) {
+        var n_t, n_v = sock_recv(_unix_cfd, _unix_cbuf + blen, room);
+        if (is_err_result(n_t) == 0 && n_v > 0) {
+            blen = blen + n_v;
+            store64(_unix_cblen, blen);
+        }
+    }
+    if (_unix_seen < _unix_from) { _unix_seen = _unix_from; }
+    var done[8];
+    var hit = codec_lines_cancel_a(a, _unix_cbuf + _unix_seen, blen - _unix_seen, id, &done);
+    _unix_seen = _unix_seen + load64(&done);
+    return hit;
+}
+
+fn _unix_begin(from) {
+    var a = bote_listen_line_begin(_unix_listen);
+    _unix_from = from;
+    _unix_seen = from;
+    bote_req_set_cancel(&_unix_cancelled, 0);
+    return a;
+}
+
 # Process complete (newline-terminated) lines in the per-connection buffer.
 # Returns 1 if any was processed, 0 if none, and -1 when a reply could not be
-# written: the caller then drops the connection.
+# written: the caller then drops the connection. What a cancellation check reads in
+# while a line is served is served in the same pass.
 fn _unix_process_lines(cfd, dispatcher, buf, blen_ptr) {
-    var blen = load64(blen_ptr);
     var processed = 0;
     var scanned = 0;
     var line_start = 0;
-    while (scanned < blen) {
+    while (scanned < load64(blen_ptr)) {
         if (load8(buf + scanned) == 10) {
             store8(buf + scanned, 0);
             var line_len = scanned - line_start;
             if (line_len > 0) {
-                var resp = codec_process_message_a(bote_listen_line_begin(_unix_listen), buf + line_start, dispatcher, 0);
+                var resp = codec_process_message_a(_unix_begin(scanned + 1), buf + line_start, dispatcher, 0);
                 if (resp != 0) {
                     if (_unix_reply(cfd, resp) < 0) { return 0 - 1; }
                 }
@@ -67,14 +105,12 @@ fn _unix_process_lines(cfd, dispatcher, buf, blen_ptr) {
         scanned = scanned + 1;
     }
     if (line_start > 0) {
-        var leftover = blen - line_start;
+        var leftover = load64(blen_ptr) - line_start;
         if (leftover > 0) { memcpy(buf, buf + line_start, leftover); }
         store64(blen_ptr, leftover);
     }
     return processed;
 }
-
-var UNIX_BUF_SIZE = 131072;
 
 # ================================================================
 # Accept-error policy (3.2.1)
@@ -189,6 +225,9 @@ fn _unix_serve_client(cfd, dispatcher) {
     var blen_store[8];
     var blen_slot = &blen_store;
     store64(blen_slot, 0);
+    _unix_cfd = cfd;
+    _unix_cbuf = buf;
+    _unix_cblen = blen_slot;
     var skipping = 0;
     var heard = clock_now_ms();
     while (1 == 1) {
@@ -227,7 +266,7 @@ fn _unix_serve_client(cfd, dispatcher) {
             # EOF — flush any final unterminated line.
             if (blen > 0) {
                 store8(buf + blen, 0);
-                var resp = codec_process_message_a(bote_listen_line_begin(_unix_listen), buf, dispatcher, 0);
+                var resp = codec_process_message_a(_unix_begin(blen), buf, dispatcher, 0);
                 if (resp != 0) { _unix_reply(cfd, resp); }
             }
             return 0;

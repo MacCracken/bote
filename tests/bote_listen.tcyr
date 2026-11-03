@@ -61,6 +61,8 @@ include "src/transport_streamable.cyr"
 fn h_ok(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
 fn h_prompt(args, claims) { return "{\"messages\":[]}"; }
 fn h_res(uri, claims) { return "{\"contents\":[]}"; }
+# A scope check (3.6.3's shape): the claims hold a scope they name.
+fn _sc_has(claims, scope, ctx) { return strstr(claims, scope) >= 0; }
 
 fn _has(hay, needle) { return strstr(hay, needle) >= 0; }
 
@@ -426,6 +428,85 @@ fn _wa_reader(i) {
     dispatcher_register_tool(_wa_d, _tool("wa_tool"), &h_ok);
     _cl_await(_wa_c, "acknowledged", 5000);
     return 0;
+}
+
+# The window as a race (3.7.5): a park and a change at once, each round from the same start.
+# One of the two must see the other: the change raised for the open stream, or the stream
+# owed. Without the fences between each side's write and its read, x86 lost one in about
+# 3,500 (the 3.7.4 review). The change's delay sweeps across the park's write and read.
+var RC_N = 300000;
+var _rc_h = 0;
+var _rc_s = 0;
+var _rc_fd = 0;
+var _rc_round = 0;
+var _rc_done = 0;
+var _rc_kind = 0;
+var _rc_seen = 0;
+fn _rc_parker(i) {
+    var r = 1;
+    while (r <= RC_N) {
+        while (atomic_load(&_rc_round) < r) { }
+        atomic_fence();
+        _bl_park(_rc_h, _rc_s, _rc_fd, BOTE_LISTEN_TOOLS | BOTE_LISTEN_UPDATES, "\"rc\"", 4, _rc_seen);
+        atomic_fetch_add(&_rc_done, 1);
+        r = r + 1;
+    }
+    return 0;
+}
+fn _rc_changer(i) {
+    var r = 1;
+    while (r <= RC_N) {
+        while (atomic_load(&_rc_round) < r) { }
+        atomic_fence();
+        # A delay that sweeps the change across the park's write and read, round by round.
+        var k = 0;
+        var wait = (r * 7) % 200;
+        while (k < wait) { k = k + 1; }
+        if (_rc_kind == 0) { _bl_publish(_rc_h, TOPIC_TOOL_REGISTERED(), 0); }
+        else { _bl_queue(_rc_h, "res://rc"); }
+        atomic_fetch_add(&_rc_done, 1);
+        r = r + 1;
+    }
+    return 0;
+}
+
+# Race a park against a change of `kind` for RC_N rounds: how many reached nobody.
+fn _rc_race(kind) {
+    _rc_h = bote_listen_hub_new(1);
+    _rc_s = _bl_reserve(_rc_h);
+    var p[16];
+    sys_socketpair(1, 1, 0, &p);
+    _rc_fd = load32(&p);
+    _rc_kind = kind;
+    atomic_store(&_rc_round, 0);
+    var lost = 0;
+    var ta = thread_create(&_rc_parker, 0);
+    var tb = thread_create(&_rc_changer, 0);
+    var r = 1;
+    while (r <= RC_N) {
+        store64(_rc_s, 0 - 2);
+        store64(_rc_h + 24, 0);
+        store64(_rc_h + 32, 0);
+        store64(_rc_s + 304, 0);
+        store64(_rc_h + 112, 0);
+        store64(_rc_h + 120, 0);
+        _rc_seen = atomic_load(_rc_h + 152);
+        atomic_store(&_rc_done, 0);
+        atomic_fence();
+        atomic_store(&_rc_round, r);
+        while (atomic_load(&_rc_done) < 2) { }
+        atomic_fence();
+        var heard = 0;
+        if (kind == 0 && (load64(_rc_h + 32) & BOTE_LISTEN_TOOLS) != 0) { heard = 1; }
+        if (kind == 1 && (load64(_rc_h + 112) != 0 || load64(_rc_h + 120) != 0)) { heard = 1; }
+        if (heard == 0 && load64(_rc_s + 304) == 0) { lost = lost + 1; }
+        r = r + 1;
+    }
+    thread_join(ta);
+    thread_join(tb);
+    sys_close(load32(&p));
+    sys_close(load32(&p + 4));
+    return lost;
 }
 
 # A hub thread that does not start (3.7.3).
@@ -913,7 +994,7 @@ fn main() {
     var owp[16];
     sys_socketpair(1, 1, 0, &owp);
     var ows = _bl_reserve(hw);
-    _bl_keep_uris(bote_req_begin(), ows, "{\"notifications\":{\"toolsListChanged\":true,\"resourceSubscriptions\":[\"res://o\"]}}");
+    _bl_keep_uris(bote_req_begin(), ows, "{\"notifications\":{\"toolsListChanged\":true,\"resourceSubscriptions\":[\"res://o\"]}}", 0);
     _bl_park(hw, ows, load32(&owp), BOTE_LISTEN_TOOLS | BOTE_LISTEN_UPDATES, "\"ow\"", 4, atomic_load(hw + 152) - 1);
     _bl_start(hw);
     var owc = _cl_new();
@@ -948,6 +1029,75 @@ fn main() {
     assert_eq(_bl_reserve(hv), vs, "owed: the next stream takes the slot");
     _bl_park(hv, vs, load32(&vp), BOTE_LISTEN_TOOLS, "\"v2\"", 4, atomic_load(hv + 152));
     assert_eq(load64(vs + 304), 0, "owed: ...and is owed nothing of the last one's");
+    # A resource's scopes hold for its updates on HTTP too (3.7.5).
+    var hsd = _mk_d(1);
+    dispatcher_set_scope_check(hsd, &_sc_has, 0);
+    var hssc = vec_new();
+    vec_push(hssc, "p:secret");
+    dispatcher_register_resource(hsd, resource_def_with_required_scopes(resource_def_new("sp://secret", "s", "S", "text/plain"), hssc), &h_res);
+    dispatcher_register_resource(hsd, resource_def_new("sp://open", "o", "O", "text/plain"), &h_res);
+    var hsh = bote_listen_hub_new(4);
+    bote_listen_hub_with_keepalive(hsh, 600000);
+    dispatcher_set_listen(hsd, hsh);
+    dispatcher_set_events(hsd, bote_listen_sink(hsh, 0));
+    var hsa = bote_req_begin();
+    var hserr[8];
+    var hsreq = _cdc_admit_a(hsa, _lb("\"hs\"", "{\"resourceSubscriptions\":[\"sp://secret\",\"sp:/\"]}"), &hserr);
+    var hsp[16];
+    sys_socketpair(1, 1, 0, &hsp);
+    var hshc[48];
+    bote_http_ctx(&hshc, load32(&hsp), "http", "", 0, 0);
+    bote_http_serve_modern(&hshc, hsreq, hsd, "token=x");
+    sys_close(load32(&hsp));
+    var hscl = _cl_new();
+    store64(hscl, load32(&hsp + 4));
+    assert(_cl_await(hscl, "acknowledged", 2000) == 1 && _has(_cl_buf(hscl), "\"resourceSubscriptions\":[\"sp:/\"]"), "scopes: HTTP honors no URI the token may not read");
+    dispatcher_resource_updated(hsd, "sp://secret");
+    dispatcher_resource_updated(hsd, "sp://open");
+    assert_eq(_cl_await(hscl, "\"uri\":\"sp://open\"", 2000), 1, "scopes: HTTP tells it what it may read");
+    assert_eq(_has(_cl_buf(hscl), "\"uri\":\"sp://secret\""), 0, "scopes: ...and not what it may not, through the prefix it holds");
+    _cl_close(hscl);
+    _await_open(hsh, 0, 2000);
+    # The writing thread's arena (3.7.5): each frame goes once it is sent. A pass kept them
+    # all, 38 MB for 256 streams told of 16 kilobyte URIs (the 3.7.4 review).
+    var hfa = bote_listen_hub_new(16);
+    var hfp = vec_new();
+    var hfs = 0;
+    while (hfs < 16) {
+        var hpr = alloc(16);
+        sys_socketpair(1, 1, 0, hpr);
+        var hsl = _bl_reserve(hfa);
+        _bl_keep_uris(bote_req_begin(), hsl, "{\"notifications\":{\"resourceSubscriptions\":[\"res://p/\"]}}", 0);
+        _bl_park(hfa, hsl, load32(hpr), BOTE_LISTEN_UPDATES, "\"f\"", 3, atomic_load(hfa + 152));
+        vec_push(hfp, hpr);
+        hfs = hfs + 1;
+    }
+    var hfk = 0;
+    while (hfk < 16) {
+        var hu = alloc(1001);
+        memset(hu, 120, 1000);
+        memcpy(hu, "res://p/", 8);
+        store8(hu + 8, 65 + hfk);
+        store8(hu + 1000, 0);
+        _bl_queue(hfa, hu);
+        hfk = hfk + 1;
+    }
+    var hfb = bote_req_arena_bytes(load64(hfa + 144));
+    _bl_send_changes(hfa, BOTE_LISTEN_UPDATES);
+    assert_eq(bote_req_arena_bytes(load64(hfa + 144)), hfb, "frames: 16 streams told of 16 kilobyte URIs, and the arena never past its first chunk");
+    var hfc = _cl_new();
+    store64(hfc, load32(vec_get(hfp, 15) + 4));
+    _cl_await_n(hfc, "notifications/resources/updated", 16, 2000);
+    assert_eq(_count(_cl_buf(hfc), "notifications/resources/updated"), 16, "frames: ...each of them told all 16");
+    hfs = 0;
+    while (hfs < 16) {
+        sys_close(load32(vec_get(hfp, hfs)));
+        sys_close(load32(vec_get(hfp, hfs) + 4));
+        hfs = hfs + 1;
+    }
+    # A park and a change at once, raced (3.7.5): none lost.
+    assert_eq(_rc_race(0), 0, "race: a list change made as a stream parks always reaches it");
+    assert_eq(_rc_race(1), 0, "race: ...and an update");
     # Through bote_listen_http: a head longer than the socket takes keeps the worker writing
     # until the client reads, and the client changes the tools first.
     var wa = bote_req_begin();

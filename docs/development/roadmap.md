@@ -34,7 +34,7 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.7.5 — Cancellation.** Item 1 of 3.7.x below.
+**3.7.6 — Progress.** `notifications/progress` on a request's own response stream, the last item of 3.7.x below.
 
 ## 3.7.x — Threaded dispatch and `subscriptions/listen`
 
@@ -44,9 +44,15 @@ a hub thread off the serving threads and, on stdio, unix and WebSocket, the conn
 bites.** The other transports' buffers (`_ws_frame_buf`, `_ws_token_buf`, `_unix_buf`, stdio's) matter only if those
 transports take workers too.
 
-1. Cancellation: on Streamable HTTP closing the response stream cancels the request, and on stdio
-   `notifications/cancelled`. `bote_cancel_token_*` is the data layer.
-2. `notifications/progress` on a request's own response stream.
+1. `notifications/progress` on a request's own response stream. Cancellation (3.7.5) is cooperative,
+   `bote_cancelled()` asked by the handler, and progress is the same shape the other way: a handler
+   that reports as it goes, and a transport that writes it on the request's stream.
+2. **Cancellation on WebSocket.** A `notifications/cancelled` frame, or a close frame, read while a
+   handler runs. The loop reads frames only between messages, so the check needs to read a frame and
+   keep it for the loop, as stdio's keeps lines. WebSocket is not an MCP transport.
+3. **Cancellation on the legacy HTTP path.** 2025-11-25 cancels with a `notifications/cancelled` POST of
+   its own, on another connection and, on streamable, another worker. Matching it to the request in
+   flight needs a table of them per session. The spec lets a server ignore it, and bote does.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption.
@@ -114,6 +120,18 @@ Not planned, because the current spec removes or deprecates them: the held-open 
   can listen: one client opening 256 streams takes every slot. A stream's age (the server ends it with its
   result, and the client listens again), a bound per client or per token, or both. Either changes what a
   client that never listens again sees, and the TypeScript SDK's server has neither.
+- **A listen stream's token.** A stream keeps no token, so its token is never judged again after the
+  listen (a WebSocket's is, by the connection), and a stream made with claims is told of an update to a
+  URI that requires a scope only when it holds that URI exactly and the scope held when it listened:
+  not through a prefix, and not for a scope added since. Keeping each stream's claims in its slot, and
+  judging them per update and per keepalive, would tell a token that has the scope everything it may
+  read, and end a stream whose token expired. The claims are opaque to bote, so this needs the
+  validator to say how long they hold.
+- **A listen the server ends.** The cancellation page says a server MUST send `notifications/cancelled`
+  for a listen it tears down; the subscriptions page says it SHOULD answer the listen with its result.
+  bote ends a listen of its own accord only when nothing is honored, with the result, and when a hub
+  thread cannot start, by closing the stream. The TypeScript SDK never answers a listen: it closes
+  the stream on HTTP and sends `notifications/cancelled` on stdio.
 - **`libro_retention`'s archive.** `chain_apply_retention` returns what it removed, and the tool drops
   it, so "archived" means deleted. It also ignores `claims`. It reaches nothing in the binary, whose
   chain is empty, but an embedder with an audit sink gets a destructive tool any client can call. Hand

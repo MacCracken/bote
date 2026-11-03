@@ -350,10 +350,13 @@ fn _web_get_guarded(url) {
 # away when it exits. The child answers with a record, and the parent logs and builds the
 # result from it, so the guard's refusal is logged here as it always was.
 
-# What a request that did not finish says, as a WARN naming why.
+# What a request that did not finish says, as a WARN naming why; a TRACE for one its
+# client cancelled (3.7.5), which the request's own line reports.
 fn _web_child_failed(tool) {
+    var lvl = SK_WARN;
+    if (bote_req_was_cancelled() == 1) { lvl = SK_TRACE; }
     var ln[BOTE_LOG_LINE_BYTES];
-    bote_log_line(&ln, SK_WARN, "outbound request did not finish");
+    bote_log_line(&ln, lvl, "outbound request did not finish");
     bote_log_str(&ln, "tool", tool);
     bote_log_str(&ln, "reason", bote_fetch_why());
     bote_log_emit(&ln);

@@ -92,13 +92,21 @@ fn resp_success(id, result) {
 #               nothing; 1, an HTTP transport, which opens it itself once the dispatcher
 #               has accepted it (3.7.2); or a BoteStream, a connection that is the stream
 #               (3.7.3), whose functions the codec calls
+#   +40 cancel  (3.7.5) how the connection says the request being served is cancelled:
+#               fn(ctx, a, id) → 1 when it has been, or 0 for a transport that cannot say
+#   +48 ctx     its context
+#   +56 id      the raw id of the request being served, or 0
+#   +64 gone    1 once bote_cancelled has found it cancelled
+#   +72 claims  (3.7.5) the claims a `subscriptions/listen` was judged with, for the
+#               transport that holds its stream, or 0
 # A transport that serves one message at a time uses the process's block. A server
 # that serves on worker threads (3.7.0, src/conn.cyr) sets _bote_req_state_fp to a
 # function returning the calling thread's block, before its first worker starts.
-var BOTE_REQ_STATE_BYTES = 40;
+var BOTE_REQ_STATE_BYTES = 80;
 var BOTE_REQ_STATE_WHY = 24;
 var BOTE_REQ_STATE_STREAM = 32;
-var _bote_req_g[5];
+var BOTE_REQ_STATE_CANCEL = 40;
+var _bote_req_g[10];
 var _bote_req_state_fp = 0;
 
 fn bote_req_state() {
@@ -266,15 +274,25 @@ fn bote_req_arena_new() {
 # message: fs_read's 64 KB buffer stayed for the rest of its message, 6.5 MB for a batch of
 # a hundred, and 128 KB a call where nothing rewinds. Nothing allocated after the mark may
 # be used after the release.
-fn bote_req_mark(m) {
-    var st = load64(bote_req_alloc() + 32);
+fn bote_req_mark(m) { return bote_arena_mark(bote_req_alloc(), m); }
+fn bote_req_release(m) { return bote_arena_release(bote_req_alloc(), m); }
+
+# The same for any arena `a` (3.7.5): a bote_req_arena_new's, a thread's own or a listen
+# carrier's. On an allocator that is no bote arena the mark is empty and the release does
+# nothing, so a function handed any allocator may mark and release it.
+fn bote_arena_mark(a, m) {
+    store64(m, 0);
+    store64(m + 8, 0);
+    if (a == 0 || load64(a) != &_bote_ar_alloc) { return m; }
+    var st = load64(a + 32);
     store64(m, load64(st + 8));
     store64(m + 8, load64(st + 16));
     return m;
 }
 
-fn bote_req_release(m) {
-    var st = load64(bote_req_alloc() + 32);
+fn bote_arena_release(a, m) {
+    if (load64(m) == 0 || a == 0 || load64(a) != &_bote_ar_alloc) { return 0; }
+    var st = load64(a + 32);
     _bote_ar_use(st, load64(m));
     store64(st + 16, load64(m + 8));
     return 0;
@@ -326,7 +344,76 @@ fn bote_req_begin() {
     store64(s + 8, 0);
     store64(s + 16, 0);
     store64(s + BOTE_REQ_STATE_STREAM, 0);
+    store64(s + BOTE_REQ_STATE_CANCEL, 0);
+    store64(s + BOTE_REQ_STATE_CANCEL + 8, 0);
+    store64(s + BOTE_REQ_STATE_CANCEL + 16, 0);
+    store64(s + BOTE_REQ_STATE_CANCEL + 24, 0);
+    store64(s + BOTE_REQ_STATE_CANCEL + 32, 0);
     return al;
+}
+
+# The claims the dispatcher judged a `subscriptions/listen` with, for the transport that
+# opens its stream next (3.7.5): what it keeps of the listen is judged by the same.
+fn bote_req_set_listen_claims(claims) {
+    store64(bote_req_state() + BOTE_REQ_STATE_CANCEL + 32, claims);
+    return claims;
+}
+
+fn bote_req_listen_claims() { return load64(bote_req_state() + BOTE_REQ_STATE_CANCEL + 32); }
+
+# ---- cancellation (3.7.5) ----------------------------------------------------------
+#
+# A client cancels a request in flight: on Streamable HTTP by closing its response
+# stream, on stdio with `notifications/cancelled` naming it (MCP 2026-07-28, cancellation;
+# 2025-11-25's stdio is the same). A handler runs to its end on the thread that called it,
+# so cancelling one is cooperative: a handler that runs long asks bote_cancelled() as it
+# goes, and stops when it says 1. The transport answers the question for the message it is
+# serving, through the check it sets with bote_req_set_cancel after bote_req_begin; the
+# codec names the request. Once a check has said 1 nothing more goes out for the request,
+# its response included, and a tools/call is audited as cancelled. A request whose handler
+# never asks runs to its end and is answered, which the spec allows: a cancellation that
+# arrives after the work is done may be ignored.
+
+# The connection's check for this message: fn(ctx, a, id), 1 when the request whose raw id
+# is `id` has been cancelled. `a` is the request arena, rewound past what the check
+# allocated once it returns.
+fn bote_req_set_cancel(fp, ctx) {
+    var s = bote_req_state();
+    store64(s + BOTE_REQ_STATE_CANCEL, fp);
+    store64(s + BOTE_REQ_STATE_CANCEL + 8, ctx);
+    return 0;
+}
+
+# The request now being served, by its raw id (the codec's), and not cancelled yet.
+fn bote_req_set_request_id(id) {
+    var s = bote_req_state();
+    store64(s + BOTE_REQ_STATE_CANCEL + 16, id);
+    store64(s + BOTE_REQ_STATE_CANCEL + 24, 0);
+    return 0;
+}
+
+# 1 when this message's connection can say whether its request is cancelled.
+fn bote_req_cancel_live() { return load64(bote_req_state() + BOTE_REQ_STATE_CANCEL) != 0; }
+
+# 1 once bote_cancelled has said 1 for the request being served.
+fn bote_req_was_cancelled() { return load64(bote_req_state() + BOTE_REQ_STATE_CANCEL + 24); }
+
+# 1 when the client has cancelled the request the calling thread is serving: what a
+# handler asks while it works. Each call asks the connection once, a poll or a look at what
+# has arrived, and a 1 stays 1. 0 off a handler's own thread, with no request being
+# served, and wherever the transport cannot say.
+fn bote_cancelled() {
+    var s = bote_req_state();
+    if (load64(s + BOTE_REQ_STATE_CANCEL + 24) == 1) { return 1; }
+    var fp = load64(s + BOTE_REQ_STATE_CANCEL);
+    if (fp == 0 || load64(s + BOTE_REQ_STATE_CANCEL + 16) == 0) { return 0; }
+    var m[16];
+    bote_req_mark(&m);
+    var r = fncall3(fp, load64(s + BOTE_REQ_STATE_CANCEL + 8), bote_req_alloc(), load64(s + BOTE_REQ_STATE_CANCEL + 16));
+    bote_req_release(&m);
+    if (r != 1) { return 0; }
+    store64(s + BOTE_REQ_STATE_CANCEL + 24, 1);
+    return 1;
 }
 
 # What can hold a stream open for the message being dispatched (3.7.2): 0, 1 or a

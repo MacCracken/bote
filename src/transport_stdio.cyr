@@ -32,11 +32,48 @@ fn _stdio_listen_write(fd, json) {
     return 0;
 }
 
+# Cancellation (3.7.5): a client cancels a request on stdio with `notifications/cancelled`
+# naming it, which it sends while the request runs. A handler that asks bote_cancelled()
+# brings this check in: what stdin has ready is read in after what the buffer holds, while
+# there is room, without waiting, and the complete lines past the message being served are
+# looked through, each once. They stay in the buffer and are served in their turn. A read
+# that finds the end of stdin is remembered for the loop, since a terminal's end is read
+# only once; the end of stdin is not a cancellation, because a client may send its last
+# request and close stdin before it reads the answer.
+var _stdio_in = 0;
+var _stdio_from = 0;    # where what follows the message being served begins
+var _stdio_seen = 0;    # how far a check has looked, for this message
+var _stdio_eof = 0;
+
+fn _stdio_cancelled(ctx, a, id) {
+    var room = STDIO_BUF_SIZE - _stdio_buf_len;
+    if (room > 0 && _stdio_eof == 0 && bote_conn_readable(_stdio_in) == 1) {
+        var n = sys_read(_stdio_in, _stdio_buf + _stdio_buf_len, room);
+        if (n > 0) { _stdio_buf_len = _stdio_buf_len + n; }
+        elif (n == 0) { _stdio_eof = 1; }
+    }
+    if (_stdio_seen < _stdio_from) { _stdio_seen = _stdio_from; }
+    var done[8];
+    var hit = codec_lines_cancel_a(a, _stdio_buf + _stdio_seen, _stdio_buf_len - _stdio_seen, id, &done);
+    _stdio_seen = _stdio_seen + load64(&done);
+    return hit;
+}
+
+# Begin the message at `from`, what follows it there: the arena, as bote_req_begin.
+fn _stdio_begin(from) {
+    var a = bote_listen_line_begin(_stdio_listen);
+    _stdio_from = from;
+    _stdio_seen = from;
+    bote_req_set_cancel(&_stdio_cancelled, 0);
+    return a;
+}
+
 fn _stdio_init() {
     if (_stdio_buf == 0) {
         _stdio_buf = alloc(STDIO_BUF_SIZE);
     }
     _stdio_buf_len = 0;
+    _stdio_eof = 0;
     return 0;
 }
 
@@ -53,7 +90,7 @@ fn _stdio_process_lines(dispatcher) {
             store8(_stdio_buf + scanned, 0);
             if (line_len > 0) {
                 var line_ptr = _stdio_buf + line_start;
-                var resp = codec_process_message_a(bote_listen_line_begin(_stdio_listen), line_ptr, dispatcher, 0);
+                var resp = codec_process_message_a(_stdio_begin(scanned + 1), line_ptr, dispatcher, 0);
                 if (resp != 0 && _stdio_listen_write(_stdio_out, resp) < 0) { return 0 - 1; }
                 if (bote_listen_line_broken(_stdio_listen) == 1) { return 0 - 1; }
                 processed = 1;
@@ -82,6 +119,7 @@ fn _stdio_serve(dispatcher, in_fd, out_fd) {
     signal_ignore(BOTE_SIGPIPE);
     _stdio_init();
     _stdio_out = out_fd;
+    _stdio_in = in_fd;
     bote_listen_line_attach(_stdio_listen, dispatcher, &_stdio_listen_write, out_fd);
     var r = _stdio_loop(dispatcher, in_fd);
     bote_listen_line_detach(_stdio_listen);
@@ -98,14 +136,17 @@ fn _stdio_loop(dispatcher, in_fd) {
             _stdio_buf_len = 0;
             space = STDIO_BUF_SIZE;
         }
-        # A client gone from stdout is gone.
-        if (_stdio_listen != 0 && bote_listen_line_await(_stdio_listen, in_fd, 0) < 0) { return _stdio_gone(); }
-        var n = sys_read(in_fd, _stdio_buf + _stdio_buf_len, space);
+        # A client gone from stdout is gone. A cancellation check may have read the end.
+        var n = 0;
+        if (_stdio_eof == 0) {
+            if (_stdio_listen != 0 && bote_listen_line_await(_stdio_listen, in_fd, 0) < 0) { return _stdio_gone(); }
+            n = sys_read(in_fd, _stdio_buf + _stdio_buf_len, space);
+        }
         if (n <= 0) {
             # EOF — process any final line that lacks a trailing newline
             if (_stdio_buf_len > 0) {
                 store8(_stdio_buf + _stdio_buf_len, 0);
-                var resp = codec_process_message_a(bote_listen_line_begin(_stdio_listen), _stdio_buf, dispatcher, 0);
+                var resp = codec_process_message_a(_stdio_begin(_stdio_buf_len), _stdio_buf, dispatcher, 0);
                 if (resp != 0) { _stdio_listen_write(_stdio_out, resp); }
             }
             return 0;
