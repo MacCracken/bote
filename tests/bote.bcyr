@@ -37,6 +37,7 @@ include "src/jwt.cyr"
 include "tests/fixtures/jwt_vectors.cyr"
 include "src/http_era.cyr"
 include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
 include "src/fetch.cyr"
 include "src/conn.cyr"
 
@@ -282,6 +283,13 @@ fn b_scope_check_jwt() {
 fn b_dispatch_tools_call_scoped() {
     dispatcher_dispatch_a(bote_req_begin(), _b_scoped_dispatcher, _b_scoped_req, _b_scope_token);
     return 0;
+}
+
+# 3.7.2: what a listen request's filter honors, and the acknowledgement made of it.
+var _b_listen_params = "{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}},\"notifications\":{\"toolsListChanged\":true,\"promptsListChanged\":true,\"resourcesListChanged\":true,\"resourceSubscriptions\":[\"file:///a\"]}}";
+fn b_listen_filter() {
+    var a = bote_req_begin();
+    return bote_listen_ack_params_a(a, dispatcher_listen_mask_a(a, _b_dispatcher, _b_listen_params));
 }
 
 fn _bench_setup() {
@@ -536,6 +544,9 @@ fn main() {
     var b35 = bench_new("codec_process_message_arena");
     bench_run(b35, &b_codec_process_message_arena, 10000);
     vec_push(benches, b35);
+    var b37 = bench_new("listen_filter");
+    bench_run(b37, &b_listen_filter, 100000);
+    vec_push(benches, b37);
     bote_conn_arm();
     thread_join(thread_create(&_b_thread_nop, 0));
     var b36 = bench_new("codec_process_message_threaded");

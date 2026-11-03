@@ -357,6 +357,18 @@ fn _ks_reversed() {
     return str_data(str_builder_build(sb));
 }
 
+var _lane_loaded = 0;
+fn _lane_loader(i) {
+    if (jwt_secret_from_jwks(JV_JWKS) != 0) { _lane_loaded = 1; }
+    return 0;
+}
+
+var _warms = 0;
+fn _count_warm() {
+    _warms = _warms + 1;
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -371,6 +383,28 @@ fn main() {
     # The tables a key's own checks leave for the first verify to build, on a worker.
     assert(atomic_load(&_ecq_inited) == 2 && atomic_load(&_p256_ninv_inited) == 2 && atomic_load(&_p256si_inited) == 2,
       "warm: an EC key builds the P-256 tables a verify would");
+    # 3.7.2: and in a scope of sigil's, so the thread keeps none of its crypto lanes: the main
+    # thread kept one for life, one fewer for the workers.
+    assert_eq(crypto_banks_claimed(), 0, "lanes: loading an EC key keeps none");
+    jwt_jwks_check(JV_JWKS);
+    assert_eq(crypto_banks_claimed(), 0, "lanes: nor checking a set");
+    thread_join(thread_create(&_lane_loader, 0));
+    assert_eq(_lane_loaded, 1, "lanes: a thread loaded a set");
+    assert_eq(crypto_banks_claimed(), 0, "lanes: and, gone, holds none for good");
+    # Built once for the process, not once for each EC key of every set that changes.
+    _jwt_p256_warm_fp = &_count_warm;
+    jwt_secret_from_jwks(JV_JWKS);
+    assert_eq(_warms, 0, "warm: once for the process, not again for a set of two EC keys");
+    _jwt_p256_warmed = 0;
+    var ws = jwt_secret_from_jwks(JV_JWKS);
+    assert_eq(_warms, 1, "warm: a set of two EC keys builds them once");
+    jwt_secret_set_jwks(ws, JV_JWKS_ONE_EC);
+    assert_eq(_warms, 1, "warm: a set that changes builds them no more");
+    _jwt_p256_warmed = 0;
+    jwt_secret_from_jwks(JV_JWKS_ONE_RSA);
+    assert_eq(_warms, 1, "warm: an RSA set builds none");
+    _jwt_p256_warm_fp = &ecdsa_p256_warm;
+    _jwt_p256_warmed = 1;
 
     # ================================================================
     # base64url decode — RFC 4648 §10 vectors + URL-safety check

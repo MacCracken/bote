@@ -692,11 +692,13 @@ fn _registry_deregister_u(r, name) {
     return existing;
 }
 
-# Mark a tool deprecated with a message. No-op if tool absent.
+# Mark a tool deprecated with a message. No-op if tool absent. A write (3.7.2): a list
+# built beside it sized the reply without the message and then wrote it in.
 fn registry_deprecate(r, name, message) {
-    var t = registry_get(r, name);
-    if (t == 0) { return 0; }
-    tool_def_with_deprecated(t, message);
+    bote_reg_write();
+    var t = _registry_get_u(r, name);
+    if (t != 0) { tool_def_with_deprecated(t, message); }
+    bote_reg_write_end();
     return 0;
 }
 
@@ -726,7 +728,13 @@ fn registry_validate_params(r, name, params_cstr) {
 
 # registry_validate_params with the error and its text on `a`.
 fn registry_validate_params_a(a, r, name, params_cstr) {
-    var t = registry_get(r, name);
+    return registry_validate_def_a(a, registry_get(r, name), name, params_cstr);
+}
+
+# registry_validate_params_a against `t`, the definition the caller found for `name`, or 0
+# when it found none (3.7.2): a call judged by what one look at the registry found cannot
+# be validated by a definition registered since.
+fn registry_validate_def_a(a, t, name, params_cstr) {
     if (t == 0) {
         return bote_err_new_a(a, BOTE_ERR_TOOL_NOT_FOUND, name, 0);
     }

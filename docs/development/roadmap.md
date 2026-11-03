@@ -34,21 +34,21 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.7.2 — `subscriptions/listen`.** Item 1 of 3.7.x below, and before it the room a listening stream needs in the worker
-pool.
+**3.7.3 — `subscriptions/listen` on stdio, unix and WebSocket.** The rest of item 1 of 3.7.x below for the list changes.
 
 ## 3.7.x — Threaded dispatch and `subscriptions/listen`
 
-`bote streamable` serves on worker threads since 3.7.0, and since 3.7.1 everything a request reaches in bote is safe there:
-bote's own tools, and registering a tool, prompt or resource while it serves. So a held-open stream no longer starves the
-POSTs that feed it, and `subscriptions/listen` is such a stream. **Large: small bites.** The other transports' buffers
-(`_ws_frame_buf`, `_ws_token_buf`, `_unix_buf`, stdio's) matter only if those transports take workers too.
+`bote streamable` serves on worker threads since 3.7.0, and since 3.7.1 everything a request reaches in bote is safe there.
+`subscriptions/listen` serves list changes on `http`, `bridge` and `streamable` since 3.7.2, its streams held by a hub
+thread off the serving threads. **Large: small bites.** The other transports' buffers (`_ws_frame_buf`, `_ws_token_buf`,
+`_unix_buf`, stdio's) matter only if those transports take workers too.
 
-1. `subscriptions/listen`, with `toolsListChanged`, `promptsListChanged`, `resourcesListChanged` and
-   `resourceSubscriptions`, `notifications/subscriptions/acknowledged`, and
-   `io.modelcontextprotocol/subscriptionId` tagging. Then `notifications/resources/updated`. A listening stream holds a
-   worker for as long as it is open, so the pool needs room for streams beside requests: a bound on streams, or streams
-   parked off the pool.
+1. `subscriptions/listen` where the connection is the stream: stdio, unix and WebSocket. On stdio the acknowledgement is
+   the reply's first message and `notifications/cancelled` naming the listen request's id ends the subscription; the
+   changes go out between the replies to other requests, so the line transports need a writer the hub can reach. Then
+   `resourceSubscriptions` and `notifications/resources/updated`, which need `resources.subscribe` advertised and a way
+   for an embedder to say a resource changed. Until then the filter's `resourceSubscriptions` is checked and never
+   honored.
 2. Cancellation: on Streamable HTTP closing the response stream cancels the request, and on stdio
    `notifications/cancelled`. `bote_cancel_token_*` is the data layer.
 3. `notifications/progress` on a request's own response stream.

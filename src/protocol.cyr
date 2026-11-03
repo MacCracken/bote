@@ -88,12 +88,14 @@ fn resp_success(id, result) {
 #   +8  token   the token an accepted request presented, on the arena
 #   +16 kept    its copy on the heap, once a handler has been handed one
 #   +24 why     why this thread's last bote_fetch_in_child failed (src/fetch.cyr), or 0
+#   +32 stream  1 while a transport that can hold a stream open dispatches the message
 # A transport that serves one message at a time uses the process's block. A server
 # that serves on worker threads (3.7.0, src/conn.cyr) sets _bote_req_state_fp to a
 # function returning the calling thread's block, before its first worker starts.
-var BOTE_REQ_STATE_BYTES = 32;
+var BOTE_REQ_STATE_BYTES = 40;
 var BOTE_REQ_STATE_WHY = 24;
-var _bote_req_g[4];
+var BOTE_REQ_STATE_STREAM = 32;
+var _bote_req_g[5];
 var _bote_req_state_fp = 0;
 
 fn bote_req_state() {
@@ -127,12 +129,23 @@ fn bote_req_alloc() {
 var BOTE_RW_WRITER = 1099511627776;   # 2^40: far above any count of readers
 var _bote_reg_lock = 0;
 
+# A thread waiting on the lock gives its CPU up every BOTE_RW_SPINS turns (3.7.2). With more
+# workers than cores, readers spun through whole scheduler slices where the writer they
+# waited for could have run: a registration under load took 48 ms on one CPU. The next turn.
+var BOTE_RW_SPINS = 64;
+
+fn _bote_reg_wait(spins) {
+    if (spins % BOTE_RW_SPINS == BOTE_RW_SPINS - 1) { sys_sched_yield(); }
+    return spins + 1;
+}
+
 fn bote_reg_read() {
     if (_threads_active == 0) { return 0; }
     while (1 == 1) {
         if ((atomic_fetch_add(&_bote_reg_lock, 1) & BOTE_RW_WRITER) == 0) { return 0; }
         atomic_fetch_add(&_bote_reg_lock, 0 - 1);
-        while ((atomic_load(&_bote_reg_lock) & BOTE_RW_WRITER) != 0) { }
+        var sp = 0;
+        while ((atomic_load(&_bote_reg_lock) & BOTE_RW_WRITER) != 0) { sp = _bote_reg_wait(sp); }
     }
     return 0;
 }
@@ -146,12 +159,14 @@ fn bote_reg_read_end() {
 fn bote_reg_write() {
     if (_threads_active == 0) { return 0; }
     var held = 0;
+    var sp = 0;
     while (held == 0) {
         var s = atomic_load(&_bote_reg_lock);
         if ((s & BOTE_RW_WRITER) == 0) { held = atomic_cas(&_bote_reg_lock, s, s + BOTE_RW_WRITER); }
+        if (held == 0) { sp = _bote_reg_wait(sp); }
     }
     # The readers inside finish; none comes in past the writer bit.
-    while ((atomic_load(&_bote_reg_lock) & (BOTE_RW_WRITER - 1)) != 0) { }
+    while ((atomic_load(&_bote_reg_lock) & (BOTE_RW_WRITER - 1)) != 0) { sp = _bote_reg_wait(sp); }
     atomic_fence();
     return 0;
 }
@@ -242,6 +257,26 @@ fn bote_req_arena_new() {
     return allocator_new(&_bote_ar_alloc, &_bote_ar_realloc, &_bote_ar_free, &_bote_ar_reset, st);
 }
 
+# Where the calling thread's request arena is now, into `m` (16 B: the chunk in use and its
+# next free byte), for bote_req_release (3.7.2). What a function allocates on the arena
+# after the mark and has copied off before it releases it goes then, and not at the next
+# message: fs_read's 64 KB buffer stayed for the rest of its message, 6.5 MB for a batch of
+# a hundred, and 128 KB a call where nothing rewinds. Nothing allocated after the mark may
+# be used after the release.
+fn bote_req_mark(m) {
+    var st = load64(bote_req_alloc() + 32);
+    store64(m, load64(st + 8));
+    store64(m + 8, load64(st + 16));
+    return m;
+}
+
+fn bote_req_release(m) {
+    var st = load64(bote_req_alloc() + 32);
+    _bote_ar_use(st, load64(m));
+    store64(st + 16, load64(m + 8));
+    return 0;
+}
+
 # Every byte the arena `a` (a bote_req_arena_new) holds, across its chunks.
 fn bote_req_arena_bytes(a) {
     var c = load64(load64(a + 32));
@@ -287,8 +322,20 @@ fn bote_req_begin() {
     var s = bote_req_state();
     store64(s + 8, 0);
     store64(s + 16, 0);
+    store64(s + BOTE_REQ_STATE_STREAM, 0);
     return al;
 }
+
+# Whether the message being dispatched came on a transport that can hold a stream open
+# (3.7.2). That transport sets it around the dispatch, and only then is
+# `subscriptions/listen` served: a dispatcher one embedder serves on HTTP and on stdio
+# answers it on stdio as a method it does not have.
+fn bote_req_set_stream(on) {
+    store64(bote_req_state() + BOTE_REQ_STATE_STREAM, on);
+    return on;
+}
+
+fn bote_req_stream() { return load64(bote_req_state() + BOTE_REQ_STATE_STREAM); }
 
 # The token noted for this message, or 0.
 fn bote_req_token() { return load64(bote_req_state() + 8); }

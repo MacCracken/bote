@@ -230,7 +230,16 @@ fn fs_read_handler(args, claims) {
     }
     # On the request arena, which is the calling thread's (3.7.1): one buffer for the
     # process let two workers read into it at once, and hand a client another's file.
-    var buf = alloc_via(bote_req_alloc(), FS_READ_CAP + FS_READ_NOTE);
+    # Released once the result, on the heap, is made of it (3.7.2).
+    var mark[16];
+    bote_req_mark(&mark);
+    var res = _fs_read_into(alloc_via(bote_req_alloc(), FS_READ_CAP + FS_READ_NOTE), full);
+    bote_req_release(&mark);
+    return res;
+}
+
+# fs_read of the file `full`, read into `buf`: the tool's result.
+fn _fs_read_into(buf, full) {
     # O_NONBLOCK: a FIFO with no writer would otherwise park this call, and with
     # it every client of the server.
     var fd = file_open(full, O_RDONLY | BOTE_O_NONBLOCK | O_NOFOLLOW, 0);

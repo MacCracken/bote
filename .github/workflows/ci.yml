@@ -346,26 +346,12 @@ jobs:
         # Test files split across compilation units (bote.tcyr, plus
         # per-module bote_<mod>.tcyr) to stay under the cyrius
         # function-table cap. Run each in turn; fail fast on any
-        # 'N failed' line that isn't '0 failed'.
+        # 'N failed' line that isn't '0 failed'. Every file in tests/, by
+        # glob (3.7.2): the list this step kept had missed bote_fetch,
+        # bote_jwks and bote_threads since each was added.
         run: |
           fail=0
-          for tcyr in tests/bote.tcyr \
-                      tests/conformance.tcyr \
-                      tests/bote_auth.tcyr \
-                      tests/bote_content.tcyr \
-                      tests/bote_fs_tools.tcyr \
-                      tests/bote_host.tcyr \
-                      tests/bote_http_era.tcyr \
-                      tests/bote_jwt.tcyr \
-                      tests/bote_libro_tools.tcyr \
-                      tests/bote_log.tcyr \
-                      tests/bote_pkce.tcyr \
-                      tests/bote_sandbox.tcyr \
-                      tests/bote_streamable.tcyr \
-                      tests/bote_transport_unix.tcyr \
-                      tests/bote_web_tools.tcyr \
-                      tests/bote_ws.tcyr \
-                      tests/bote_core_only_smoke.tcyr; do
+          for tcyr in tests/*.tcyr; do
             echo "--- $tcyr ---"
             # 3.3.12: the exit code is checked. Through 3.3.11 `out=$(...)`
             # discarded it and only an explicit "N passed, M failed" with

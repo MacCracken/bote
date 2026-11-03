@@ -78,6 +78,7 @@ include "src/fetch.cyr"
 include "src/jwks.cyr"
 include "src/http_era.cyr"
 include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
 include "src/transport_stdio.cyr"
 include "src/transport_http.cyr"
 include "src/transport_unix.cyr"
@@ -158,6 +159,8 @@ fn main() {
         # (incl. the GET stream) must present it.
         var session_store = session_store_default();
         dispatcher_set_events(sdisp, strm_notify_sink(session_store));
+        # subscriptions/listen (3.7.2): its streams, and the changes beside the drain's.
+        bote_main_listen(sdisp);
         # This transport has a drain path, so it may honestly advertise
         # tools/prompts listChanged (no other mode sets this).
         dispatcher_set_notifications(sdisp, 1);
@@ -208,6 +211,7 @@ fn main() {
     if (streq(mode, "http") == 1) {
         var port = 8390;
         if (arg != 0) { port = bote_main_port(arg, 8390); }
+        bote_main_listen(dispatcher);
         var cfg = http_config_new("/mcp", INADDR_LOOPBACK(), port);
         http_config_with_allowed_origins(cfg, allowed_origins);
         http_config_with_resource_metadata(cfg, prm);
@@ -226,6 +230,7 @@ fn main() {
     if (streq(mode, "bridge") == 1) {
         var bport = 8391;
         if (arg != 0) { bport = bote_main_port(arg, 8391); }
+        bote_main_listen(dispatcher);
         var bcfg = bridge_config_new(INADDR_LOOPBACK(), bport);
         bridge_config_with_origins(bcfg, allowed_origins);
         bridge_config_with_resource_metadata(bcfg, prm);

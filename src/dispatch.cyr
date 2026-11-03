@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.7.1"; }
+fn _bote_server_version() { return "3.7.2"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -117,8 +117,11 @@ fn validate_tool_name(name) {
 #                           Set together via dispatcher_set_server_info.
 #   +88 scope_check           fn ptr (claims, scope, ctx) → 1 when held, or 0.
 #   +96 scope_ctx             passed to it. Set via dispatcher_set_scope_check.
+#   +104 listen               what carries `subscriptions/listen` streams (3.7.2): a
+#                           ListenHub (src/listen.cyr), opaque here, or 0, when the
+#                           method is not served. Set by the transport wiring.
 fn dispatcher_new(reg) {
-    var d = alloc(104);
+    var d = alloc(112);
     store64(d, reg);
     store64(d + 8, map_new());
     store64(d + 16, map_new());
@@ -132,6 +135,7 @@ fn dispatcher_new(reg) {
     store64(d + 80, 0);
     store64(d + 88, 0);
     store64(d + 96, 0);
+    store64(d + 104, 0);
     return d;
 }
 
@@ -175,6 +179,11 @@ fn dispatcher_set_scope_check(d, fp, ctx) {
     return d;
 }
 
+# What carries this dispatcher's `subscriptions/listen` streams (3.7.2), or 0 for none,
+# when the method is not found. A transport that can hold a stream open sets it.
+fn dispatcher_set_listen(d, hub) { store64(d + 104, hub); return d; }
+fn dispatcher_listen(d) { return load64(d + 104); }
+
 fn dispatcher_set_audit(d, sink) { store64(d + 24, sink); return d; }
 fn dispatcher_set_events(d, sink) { store64(d + 32, sink); return d; }
 fn dispatcher_set_prompts(d, preg) { store64(d + 40, preg); return d; }
@@ -215,6 +224,26 @@ fn dispatcher_is_streaming_tool(d, name) {
     var h = map_has(dispatcher_streaming(d), name);
     bote_reg_read_end();
     return h;
+}
+
+# The tool `name`, or 0, from one look at the registries (3.7.2), with what serves it: its
+# handler through *fp_out, *has_out 1 when one is set (a handler may be registered as 0),
+# and with a `ver`, *ver_out 1 when that version is registered. A call is judged by this
+# and served by it, so a tool registered or replaced while the call runs cannot lend it a
+# definition its scopes were not checked against.
+fn _dsp_tool_serving(d, name, ver, ver_out, has_out, fp_out) {
+    bote_reg_read();
+    var t = _registry_get_u(dispatcher_registry(d), name);
+    var has = map_has(dispatcher_handlers(d), name);
+    var fp = 0;
+    if (has == 1) { fp = map_get(dispatcher_handlers(d), name); }
+    var vok = 1;
+    if (ver != 0 && _registry_get_versioned_u(dispatcher_registry(d), name, ver) == 0) { vok = 0; }
+    bote_reg_read_end();
+    store64(ver_out, vok);
+    store64(has_out, has);
+    store64(fp_out, fp);
+    return t;
 }
 
 # The handler registered for tool `name`, through *has_out 1 when there is one (a handler
@@ -279,6 +308,15 @@ fn dispatcher_deregister_tool(d, name) {
 # scope-token is not registered: the scope would go out in a 403's header (3.6.6).
 var DSP_SCOPE_NOT_TOKEN = "a required scope must be a non-empty token with no space, quote or backslash";
 
+# The registry at `d + off`, the one `fresh` becomes when there is none yet (3.7.2). Two
+# threads registering the first prompt or resource at once each made one, and the first
+# stored was lost with what was registered in it. The swap publishes `fresh` after its
+# maps, so a reader that sees it sees them; a loser's `fresh` is left unused.
+fn _dsp_made(d, off, fresh) {
+    if (atomic_cas(d + off, 0, fresh) == 1) { return fresh; }
+    return atomic_load(d + off);
+}
+
 # Register an MCP prompt + its generator handler. Lazily stands up the
 # dispatcher's PromptRegistry on first call — which is also what flips the
 # `prompts` capability on at initialize (see _build_capabilities). Prompt
@@ -292,10 +330,7 @@ fn dispatcher_register_prompt(d, prompt_def, handler_fp) {
         return bote_err_new(BOTE_ERR_INVALID_PARAMS, prompt_def_name(prompt_def), DSP_SCOPE_NOT_TOKEN);
     }
     var preg = dispatcher_prompts(d);
-    if (preg == 0) {
-        preg = prompt_registry_new();
-        dispatcher_set_prompts(d, preg);
-    }
+    if (preg == 0) { preg = _dsp_made(d, 40, prompt_registry_new()); }
     prompt_registry_register(preg, prompt_def, handler_fp);
     # Emit a prompt-set-changed event so a client-notification sink can push
     # notifications/prompts/list_changed (no-op when no sink is wired, e.g.
@@ -321,11 +356,16 @@ fn dispatcher_register_resource(d, resource_def, handler_fp) {
         return bote_err_new(BOTE_ERR_INVALID_PARAMS, resource_def_uri(resource_def), DSP_SCOPE_NOT_TOKEN);
     }
     var rreg = dispatcher_resources(d);
-    if (rreg == 0) {
-        rreg = resource_registry_new();
-        dispatcher_set_resources(d, rreg);
-    }
+    if (rreg == 0) { rreg = _dsp_made(d, 48, resource_registry_new()); }
     resource_registry_register(rreg, resource_def, handler_fp);
+    _dsp_resource_changed(d);
+    return 0;
+}
+
+# A resource or a template registered (3.7.2): `notifications/resources/list_changed`
+# for whoever listens for it.
+fn _dsp_resource_changed(d) {
+    event_sink_publish(dispatcher_event_sink(d), TOPIC_RESOURCE_REGISTERED(), "{}");
     return 0;
 }
 
@@ -342,11 +382,9 @@ fn dispatcher_register_resource_template(d, template, handler_fp) {
         return bote_err_new(BOTE_ERR_INVALID_PARAMS, resource_template_name(template), DSP_SCOPE_NOT_TOKEN);
     }
     var rreg = dispatcher_resources(d);
-    if (rreg == 0) {
-        rreg = resource_registry_new();
-        dispatcher_set_resources(d, rreg);
-    }
+    if (rreg == 0) { rreg = _dsp_made(d, 48, resource_registry_new()); }
     resource_registry_register_template(rreg, template, handler_fp);
+    _dsp_resource_changed(d);
     return 0;
 }
 
@@ -500,7 +538,9 @@ fn _build_capabilities_lc(sb, d, lc) {
         str_builder_add_cstr(sb, "}");
     }
     if (dispatcher_resources(d) != 0) {
-        str_builder_add_cstr(sb, ",\"resources\":{}");
+        str_builder_add_cstr(sb, ",\"resources\":{");
+        if (lc == 1) { str_builder_add_cstr(sb, "\"listChanged\":true"); }
+        str_builder_add_cstr(sb, "}");
     }
     if (dispatcher_completion(d) != 0) {
         str_builder_add_cstr(sb, ",\"completions\":{}");
@@ -1078,7 +1118,10 @@ fn _build_discover_result_a(a, d) {
     str_builder_add_cstr(sb, "{\"resultType\":\"complete\",\"supportedVersions\":");
     _mcp_emit_versions(sb);
     str_builder_add_cstr(sb, ",\"capabilities\":");
-    _build_capabilities_lc(sb, d, 0);
+    # The changes a listen stream carries, once something carries one (3.7.2).
+    var lc = 0;
+    if (dispatcher_listen(d) != 0) { lc = 1; }
+    _build_capabilities_lc(sb, d, lc);
     str_builder_add_cstr(sb, ",");
     _dsp_emit_modern_meta(sb, d);
     str_builder_add_cstr(sb, ",\"ttlMs\":0,\"cacheScope\":\"private\"}");
@@ -1175,16 +1218,21 @@ fn _dsp_scopes_lacking(d, req, claims) {
 # it may run, or no such tool is registered.
 fn dispatcher_scopes_missing(d, name, claims) {
     if (claims == 0) { return 0; }
-    var t = registry_get(dispatcher_registry(d), name);
-    if (t == 0) { return 0; }
+    return _dsp_def_scopes_missing(d, registry_get(dispatcher_registry(d), name), claims);
+}
+
+# The same for the tool definition `t` a call found, or 0 for none.
+fn _dsp_def_scopes_missing(d, t, claims) {
+    if (claims == 0 || t == 0) { return 0; }
     return _dsp_scopes_lacking(d, tool_def_required_scopes(t), claims);
 }
 
 # The same for the prompt `name` (3.6.6).
 fn dispatcher_prompt_scopes_missing(d, name, claims) {
     if (claims == 0 || name == 0 || dispatcher_prompts(d) == 0) { return 0; }
-    if (prompt_registry_contains(dispatcher_prompts(d), name) == 0) { return 0; }
-    return _dsp_scopes_lacking(d, prompt_def_required_scopes(prompt_registry_get(dispatcher_prompts(d), name)), claims);
+    var p = prompt_registry_get(dispatcher_prompts(d), name);
+    if (p == 0) { return 0; }
+    return _dsp_scopes_lacking(d, prompt_def_required_scopes(p), claims);
 }
 
 # The same for reading `uri`, judged by what would serve it, as resources/read finds that:
@@ -1194,13 +1242,8 @@ fn dispatcher_prompt_scopes_missing(d, name, claims) {
 # served by a template that required a scope.
 fn dispatcher_resource_scopes_missing(d, uri, claims) {
     if (claims == 0 || uri == 0 || dispatcher_resources(d) == 0) { return 0; }
-    var r = dispatcher_resources(d);
-    if (resource_registry_handler(r, uri) != 0) {
-        return _dsp_scopes_lacking(d, resource_def_required_scopes(resource_registry_get(r, uri)), claims);
-    }
-    var t = resource_registry_template_for(r, uri);
-    if (t == 0) { return 0; }
-    return _dsp_scopes_lacking(d, resource_template_required_scopes(t), claims);
+    var fp[8];
+    return _dsp_scopes_lacking(d, resource_registry_serving(dispatcher_resources(d), uri, &fp), claims);
 }
 
 # The same for a completion/complete's `ref`, on `a` (3.6.6): a completion offers what a
@@ -1277,11 +1320,108 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
     if (streq(method, "server/discover") == 1) {
         return resp_success_a(a, id, _build_discover_result_a(a, d));
     }
+    if (streq(method, "subscriptions/listen") == 1) { return _dsp_listen_a(a, d, id, req_params(request)); }
     # Removed from this revision, with `initialize`.
     if (streq(method, "ping") == 1) {
         return resp_error_a(a, id, 0 - 32601, "method not found: ping");
     }
     return _dsp_modern_response(a, d, method, _dsp_serve_a(a, d, request, claims, &pos, plen));
+}
+
+# ================================================================
+# subscriptions/listen (3.7.2, MCP 2026-07-28)
+# ================================================================
+#
+# A client opens a stream for the changes it opts in to: `params.notifications` names
+# them, each opt-in, and the server MUST NOT send one it was not asked for. The dispatcher
+# judges the request and the transport carries the stream (src/listen.cyr): what comes
+# back here is the acknowledgement's `notifications`, the honored subset, which the
+# transport sends as the stream's first message. The subset narrows what was asked to
+# what this server delivers: a list's change when it has that list, and never
+# `resourceSubscriptions`, since no `resources.subscribe` is advertised yet.
+
+var BOTE_LISTEN_TOOLS = 1;
+var BOTE_LISTEN_PROMPTS = 2;
+var BOTE_LISTEN_RESOURCES = 4;
+var DSP_LISTEN_FILTER = "Invalid params: 'notifications' is required and must be a valid SubscriptionFilter";
+
+# 1 when `raw`, a field of the filter, is absent or a boolean, and *on_out says whether it
+# is `true`.
+fn _dsp_listen_flag(raw, on_out) {
+    store64(on_out, 0);
+    if (raw == 0) { return 1; }
+    if (streq(raw, "true") == 1) {
+        store64(on_out, 1);
+        return 1;
+    }
+    return streq(raw, "false");
+}
+
+# 1 when `raw` is absent or an array of strings.
+fn _dsp_listen_strings(raw) {
+    if (raw == 0) { return 1; }
+    var n = strlen(raw);
+    if (n == 0 || load8(raw) != 91) { return 0; }
+    var i = _jx_skip_ws(raw, n, 1);
+    while (i < n && load8(raw + i) != 93) {
+        if (load8(raw + i) != 34) { return 0; }
+        i = _jx_array_next(raw, n, i);
+    }
+    return 1;
+}
+
+# The honored subset of a listen request's filter, as BOTE_LISTEN_* bits, or -1 when
+# `notifications` is missing or not a SubscriptionFilter.
+fn dispatcher_listen_mask_a(a, d, params) {
+    if (params == 0) { return 0 - 1; }
+    var f = jsonx_get_raw_a(a, params, "notifications");
+    if (f == 0 || jsonx_is_object(f) == 0) { return 0 - 1; }
+    var t[8];
+    var p[8];
+    var r[8];
+    if (_dsp_listen_flag(jsonx_get_raw_a(a, f, "toolsListChanged"), &t) == 0) { return 0 - 1; }
+    if (_dsp_listen_flag(jsonx_get_raw_a(a, f, "promptsListChanged"), &p) == 0) { return 0 - 1; }
+    if (_dsp_listen_flag(jsonx_get_raw_a(a, f, "resourcesListChanged"), &r) == 0) { return 0 - 1; }
+    if (_dsp_listen_strings(jsonx_get_raw_a(a, f, "resourceSubscriptions")) == 0) { return 0 - 1; }
+    var mask = 0;
+    if (load64(&t) == 1) { mask = mask | BOTE_LISTEN_TOOLS; }
+    if (load64(&p) == 1 && dispatcher_prompts(d) != 0) { mask = mask | BOTE_LISTEN_PROMPTS; }
+    if (load64(&r) == 1 && dispatcher_resources(d) != 0) { mask = mask | BOTE_LISTEN_RESOURCES; }
+    return mask;
+}
+
+# The acknowledgement's params for the bits `mask`: {"notifications":{...}}.
+fn bote_listen_ack_params_a(a, mask) {
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, 128);
+    str_builder_add_cstr(sb, "{\"notifications\":{");
+    var sep = "";
+    if ((mask & BOTE_LISTEN_TOOLS) != 0) {
+        str_builder_add_cstr(sb, "\"toolsListChanged\":true");
+        sep = ",";
+    }
+    if ((mask & BOTE_LISTEN_PROMPTS) != 0) {
+        str_builder_add_cstr(sb, sep);
+        str_builder_add_cstr(sb, "\"promptsListChanged\":true");
+        sep = ",";
+    }
+    if ((mask & BOTE_LISTEN_RESOURCES) != 0) {
+        str_builder_add_cstr(sb, sep);
+        str_builder_add_cstr(sb, "\"resourcesListChanged\":true");
+    }
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build_a(a, sb));
+}
+
+# A subscriptions/listen request: -32601 where no transport carries the stream, or this
+# message did not come on one that does (bote_req_stream), -32602 for a filter that is not
+# one, else a response whose result is the acknowledgement's params, for the transport to
+# open the stream with. It is no answer to send as it is.
+fn _dsp_listen_a(a, d, id, params) {
+    if (dispatcher_listen(d) == 0 || bote_req_stream() == 0) { return resp_error_a(a, id, 0 - 32601, "method not found: subscriptions/listen"); }
+    var mask = dispatcher_listen_mask_a(a, d, params);
+    if (mask < 0) { return resp_error_a(a, id, 0 - 32602, DSP_LISTEN_FILTER); }
+    return resp_success_a(a, id, bote_listen_ack_params_a(a, mask));
 }
 
 # The methods themselves, for both eras: what differs between them is around this.
@@ -1299,18 +1439,25 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
             return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(ne)), str_data(bote_err_format_a(a, ne)));
         }
 
+        # The tool, its handler and the version asked for, from one look (3.7.2): the
+        # whole call is judged by and served by what this found.
+        var ver = _jx_str_dec_at_a(a, params, plen, load64(pos + 8));
+        var ver_ok[8];
+        var has_fp[8];
+        var fp_slot[8];
+        var t = _dsp_tool_serving(d, name, ver, &ver_ok, &has_fp, &fp_slot);
+
         # Ahead of everything else about the call: a token that may not run this tool
         # learns nothing about its arguments. HTTP answers this with a 403 before it
         # gets here, and this is what a batch and a WebSocket reach.
-        if (dispatcher_scopes_missing(d, name, claims) != 0) {
+        if (_dsp_def_scopes_missing(d, t, claims) != 0) {
             var smsg = _dsp_named_msg_a(a, "insufficient scope for tool: ", name, 0);
             _dsp_record_refusal(d, name, params, plen, load64(pos + 24), smsg);
             return resp_error_a(a, id, BOTE_RPC_INSUFFICIENT_SCOPE, smsg);
         }
 
         # Optional: version negotiation
-        var ver = _jx_str_dec_at_a(a, params, plen, load64(pos + 8));
-        if (ver != 0 && registry_get_versioned(reg, name, ver) == 0) {
+        if (load64(&ver_ok) == 0) {
             var sb = str_builder_new_a(a);
             str_builder_add_cstr_a(a, sb, "version '");
             str_builder_add_cstr_a(a, sb, ver);
@@ -1336,7 +1483,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
         # result with isError, so the model sees what it got wrong and can
         # retry (MCP 2025-11-25, SEP-1303). They were a -32602 protocol
         # error through 3.4.4.
-        var verr2 = registry_validate_params_a(a, reg, name, args);
+        var verr2 = registry_validate_def_a(a, t, name, args);
         if (verr2 != 0) {
             var vmsg = str_data(bote_err_format_a(a, verr2));
             _dsp_record_refusal(d, name, params, plen, load64(pos + 24), vmsg);
@@ -1347,7 +1494,6 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
         }
 
         # Deprecation event (best-effort; never blocks dispatch)
-        var t = registry_get(reg, name);
         if (t != 0) {
             var dep = tool_def_deprecated(t);
             if (dep != 0) {
@@ -1379,8 +1525,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
             name = _jx_str_dec_at_a(default_alloc(), params, plen, load64(pos));
             caller_id = _jx_str_at_a(default_alloc(), params, plen, load64(pos + 24));
         }
-        var has_fp[8];
-        var fp = _dsp_handler(d, name, &has_fp);
+        var fp = load64(&fp_slot);
         if (load64(&has_fp) == 0) {
             var nf = bote_err_new_a(a, BOTE_ERR_TOOL_NOT_FOUND, name, 0);
             var msg_nh = str_data(bote_err_format_a(a, nf));
@@ -1468,12 +1613,15 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
             var pe = bote_err_new_a(a, BOTE_ERR_INVALID_PARAMS, "", "missing or empty 'name' field");
             return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(pe)), str_data(bote_err_format_a(a, pe)));
         }
-        var phandler = prompt_registry_handler(dispatcher_prompts(d), pname);
+        # The prompt and its handler from one look (3.7.2), as for a tool.
+        var ph_slot[8];
+        var pdef = prompt_registry_serving(dispatcher_prompts(d), pname, &ph_slot);
+        var phandler = load64(&ph_slot);
         if (phandler == 0) {
             return resp_error_a(a, id, 0 - 32602, _dsp_named_msg_a(a, "prompt not found: ", pname, 0));
         }
         # As for a tool: a token that may not get this prompt learns nothing past its name.
-        if (dispatcher_prompt_scopes_missing(d, pname, claims) != 0) {
+        if (claims != 0 && pdef != 0 && _dsp_scopes_lacking(d, prompt_def_required_scopes(pdef), claims) != 0) {
             return resp_error_a(a, id, BOTE_RPC_INSUFFICIENT_SCOPE, _dsp_named_msg_a(a, "insufficient scope for prompt: ", pname, 0));
         }
         var pargs = jsonx_get_raw_a(a, params, "arguments");
@@ -1484,7 +1632,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
         if (jsonx_is_object(pargs) == 0) {
             return resp_error_a(a, id, 0 - 32602, _dsp_named_msg_a(a, "'arguments' must be an object for prompt '", pname, "'"));
         }
-        var pmissing = _prompt_missing_required(prompt_registry_get(dispatcher_prompts(d), pname), pargs);
+        var pmissing = _prompt_missing_required(pdef, pargs);
         if (pmissing != 0) {
             var pmb = str_builder_new_a(a);
             str_builder_add_cstr_a(a, pmb, "missing required argument '");
@@ -1514,8 +1662,10 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
             var re = bote_err_new_a(a, BOTE_ERR_INVALID_PARAMS, "", "missing or empty 'uri' field");
             return resp_error_a(a, id, bote_err_rpc_code(bote_err_tag(re)), str_data(bote_err_format_a(a, re)));
         }
-        var rhandler = resource_registry_handler(dispatcher_resources(d), ruri);
-        if (rhandler == 0) { rhandler = resource_registry_template_handler(dispatcher_resources(d), ruri); }
+        # What serves the URI and the scopes it requires, from one look (3.7.2).
+        var rh_slot[8];
+        var rscopes = resource_registry_serving(dispatcher_resources(d), ruri, &rh_slot);
+        var rhandler = load64(&rh_slot);
         if (rhandler == 0) {
             # -32002 with the URI in `data`, as the MCP resources spec has
             # it. It was -32602 through 3.4.4.
@@ -1527,7 +1677,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen) {
             return resp_error_data_a(a, id, BOTE_RPC_RESOURCE_NOT_FOUND,
               _dsp_named_msg_a(a, "resource not found: ", ruri, 0), str_data(str_builder_build_a(a, rdb)));
         }
-        if (dispatcher_resource_scopes_missing(d, ruri, claims) != 0) {
+        if (claims != 0 && _dsp_scopes_lacking(d, rscopes, claims) != 0) {
             return resp_error_a(a, id, BOTE_RPC_INSUFFICIENT_SCOPE, _dsp_named_msg_a(a, "insufficient scope for resource: ", ruri, 0));
         }
         # Past every refusal: a handler may keep what it is handed.

@@ -1,0 +1,260 @@
+# Fuzz: dispatcher_listen_mask_a (3.7.2) judges a subscriptions/listen filter as its parts
+# say, and keeps nothing.
+#
+# A filter is drawn from a small grammar: each of the four members MCP 2026-07-28 names, or
+# none, its key spelled plainly or with an escape, its value valid or not, members bote does
+# not know beside them, whitespace between, and now and then no filter or one that is not
+# an object. A reference made from the same choices says what the mask must be. Two
+# properties, each with its own exit code:
+#
+#   10   the mask is the reference's: -1 for a filter that is none, else the lists asked for
+#        that the dispatcher has, on one with prompts and resources and one with neither;
+#   20   a round leaves nothing on the heap: the filter is read on the request arena;
+#   30   the rounds drew each outcome, -1, nothing and something, a thousand times at least.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+
+alloc_init();
+
+# A small, fixed generator: the run is the same every time.
+var _rng = 88172645463325252;
+fn _rand() {
+    _rng = _rng ^ (_rng << 13);
+    _rng = _rng ^ (_rng >> 7);
+    _rng = _rng ^ (_rng << 17);
+    if (_rng < 0) { return 0 - _rng; }
+    return _rng;
+}
+
+fn h_p(args, claims) { return "{\"messages\":[]}"; }
+fn h_r(uri, claims) { return "{\"contents\":[]}"; }
+
+# The three lists' flags, each spelled plainly and with an escape, and their bits.
+var _FLAG_KEYS = 0;
+var _FLAG_ESC = 0;
+fn _keys() {
+    _FLAG_KEYS = vec_new();
+    vec_push(_FLAG_KEYS, "toolsListChanged");
+    vec_push(_FLAG_KEYS, "promptsListChanged");
+    vec_push(_FLAG_KEYS, "resourcesListChanged");
+    _FLAG_ESC = vec_new();
+    vec_push(_FLAG_ESC, "tools\\u004cistChanged");
+    vec_push(_FLAG_ESC, "\\u0070romptsListChanged");
+    vec_push(_FLAG_ESC, "resourcesListChange\\u0064");
+    return 0;
+}
+
+# A flag's value: 1 true, 0 false, -1 anything else.
+var _FLAG_VALS = 0;
+var _FLAG_MEANS = 0;
+# resourceSubscriptions' value: 1 when it is a list of strings.
+var _SUB_VALS = 0;
+var _SUB_OK = 0;
+# Values a member bote does not know may have.
+var _ANY = 0;
+fn _values() {
+    _FLAG_VALS = vec_new();
+    _FLAG_MEANS = vec_new();
+    vec_push(_FLAG_VALS, "true"); vec_push(_FLAG_MEANS, 1);
+    vec_push(_FLAG_VALS, "false"); vec_push(_FLAG_MEANS, 0);
+    vec_push(_FLAG_VALS, "1"); vec_push(_FLAG_MEANS, 0 - 1);
+    vec_push(_FLAG_VALS, "0"); vec_push(_FLAG_MEANS, 0 - 1);
+    vec_push(_FLAG_VALS, "\"true\""); vec_push(_FLAG_MEANS, 0 - 1);
+    vec_push(_FLAG_VALS, "null"); vec_push(_FLAG_MEANS, 0 - 1);
+    vec_push(_FLAG_VALS, "{}"); vec_push(_FLAG_MEANS, 0 - 1);
+    vec_push(_FLAG_VALS, "[true]"); vec_push(_FLAG_MEANS, 0 - 1);
+    _SUB_VALS = vec_new();
+    _SUB_OK = vec_new();
+    vec_push(_SUB_VALS, "[]"); vec_push(_SUB_OK, 1);
+    vec_push(_SUB_VALS, "[ ]"); vec_push(_SUB_OK, 1);
+    vec_push(_SUB_VALS, "[\"file:///a\"]"); vec_push(_SUB_OK, 1);
+    vec_push(_SUB_VALS, "[ \"a\" , \"b\\\"c\" ]"); vec_push(_SUB_OK, 1);
+    vec_push(_SUB_VALS, "[\"\"]"); vec_push(_SUB_OK, 1);
+    vec_push(_SUB_VALS, "[1]"); vec_push(_SUB_OK, 0);
+    vec_push(_SUB_VALS, "[\"a\",2]"); vec_push(_SUB_OK, 0);
+    vec_push(_SUB_VALS, "[[\"a\"]]"); vec_push(_SUB_OK, 0);
+    vec_push(_SUB_VALS, "[\"a\",null]"); vec_push(_SUB_OK, 0);
+    vec_push(_SUB_VALS, "\"a\""); vec_push(_SUB_OK, 0);
+    vec_push(_SUB_VALS, "\"\""); vec_push(_SUB_OK, 0);
+    vec_push(_SUB_VALS, "{}"); vec_push(_SUB_OK, 0);
+    vec_push(_SUB_VALS, "null"); vec_push(_SUB_OK, 0);
+    vec_push(_SUB_VALS, "true"); vec_push(_SUB_OK, 0);
+    _ANY = vec_new();
+    vec_push(_ANY, "1");
+    vec_push(_ANY, "\"x\"");
+    vec_push(_ANY, "{\"toolsListChanged\":7}");
+    vec_push(_ANY, "[1,2]");
+    vec_push(_ANY, "null");
+    return 0;
+}
+
+fn _ws(sb) {
+    var r = _rand() % 6;
+    if (r == 0) { str_builder_add_cstr(sb, " "); }
+    if (r == 1) { str_builder_add_cstr(sb, "\n\t "); }
+    return 0;
+}
+
+fn _member(sb, first, key, value) {
+    if (first == 0) { str_builder_add_cstr(sb, ","); }
+    _ws(sb);
+    str_builder_add_cstr(sb, "\"");
+    str_builder_add_cstr(sb, key);
+    str_builder_add_cstr(sb, "\"");
+    _ws(sb);
+    str_builder_add_cstr(sb, ":");
+    _ws(sb);
+    str_builder_add_cstr(sb, value);
+    _ws(sb);
+    return 0;
+}
+
+# One round's params on `a`, and through *want the mask a dispatcher with every list must
+# give, and through *want_bare the one with tools only.
+fn _round(a, want, want_bare) {
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, 1024);
+    str_builder_add_cstr(sb, "{");
+    var shape = _rand() % 12;
+    if (shape == 0) {
+        str_builder_add_cstr(sb, "}");
+        store64(want, 0 - 1);
+        store64(want_bare, 0 - 1);
+        return str_data(str_builder_build_a(a, sb));
+    }
+    str_builder_add_cstr(sb, "\"notifications\":");
+    _ws(sb);
+    if (shape == 1) {
+        var bad = vec_get(_ANY, _rand() % 5);
+        if (load8(bad) == 123) { bad = "[]"; }
+        str_builder_add_cstr(sb, bad);
+        str_builder_add_cstr(sb, "}");
+        store64(want, 0 - 1);
+        store64(want_bare, 0 - 1);
+        return str_data(str_builder_build_a(a, sb));
+    }
+    str_builder_add_cstr(sb, "{");
+    var first = 1;
+    var bad = 0;
+    var mask = 0;
+    # The members in an order of their own: each of the four, once at most, and up to two
+    # bote does not know, in among them.
+    var order[8];
+    var k = 0;
+    while (k < 6) {
+        store8(&order + k, k);
+        k = k + 1;
+    }
+    k = 5;
+    while (k > 0) {
+        var j = _rand() % (k + 1);
+        var t = load8(&order + k);
+        store8(&order + k, load8(&order + j));
+        store8(&order + j, t);
+        k = k - 1;
+    }
+    k = 0;
+    while (k < 6) {
+        var m = load8(&order + k);
+        if (_rand() % 3 != 0) {
+            if (m < 3) {
+                var key = vec_get(_FLAG_KEYS, m);
+                if (_rand() % 4 == 0) { key = vec_get(_FLAG_ESC, m); }
+                # A valid value three times in four, so that whole filters often are.
+                var vi = _rand() % 2;
+                if (_rand() % 4 == 0) { vi = 2 + _rand() % (vec_len(_FLAG_VALS) - 2); }
+                _member(sb, first, key, vec_get(_FLAG_VALS, vi));
+                var means = vec_get(_FLAG_MEANS, vi);
+                if (means < 0) { bad = 1; }
+                if (means == 1) { mask = mask | (1 << m); }
+            } elif (m == 3) {
+                var si = _rand() % 5;
+                if (_rand() % 4 == 0) { si = 5 + _rand() % (vec_len(_SUB_VALS) - 5); }
+                _member(sb, first, "resourceSubscriptions", vec_get(_SUB_VALS, si));
+                if (vec_get(_SUB_OK, si) == 0) { bad = 1; }
+            } else {
+                var uk = "later";
+                if (m == 5) { uk = "x-other"; }
+                _member(sb, first, uk, vec_get(_ANY, _rand() % 5));
+            }
+            first = 0;
+        }
+        k = k + 1;
+    }
+    str_builder_add_cstr(sb, "}}");
+    if (bad == 1) {
+        store64(want, 0 - 1);
+        store64(want_bare, 0 - 1);
+    } else {
+        store64(want, mask);
+        store64(want_bare, mask & BOTE_LISTEN_TOOLS);
+    }
+    return str_data(str_builder_build_a(a, sb));
+}
+
+_keys();
+_values();
+var full = dispatcher_new(tool_registry_new());
+dispatcher_register_prompt(full, prompt_def_new("p", "P", vec_new()), &h_p);
+dispatcher_register_resource(full, resource_def_new("r://a", "a", "A", "text/plain"), &h_r);
+var bare = dispatcher_new(tool_registry_new());
+var w[8];
+var wb[8];
+# A round first, so the arena has the chunk every later round uses.
+var a0 = bote_req_begin();
+dispatcher_listen_mask_a(a0, full, _round(a0, &w, &wb));
+var before = alloc_used();
+var none = 0;
+var nothing = 0;
+var some = 0;
+var round = 0;
+while (round < 20000) {
+    var a = bote_req_begin();
+    var p = _round(a, &w, &wb);
+    if (dispatcher_listen_mask_a(a, full, p) != load64(&w)) { sys_exit(10); }
+    if (dispatcher_listen_mask_a(a, bare, p) != load64(&wb)) { sys_exit(10); }
+    if (load64(&w) < 0) { none = none + 1; }
+    elif (load64(&w) == 0) { nothing = nothing + 1; }
+    else { some = some + 1; }
+    round = round + 1;
+}
+if (alloc_used() != before) { sys_exit(20); }
+if (none < 1000 || nothing < 1000 || some < 1000) { sys_exit(30); }
+
+sys_exit(0);

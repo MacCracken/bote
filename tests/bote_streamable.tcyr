@@ -53,6 +53,7 @@ include "src/auth.cyr"
 include "src/conn.cyr"
 include "src/http_era.cyr"
 include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
 include "src/transport_streamable.cyr"
 
 # Minimal tool handler for the notify-sink full-path test.
@@ -201,6 +202,18 @@ fn main() {
     dispatcher_register_prompt(ndisp, prompt_def_new("greet2", "g", 0), &_n_handler);
     assert_eq(resumption_buffer_len(session_outbound_buffer(nso)), pbefore2 + 1,
     "dispatcher_register_prompt → prompts/list_changed reaches the buffer");
+    # A resource or a template registered produces notifications/resources/list_changed (3.7.2).
+    var rbefore = resumption_buffer_len(session_outbound_buffer(nso));
+    dispatcher_register_resource(ndisp, resource_def_new("res://n", "n", "N", "text/plain"), &_n_handler);
+    assert_eq(resumption_buffer_len(session_outbound_buffer(nso)), rbefore + 1,
+    "dispatcher_register_resource → a notification reaches the buffer");
+    var rev = vec_get(resumption_buffer_events(session_outbound_buffer(nso)), rbefore);
+    assert(streq(stream_event_data(rev),
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/list_changed\",\"params\":{}}") == 1,
+    "buffered event is resources/list_changed");
+    dispatcher_register_resource_template(ndisp, resource_template_new("res://t/{id}", "t", "T", "text/plain"), &_n_handler);
+    assert_eq(resumption_buffer_len(session_outbound_buffer(nso)), rbefore + 2,
+    "dispatcher_register_resource_template → another");
 
     # ---------------- POST piggyback: Accept negotiation + response frame ----------------
     var acc_yes = "POST /mcp HTTP/1.1\r\nAccept: application/json, text/event-stream\r\n\r\n";

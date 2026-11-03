@@ -60,14 +60,14 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | `serverInfo` in `result._meta["io.modelcontextprotocol/serverInfo"]` | ✅ (3.5.0) |
 | A missing resource is `-32602`, never `-32002` | ✅ (3.5.0) — `-32002` stays on the legacy path |
 | `ping` and `initialize` are gone | ✅ (3.5.0) — a modern `ping` is `-32601`. An `initialize` selects the legacy path whatever `_meta` it carries, so it never lands on a revision that has no `initialize` |
-| No `listChanged` advertised | ✅ (3.5.0) — the modern era has no way to deliver it until `subscriptions/listen` |
+| `listChanged` advertised only where it is delivered | ✅ (3.5.0) none; (3.7.2) `server/discover` advertises it for tools, prompts and resources on `http`, `bridge` and `streamable`, which carry `subscriptions/listen`, and on no other transport |
 | `tools/list` in a deterministic order | ✅ registration order, in both eras |
 | Every POST: `MCP-Protocol-Version` and `Mcp-Method`, and `Mcp-Name` on `tools/call`, `resources/read` and `prompts/get`. Missing, invalid or disagreeing with the body is `400` + `-32020` | ✅ (3.5.1) `src/http_era.cyr`, on `bote http`, `bote streamable` and (3.5.2) `bote bridge`. Names are case-insensitive, values case-sensitive. A field on two lines combines into a value that matches nothing, so it is refused (3.5.2) |
 | `Mcp-Name` in the `=?base64?…?=` sentinel, decoded before the comparison | ✅ (3.5.1) lower-case markers only, canonical Base64 only |
 | An unsupported version is `400` + `-32022`; a method bote does not implement is `404` + `-32601`; a `_meta` missing a required field is `400` + `-32602` | ✅ (3.5.1, corrected at 3.5.2) that clause is about `_meta`. Every other `-32602` and `-32603` is in-band on a `200`: the spec gives them no status, and the official client reads a JSON-RPC error out of a `200` or a `400`, not out of a `500` |
 | A notification is `202` with no body | ✅ (3.5.1), in both eras. It was `204` through 3.5.0, which 2025-11-25 does not allow either |
 | One message per POST | ✅ (3.5.1) a batch, a response or a non-object is `400`, a batch that names this revision included |
-| Responses in `application/json` | ✅ the spec lets the server choose per request. SSE arrives with `subscriptions/listen` |
+| Responses in `application/json` | ✅ the spec lets the server choose per request; (3.7.2) `subscriptions/listen` answers with `text/event-stream` |
 | `GET` and `DELETE` are `405` to a request naming this revision, with `Allow` | ✅ (3.5.1). A legacy `GET` keeps its stream |
 | `Mcp-Session-Id` and `Last-Event-ID` are ignored, and no session is minted | ✅ (3.5.1) |
 | `Mcp-Param-{Name}`, for a tool that declares `x-mcp-header` | ✅ (3.5.2) a value in the body needs its header, decoded and equal, integers compared by value and booleans as `true` / `false`. Missing, malformed, mismatched or undecodable is `400` + `-32020`. A header with no value in the body is refused too, which the spec's table does not ask for and no conforming client meets. A header the tool does not declare is ignored |
@@ -76,7 +76,9 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | `-32021` for a missing client capability | ⏳ no request bote serves needs one yet; capabilities are required and not otherwise read |
 | A third-party client | ✅ (3.5.3) `@modelcontextprotocol/client` 2.4.0 connects and uses every capability bote has, 410 checks on `http`, `streamable` and stdio in both eras and `bridge` in the modern one, and (3.6.0 to 3.6.3) its whole OAuth flow, with HS256, RS256 and ES256 tokens from a mock authorization server, and a step-up from a 403 it makes on its own. `./scripts/conformance.sh` repeats it |
 | `@modelcontextprotocol/conformance`, by its frozen requirement list | ⏳ (3.5.3) **25 of 37** on 2026-07-28, **21 of 30** on 2025-11-25, the same on `http` and `streamable`. What fails is a feature bote lacks: `InputRequiredResult`, progress, sampling and elicitation, logging, subscriptions. `tests/fixtures/conformance-expected-<revision>.yaml` lists each, and why |
-| `subscriptions/listen` and the rest of its notifications | ⏳ roadmap 3.7.x |
+| `subscriptions/listen`: each kind opt-in, never one not asked for, the honored subset acknowledged first in `notifications/subscriptions/acknowledged`, every message stamped with `io.modelcontextprotocol/subscriptionId`, keepalives | ✅ (3.7.2) on `http`, `bridge` and `streamable`, for `toolsListChanged`, `promptsListChanged` and `resourcesListChanged`, each honored only where that list exists. A filter that is not one is `-32602`; past `BOTE_LISTEN_MAX` streams, `-32603` "Subscription limit reached", the TypeScript SDK's words. With nothing honored the stream ends at once with its result, as the SDK does. A client that closes, sends anything, or stops reading loses its stream. `: keepalive` every `BOTE_LISTEN_KEEPALIVE_MS` (15 s, the SDK's) |
+| `resourceSubscriptions` and `notifications/resources/updated` | ⏳ checked as a list of strings and never honored, since `resources.subscribe` is not advertised (roadmap 3.7.x) |
+| `subscriptions/listen` on stdio, unix and WebSocket | ⏳ `-32601` there (roadmap 3.7.3) |
 
 ---
 
@@ -101,9 +103,10 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | `prompts/list` + `prompts/get` (capability advertised iff a `PromptRegistry` is present) | `dispatch` + `prompts` | ✅ — an unknown name, a missing required argument and non-object `arguments` are `-32602` (the last two since 3.4.5) |
 | `resources/list` + `resources/read` (capability advertised iff a `ResourceRegistry` is present) | `dispatch` + `resources` | ✅ — an unserved URI is `-32002` with `data.uri`, as in the resources spec's example (3.4.5; was `-32602`) |
 | `resources/templates/list` and reading through a template (optional in the spec) | `dispatch` + `resources` | ✅ (3.5.3) `dispatcher_register_resource_template`. RFC 6570 level 1: `{name}` is one non-empty value with no `/`, `?` or `#`, one to a segment. An exact resource wins, and the handler owns percent-decoding. Gated like `resources/*`, and an empty list with none registered |
-| `resources/subscribe` / `unsubscribe` + `notifications/resources/updated`; `resources` `listChanged` | — | ⏳ not implemented and not advertised. `notifications/resources/updated` comes with `subscriptions/listen` (roadmap 3.7.x); `resources/subscribe` is not planned, because 2026-07-28 removes it |
+| `resources/subscribe` / `unsubscribe` + `notifications/resources/updated` | — | ⏳ not implemented and not advertised. `notifications/resources/updated` comes with `subscriptions/listen`'s `resourceSubscriptions` (roadmap 3.7.x); `resources/subscribe` is not planned, because 2026-07-28 removes it |
+| `resources` `listChanged`, `notifications/resources/list_changed` | `dispatch` (`TOPIC_RESOURCE_REGISTERED`) | ✅ (3.7.2) a resource or a template registered is a change: streamable's drain path carries it, and `listChanged` is advertised beside tools and prompts |
 | `completion/complete` (capability advertised iff a completion handler is set) | `dispatch` (`dispatcher_set_completion`) | ✅ |
-| `notifications/tools/list_changed` + `notifications/prompts/list_changed` (buffered per session, drained on the client's next streamable `GET`; `listChanged` advertised only by a transport with a drain path) | `dispatch` (`dispatcher_set_notifications`) + `transport_streamable` (`strm_notify_sink`) | ✅ streamable (polled) |
+| `notifications/tools/list_changed` + `notifications/prompts/list_changed` + (3.7.2) `notifications/resources/list_changed` (buffered per session, drained on the client's next streamable `GET`; `listChanged` advertised only by a transport with a drain path) | `dispatch` (`dispatcher_set_notifications`) + `transport_streamable` (`strm_notify_sink`) | ✅ streamable (polled); live on a `subscriptions/listen` stream (3.7.2) |
 | `logging/setLevel` + `notifications/message` | — | ⏳ not advertised — advertising it would promise messages bote cannot deliver; not planned, because 2026-07-28 removes it |
 | Notifications produce no response | `dispatch` + `codec` | ✅ |
 | Batch arrays — mixed req + notif return only req responses (spec ≤ 2025-03-26; still accepted for later versions) | `codec` | ✅ |
@@ -252,7 +255,7 @@ registered by default in the binaries.
 | `notifications/progress` JSON builder | `progress_notification` | ✅ |
 | Threaded streaming dispatch | — | ⏳ bote-side work (roadmap 3.7.x). The cyrius primitives this once waited on — `lib/thread.cyr` MPSC, `lib/async.cyr`, `thread_local_alloc`, `arena_*` — are complete and pinned |
 | `$/cancelRequest` mid-stream handling | — | ⏳ pairs with threaded dispatch |
-| Server → client push (`tools` / `prompts` `list_changed`) | `transport_streamable` (`SessionOutbound`) | ✅ polled — buffered per session at produce time, drained on the next `GET` or piggybacked as SSE on a `POST`; advertised only by a transport with a drain path (3.0.0) |
+| Server → client push (`tools` / `prompts` / `resources` `list_changed`) | `transport_streamable` (`SessionOutbound`); `listen` | ✅ polled — buffered per session at produce time, drained on the next `GET` or piggybacked as SSE on a `POST`; advertised only by a transport with a drain path (3.0.0). ✅ live on a `subscriptions/listen` stream (3.7.2) |
 | Held-open `GET` stream with live push | `transport_streamable` | 🟡 the stream opens and replays the resumption buffer; *live* delivery waits on threaded dispatch |
 
 ## Audit / Events Sinks

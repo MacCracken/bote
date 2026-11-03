@@ -217,6 +217,20 @@ on the one loop, one at a time, as before 3.7.0. The other transports serve one 
 BOTE_WORKERS=8 ./build/bote streamable 8392
 ```
 
+### Listen streams
+
+On `http`, `bridge` and `streamable`, a client of MCP 2026-07-28 can send `subscriptions/listen` naming the
+list changes it wants, `toolsListChanged`, `promptsListChanged` and `resourcesListChanged`, and keep the
+response open as an event stream: an acknowledgement of what bote honors first, then a notification for
+each change it asked for. One thread holds every stream, so a stream holds no worker. `BOTE_LISTEN_MAX`
+(default 256) bounds how many are open at once, each one socket, and `0` turns the method off;
+`BOTE_LISTEN_KEEPALIVE_MS` (default 15000) is how often each stream gets a keepalive comment. A client that
+closes, sends anything, or stops reading loses its stream.
+
+```sh
+BOTE_LISTEN_MAX=64 BOTE_LISTEN_KEEPALIVE_MS=30000 ./build/bote http 8390
+```
+
 ### Connection deadlines
 
 Every transport but streamable serves one client at a time, so each connection gets a **send deadline**:
@@ -299,6 +313,7 @@ bote implements [MCP](https://modelcontextprotocol.io/) over JSON-RPC 2.0.
 | `completion/complete` | Completion capability | Argument completion values |
 | `ping` | Keepalive | Empty result — answered even on a dispatcher with no registries wired |
 | `server/discover` | 2026-07-28 only | Supported versions and capabilities, with the cache hints |
+| `subscriptions/listen` | 2026-07-28 only, on `http`, `bridge` and `streamable` | An event stream: the acknowledgement, then a notification for each list change asked for |
 
 Supported MCP protocol versions: `2024-11-05`, `2025-03-26`, `2025-06-18`,
 `2025-11-25` (default) — the same list for `initialize` negotiation and for the
@@ -378,6 +393,10 @@ src/fs_tools.cyr           fs_write / fs_read / fs_mkdir (BOTE_FS_ROOT-confined)
 src/web_tools.cyr          web_fetch / web_search (SearXNG)
 src/fetch.cyr              An outbound request made in a child, with a deadline
 src/jwks.cyr               A JWK Set fetched from a jwks_uri
+src/conn.cyr               Per-connection deadlines, the serve entry, worker threads
+src/http_era.cyr           Which MCP revision an HTTP POST belongs to, and the 2026-07-28 header checks
+src/oauth_metadata.cyr     OAuth 2.0 Protected Resource Metadata (RFC 9728) and the scope gate
+src/listen.cyr             subscriptions/listen streams, held by one thread off the serving ones
 src/transport_stdio.cyr    Line-oriented JSON-RPC over stdin/stdout
 src/transport_http.cyr     HTTP/1.1 server with middleware
 src/transport_unix.cyr     AF_UNIX line-oriented transport
@@ -391,7 +410,7 @@ src/main_common.cyr        Entry helpers (dispatcher, mode selection, env bearer
 Dependencies rehydrate into `lib/` (gitignored) via `cyrius deps`.
 Cross-project deps **libro and majra** are git-pinned via
 `[deps.<name>]` in `cyrius.cyml`. Two consumer bundles ship in `dist/`:
-`bote.cyr` (full, 37 modules) and `bote-core.cyr` (core 13,
+`bote.cyr` (full, 38 modules) and `bote-core.cyr` (core 13,
 transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md). Both state
 **cyrius ≥ 6.7.13** on the `# Minimum cyrius:` line near the top of each (`bote-core.cyr` alone still builds from 6.7.2);
 a repo that copies the core bundle rather than pinning it must also declare
@@ -401,9 +420,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 4536 total across nineteen files (+ a core-only drift smoke)
+### Tests — 4730 total across twenty files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 4536 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 4730 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 969 — core protocol/dispatch/codec/schema/session/transports
@@ -411,17 +430,18 @@ cyrius test tests/conformance.tcyr        # 218 — JSON-RPC 2.0 + MCP 2025-11-2
 cyrius test tests/bote_auth.tcyr          # 91 — bearer + allowlist + JWT + PKCE validators, the head check
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fetch.tcyr         # 62 — a request made in a child: the record, the cap, the deadline, a real GET
-cyrius test tests/bote_fs_tools.tcyr      # 56 — fs_write / fs_read / fs_mkdir
+cyrius test tests/bote_fs_tools.tcyr      # 63 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 207 — host registry + SSRF guard (IPv4 + IPv6)
 cyrius test tests/bote_http_era.tcyr      # 1833 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
 cyrius test tests/bote_jwks.tcyr          # 49 — a jwks_uri: what it may be, and real fetches from a child
-cyrius test tests/bote_jwt.tcyr           # 483 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
+cyrius test tests/bote_jwt.tcyr           # 491 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
+cyrius test tests/bote_listen.tcyr        # 169 — subscriptions/listen: the filter, and real streams on the three HTTP handlers
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
-cyrius test tests/bote_streamable.tcyr    # 58 — Streamable HTTP / SSE internals
-cyrius test tests/bote_threads.tcyr       # 74 — bote on worker threads: each case from several threads at once
+cyrius test tests/bote_streamable.tcyr    # 61 — Streamable HTTP / SSE internals
+cyrius test tests/bote_threads.tcyr       # 81 — bote on worker threads: each case from several threads at once
 cyrius test tests/bote_transport_unix.tcyr # 76 — Unix transport: sockaddr, accept-error policy, backoff, deadlines, closed-peer write
 cyrius test tests/bote_web_tools.tcyr     # 88 — web_fetch / web_search + the SSRF guard (URL and resolved address) + their records
 cyrius test tests/bote_ws.tcyr            # 94 — WebSocket config + wire-up + the send-deadline drop + scopes per frame + what an upgrade and a connection keep
@@ -483,6 +503,7 @@ cyrius fuzz fuzz/schema_validate.fcyr
 cyrius fuzz fuzz/ssrf_ipv6.fcyr
 cyrius fuzz fuzz/http_head.fcyr
 cyrius fuzz fuzz/req_arena.fcyr
+cyrius fuzz fuzz/listen_filter.fcyr
 # 1 passed, 0 failed each
 ```
 

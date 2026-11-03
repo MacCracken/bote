@@ -30,7 +30,14 @@ The primary security-relevant surface areas are:
   the operator opts in. The send deadline is per write, so a client that keeps
   reading a little at a time is not dropped: on streamable it holds a worker, and
   `BOTE_WORKERS` such clients hold them all; on the other transports one holds
-  the server.
+  the server. Since **3.7.2** a `subscriptions/listen` stream on `http`, `bridge` or
+  `streamable` is held by one thread of its own, not by a worker or the serving loop,
+  and at most `BOTE_LISTEN_MAX` (256) are open at once; past that a listen gets
+  `-32603`. Each holds one socket and keeps nothing on the heap. The thread never
+  waits on a client: a frame the socket cannot take whole ends that stream, as does a
+  client that closes or sends anything. Leave the process's file limit room for
+  `BOTE_LISTEN_MAX` sockets beside the rest. A stream's token is checked when it
+  opens and not again; it carries only that a list changed, never what is in it.
 - **Browsers** — since **3.4.15** every HTTP-family transport refuses a present
   `Origin` that is not on `BOTE_ALLOWED_ORIGINS` with 403, before anything else
   runs, and with no list set every present `Origin` is refused, except since **3.5.2**
@@ -119,9 +126,11 @@ The primary security-relevant surface areas are:
   substitution of a request reaches a scoped tool without its scope. A tool that requires a scope
   with nothing configured to read one is refused, not waved through, and a name in
   `BOTE_TOOL_SCOPES` that matches no tool stops the server. With no token in play there is nothing to
-  compare, so scopes do not apply on stdio or the Unix socket, and bote logs a WARN there. Scopes
-  gate `tools/call` only. A WebSocket checks its token once, at the upgrade, so a token that
-  expires keeps its connection.
+  compare, so scopes do not apply on stdio or the Unix socket, and bote logs a WARN there. Since
+  **3.7.2** a call is judged and served by one look at the
+  registries: through **3.7.1** a tool registered while a call for it was in flight could run for a
+  token without its scope, since the check found no tool and the handler was found after, and a
+  prompt or resource replaced meanwhile was judged by one registration and served by another.
 - **Memory** — `alloc` never frees, so what a request leaves on the heap stays for
   the life of the process. Since **3.4.15** everything bote allocates to answer a
   message goes on a request arena that the next message rewinds, including

@@ -60,6 +60,7 @@ include "src/conn.cyr"
 include "src/fetch.cyr"
 include "src/http_era.cyr"
 include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
 include "src/transport_streamable.cyr"
 include "src/libro_tools.cyr"
 include "src/fs_tools.cyr"
@@ -780,6 +781,122 @@ fn _rt_writer(i) {
     return 0;
 }
 
+# ---- the first prompt and resource, from four threads at once (3.7.2) --------------------
+# A dispatcher makes its prompt and resource registries on first use. Four threads each
+# register a prompt, a resource and a template on each of FR_N fresh dispatchers: each made
+# its own registry, and the first stored was lost, with what was in it, for nearly all.
+var FR_N = 1000;
+var _fr_ds = 0;
+
+fn _fr_worker(i) {
+    var pn = _rg_name("fr_p", i);
+    var ru = _rg_name("fr://r/", i);
+    var tu = _cat3(_rg_name("fr://t/", i), "/{x}", "");
+    _wait_go();
+    var j = 0;
+    while (j < FR_N) {
+        var d = load64(_fr_ds + j * 8);
+        dispatcher_register_prompt(d, prompt_def_new(pn, "P", vec_new()), &_rg_prompt);
+        dispatcher_register_resource(d, resource_def_new(ru, "r", "R", "text/plain"), &_rg_res);
+        j = j + 1;
+    }
+    j = 0;
+    while (j < FR_N) {
+        var td = load64(_fr_ds + (FR_N + j) * 8);
+        dispatcher_register_resource_template(td, resource_template_new(tu, "t", "T", "text/plain"), &_rg_res);
+        j = j + 1;
+    }
+    return 0;
+}
+
+# ---- a call judged by what serves it (3.7.2) ----------------------------------------
+# Writers change what serves a name while callers, whose token lacks the scope `admin`, ask
+# for it: a tool registered requiring it and removed; a prompt and a resource that switch
+# between a registration requiring it, served by a guarded handler, and one requiring
+# nothing, served by a public one; and a resource that switches between no handler, when a
+# template requiring the scope serves its URI, and a public handler. A call judged by one
+# look at the registry and served by another ran a guarded handler for such a token, once
+# in twenty calls. And a tool that switches between a schema requiring `n`, served by a
+# handler that must never see a call without it, and one requiring nothing: its arguments
+# are checked against the schema of the registration that serves them. Each writer and
+# each caller is a thread of its own.
+var _js_d = 0;
+var _js_writers = 0;
+var _js_ran = 0;
+var _js_refused = 0;
+var _js_public = 0;
+var _js_unchecked = 0;
+var _js_msgs = 0;
+var JS_N = 3000;
+
+fn _js_tool(args, claims) { atomic_fetch_add(&_js_ran, 1); return "{\"content\":[]}"; }
+fn _js_prompt(args, claims) { atomic_fetch_add(&_js_ran, 1); return "{\"messages\":[]}"; }
+fn _js_res(uri, claims) { atomic_fetch_add(&_js_ran, 1); return "{\"contents\":[]}"; }
+fn _js_pub_prompt(args, claims) { atomic_fetch_add(&_js_public, 1); return "{\"messages\":[]}"; }
+fn _js_pub_res(uri, claims) { atomic_fetch_add(&_js_public, 1); return "{\"contents\":[]}"; }
+fn _js_strict(args, claims) {
+    if (_has(args, "\"n\"") == 0) { atomic_fetch_add(&_js_unchecked, 1); }
+    return "{\"content\":[]}";
+}
+fn _js_loose(args, claims) { atomic_fetch_add(&_js_public, 1); return "{\"content\":[]}"; }
+
+# A schema that requires the integer `n`.
+fn _js_needs_n() {
+    var props = vec_new();
+    vec_push(props, schema_prop_new("n", "{\"type\":\"integer\"}"));
+    var req = vec_new();
+    vec_push(req, "n");
+    return schema_new("object", props, req);
+}
+fn _js_lacks(claims, scope, ctx) { return 0; }
+
+fn _js_admin() {
+    var v = vec_new();
+    vec_push(v, "admin");
+    return v;
+}
+
+fn _js_writer(kind) {
+    _wait_go();
+    var k = 0;
+    while (k < JS_N) {
+        if (kind == 0) {
+            dispatcher_register_tool(_js_d, tool_def_with_required_scopes(tool_def_new("js_tool", "J", schema_new("object", 0, vec_new())), _js_admin()), &_js_tool);
+            dispatcher_deregister_tool(_js_d, "js_tool");
+        } elif (kind == 1) {
+            dispatcher_register_prompt(_js_d, prompt_def_with_required_scopes(prompt_def_new("js_p", "J", vec_new()), _js_admin()), &_js_prompt);
+            dispatcher_register_prompt(_js_d, prompt_def_new("js_p", "J", vec_new()), &_js_pub_prompt);
+        } elif (kind == 4) {
+            dispatcher_register_tool(_js_d, tool_def_new("js_v", "V", _js_needs_n()), &_js_strict);
+            dispatcher_register_tool(_js_d, tool_def_new("js_v", "V", schema_new("object", 0, vec_new())), &_js_loose);
+        } elif (kind == 2) {
+            dispatcher_register_resource(_js_d, resource_def_with_required_scopes(resource_def_new("js://r", "j", "J", "text/plain"), _js_admin()), &_js_res);
+            dispatcher_register_resource(_js_d, resource_def_new("js://r", "j", "J", "text/plain"), &_js_pub_res);
+        } else {
+            dispatcher_register_resource(_js_d, resource_def_new("js://t/1", "j", "J", "text/plain"), 0);
+            dispatcher_register_resource(_js_d, resource_def_new("js://t/1", "j", "J", "text/plain"), &_js_pub_res);
+        }
+        k = k + 1;
+    }
+    atomic_fetch_add(&_js_writers, 0 - 1);
+    return 0;
+}
+
+fn _js_caller(kind) {
+    _wait_go();
+    var m = load64(_js_msgs + kind * 8);
+    while (atomic_load(&_js_writers) > 0) {
+        var r = codec_process_message_a(bote_req_begin(), m, _js_d, "a-token");
+        if (r != 0 && _has(r, "insufficient scope")) { atomic_fetch_add(&_js_refused, 1); }
+    }
+    return 0;
+}
+
+fn _js_run(i) {
+    if (i < 5) { return _js_writer(i); }
+    return _js_caller(i - 5);
+}
+
 # ---- a failure that ends the process, from a worker (3.7.1) -----------------------
 # _gen_session_id exits 90 when the kernel gives no entropy. Called with sys_exit from a
 # worker, it ended that thread alone, holding the store's lock: the process stayed up and
@@ -1098,6 +1215,49 @@ fn main() {
     _rt_reg = resource_registry_new();
     _on_threads(&_rt_writer, 4);
     assert_eq(vec_len(resource_registry_templates(_rt_reg)), 1200, "register: four threads registering templates at once lose none");
+
+    # ---------------- the first prompt and resource, from four threads (3.7.2) ----------------
+    _fr_ds = alloc(2 * FR_N * 8);
+    var fr_i = 0;
+    while (fr_i < 2 * FR_N) {
+        store64(_fr_ds + fr_i * 8, dispatcher_new(tool_registry_new()));
+        fr_i = fr_i + 1;
+    }
+    _on_threads(&_fr_worker, 4);
+    var fr_lost_p = 0;
+    var fr_lost_r = 0;
+    var fr_lost_t = 0;
+    fr_i = 0;
+    while (fr_i < FR_N) {
+        var frd = load64(_fr_ds + fr_i * 8);
+        if (prompt_registry_len(dispatcher_prompts(frd)) != 4) { fr_lost_p = fr_lost_p + 1; }
+        if (resource_registry_len(dispatcher_resources(frd)) != 4) { fr_lost_r = fr_lost_r + 1; }
+        var frt = load64(_fr_ds + (FR_N + fr_i) * 8);
+        if (vec_len(resource_registry_templates(dispatcher_resources(frt))) != 4) { fr_lost_t = fr_lost_t + 1; }
+        fr_i = fr_i + 1;
+    }
+    assert_eq(fr_lost_p, 0, "first: no dispatcher lost a prompt registered beside another thread's first");
+    assert_eq(fr_lost_r, 0, "first: nor a resource");
+    assert_eq(fr_lost_t, 0, "first: nor a template");
+
+    # ---------------- a call judged by what serves it (3.7.2) ----------------
+    _js_d = dispatcher_new(tool_registry_new());
+    dispatcher_set_scope_check(_js_d, &_js_lacks, 0);
+    dispatcher_register_prompt(_js_d, prompt_def_new("js_p", "J", vec_new()), &_js_pub_prompt);
+    dispatcher_register_resource(_js_d, resource_def_new("js://r", "j", "J", "text/plain"), &_js_pub_res);
+    dispatcher_register_resource_template(_js_d, resource_template_with_required_scopes(resource_template_new("js://t/{id}", "t", "T", "text/plain"), _js_admin()), &_js_res);
+    _js_msgs = alloc(40);
+    store64(_js_msgs, _rg_msg("tools/call", "{\"name\":\"js_tool\"}"));
+    store64(_js_msgs + 8, _rg_msg("prompts/get", "{\"name\":\"js_p\"}"));
+    store64(_js_msgs + 16, _rg_msg("resources/read", "{\"uri\":\"js://r\"}"));
+    store64(_js_msgs + 24, _rg_msg("resources/read", "{\"uri\":\"js://t/1\"}"));
+    store64(_js_msgs + 32, _rg_msg("tools/call", "{\"name\":\"js_v\",\"arguments\":{}}"));
+    _js_writers = 5;
+    _on_threads(&_js_run, 10);
+    assert_eq(_js_ran, 0, "judged: no guarded handler ran for a token without its scope");
+    assert_eq(_js_unchecked, 0, "judged: no handler ran with arguments another registration's schema passed");
+    assert(_js_refused > 0, "judged: calls were refused for the scope");
+    assert(_js_public > 0, "judged: and the public registrations answered");
     _hd_d = dispatcher_new(tool_registry_new());
     _on_threads(&_hd_writer, 4);
     assert_eq(map_count(dispatcher_handlers(_hd_d)), 1200, "register: four threads setting handlers at once lose none");

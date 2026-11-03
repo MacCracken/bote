@@ -202,6 +202,8 @@ fn _strm_notify_publish(ctx, topic, payload) {
         wire = tools_list_changed_notification();
     } elif (streq(topic, TOPIC_PROMPT_REGISTERED()) == 1) {
         wire = prompts_list_changed_notification();
+    } elif (streq(topic, TOPIC_RESOURCE_REGISTERED()) == 1) {
+        wire = resources_list_changed_notification();
     } else {
         return 0;
     }

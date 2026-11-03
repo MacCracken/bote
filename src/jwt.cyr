@@ -429,13 +429,31 @@ fn _jwk_rsa_key_a(a, jwk, kid) {
 
 # 1 when the 64 bytes Qx || Qy are a point on P-256. sigil asks on every verify too, and
 # this says so once, at startup, and not as every token failing.
+# sigil's curve check makes what it needs itself. This called _ecv_init too, the verify's
+# tables, which outside a scope of sigil's takes one of its crypto lanes for the rest of the
+# calling thread's life (sigil 3.13.14): the main thread loading keys at startup kept a lane
+# no worker could have, and a worker that refreshed the keys and exited kept one for good
+# (3.7.2). The verify's tables are _jwt_p256_warm's.
 fn _jwt_on_curve(q) {
-    _ecv_init();
     var x[32];
     var y[32];
     u256_load_be(&x, q);
     u256_load_be(&y, q + 32);
     return pt_is_on_curve(&x, &y);
+}
+
+# sigil's P-256 tables, built on the thread that takes the first EC key (3.7.1): a fetch
+# forked while another thread builds one would leave the child waiting on its claim. Once
+# for the process: each build is a sign and a verify, 13 ms, and it ran for every EC key of
+# every set that changed (3.7.2). sigil's sign and verify open their own lane scopes.
+var _jwt_p256_warmed = 0;
+var _jwt_p256_warm_fp = &ecdsa_p256_warm;   # what builds them; a test counts the builds
+
+fn _jwt_p256_warm() {
+    if (atomic_load(&_jwt_p256_warmed) == 1) { return 0; }
+    fncall0(_jwt_p256_warm_fp);
+    atomic_store(&_jwt_p256_warmed, 1);
+    return 0;
 }
 
 fn _jwk_ec_key_a(a, jwk, kid) {
@@ -934,7 +952,7 @@ fn jwt_secret_new(key) {
     # sigil builds its tables on first use, a claim flag held while it does. A fetch forked
     # from one worker while another builds one leaves the child waiting on that flag, so a
     # handle builds what its verifies will need now, on the thread making it (3.7.1): the
-    # SHA-256 tables here, the P-256 ones when it takes an EC key (_jwt_set_jwks).
+    # SHA-256 tables here, the P-256 ones when it takes an EC key (_jwt_p256_warm).
     sha256_global_init();
     var s = alloc(BOTE_JWT_SECRET_BYTES);
     memset(s, 0, BOTE_JWT_SECRET_BYTES);
@@ -981,12 +999,14 @@ fn _jwt_set_jwks(s, json, changed_out) {
     }
     if (_jwt_keys_same(jwt_secret_keys(s), fresh) == 1) { return 0; }
     var kept = vec_new();
+    var ec = 0;
     i = 0;
     while (i < vec_len(fresh)) {
         vec_push(kept, _jwt_key_keep(vec_get(fresh, i)));
-        if (_jwt_key_alg(vec_get(fresh, i)) == BOTE_JWT_ES256) { ecdsa_p256_warm(); }
+        if (_jwt_key_alg(vec_get(fresh, i)) == BOTE_JWT_ES256) { ec = 1; }
         i = i + 1;
     }
+    if (ec == 1) { _jwt_p256_warm(); }
     i = 0;
     while (i < vec_len(elems)) {
         if (_jwk_key_a(a, vec_get(elems, i)) == 0) {

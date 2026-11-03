@@ -24,7 +24,9 @@
 #     answers by BOTE_WEB_TIMEOUT_MS (3.6.5);
 #   - streamable on worker threads answers beside a held connection, which stops it
 #     with BOTE_WORKERS=0, holds BOTE_WORKERS to its bound, and serves sixteen
-#     clients at once while a jwks_uri is fetched every second from its workers (3.7.0).
+#     clients at once while a jwks_uri is fetched every second from its workers (3.7.0);
+#   - a subscriptions/listen stream on http, bridge and streamable: its acknowledgement,
+#     keepalives, a client that goes, and -32601 over stdio (3.7.2).
 # Needs curl and python3. CI runs it as the "Transport smoke" step.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -422,6 +424,12 @@ BOTE_WORKERS=500000000000 start workers500 "$L/workers500.err" $B streamable 183
 wait_port 18377 || err "workers: nothing listening on 18377"
 grep -q 'BOTE_WORKERS past its bound; holding it there workers=999999999 max=64' "$L/workers500.err" && grep -q 'worker threads workers=64' "$L/workers500.err" \
   || err "workers: a twelve-digit count not held at 64: $(head -3 "$L/workers500.err")"
+# Leading zeros are not digits of the count (3.7.2): ten of them were 999999999, and 64 workers.
+BOTE_WORKERS=0000000000 start workers00 "$L/workers00.err" $B streamable 18374
+BOTE_WORKERS=0000000004 start workers04 "$L/workers04.err" $B streamable 18373
+wait_port 18374 && wait_port 18373 || err "workers: nothing listening on 18374 or 18373"
+grep -q 'worker threads workers=0' "$L/workers00.err" || err "workers: ten zeros not read as 0: $(head -3 "$L/workers00.err")"
+grep -q 'worker threads workers=4' "$L/workers04.err" || err "workers: 0000000004 not read as 4: $(head -3 "$L/workers04.err")"
 python3 -I -m http.server 18376 --bind 127.0.0.1 --directory "$jk" > /dev/null 2>&1 & pids+=($!)
 wait_port 18376 || err "workers: the key server did not start"
 env "${JENV[@]}" BOTE_LOG=debug BOTE_JWKS_URL=http://127.0.0.1:18376/full.json BOTE_JWKS_REFRESH=1 BOTE_WORKERS=4 \
@@ -548,6 +556,26 @@ r=$(wscall http://127.0.0.1:18381 BOTE_WEB_TIMEOUT_MS=500)
 ms=$(( ($(date +%s%N) - t0) / 1000000 ))
 echo "$r" | grep -q 'could not reach the SearXNG endpoint' || err "web_search on a silent server: $r"
 [ "$ms" -lt 3000 ] || err "web_search on a silent server took $ms ms, past its 500 ms deadline"
+
+# subscriptions/listen (3.7.2): on http, bridge and streamable a listen opens an event stream
+# whose first message is the acknowledgement, stamped with the request's id; a keepalive keeps
+# it, and a client that goes is gone from the server's count. stdio and ws have no such method.
+LB="{\"jsonrpc\":\"2.0\",\"id\":\"s1\",\"method\":\"subscriptions/listen\",\"params\":{$MD,\"notifications\":{\"toolsListChanged\":true}}}"
+LACK='"method":"notifications/subscriptions/acknowledged","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/subscriptionId":"s1"}}'
+for m in "18390 /mcp" "18391 /" "18392 /mcp"; do
+  read -r p path <<< "$m"
+  r=$(curl -s -N -D - --max-time 1 "${MV[@]}" -H 'Mcp-Method: subscriptions/listen' -d "$LB" "http://127.0.0.1:$p$path")
+  echo "$r" | grep -qi '^content-type: text/event-stream' && echo "$r" | grep -qF "$LACK" || err "$p listen: no acknowledgement on an event stream: $r"
+done
+BOTE_LOG=debug BOTE_LISTEN_KEEPALIVE_MS=200 start listen "$L/listen.err" $B http 18372
+wait_port 18372 || err "listen: nothing listening on 18372"
+r=$(curl -s -N --max-time 1 "${MV[@]}" -H 'Mcp-Method: subscriptions/listen' -d "$LB" http://127.0.0.1:18372/mcp)
+[ "$(echo "$r" | grep -c '^: keepalive')" -ge 3 ] || err "listen: fewer than three keepalives in a second at 200 ms: $r"
+for _ in $(seq 1 20); do grep -q 'listen stream closed reason=gone open=0' "$L/listen.err" && break; sleep 0.1; done
+grep -q 'listen streams max=256 keepalive_ms=200' "$L/listen.err" && grep -q 'listen stream opened honored=1 open=1' "$L/listen.err" \
+  && grep -q 'listen stream closed reason=gone open=0' "$L/listen.err" || err "listen: the log does not show a stream opened and its client gone: $(grep listen "$L/listen.err")"
+r=$(printf '%s\n' "$LB" | timeout 5 $B stdio 2>/dev/null)
+echo "$r" | grep -q '"code":-32601' || err "listen over stdio is not -32601: $r"
 
 for f in "$L"/*.err; do grep -q 'transport failed' "$f" && err "$(basename "$f"): $(grep 'transport failed' "$f")"; done
 [ $fail -eq 0 ] || exit 1

@@ -53,6 +53,7 @@ include "src/stream.cyr"
 include "src/session.cyr"
 include "src/auth.cyr"
 include "src/http_era.cyr"
+include "src/listen.cyr"
 
 alloc_init();
 sakshi_set_level(SK_ERROR);

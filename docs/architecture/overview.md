@@ -22,7 +22,7 @@
 1. **One protocol implementation** — every consumer dispatches through bote instead of reimplementing JSON-RPC 2.0.
 2. **Registry-driven** — tools registered with schemas, dispatch validates automatically.
 3. **Transport-agnostic** — same `Dispatcher` powers six transports.
-4. **Streaming-ready data layer** — progress + cancellation primitives and a polled per-session push are in place; real-time held-open streaming is bote-side work (roadmap 3.7.x). Since 3.7.0 the streamable transport serves on sandhi's worker pool (`bote_conn_serve_pooled`, `BOTE_WORKERS`): each thread has its own request state (`bote_req_state`, through a thread-local slot `bote_conn_arm` claims), and what workers share is guarded — the session store and its buffers by a mutex, a session's outbound bundle and a JwtSecret's refresh by compare-and-swap, its cache by a mutex once threads run, the dispatcher's sinks by `bote_conn_serial_sinks`, a forked fetch by holding the allocators' locks across the fork.
+4. **Streaming-ready data layer** — progress + cancellation primitives and a polled per-session push are in place. Since 3.7.2 a `subscriptions/listen` stream carries list changes live on `http`, `bridge` and `streamable`: the thread that answers it writes the acknowledgement and parks a duplicate of the socket in a ListenHub (`src/listen.cyr`), whose one thread waits on every parked socket and on a wake pipe, and writes each stream the changes it asked for, without ever waiting on a client. Progress on a request's own stream, cancellation, and listen on the line transports remain (roadmap 3.7.x). Since 3.7.0 the streamable transport serves on sandhi's worker pool (`bote_conn_serve_pooled`, `BOTE_WORKERS`): each thread has its own request state (`bote_req_state`, through a thread-local slot `bote_conn_arm` claims), and what workers share is guarded — the session store and its buffers by a mutex, a session's outbound bundle and a JwtSecret's refresh by compare-and-swap, its cache by a mutex once threads run, the dispatcher's sinks by `bote_conn_serial_sinks`, a forked fetch by holding the allocators' locks across the fork.
 5. **Audit + events as fn-pointer + ctx adapters** — libro and majra wired today; any other backend drops in via the same shape.
 6. **Auth as opt-in middleware** — bearer-token validator is a fn-pointer slot on each HTTP-family transport config; unset = no overhead, no behavior change.
 7. **No global state in the dispatcher** — caller owns the registry and dispatcher heap pointers; transports are per-instance.
@@ -151,6 +151,7 @@ src/
 ├── jwks.cyr                — a JWK Set fetched from a jwks_uri, through fetch.cyr, refreshed by jwt.cyr (3.6.6)
 ├── http_era.cyr            — which era a POST is; 2026-07-28's headers, `Mcp-Param` included, and status codes (3.5.1)
 ├── oauth_metadata.cyr      — RFC 9728 Protected Resource Metadata, the challenge a 401 carries (3.6.0), and the 403 for a missing scope (3.6.3)
+├── listen.cyr              — `subscriptions/listen` streams on the HTTP transports, held by one hub thread off the serving ones (3.7.2)
 ├── conn.cyr                — per-connection deadlines (3.4.3): send timeout on
 │                             every connection, opt-in Unix idle timeout
 ├── transport_stdio.cyr     — line-oriented stdin/stdout loop

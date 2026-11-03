@@ -209,6 +209,18 @@ own modules. See
 `docs/development/issues/archive/2026-05-10-opt-in-transport-profile.md`
 for the rationale and module-split derivation.
 
+### A consumer that serves messages itself
+
+bote allocates what a message needs on a request arena (`bote_req_alloc()`), and a
+transport rewinds it at the top of every message with `bote_req_begin()`. bote's own
+transports do. A consumer that hands messages to `codec_process_message` or
+`dispatcher_dispatch` from its own transport, as a core-bundle consumer does, must call
+`bote_req_begin()` before each one, on the thread that serves it. Without it the arena
+is never rewound, and what each message put there stays for the life of the process.
+Use the `_a` forms (`codec_process_message_a(bote_req_begin(), ...)`) to put the reply
+there too; the plain forms put it on the heap. A threaded server calls `bote_conn_arm()`
+once, before its first thread, so each thread has an arena of its own.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`

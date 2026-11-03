@@ -1,0 +1,501 @@
+# bote::listen — `subscriptions/listen` streams, held off the serving threads (3.7.2).
+#
+# MCP 2026-07-28 replaces the GET stream with `subscriptions/listen`: a client names the
+# changes it wants, each opt-in, and the server answers with a stream that stays open. On
+# HTTP that is a text/event-stream response. Its first message is
+# `notifications/subscriptions/acknowledged`, naming what the server agreed to honor; then
+# one notification for each change of a kind it honors; a `: keepalive` comment every
+# BOTE_LISTEN_KEEPALIVE_MS; and a result only when the server ends the stream, which here
+# is only when nothing asked for can be honored. Every message on it carries the listen
+# request's id in `_meta`, under `io.modelcontextprotocol/subscriptionId`.
+#
+# A stream held by the thread that answered it would hold a worker, or a one-loop server,
+# for as long as it is open. So a hub holds them instead. The worker writes the response's
+# head and the acknowledgement, hands a duplicate of the socket to one of the hub's slots,
+# and goes back to serving, sandhi closing its own copy. One hub thread, started by the
+# first stream, waits on every parked socket and on a wake pipe: a client that closes, or
+# sends anything at all, is gone, and its slot is free. A change any thread publishes
+# through the hub's sink is a bit, so changes of one kind coalesce: a list's change says
+# only that it changed. The thread writes each stream its frame, never blocking: a write
+# the socket cannot take whole is a client that has stopped reading, and its stream ends.
+#
+# A stream keeps nothing: the slots are made with the hub, frames are built in its own
+# buffers, and the id is copied into the slot, which bounds it at BOTE_LISTEN_ID_MAX.
+#
+# agnos runs its threads one at a time, so a hub thread there would hold the server: there
+# is no hub, and the method is not found.
+#
+# ListenHub (104 B):
+#   +0  lock          a mutex over the slots
+#   +8  slots         `max` of BOTE_LISTEN_SLOT_BYTES
+#   +16 max
+#   +24 open          slots holding a stream
+#   +32 pending       BOTE_LISTEN_* bits of the changes waiting to go out, set by any thread
+#   +40 wake_rd       the hub thread's end of its wake pipe
+#   +48 wake_wr
+#   +56 started       1 once the hub thread runs
+#   +64 keepalive_ms
+#   +72 next          the EventSink the hub's sink passes every event on to, or 0
+#   +80 pollfds       max + 1 of them, the hub thread's own
+#   +88 frame         BOTE_LISTEN_FRAME_MAX bytes, the hub thread's own
+#   +96 polled        max + 1 slot pointers, beside the pollfds
+# A slot (BOTE_LISTEN_SLOT_BYTES): +0 fd, -1 when free and -2 while a worker opens it,
+# +8 the BOTE_LISTEN_* bits it honors, +16 the id's length, +24 the id, a raw JSON literal.
+
+var BOTE_LISTEN_MAX_DEFAULT = 256;
+var BOTE_LISTEN_KEEPALIVE_MS = 15000;
+var BOTE_LISTEN_ID_MAX = 256;
+var BOTE_LISTEN_SLOT_BYTES = 288;
+var BOTE_LISTEN_FRAME_MAX = 1024;
+var BOTE_LISTEN_SUB_KEY = "io.modelcontextprotocol/subscriptionId";
+var BOTE_LISTEN_ID_LONG = "a subscriptions/listen id is at most 256 bytes";
+
+# The change a published topic is, as a BOTE_LISTEN_* bit, or 0.
+fn _bl_kind(topic) {
+    if (streq(topic, TOPIC_TOOL_REGISTERED()) == 1 || streq(topic, TOPIC_TOOL_DEREGISTERED()) == 1) { return BOTE_LISTEN_TOOLS; }
+    if (streq(topic, TOPIC_PROMPT_REGISTERED()) == 1) { return BOTE_LISTEN_PROMPTS; }
+    if (streq(topic, TOPIC_RESOURCE_REGISTERED()) == 1) { return BOTE_LISTEN_RESOURCES; }
+    return 0;
+}
+
+# The notification a BOTE_LISTEN_* bit sends.
+fn _bl_method(bit) {
+    if (bit == BOTE_LISTEN_TOOLS) { return "notifications/tools/list_changed"; }
+    if (bit == BOTE_LISTEN_PROMPTS) { return "notifications/prompts/list_changed"; }
+    return "notifications/resources/list_changed";
+}
+
+fn bote_listen_open(h) {
+    if (h == 0) { return 0; }
+    return atomic_load(h + 24);
+}
+
+fn bote_listen_hub_with_keepalive(h, ms) {
+    if (h != 0 && ms > 0) { store64(h + 64, ms); }
+    return h;
+}
+
+#ifdef CYRIUS_TARGET_AGNOS
+fn bote_listen_hub_new(max) { return 0; }
+fn bote_listen_sink(h, next) { return next; }
+fn bote_listen_http(h, hc, req, resp, d) { return resp_error_a(bote_req_alloc(), req_id(req), 0 - 32601, "method not found: subscriptions/listen"); }
+#endif
+
+#ifndef CYRIUS_TARGET_AGNOS
+var _BL_POLLIN = 1;
+var _BL_SEND = 16448;   # MSG_DONTWAIT | MSG_NOSIGNAL, the same on both Linux arches
+
+fn _bl_nonblock(fd) {
+    var fl = sys_fcntl(fd, F_GETFL, 0);
+    if (fl < 0) { return fl; }
+    return sys_fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+}
+
+# A hub for at most `max` streams, or 0 for none.
+fn bote_listen_hub_new(max) {
+    if (max <= 0) { return 0; }
+    var h = alloc(104);
+    var slots = alloc(max * BOTE_LISTEN_SLOT_BYTES);
+    var pfd = alloc((max + 1) * 8);
+    var polled = alloc((max + 1) * 8);
+    var frame = alloc(BOTE_LISTEN_FRAME_MAX);
+    var fds[8];
+    if (h == 0 || slots == 0 || pfd == 0 || polled == 0 || frame == 0 || sys_pipe(&fds) < 0) { return 0; }
+    var i = 0;
+    while (i < max) {
+        store64(slots + i * BOTE_LISTEN_SLOT_BYTES, 0 - 1);
+        i = i + 1;
+    }
+    store64(h, mutex_new());
+    store64(h + 8, slots);
+    store64(h + 16, max);
+    store64(h + 24, 0);
+    store64(h + 32, 0);
+    store64(h + 40, load32(&fds));
+    store64(h + 48, load32(&fds + 4));
+    store64(h + 56, 0);
+    store64(h + 64, BOTE_LISTEN_KEEPALIVE_MS);
+    store64(h + 72, 0);
+    store64(h + 80, pfd);
+    store64(h + 88, frame);
+    store64(h + 96, polled);
+    _bl_nonblock(load64(h + 40));
+    _bl_nonblock(load64(h + 48));
+    return h;
+}
+
+# ---- the sink -------------------------------------------------------------------
+
+# Wake the hub thread: one byte down its pipe, which a pipe already full of them needs not.
+fn _bl_wake(h) {
+    var b[8];
+    store8(&b, 1);
+    sys_write(load64(h + 48), &b, 1);
+    return 0;
+}
+
+fn _bl_raise(h, bit) {
+    var set = 0;
+    while (set == 0) {
+        var p = atomic_load(h + 32);
+        set = atomic_cas(h + 32, p, p | bit);
+    }
+    return _bl_wake(h);
+}
+
+# A change with no stream open tells nobody, and is not kept for the first to open.
+fn _bl_publish(h, topic, payload) {
+    var bit = _bl_kind(topic);
+    if (bit != 0 && atomic_load(h + 24) > 0) { _bl_raise(h, bit); }
+    var next = load64(h + 72);
+    if (next != 0) { event_sink_publish(next, topic, payload); }
+    return 0;
+}
+
+# The EventSink that carries the dispatcher's changes to `h`'s streams and passes every
+# event on to `next`. Its list-only flag is `next`'s, or set when there is none. With no
+# hub, `next` itself.
+fn bote_listen_sink(h, next) {
+    if (h == 0) { return next; }
+    store64(h + 72, next);
+    var s = event_sink_new(&_bl_publish, h);
+    if (next == 0 || load64(next + 16) == 1) { event_sink_set_list_only(s); }
+    return s;
+}
+
+# ---- the slots ------------------------------------------------------------------
+
+fn _bl_slot(h, i) { return load64(h + 8) + i * BOTE_LISTEN_SLOT_BYTES; }
+
+# A free slot, reserved for the caller, or 0 when every slot holds a stream.
+fn _bl_reserve(h) {
+    mutex_lock(load64(h));
+    var got = 0;
+    var i = 0;
+    while (i < load64(h + 16) && got == 0) {
+        var s = _bl_slot(h, i);
+        if (load64(s) == 0 - 1) {
+            store64(s, 0 - 2);
+            got = s;
+        }
+        i = i + 1;
+    }
+    mutex_unlock(load64(h));
+    return got;
+}
+
+fn _bl_release(h, s) {
+    if (s == 0) { return 0; }
+    mutex_lock(load64(h));
+    store64(s, 0 - 1);
+    mutex_unlock(load64(h));
+    return 0;
+}
+
+fn _bl_park(h, s, fd, mask, id, idl) {
+    mutex_lock(load64(h));
+    store64(s + 8, mask);
+    store64(s + 16, idl);
+    memcpy(s + 24, id, idl);
+    store64(s, fd);
+    store64(h + 24, load64(h + 24) + 1);
+    mutex_unlock(load64(h));
+    return 0;
+}
+
+# End the stream in slot `s`, with the lock held. `why` names the reason in the log.
+fn _bl_close_held(h, s, why) {
+    sys_close(load64(s));
+    store64(s, 0 - 1);
+    store64(h + 24, load64(h + 24) - 1);
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_DEBUG, "listen stream closed");
+    bote_log_str(&ln, "reason", why);
+    bote_log_int(&ln, "open", load64(h + 24));
+    bote_log_emit(&ln);
+    return 0;
+}
+
+# ---- frames ---------------------------------------------------------------------
+
+# Append `n` bytes of `p` to `buf` at *at.
+fn _bl_put(buf, at, p, n) {
+    memcpy(buf + load64(at), p, n);
+    store64(at, load64(at) + n);
+    return 0;
+}
+
+fn _bl_puts(buf, at, s) { return _bl_put(buf, at, s, strlen(s)); }
+
+# `payload`, `n` bytes of an SSE event, as one chunk of a chunked body at `out`. Its length.
+fn _bl_chunk(out, payload, n) {
+    var hex[24];
+    var hi = 0;
+    var v = n;
+    var tmp[24];
+    var ti = 0;
+    while (v > 0 || ti == 0) {
+        var dgt = v & 15;
+        if (dgt < 10) { store8(&tmp + ti, 48 + dgt); } else { store8(&tmp + ti, 87 + dgt); }
+        v = v >> 4;
+        ti = ti + 1;
+    }
+    while (ti > 0) {
+        ti = ti - 1;
+        store8(&hex + hi, load8(&tmp + ti));
+        hi = hi + 1;
+    }
+    var at[8];
+    store64(&at, 0);
+    _bl_put(out, &at, &hex, hi);
+    _bl_puts(out, &at, "\r\n");
+    _bl_put(out, &at, payload, n);
+    _bl_puts(out, &at, "\r\n");
+    return load64(&at);
+}
+
+# One change notification for the stream in slot `s`, as a chunk, in the hub's frame
+# buffer. Its length.
+fn _bl_change_frame(h, s, method) {
+    var ev[512];
+    var at[8];
+    store64(&at, 0);
+    _bl_puts(&ev, &at, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"");
+    _bl_puts(&ev, &at, method);
+    _bl_puts(&ev, &at, "\",\"params\":{\"_meta\":{\"");
+    _bl_puts(&ev, &at, BOTE_LISTEN_SUB_KEY);
+    _bl_puts(&ev, &at, "\":");
+    _bl_put(&ev, &at, s + 24, load64(s + 16));
+    _bl_puts(&ev, &at, "}}}\n\n");
+    return _bl_chunk(load64(h + 88), &ev, load64(&at));
+}
+
+# Write `n` bytes at `p` to the stream in slot `s` without waiting: 1 when the socket took
+# all of them.
+fn _bl_send(s, p, n) {
+    return sys_sendto(load64(s), p, n, _BL_SEND, 0, 0) == n;
+}
+
+# ---- the HTTP side --------------------------------------------------------------
+
+# The acknowledgement for `id`, from `ack`, the params the dispatcher made, as an SSE event
+# on `a`.
+fn _bl_ack_event_a(a, ack, id) {
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, strlen(ack) + strlen(id) + 160);
+    str_builder_add_cstr(sb, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":{");
+    # `ack` is {"notifications":{...}}: its members, then the stamp.
+    var i = 1;
+    while (i < strlen(ack) - 1) {
+        str_builder_add_byte(sb, load8(ack + i));
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, ",\"_meta\":{\"");
+    str_builder_add_cstr(sb, BOTE_LISTEN_SUB_KEY);
+    str_builder_add_cstr(sb, "\":");
+    str_builder_add_cstr(sb, id);
+    str_builder_add_cstr(sb, "}}}\n\n");
+    return str_data(str_builder_build_a(a, sb));
+}
+
+# The stream's result, which ends it, for `id`, as an SSE event on `a`.
+fn _bl_result_event_a(a, id, d) {
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, strlen(id) * 2 + 512);
+    str_builder_add_cstr(sb, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":");
+    str_builder_add_cstr(sb, id);
+    str_builder_add_cstr(sb, ",\"result\":{\"resultType\":\"complete\",\"_meta\":{\"");
+    str_builder_add_cstr(sb, BOTE_LISTEN_SUB_KEY);
+    str_builder_add_cstr(sb, "\":");
+    str_builder_add_cstr(sb, id);
+    str_builder_add_cstr(sb, ",\"io.modelcontextprotocol/serverInfo\":");
+    _dsp_emit_server_info(sb, d);
+    str_builder_add_cstr(sb, "}}}\n\n");
+    return str_data(str_builder_build_a(a, sb));
+}
+
+fn _bl_start(h) {
+    if (atomic_load(h + 56) == 1 || atomic_cas(h + 56, 0, 1) == 0) { return 1; }
+    if (thread_create(&_bl_run, h) != 0) { return 1; }
+    atomic_store(h + 56, 0);
+    bote_log(SK_ERROR, "listen: the hub thread did not start; its streams are not served");
+    return 0;
+}
+
+# Serve the listen request `req`, which the dispatcher `d` accepted with `resp`, on the HTTP
+# connection `hc`: 0 once the stream is open, or closed already when nothing asked for can be
+# honored, or a response to send in its place.
+fn bote_listen_http(h, hc, req, resp, d) {
+    var a = bote_req_alloc();
+    var id = req_id(req);
+    var idl = strlen(id);
+    if (idl > BOTE_LISTEN_ID_MAX) { return resp_error_a(a, id, 0 - 32602, BOTE_LISTEN_ID_LONG); }
+    var mask = dispatcher_listen_mask_a(a, d, req_params(req));
+    var s = 0;
+    if (mask != 0) {
+        s = _bl_reserve(h);
+        if (s == 0) {
+            var wl[BOTE_LOG_LINE_BYTES];
+            bote_log_line(&wl, SK_WARN, "subscriptions/listen refused: every stream slot is taken");
+            bote_log_int(&wl, "max", load64(h + 16));
+            bote_log_emit(&wl);
+            return resp_error_a(a, id, 0 - 32603, "Subscription limit reached");
+        }
+    }
+    var cfd = _he_cfd(hc);
+    var hdr = "Cache-Control: no-cache\r\n";
+    if (_he_extra(hc) != 0) {
+        var hb = str_builder_new_a(a);
+        str_builder_add_cstr_a(a, hb, hdr);
+        str_builder_add_cstr_a(a, hb, _he_extra(hc));
+        hdr = str_data(str_builder_build_a(a, hb));
+    }
+    if (sandhi_server_send_chunked_start_a(a, cfd, HTTP_OK, "text/event-stream", hdr) < 0) { return _bl_release(h, s); }
+    var ack = _bl_ack_event_a(a, resp_result(resp), id);
+    if (sandhi_server_send_chunk(cfd, ack, strlen(ack)) < 0) { return _bl_release(h, s); }
+    if (mask == 0) {
+        var res = _bl_result_event_a(a, id, d);
+        sandhi_server_send_chunk(cfd, res, strlen(res));
+        sandhi_server_send_chunked_end(cfd);
+        return 0;
+    }
+    var fd = sys_fcntl(cfd, F_DUPFD, 3);
+    if (fd < 0) { return _bl_release(h, s); }
+    _bl_park(h, s, fd, mask, id, idl);
+    if (_bl_start(h) == 0) {
+        mutex_lock(load64(h));
+        _bl_close_held(h, s, "no hub thread");
+        mutex_unlock(load64(h));
+        return 0;
+    }
+    _bl_wake(h);
+    var ln[BOTE_LOG_LINE_BYTES];
+    bote_log_line(&ln, SK_DEBUG, "listen stream opened");
+    bote_log_int(&ln, "honored", mask);
+    bote_log_int(&ln, "open", bote_listen_open(h));
+    bote_log_emit(&ln);
+    return 0;
+}
+
+# ---- the hub thread -------------------------------------------------------------
+
+# The pollfds: the wake pipe first, then every parked stream, each beside its slot. How many.
+fn _bl_pollset(h) {
+    var pfd = load64(h + 80);
+    var polled = load64(h + 96);
+    store32(pfd, load64(h + 40));
+    store16(pfd + 4, _BL_POLLIN);
+    store16(pfd + 6, 0);
+    var n = 1;
+    mutex_lock(load64(h));
+    var i = 0;
+    while (i < load64(h + 16)) {
+        var s = _bl_slot(h, i);
+        if (load64(s) >= 0) {
+            store32(pfd + n * 8, load64(s));
+            store16(pfd + n * 8 + 4, _BL_POLLIN);
+            store16(pfd + n * 8 + 6, 0);
+            store64(polled + n * 8, s);
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    mutex_unlock(load64(h));
+    return n;
+}
+
+# 1 when the pollfd `i` of `pfd` came back with any event.
+fn _bl_fired(pfd, i) {
+    if (load8(pfd + i * 8 + 6) != 0 || load8(pfd + i * 8 + 7) != 0) { return 1; }
+    return 0;
+}
+
+fn _bl_poll(pfd, n, ms) {
+    var ts[16];
+    store64(&ts, ms / 1000);
+    store64(&ts + 8, (ms % 1000) * 1000000);
+    return sys_ppoll(pfd, n, &ts, 0, 8);
+}
+
+# The pending bits, taken: they are 0 after.
+fn _bl_take_pending(h) {
+    var taken = 0;
+    var p = 0;
+    while (taken == 0) {
+        p = atomic_load(h + 32);
+        taken = atomic_cas(h + 32, p, 0);
+    }
+    return p;
+}
+
+# Every stream that honors one of `bits` gets its notification; one that will not take it
+# whole ends.
+fn _bl_send_changes(h, bits) {
+    mutex_lock(load64(h));
+    var i = 0;
+    while (i < load64(h + 16)) {
+        var s = _bl_slot(h, i);
+        var b = 1;
+        while (b <= BOTE_LISTEN_RESOURCES && load64(s) >= 0) {
+            if ((bits & b) != 0 && (load64(s + 8) & b) != 0) {
+                var n = _bl_change_frame(h, s, _bl_method(b));
+                if (_bl_send(s, load64(h + 88), n) == 0) { _bl_close_held(h, s, "stopped reading"); }
+            }
+            b = b * 2;
+        }
+        i = i + 1;
+    }
+    mutex_unlock(load64(h));
+    return 0;
+}
+
+fn _bl_keepalive(h) {
+    var ka = ": keepalive\n\n";
+    var kn = _bl_chunk(load64(h + 88), ka, strlen(ka));
+    mutex_lock(load64(h));
+    var i = 0;
+    while (i < load64(h + 16)) {
+        var s = _bl_slot(h, i);
+        if (load64(s) >= 0 && _bl_send(s, load64(h + 88), kn) == 0) { _bl_close_held(h, s, "stopped reading"); }
+        i = i + 1;
+    }
+    mutex_unlock(load64(h));
+    return 0;
+}
+
+fn _bl_run(h) {
+    var drain[64];
+    var last = clock_now_ms();
+    while (1 == 1) {
+        var n = _bl_pollset(h);
+        var wait = load64(h + 64) - (clock_now_ms() - last);
+        if (wait < 0) { wait = 0; }
+        var pr = _bl_poll(load64(h + 80), n, wait);
+        var pfd = load64(h + 80);
+        if (pr > 0) {
+            if (_bl_fired(pfd, 0) == 1) {
+                while (sys_read(load64(h + 40), &drain, 64) > 0) { }
+            }
+            # A client that closed, or sent anything: gone. Its slot is checked for the same
+            # socket, which a stream opened since could have taken.
+            mutex_lock(load64(h));
+            var i = 1;
+            while (i < n) {
+                if (_bl_fired(pfd, i) == 1) {
+                    var s = load64(load64(h + 96) + i * 8);
+                    if (load64(s) == load32(pfd + i * 8)) { _bl_close_held(h, s, "gone"); }
+                }
+                i = i + 1;
+            }
+            mutex_unlock(load64(h));
+        }
+        var bits = _bl_take_pending(h);
+        if (bits != 0) { _bl_send_changes(h, bits); }
+        if (clock_now_ms() - last >= load64(h + 64)) {
+            _bl_keepalive(h);
+            last = clock_now_ms();
+        }
+    }
+    return 0;
+}
+#endif

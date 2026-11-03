@@ -119,6 +119,19 @@ fn prompt_registry_contains(r, name) {
     return h;
 }
 
+# The prompt `name`, or 0, and its handler through *fp_out, 0 when it has none, from one
+# look at the registry (3.7.2): what prompts/get judges and what serves it are then the
+# same registration, whatever replaces it meanwhile.
+fn prompt_registry_serving(r, name, fp_out) {
+    bote_reg_read();
+    var p = _prompt_registry_get_u(r, name);
+    var fp = 0;
+    if (map_has(prompt_registry_handlers(r), name) == 1) { fp = map_get(prompt_registry_handlers(r), name); }
+    bote_reg_read_end();
+    store64(fp_out, fp);
+    return p;
+}
+
 # Handler fn ptr for `name`, or 0 if the prompt is unknown.
 fn prompt_registry_handler(r, name) {
     bote_reg_read();

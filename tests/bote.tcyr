@@ -49,6 +49,7 @@ include "src/auth.cyr"
 include "src/conn.cyr"
 include "src/http_era.cyr"
 include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
 include "src/transport_http.cyr"
 include "src/bridge.cyr"
 # 2.7.2: Streamable HTTP + WebSocket transports moved to their own
@@ -1419,14 +1420,14 @@ fn main() {
     "all four capabilities advertised in canonical order");
 
     # listChanged is gated on the notifications flag (set only by a transport
-    # with a server→client drain path). Flipping it advertises tools + prompts
-    # listChanged; resources stays bare (no resource-mutation producer).
+    # with a server→client drain path). Flipping it advertises listChanged for
+    # tools, prompts and, since a registration publishes one (3.7.2), resources.
     dispatcher_set_notifications(pr_d, 1);
     var cap_lc = resp_result(dispatcher_dispatch(pr_d,
     req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}"), 0));
     assert(streq(jsonx_get_raw(cap_lc, "capabilities"),
-    "{\"tools\":{\"listChanged\":true},\"prompts\":{\"listChanged\":true},\"resources\":{},\"completions\":{}}") == 1,
-    "notifications flag → tools + prompts listChanged advertised");
+    "{\"tools\":{\"listChanged\":true},\"prompts\":{\"listChanged\":true},\"resources\":{\"listChanged\":true},\"completions\":{}}") == 1,
+    "notifications flag → tools, prompts and resources listChanged advertised");
 
     # ---------------- dispatch: tools/call success ----------------
     dispatcher_handle(d, "svc_echo", &h_echo);

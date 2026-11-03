@@ -1,0 +1,806 @@
+# bote_listen.tcyr — `subscriptions/listen` (3.7.2): what the dispatcher makes of a listen
+# request, and the streams src/listen.cyr holds open, through the real `_http_handle`,
+# `_strm_handle` and `_bridge_handle` over socketpairs, read with a deadline: the head,
+# the acknowledgement, the changes each stream asked for and no others, keepalives, a
+# client that goes or stops reading, the capacity, and the heap.
+#
+# Run: cyrius test tests/bote_listen.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_http.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+
+fn h_ok(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+fn h_prompt(args, claims) { return "{\"messages\":[]}"; }
+fn h_res(uri, claims) { return "{\"contents\":[]}"; }
+
+fn _has(hay, needle) { return strstr(hay, needle) >= 0; }
+
+fn _cat3(a, b, c) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    str_builder_add_cstr(sb, c);
+    return str_data(str_builder_build(sb));
+}
+
+fn _rep(s, n) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < n) {
+        str_builder_add_cstr(sb, s);
+        i = i + 1;
+    }
+    return str_data(str_builder_build(sb));
+}
+
+# How many times `needle` occurs in `hay`.
+fn _count(hay, needle) {
+    var n = 0;
+    var at = strstr(hay, needle);
+    while (at >= 0) {
+        n = n + 1;
+        hay = hay + at + strlen(needle);
+        at = strstr(hay, needle);
+    }
+    return n;
+}
+
+# A dispatcher with one tool and, when `lists` is 1, a prompt and a resource.
+fn _mk_d(lists) {
+    var reg = tool_registry_new();
+    registry_register(reg, tool_def_new("t_echo", "Echo", schema_new("object", 0, vec_new())));
+    var d = dispatcher_new(reg);
+    dispatcher_handle(d, "t_echo", &h_ok);
+    if (lists == 1) {
+        dispatcher_register_prompt(d, prompt_def_new("p_one", "One", vec_new()), &h_prompt);
+        dispatcher_register_resource(d, resource_def_new("res://a", "a", "A", "text/plain"), &h_res);
+    }
+    return d;
+}
+
+fn _tool(name) { return tool_def_new(name, "T", schema_new("object", 0, vec_new())); }
+
+var _META = "\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}";
+var _ALL = "{\"toolsListChanged\":true,\"promptsListChanged\":true,\"resourcesListChanged\":true}";
+var _TOOLS = "{\"toolsListChanged\":true}";
+
+# A listen request's body: `id`, a raw JSON literal or 0 for a notification, and `filter`,
+# the raw value of `notifications` or 0 for none.
+fn _lb(id, filter) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",");
+    if (id != 0) {
+        str_builder_add_cstr(sb, "\"id\":");
+        str_builder_add_cstr(sb, id);
+        str_builder_add_cstr(sb, ",");
+    }
+    str_builder_add_cstr(sb, "\"method\":\"subscriptions/listen\",\"params\":{");
+    str_builder_add_cstr(sb, _META);
+    if (filter != 0) {
+        str_builder_add_cstr(sb, ",\"notifications\":");
+        str_builder_add_cstr(sb, filter);
+    }
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}
+
+# A modern body for `method`, with no params beside `_meta`.
+fn _mb(method) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, "\",\"params\":{");
+    str_builder_add_cstr(sb, _META);
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}
+
+var _INIT = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}";
+
+# The honored bits for `filter` (0: no `notifications`) on `d`.
+fn _mask(d, filter) {
+    var a = bote_req_begin();
+    var p = "{}";
+    if (filter != 0) { p = _cat3("{\"notifications\":", filter, "}"); }
+    return dispatcher_listen_mask_a(a, d, p);
+}
+
+# What the era router answers `body` with on `d`, with the stream flag `stream`: the
+# result's JSON, or the error's code as a decimal string.
+fn _route(d, body, stream) {
+    var a = bote_req_begin();
+    var err[8];
+    var req = _cdc_admit_a(a, body, &err);
+    if (req == 0) { return "admit"; }
+    bote_req_set_stream(stream);
+    var resp = dispatcher_dispatch_a(a, d, req, 0);
+    bote_req_set_stream(0);
+    if (resp == 0) { return "none"; }
+    var e = resp_error_obj(resp);
+    if (e != 0) {
+        var sb = str_builder_new();
+        str_builder_add_int(sb, rpc_err_code(e));
+        return str_data(str_builder_build(sb));
+    }
+    var out = alloc(strlen(resp_result(resp)) + 1);
+    memcpy(out, resp_result(resp), strlen(resp_result(resp)) + 1);
+    return out;
+}
+
+var _ev_n = 0;
+var _ev_topic = 0;
+var _ev_payload = 0;
+fn _ev_cap(ctx, topic, payload) {
+    _ev_n = _ev_n + 1;
+    _ev_topic = topic;
+    _ev_payload = payload;
+    return 0;
+}
+
+var _passed = 0;
+fn _ev_count(ctx, topic, payload) {
+    atomic_fetch_add(&_passed, 1);
+    return 0;
+}
+
+# ---- streams, over socketpairs --------------------------------------------------
+#ifndef CYRIUS_TARGET_AGNOS
+
+var _rbuf = 0;
+
+fn _raw(verb, hdrs, body) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, verb);
+    str_builder_add_cstr(sb, " /mcp HTTP/1.1\r\nHost: x\r\n");
+    str_builder_add_cstr(sb, hdrs);
+    str_builder_add_cstr(sb, "Content-Length: ");
+    str_builder_add_int(sb, strlen(body));
+    str_builder_add_cstr(sb, "\r\n\r\n");
+    str_builder_add_cstr(sb, body);
+    return str_data(str_builder_build(sb));
+}
+
+var _LH = "MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: subscriptions/listen\r\n";
+var _ORIGIN = "Origin: http://localhost\r\n";
+
+# A POST of the listen body `body`.
+fn _post(body) { return _raw("POST", _LH, body); }
+
+# Hand the request `raw` to handler `kind` (0 http, 1 streamable, 2 bridge) with config
+# `cfg`, on a fresh socketpair whose server end has a send buffer of `sndbuf` bytes unless
+# it is 0, reading it from `rb`, and close the server's copy after, as sandhi does: the
+# client's end.
+fn _serve_in(kind, cfg, raw, sndbuf, rb) {
+    var n = strlen(raw);
+    memcpy(rb, raw, n);
+    store8(rb + n, 0);
+    # The bridge's endpoint is "/".
+    if (kind == 2) {
+        var mp = strstr(rb, " /mcp ");
+        if (mp >= 0) { memcpy(rb + mp + 2, "   ", 3); }
+    }
+    var sp[16];
+    var v[8];
+    sys_socketpair(1, 1, 0, &sp);
+    var sa = load32(&sp);
+    var sb = load32(&sp + 4);
+    if (sndbuf > 0) {
+        store64(&v, sndbuf);
+        sys_setsockopt(sa, 1, 7, &v, 4);
+    }
+    if (kind == 0) { _http_handle(cfg, sa, rb, n); }
+    elif (kind == 1) { _strm_handle(cfg, sa, rb, n); }
+    else { _bridge_handle(cfg, sa, rb, n); }
+    sys_close(sa);
+    return sb;
+}
+
+fn _serve(kind, cfg, raw, sndbuf) { return _serve_in(kind, cfg, raw, sndbuf, _rbuf); }
+
+# A client's end (32 B): +0 fd, +8 what it has read, +16 how many bytes, +24 1 once the
+# server has ended it.
+fn _cl_new() {
+    var c = alloc(32);
+    store64(c, 0 - 1);
+    store64(c + 8, alloc(65537));
+    store64(c + 16, 0);
+    store64(c + 24, 0);
+    return c;
+}
+
+fn _cl_buf(c) { return load64(c + 8); }
+fn _cl_ended(c) { return load64(c + 24); }
+
+fn _cl_open(c, kind, cfg, raw, sndbuf) {
+    store64(c, _serve(kind, cfg, raw, sndbuf));
+    store64(c + 16, 0);
+    store64(c + 24, 0);
+    store8(load64(c + 8), 0);
+    return c;
+}
+
+fn _cl_close(c) {
+    sys_close(load64(c));
+    store64(c, 0 - 1);
+    return 0;
+}
+
+# Read what reaches `c` until it holds `needle`, or `ms` pass, or the server ends it: 1 when
+# it holds it. A buffer that fills starts over.
+fn _cl_await(c, needle, ms) {
+    var until = clock_now_ms() + ms;
+    var pfd[8];
+    var ts[16];
+    while (1 == 1) {
+        var buf = load64(c + 8);
+        var got = load64(c + 16);
+        store8(buf + got, 0);
+        if (strstr(buf, needle) >= 0) { return 1; }
+        if (load64(c + 24) == 1) { return 0; }
+        var left = until - clock_now_ms();
+        if (left <= 0) { return 0; }
+        if (got >= 65536) {
+            got = 0;
+            store64(c + 16, 0);
+        }
+        store32(&pfd, load64(c));
+        store16(&pfd + 4, 1);
+        store16(&pfd + 6, 0);
+        store64(&ts, left / 1000);
+        store64(&ts + 8, (left % 1000) * 1000000);
+        if (sys_ppoll(&pfd, 1, &ts, 0, 8) > 0) {
+            var r = sys_read(load64(c), buf + got, 65536 - got);
+            if (r <= 0) { store64(c + 24, 1); }
+            else { store64(c + 16, got + r); }
+        }
+    }
+    return 0;
+}
+
+# _cl_await, until `needle` has arrived `n` times.
+fn _cl_await_n(c, needle, n, ms) {
+    var until = clock_now_ms() + ms;
+    while (_count(load64(c + 8), needle) < n) {
+        var left = until - clock_now_ms();
+        if (left <= 0 || load64(c + 24) == 1) { return 0; }
+        _cl_await(c, "\x01\x02", 5);
+    }
+    return 1;
+}
+
+# Read until the server ends the stream, or `ms` pass: 1 when it did.
+fn _cl_eof(c, ms) {
+    _cl_await(c, "\x01\x02", ms);
+    return load64(c + 24);
+}
+
+# The HTTP status `c` was answered with.
+fn _cl_status(c) {
+    var b = load64(c + 8);
+    if (load64(c + 16) < 12 || memeq(b, "HTTP/1.1 ", 9) == 0) { return 0; }
+    return (load8(b + 9) - 48) * 100 + (load8(b + 10) - 48) * 10 + load8(b + 11) - 48;
+}
+
+# Wait up to `ms` for `h` to hold `n` streams: 1 when it does.
+fn _await_open(h, n, ms) {
+    var until = clock_now_ms() + ms;
+    while (bote_listen_open(h) != n) {
+        if (clock_now_ms() >= until) { return 0; }
+        sleep_ms(1);
+    }
+    return 1;
+}
+
+# The notification `method` stamped for the stream `id`.
+fn _note(method, id) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"method\":\"");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, "\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":");
+    str_builder_add_cstr(sb, id);
+    str_builder_add_cstr(sb, "}}}");
+    return str_data(str_builder_build(sb));
+}
+
+var _TL = "notifications/tools/list_changed";
+var _PL = "notifications/prompts/list_changed";
+var _RL = "notifications/resources/list_changed";
+
+# Bytes one listen through handler `kind` leaves on the heap, read to its end, the client
+# closing first when `close` is 1, with `h` back to `open` streams after each.
+fn _heap_per(kind, cfg, raw, h, open, c) {
+    _cl_open(c, kind, cfg, raw, 0);
+    _cl_await(c, "acknowledged", 2000);
+    _cl_close(c);
+    _await_open(h, open, 2000);
+    var before = alloc_used();
+    var i = 0;
+    while (i < 10) {
+        _cl_open(c, kind, cfg, raw, 0);
+        _cl_await(c, "\r\n\r\n{", 50);
+        _cl_await(c, "acknowledged", 2000);
+        _cl_close(c);
+        _await_open(h, open, 2000);
+        i = i + 1;
+    }
+    return (alloc_used() - before) / 10;
+}
+
+# Bytes a refused or completed listen leaves on the heap, read to its end.
+fn _heap_done(kind, cfg, raw, c) {
+    _cl_open(c, kind, cfg, raw, 0);
+    _cl_eof(c, 2000);
+    _cl_close(c);
+    var before = alloc_used();
+    var i = 0;
+    while (i < 10) {
+        _cl_open(c, kind, cfg, raw, 0);
+        _cl_eof(c, 2000);
+        _cl_close(c);
+        i = i + 1;
+    }
+    return (alloc_used() - before) / 10;
+}
+
+# ---- many at once ---------------------------------------------------------------
+
+var LT_N = 4;
+var LT_M = 50;
+var _lt_cfg = 0;
+var _lt_d = 0;
+var _lt_raw = 0;
+var _lt_acks = 0;
+var _lt_refused = 0;
+var _go = 0;
+
+# A thread opening and closing LT_M streams through the streamable handler, each to its
+# acknowledgement.
+fn _lt_opener(i) {
+    while (atomic_load(&_go) == 0) { }
+    var rb = alloc(65536);
+    var c = _cl_new();
+    var k = 0;
+    while (k < LT_M) {
+        store64(c, _serve_in(1, _lt_cfg, _lt_raw, 0, rb));
+        store64(c + 16, 0);
+        store64(c + 24, 0);
+        if (_cl_await(c, "acknowledged", 5000) == 1) { atomic_fetch_add(&_lt_acks, 1); }
+        elif (_has(_cl_buf(c), "Subscription limit reached")) { atomic_fetch_add(&_lt_refused, 1); }
+        _cl_close(c);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# A thread registering and removing tools, each a change every open stream is told of.
+fn _lt_writer(i) {
+    while (atomic_load(&_go) == 0) { }
+    var k = 0;
+    while (k < 200) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "lt_");
+        str_builder_add_int(sb, k);
+        var name = str_data(str_builder_build(sb));
+        dispatcher_register_tool(_lt_d, _tool(name), &h_ok);
+        if (k % 2 == 1) { dispatcher_deregister_tool(_lt_d, name); }
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn _on_threads(n) {
+    _go = 0;
+    var ts = alloc((n + 1) * 8);
+    var i = 0;
+    while (i < n) {
+        store64(ts + i * 8, thread_create(&_lt_opener, i));
+        i = i + 1;
+    }
+    store64(ts + n * 8, thread_create(&_lt_writer, n));
+    atomic_store(&_go, 1);
+    i = 0;
+    while (i <= n) {
+        thread_join(load64(ts + i * 8));
+        i = i + 1;
+    }
+    return 0;
+}
+#endif
+
+fn main() {
+    alloc_init();
+
+    # ---------------- the dispatcher's judgement ----------------
+    var dm = _mk_d(1);
+    var dt = _mk_d(0);
+    # Opaque to the dispatcher: any carrier will do here, and these two are never served.
+    dispatcher_set_listen(dm, 1);
+    dispatcher_set_listen(dt, 1);
+    assert_eq(dispatcher_listen(dm), 1, "set_listen: the carrier is kept");
+    assert_eq(dispatcher_listen(dispatcher_new(tool_registry_new())), 0, "a new dispatcher carries none");
+
+    assert_eq(_mask(dm, 0), 0 - 1, "mask: no notifications is no filter");
+    assert_eq(dispatcher_listen_mask_a(bote_req_begin(), dm, 0), 0 - 1, "mask: no params is no filter");
+    assert_eq(_mask(dm, "[]"), 0 - 1, "mask: an array is no filter");
+    assert_eq(_mask(dm, "true"), 0 - 1, "mask: a boolean is no filter");
+    assert_eq(_mask(dm, "\"x\""), 0 - 1, "mask: a string is no filter");
+    assert_eq(_mask(dm, "null"), 0 - 1, "mask: null is no filter");
+    assert_eq(_mask(dm, "{}"), 0, "mask: an empty filter asks for nothing");
+    assert_eq(_mask(dm, _TOOLS), BOTE_LISTEN_TOOLS, "mask: tools");
+    assert_eq(_mask(dm, "{\"promptsListChanged\":true}"), BOTE_LISTEN_PROMPTS, "mask: prompts");
+    assert_eq(_mask(dm, "{\"resourcesListChanged\":true}"), BOTE_LISTEN_RESOURCES, "mask: resources");
+    assert_eq(_mask(dm, _ALL), 7, "mask: all three");
+    assert_eq(_mask(dt, _ALL), BOTE_LISTEN_TOOLS, "mask: a list the server does not have is not honored");
+    assert_eq(_mask(dt, "{\"promptsListChanged\":true}"), 0, "mask: ...prompts alone, nothing");
+    assert_eq(_mask(dm, "{\"toolsListChanged\":false,\"promptsListChanged\":false}"), 0, "mask: false asks for nothing");
+    assert_eq(_mask(dm, "{\"toolsListChanged\":1}"), 0 - 1, "mask: a number is no boolean");
+    assert_eq(_mask(dm, "{\"toolsListChanged\":\"true\"}"), 0 - 1, "mask: a string is no boolean");
+    assert_eq(_mask(dm, "{\"promptsListChanged\":null}"), 0 - 1, "mask: null is no boolean");
+    assert_eq(_mask(dm, "{\"resourcesListChanged\":{}}"), 0 - 1, "mask: an object is no boolean");
+    assert_eq(_mask(dm, "{\"toolsListChanged\":true,\"later\":5}"), BOTE_LISTEN_TOOLS, "mask: a member it does not know is ignored");
+    assert_eq(_mask(dm, "{\"tools\\u004cistChanged\":true}"), BOTE_LISTEN_TOOLS, "mask: an escaped key is the key it spells");
+    assert_eq(_mask(dm, "{\"resourceSubscriptions\":[]}"), 0, "mask: no subscriptions");
+    assert_eq(_mask(dm, "{\"resourceSubscriptions\":[\"file:///a\", \"res://b\"],\"toolsListChanged\":true}"), BOTE_LISTEN_TOOLS, "mask: subscriptions are valid and never honored");
+    assert_eq(_mask(dm, "{\"resourceSubscriptions\":[ ]}"), 0, "mask: an empty array with space");
+    assert_eq(_mask(dm, "{\"resourceSubscriptions\":[1]}"), 0 - 1, "mask: a number is no URI");
+    assert_eq(_mask(dm, "{\"resourceSubscriptions\":[\"a\",1]}"), 0 - 1, "mask: ...nor the second");
+    assert_eq(_mask(dm, "{\"resourceSubscriptions\":[[\"a\"]]}"), 0 - 1, "mask: an array is no URI");
+    assert_eq(_mask(dm, "{\"resourceSubscriptions\":\"a\"}"), 0 - 1, "mask: a string is no list");
+    assert_eq(_mask(dm, "{\"resourceSubscriptions\":\"\"}"), 0 - 1, "mask: ...nor an empty one");
+    assert_eq(_mask(dm, "{\"resourceSubscriptions\":{}}"), 0 - 1, "mask: an object is no list");
+
+    var ap = bote_req_begin();
+    assert(streq(bote_listen_ack_params_a(ap, 0), "{\"notifications\":{}}") == 1, "ack: nothing");
+    assert(streq(bote_listen_ack_params_a(ap, 1), "{\"notifications\":{\"toolsListChanged\":true}}") == 1, "ack: tools");
+    assert(streq(bote_listen_ack_params_a(ap, 6), "{\"notifications\":{\"promptsListChanged\":true,\"resourcesListChanged\":true}}") == 1, "ack: prompts and resources");
+    assert(streq(bote_listen_ack_params_a(ap, 5), "{\"notifications\":{\"toolsListChanged\":true,\"resourcesListChanged\":true}}") == 1, "ack: tools and resources");
+    assert(streq(bote_listen_ack_params_a(ap, 7), "{\"notifications\":{\"toolsListChanged\":true,\"promptsListChanged\":true,\"resourcesListChanged\":true}}") == 1, "ack: all three");
+
+    # The router: served only for a message whose transport can hold the stream.
+    var lb = _lb("7", _ALL);
+    assert(streq(_route(dm, lb, 1), "{\"notifications\":{\"toolsListChanged\":true,\"promptsListChanged\":true,\"resourcesListChanged\":true}}") == 1, "route: the acknowledgement's params");
+    assert(streq(_route(dm, lb, 0), "-32601") == 1, "route: not found on a transport that cannot hold it");
+    assert(streq(_route(_mk_d(1), lb, 1), "-32601") == 1, "route: not found with no carrier");
+    assert(streq(_route(dm, _lb("7", 0), 1), "-32602") == 1, "route: no filter is invalid params");
+    assert(streq(_route(dm, _lb("7", "[]"), 1), "-32602") == 1, "route: ...and a filter that is none");
+    assert(streq(_route(dm, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"subscriptions/listen\",\"params\":{\"notifications\":{}}}", 1), "-32601") == 1, "route: a legacy request has no such method");
+    assert(_has(codec_process_message(lb, dm, 0), "\"code\":-32601"), "codec: stdio's path has no such method, whatever the dispatcher carries");
+    bote_req_set_stream(1);
+    assert_eq(bote_req_stream(), 1, "stream flag: set");
+    bote_req_begin();
+    assert_eq(bote_req_stream(), 0, "stream flag: a new message clears it");
+
+    # What server/discover says, and the legacy initialize it leaves alone.
+    var disc = codec_process_message(_mb("server/discover"), dm, 0);
+    assert(_has(disc, "\"tools\":{\"listChanged\":true}"), "discover: tools listChanged with a carrier");
+    assert(_has(disc, "\"prompts\":{\"listChanged\":true}"), "discover: prompts listChanged");
+    assert(_has(disc, "\"resources\":{\"listChanged\":true}"), "discover: resources listChanged");
+    var disc0 = codec_process_message(_mb("server/discover"), _mk_d(1), 0);
+    assert(_has(disc0, "\"resources\":{}") && _has(disc0, "listChanged") == 0, "discover: none without one");
+    var init = codec_process_message(_INIT, dm, 0);
+    assert(_has(init, "\"result\"") && _has(init, "listChanged") == 0, "initialize: unchanged by a carrier");
+    var dn = _mk_d(1);
+    dispatcher_set_notifications(dn, 1);
+    assert(_has(codec_process_message(_INIT, dn, 0), "\"resources\":{\"listChanged\":true}"), "initialize: with notifications on, resources too");
+
+    # A resource or a template registered is a change.
+    var de = _mk_d(0);
+    dispatcher_set_events(de, event_sink_new(&_ev_cap, 0));
+    dispatcher_register_resource(de, resource_def_new("res://n", "n", "N", "text/plain"), &h_res);
+    assert_eq(_ev_n, 1, "event: a resource registered");
+    assert(streq(_ev_topic, TOPIC_RESOURCE_REGISTERED()) == 1 && streq(_ev_payload, "{}") == 1, "event: ...on its topic");
+    dispatcher_register_resource_template(de, resource_template_new("res://t/{id}", "t", "T", "text/plain"), &h_res);
+    assert_eq(_ev_n, 2, "event: a template registered");
+    assert(streq(_ev_topic, "bote/resource/registered") == 1, "event: ...the same topic");
+
+    assert_eq(_bl_kind(TOPIC_TOOL_REGISTERED()), BOTE_LISTEN_TOOLS, "kind: a tool registered");
+    assert_eq(_bl_kind(TOPIC_TOOL_DEREGISTERED()), BOTE_LISTEN_TOOLS, "kind: a tool removed");
+    assert_eq(_bl_kind(TOPIC_PROMPT_REGISTERED()), BOTE_LISTEN_PROMPTS, "kind: a prompt");
+    assert_eq(_bl_kind(TOPIC_RESOURCE_REGISTERED()), BOTE_LISTEN_RESOURCES, "kind: a resource");
+    assert_eq(_bl_kind("bote/tool/called"), 0, "kind: anything else");
+    assert(streq(_bl_method(BOTE_LISTEN_PROMPTS), _cat3("notifications/", "prompts/list_changed", "")) == 1, "method: prompts");
+
+    #ifndef CYRIUS_TARGET_AGNOS
+    # ---------------- the hub ----------------
+    assert_eq(bote_listen_hub_new(0), 0, "hub: none for no streams");
+    assert_eq(bote_listen_open(0), 0, "hub: none holds none");
+    var nx = event_sink_new(&_ev_count, 0);
+    assert(bote_listen_sink(0, nx) == nx, "sink: with no hub, the next one itself");
+    var h1 = bote_listen_hub_new(1);
+    assert(h1 != 0 && bote_listen_open(h1) == 0, "hub: made, empty");
+    assert_eq(load64(bote_listen_sink(h1, 0) + 16), 1, "sink: list-only with nothing after it");
+    assert_eq(load64(bote_listen_sink(h1, nx) + 16), 0, "sink: as the next one is");
+    assert_eq(load64(bote_listen_sink(h1, event_sink_set_list_only(event_sink_new(&_ev_count, 0))) + 16), 1, "sink: ...list-only too");
+    var s1 = bote_listen_sink(h1, nx);
+    event_sink_publish(s1, "bote/tool/called", "{}");
+    event_sink_publish(s1, TOPIC_TOOL_REGISTERED(), "{}");
+    assert_eq(_passed, 2, "sink: every event passed on");
+    assert_eq(atomic_load(h1 + 32), 0, "sink: a change with no stream open is kept for nobody");
+    assert_eq(bote_listen_hub_with_keepalive(h1, 0), h1, "keepalive: 0 keeps the default");
+    assert_eq(load64(h1 + 64), BOTE_LISTEN_KEEPALIVE_MS, "keepalive: ...15 s");
+
+    var cb = alloc(64);
+    var cn = _bl_chunk(cb, ": keepalive\n\n", 13);
+    assert(cn == 18 && memeq(cb, "d\r\n: keepalive\n\n\r\n", 18) == 1, "chunk: the keepalive");
+    cn = _bl_chunk(cb, "", 0);
+    assert(cn == 5 && memeq(cb, "0\r\n\r\n", 5) == 1, "chunk: nothing");
+    var c255 = alloc(300);
+    memset(c255, 120, 255);
+    var cbig = alloc(300);
+    cn = _bl_chunk(cbig, c255, 255);
+    assert(cn == 255 + 6 && memeq(cbig, "ff\r\nx", 5) == 1, "chunk: 255 bytes, in hex");
+    cn = _bl_chunk(cbig, c255, 16);
+    assert(memeq(cbig, "10\r\nx", 5) == 1, "chunk: 16 bytes");
+
+    # ---------------- streams through the handlers ----------------
+    _rbuf = alloc(262144);
+    _strm_init();
+    var h = bote_listen_hub_new(4);
+    bote_listen_hub_with_keepalive(h, 600000);
+    var d = _mk_d(1);
+    dispatcher_set_listen(d, h);
+    _passed = 0;
+    dispatcher_set_events(d, bote_listen_sink(h, event_sink_new(&_ev_count, 0)));
+    var hc = http_config_new("/mcp", 0, 0);
+    store64(hc + 48, d);
+    var sc = streamable_config_new("/mcp", 0, 0);
+    streamable_config_with_session_store(sc, session_store_default());
+    store64(sc + 56, d);
+    var bo = vec_new();
+    vec_push(bo, "http://localhost");
+    var bc = bridge_config_new("127.0.0.1", 0);
+    bridge_config_with_dispatcher(bc, d);
+    bridge_config_with_origins(bc, bo);
+
+    var ca = _cl_new();
+    var cbb = _cl_new();
+    var cc = _cl_new();
+    var cd = _cl_new();
+    var ce = _cl_new();
+
+    _cl_open(ca, 0, hc, _post(_lb("\"a\"", _TOOLS)), 0);
+    assert_eq(_cl_await(ca, "acknowledged", 2000), 1, "http: the acknowledgement arrives");
+    assert_eq(_cl_status(ca), 200, "http: 200");
+    assert(_has(_cl_buf(ca), "Content-Type: text/event-stream\r\n"), "http: an event stream");
+    assert(_has(_cl_buf(ca), "Transfer-Encoding: chunked\r\n"), "http: chunked");
+    assert(_has(_cl_buf(ca), "Cache-Control: no-cache\r\n"), "http: not cached");
+    assert(_has(_cl_buf(ca), "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":{\"notifications\":{\"toolsListChanged\":true},\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":\"a\"}}}\n\n"), "http: the acknowledgement, honored and stamped");
+    assert(_has(_cl_buf(ca), "\"result\"") == 0, "http: no result while the stream is open");
+    assert_eq(bote_listen_open(h), 1, "http: one stream held");
+    assert_eq(bote_req_stream(), 0, "stream flag: off once the message is served");
+    assert_eq(_cl_ended(ca), 0, "http: and open");
+
+    _cl_open(cbb, 1, sc, _post(_lb("\"b\"", "{\"promptsListChanged\":true}")), 0);
+    assert_eq(_cl_await(cbb, "acknowledged", 2000), 1, "streamable: the acknowledgement");
+    assert(_has(_cl_buf(cbb), "\"notifications\":{\"promptsListChanged\":true},\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":\"b\"}"), "streamable: prompts, stamped");
+    _cl_open(cc, 2, bc, _raw("POST", _cat3(_LH, _ORIGIN, ""), _lb("3", _ALL)), 0);
+    assert_eq(_cl_await(cc, "acknowledged", 2000), 1, "bridge: the acknowledgement");
+    assert(_has(_cl_buf(cc), "Access-Control-Allow-Origin: http://localhost"), "bridge: the stream's head carries CORS");
+    assert(_has(_cl_buf(cc), "text/event-stream"), "bridge: an event stream");
+    assert(_has(_cl_buf(cc), "\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":3}"), "bridge: a number id stamps as a number");
+    _cl_open(cd, 0, hc, _post(_lb("\"d\"", _ALL)), 0);
+    assert_eq(_cl_await(cd, "acknowledged", 2000), 1, "http: a fourth");
+    assert_eq(bote_listen_open(h), 4, "four streams held");
+
+    # Full: one more is refused, and one that asks for nothing honored is still answered.
+    _cl_open(ce, 0, hc, _post(_lb("\"e\"", _TOOLS)), 0);
+    assert_eq(_cl_eof(ce, 2000), 1, "full: answered and closed");
+    assert_eq(_cl_status(ce), 200, "full: 200");
+    assert(_has(_cl_buf(ce), "\"error\":{\"code\":-32603,\"message\":\"Subscription limit reached\"}"), "full: -32603, the SDK's words");
+    assert(_has(_cl_buf(ce), "application/json"), "full: a JSON reply");
+    assert(_has(_cl_buf(ce), "\"id\":\"e\""), "full: ...to its id");
+    _cl_close(ce);
+    assert_eq(bote_listen_open(h), 4, "full: still four");
+    _cl_open(ce, 0, hc, _post(_lb("\"f\"", "{\"resourceSubscriptions\":[\"file:///x\"]}")), 0);
+    assert_eq(_cl_eof(ce, 2000), 1, "nothing honored: the stream ends at once");
+    var fb = _cl_buf(ce);
+    assert(_has(fb, "\"params\":{\"notifications\":{},\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":\"f\"}}"), "nothing honored: acknowledged as nothing");
+    assert(_has(fb, "{\"jsonrpc\":\"2.0\",\"id\":\"f\",\"result\":{\"resultType\":\"complete\",\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":\"f\",\"io.modelcontextprotocol/serverInfo\":{"), "nothing honored: then the result, stamped, with serverInfo");
+    assert(strstr(fb, "acknowledged") < strstr(fb, "resultType"), "nothing honored: in that order");
+    var fl = load64(ce + 16);
+    assert(fl > 5 && memeq(fb + fl - 5, "0\r\n\r\n", 5) == 1, "nothing honored: the body ends");
+    _cl_close(ce);
+    assert_eq(bote_listen_open(h), 4, "nothing honored: holds no slot");
+
+    # Changes: each stream gets the kinds it asked for, stamped with its own id. The last
+    # slot's stream is told last, so once it has a change every stream has had it.
+    dispatcher_register_tool(d, _tool("t_new"), &h_ok);
+    assert_eq(_cl_await(cd, _note(_TL, "\"d\""), 2000), 1, "change: a tool registered, to a stream that asked");
+    assert_eq(_cl_await(ca, _note(_TL, "\"a\""), 2000), 1, "change: ...to every one");
+    assert_eq(_cl_await(cc, _note(_TL, "3"), 2000), 1, "change: ...the bridge's");
+    assert(_has(_cl_buf(ca), "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\""), "change: an SSE event");
+    dispatcher_register_prompt(d, prompt_def_new("p_new", "New", vec_new()), &h_prompt);
+    assert_eq(_cl_await(cd, _note(_PL, "\"d\""), 2000), 1, "change: a prompt");
+    assert_eq(_cl_await(cbb, _note(_PL, "\"b\""), 2000), 1, "change: ...to the stream that asked for prompts only");
+    assert(_has(_cl_buf(cbb), _TL) == 0, "change: which was not told of the tool");
+    assert_eq(_cl_await(cc, _note(_PL, "3"), 2000), 1, "change: ...and to one that asked for all");
+    dispatcher_register_resource(d, resource_def_new("res://new", "n", "N", "text/plain"), &h_res);
+    assert_eq(_cl_await(cd, _note(_RL, "\"d\""), 2000), 1, "change: a resource");
+    assert_eq(_cl_await(cc, _note(_RL, "3"), 2000), 1, "change: ...to the bridge's");
+    assert(_has(_cl_buf(ca), _PL) == 0 && _has(_cl_buf(ca), _RL) == 0, "change: the tools stream was told of neither");
+    assert(_has(_cl_buf(cbb), _RL) == 0, "change: the prompts stream not of the resource");
+    dispatcher_deregister_tool(d, "t_new");
+    assert_eq(_cl_await_n(cd, _note(_TL, "\"d\""), 2, 2000), 1, "change: a tool removed");
+    assert_eq(_cl_await_n(ca, _note(_TL, "\"a\""), 2, 2000), 1, "change: ...to the tools stream too");
+    _cl_await(ca, "\x01\x02", 50);
+    assert_eq(_count(_cl_buf(ca), _TL), 2, "change: once for each change");
+    assert(_passed >= 4, "change: every change passed on to the next sink");
+    assert(_has(_cl_buf(ca), "\"subscriptionId\":\"d\"") == 0, "change: a stream sees only its own id");
+
+    # A client that closes is gone, and its slot serves the next.
+    _cl_close(ca);
+    assert_eq(_await_open(h, 3, 2000), 1, "gone: a closed client's stream ends");
+    _cl_open(ca, 0, hc, _post(_lb("\"g\"", _TOOLS)), 0);
+    assert_eq(_cl_await(ca, "acknowledged", 2000), 1, "gone: the slot opens again");
+    assert_eq(bote_listen_open(h), 4, "gone: four again");
+    dispatcher_register_tool(d, _tool("t_again"), &h_ok);
+    assert_eq(_cl_await(ca, _note(_TL, "\"g\""), 2000), 1, "gone: the new stream has its own id");
+    assert(_has(_cl_buf(ca), "\"subscriptionId\":\"a\"") == 0, "gone: and none of the old one's");
+    # A client that sends anything is gone too.
+    var one[8];
+    store8(&one, 120);
+    sys_write(load64(cbb), &one, 1);
+    assert_eq(_await_open(h, 3, 2000), 1, "gone: a client that writes ends its stream");
+    assert_eq(_cl_eof(cbb, 2000), 1, "gone: ...and the server closes it");
+    _cl_close(cbb);
+    _cl_close(ca);
+    _cl_close(cc);
+    _cl_close(cd);
+    assert_eq(_await_open(h, 0, 2000), 1, "gone: every stream ended");
+
+    # Refusals, and requests that open no stream.
+    _cl_open(ce, 0, hc, _post(_lb("\"x\"", "[]")), 0);
+    _cl_eof(ce, 2000);
+    assert(_cl_status(ce) == 200 && _has(_cl_buf(ce), "\"code\":-32602"), "refused: a filter that is none, -32602");
+    _cl_close(ce);
+    var id256 = _cat3("\"", _rep("i", 254), "\"");
+    _cl_open(ce, 0, hc, _post(_lb(id256, _TOOLS)), 0);
+    assert_eq(_cl_await(ce, "acknowledged", 2000), 1, "id: 256 bytes opens a stream");
+    assert(_has(_cl_buf(ce), _cat3("\"io.modelcontextprotocol/subscriptionId\":", id256, "}")), "id: ...stamped with all of it");
+    _cl_close(ce);
+    assert_eq(_await_open(h, 0, 2000), 1, "id: ...and ends");
+    var id257 = _cat3("\"", _rep("i", 255), "\"");
+    _cl_open(ce, 0, hc, _post(_lb(id257, _TOOLS)), 0);
+    _cl_eof(ce, 2000);
+    assert(_has(_cl_buf(ce), _cat3("\"code\":-32602,\"message\":\"", BOTE_LISTEN_ID_LONG, "\"")), "id: 257 bytes is refused");
+    assert_eq(bote_listen_open(h), 0, "id: ...and holds nothing");
+    _cl_close(ce);
+    _cl_open(ce, 0, hc, _raw("POST", "MCP-Protocol-Version: 2026-07-28\r\n", _lb(0, _TOOLS)), 0);
+    _cl_eof(ce, 2000);
+    assert_eq(_cl_status(ce), 202, "a listen notification is accepted and opens nothing");
+    assert_eq(bote_listen_open(h), 0, "...nothing");
+    _cl_close(ce);
+    _cl_open(ce, 0, hc, _raw("POST", "", "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"subscriptions/listen\",\"params\":{\"notifications\":{}}}"), 0);
+    _cl_eof(ce, 2000);
+    assert(_has(_cl_buf(ce), "\"code\":-32601"), "legacy: no such method");
+    _cl_close(ce);
+    var hc0 = http_config_new("/mcp", 0, 0);
+    store64(hc0 + 48, _mk_d(1));
+    _cl_open(ce, 0, hc0, _post(_lb("7", _TOOLS)), 0);
+    _cl_eof(ce, 2000);
+    assert(_cl_status(ce) == 404 && _has(_cl_buf(ce), "\"code\":-32601"), "no carrier: 404, no such method");
+    _cl_close(ce);
+
+    # ---------------- keepalives, and a client that stops reading ----------------
+    var hk = bote_listen_hub_new(2);
+    bote_listen_hub_with_keepalive(hk, 2);
+    var dk = _mk_d(0);
+    dispatcher_set_listen(dk, hk);
+    dispatcher_set_events(dk, bote_listen_sink(hk, 0));
+    var hck = http_config_new("/mcp", 0, 0);
+    store64(hck + 48, dk);
+    _cl_open(ce, 0, hck, _post(_lb("\"k\"", _TOOLS)), 0);
+    assert_eq(_cl_await(ce, "d\r\n: keepalive\n\n\r\n", 2000), 1, "keepalive: a comment, as a chunk of its own");
+    assert_eq(_cl_await(ce, "\r\n: keepalive\n\n\r\nd\r\n: keepalive", 2000), 1, "keepalive: and again");
+    _cl_close(ce);
+    assert_eq(_await_open(hk, 0, 2000), 1, "keepalive: its stream ends with its client");
+    _cl_open(ce, 0, hck, _post(_lb("\"s\"", _TOOLS)), 4096);
+    assert_eq(_await_open(hk, 1, 2000), 1, "stopped: opened");
+    assert_eq(_await_open(hk, 0, 5000), 1, "stopped: a client that does not read loses its stream");
+    assert_eq(_cl_eof(ce, 2000), 1, "stopped: closed by the server");
+    assert(_has(_cl_buf(ce), "acknowledged"), "stopped: after what it was sent");
+    _cl_close(ce);
+
+    # ---------------- the heap ----------------
+    assert_eq(_heap_per(0, hc, _post(_lb("\"a\"", _TOOLS)), h, 0, ce), 0, "heap: a stream opened and closed keeps nothing");
+    assert_eq(_heap_per(1, sc, _post(_lb("\"a\"", _ALL)), h, 0, ce), 0, "heap: ...on streamable");
+    assert_eq(_heap_per(2, bc, _raw("POST", _cat3(_LH, _ORIGIN, ""), _lb("3", _ALL)), h, 0, ce), 0, "heap: ...on the bridge");
+    var big = _rep("x", 60000);
+    assert_eq(_heap_done(0, hc, _post(_lb(_cat3("\"", big, "\""), _TOOLS)), ce), 0, "heap: a 60 KB id, refused, keeps nothing");
+    assert(_has(_cl_buf(ce), BOTE_LISTEN_ID_LONG), "heap: ...refused as too long");
+    assert_eq(_heap_done(0, hc, _post(_lb("7", _cat3("{\"toolsListChanged\":\"", big, "\"}"))), ce), 0, "heap: a 60 KB value in the filter, refused");
+    assert(_has(_cl_buf(ce), "\"code\":-32602"), "heap: ...as no filter");
+    assert_eq(_heap_done(0, hc, _post(_lb("7", _cat3("{\"resourceSubscriptions\":[\"", big, "\"]}"))), ce), 0, "heap: 60 KB of subscriptions, honored as nothing");
+    assert(_has(_cl_buf(ce), "\"resultType\":\"complete\""), "heap: ...and ended");
+    assert_eq(_heap_done(2, bc, _raw("POST", _cat3(_LH, _ORIGIN, ""), _lb("7", "{}")), ce), 0, "heap: nothing honored, on the bridge");
+    assert(_has(_cl_buf(ce), "\"resultType\":\"complete\""), "heap: ...ended");
+    # Full, with 60 KB in the filter.
+    var hf = bote_listen_hub_new(1);
+    var df = _mk_d(0);
+    dispatcher_set_listen(df, hf);
+    var hcf = http_config_new("/mcp", 0, 0);
+    store64(hcf + 48, df);
+    _cl_open(cd, 0, hcf, _post(_lb("1", _TOOLS)), 0);
+    assert_eq(_cl_await(cd, "acknowledged", 2000), 1, "full: one held");
+    assert_eq(_heap_done(0, hcf, _post(_lb("7", _cat3("{\"toolsListChanged\":true,\"resourceSubscriptions\":[\"", big, "\"]}"))), ce), 0, "heap: refused when full, keeps nothing");
+    assert(_has(_cl_buf(ce), "Subscription limit reached"), "heap: ...refused as full");
+    _cl_close(cd);
+
+    # ---------------- many at once ----------------
+    bote_conn_arm();
+    var ht = bote_listen_hub_new(256);
+    bote_listen_hub_with_keepalive(ht, 5);
+    _lt_d = _mk_d(0);
+    dispatcher_set_listen(_lt_d, ht);
+    dispatcher_set_events(_lt_d, bote_listen_sink(ht, 0));
+    _lt_cfg = streamable_config_new("/mcp", 0, 0);
+    streamable_config_with_session_store(_lt_cfg, session_store_default());
+    store64(_lt_cfg + 56, _lt_d);
+    _lt_raw = _post(_lb("\"t\"", _TOOLS));
+    var lc = _cl_new();
+    _cl_open(lc, 1, _lt_cfg, _post(_lb("\"long\"", _TOOLS)), 0);
+    assert_eq(_cl_await(lc, "acknowledged", 2000), 1, "threads: a stream held throughout");
+    _on_threads(LT_N);
+    assert_eq(_lt_acks, LT_N * LT_M, "threads: every stream opened at once was acknowledged");
+    assert_eq(_lt_refused, 0, "threads: none refused");
+    assert_eq(_cl_await(lc, _note(_TL, "\"long\""), 2000), 1, "threads: the held stream was told of the changes");
+    assert_eq(_cl_ended(lc), 0, "threads: and is still open");
+    assert_eq(_await_open(ht, 1, 5000), 1, "threads: every other stream ended");
+    _cl_close(lc);
+    assert_eq(_await_open(ht, 0, 2000), 1, "threads: and the last");
+    #endif
+    return assert_summary();
+}
+
+var rc = main();
+# The hub's thread is still running: the whole process.
+sys_exit_group(rc);

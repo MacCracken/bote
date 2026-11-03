@@ -63,6 +63,18 @@ fn _lc_begin() {
     return 0;
 }
 fn _lc_end() { sakshi_clear_emit_hook(); return 0; }
+# How many times `needle` occurs in `hay`.
+fn _occurs(hay, needle) {
+    var n = 0;
+    var at = strstr(hay, needle);
+    while (at >= 0) {
+        n = n + 1;
+        hay = hay + at + strlen(needle);
+        at = strstr(hay, needle);
+    }
+    return n;
+}
+
 # 1 when cstr `hay` contains cstr `needle`.
 fn _lc_has(hay, needle) {
     if (hay == 0 || needle == 0) { return 0; }
@@ -209,6 +221,45 @@ fn main() {
     assert(_lc_has(fs_mkdir_handler("{\"path\":\"build/fst/caf\\u00e9.txt/sub\"}", 0), "\"isError\":true") == 1, "mkdir: under a file is an error");
     assert(_lc_has(fs_mkdir_handler("{\"path\":\"build/fst/mk/a/b\"}", 0), "\"isError\":false") == 1, "mkdir: a new directory is not");
     assert(_lc_has(fs_mkdir_handler("{\"path\":\"build/fst/mk/a/b\"}", 0), "\"isError\":false") == 1, "mkdir: ...and neither is one that exists");
+
+    # 3.7.2: the read buffer goes once the result is made, not with the message. A caller that
+    # never rewinds the arena kept 128 KB a call, and a batch kept 64 KB an element.
+    var rmsg = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fs_read\",\"arguments\":{\"path\":\"build/fst/caf\\u00e9.txt\"}}}";
+    assert(_lc_has(codec_process_message(rmsg, disp, 0), "\"text\":\"x\""), "arena: fs_read through the codec");
+    var ar = bote_req_alloc();
+    var ar_before = bote_req_arena_bytes(ar);
+    var heap_before = alloc_used();
+    var ri = 0;
+    while (ri < 20) {
+        codec_process_message(rmsg, disp, 0);
+        ri = ri + 1;
+    }
+    assert_eq(bote_req_arena_bytes(ar), ar_before, "arena: twenty reads, never rewound, add no chunk");
+    assert((alloc_used() - heap_before) / 20 < 4096, "arena: ...and keep only their results");
+    var bsb = str_builder_new();
+    str_builder_add_cstr(bsb, "[");
+    var bj = 0;
+    while (bj < 50) {
+        if (bj > 0) { str_builder_add_cstr(bsb, ","); }
+        str_builder_add_cstr(bsb, rmsg);
+        bj = bj + 1;
+    }
+    str_builder_add_cstr(bsb, "]");
+    var batch = str_data(str_builder_build(bsb));
+    bote_req_begin();
+    var bres = codec_process_message_a(bote_req_alloc(), batch, disp, 0);
+    assert_eq(_occurs(bres, "\"text\":\"x\""), 50, "arena: a batch of fifty reads, each answered");
+    assert(bote_req_arena_bytes(ar) <= ar_before + 262144, "arena: ...holding one read buffer, not fifty");
+    var mk[16];
+    bote_req_mark(&mk);
+    var m1 = alloc_via(ar, 100000);
+    bote_req_release(&mk);
+    assert(alloc_via(ar, 100000) == m1, "release: what came after the mark is handed out again");
+    var m2 = alloc_via(ar, 16);
+    bote_req_mark(&mk);
+    alloc_via(ar, 16);
+    bote_req_release(&mk);
+    assert(alloc_via(ar, 16) == m2 + 16, "release: in the same chunk, from the same byte");
 
     return assert_summary();
 }

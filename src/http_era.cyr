@@ -438,9 +438,18 @@ fn bote_http_serve_modern(hc, req, dispatcher, claims) {
     var dbg = bote_log_enabled(SK_DEBUG);
     var t0 = 0;
     if (dbg == 1) { t0 = clock_now_ns(); }
+    # This connection can hold a `subscriptions/listen` stream open (3.7.2).
+    bote_req_set_stream(1);
     var resp = dispatcher_dispatch_a(a, dispatcher, req, claims);
+    bote_req_set_stream(0);
     if (dbg == 1) { _cdc_log_request_a(a, req, resp, t0); }
     if (resp == 0) { return bote_http_send_accepted(_he_cfd(hc), _he_extra(hc)); }
+    # A listen the dispatcher accepted opens a stream, not a reply (3.7.2, src/listen.cyr).
+    if (resp_error_obj(resp) == 0 && dispatcher_listen(dispatcher) != 0 && streq(req_method(req), "subscriptions/listen") == 1) {
+        var lr = bote_listen_http(dispatcher_listen(dispatcher), hc, req, resp, dispatcher);
+        if (lr == 0) { return 0; }
+        resp = lr;
+    }
     var status = HTTP_OK;
     var err = resp_error_obj(resp);
     if (err != 0) {

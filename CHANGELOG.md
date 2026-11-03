@@ -18,6 +18,169 @@ have per release.
 
 _(empty)_
 
+## [3.7.2] — 2026-11-02 · Listen streams
+
+**`subscriptions/listen` on `http`, `bridge` and `streamable`.** It is MCP 2026-07-28's way to hear of changes, in place
+of the held-open GET. A client names the changes it wants, each opt-in, and its response stays open as an event stream:
+first `notifications/subscriptions/acknowledged`, naming what bote honors, then one notification for each change it asked
+for, and a `: keepalive` comment every 15 s. Every message carries the request's id under
+`io.modelcontextprotocol/subscriptionId`. bote honors `toolsListChanged`, `promptsListChanged` and
+`resourcesListChanged`, each only where it has that list. One thread holds every stream, so a stream holds no worker, nor
+a one-loop server. A client that closes, sends anything, or stops reading loses its stream. stdio, unix and WebSocket answer
+`-32601` until 3.7.3.
+
+**Eight defects in 3.7.1 land ahead of it**, from an independent review of that release. The worst ran a tool that requires a
+scope for a token without it, when the tool was registered while the call was in flight. See the correction notice in
+3.7.1. And CI had never run three of the test files: `bote_fetch` (3.6.5), `bote_jwks` (3.6.6) and `bote_threads` (3.7.0).
+
+The handler ABI and the stated minimum cyrius are unchanged.
+
+### Added
+
+- **`src/listen.cyr`**, in the full bundle after `oauth_metadata.cyr`:
+  - `bote_listen_hub_new(max)` and `bote_listen_hub_with_keepalive(h, ms)`.
+  - `bote_listen_sink(h, next)`: the EventSink that carries the dispatcher's changes to the streams and passes every event
+    on to `next`.
+  - `bote_listen_open(h)` and `bote_listen_http(...)`.
+  - The thread that answers a listen writes the head and the acknowledgement, parks a duplicate of the socket in one of
+    the hub's slots, and returns. One hub thread, started by the first stream, polls every parked socket and a wake pipe.
+  - A change is a bit, so changes of one kind coalesce. A change with no stream open is kept for nobody. Nothing per stream
+    is on the heap, and the id, at most 256 bytes, is copied into its slot.
+  - On agnos there is no hub, and the method is not found.
+- **In the dispatcher** (core):
+  - `dispatcher_set_listen` / `dispatcher_listen`; the Dispatcher grows to 112 B.
+  - `dispatcher_listen_mask_a`: the honored subset, or -1 for a filter that is none. `resourceSubscriptions` is checked as
+    a list of strings and never honored, since `resources.subscribe` is not advertised.
+  - `bote_listen_ack_params_a`.
+  - `BOTE_LISTEN_TOOLS`, `_PROMPTS` and `_RESOURCES`.
+  - In the modern router, `subscriptions/listen` is `-32601` with no carrier or on a transport that cannot hold the stream,
+    and `-32602` for a filter that is not one.
+  - `server/discover` advertises `listChanged` for tools, prompts and resources once a carrier is set.
+- `TOPIC_RESOURCE_REGISTERED`, published when a resource or a template is registered. streamable's drain path sends it as
+  `notifications/resources/list_changed`, and a legacy `initialize` with notifications on now advertises `resources`
+  `listChanged` beside tools and prompts.
+- **In the request state** (core, 40 B):
+  - `bote_req_set_stream` / `bote_req_stream`, set by a transport that can hold a stream open around its dispatch and
+    cleared by `bote_req_begin`. A dispatcher one embedder serves on HTTP and on stdio answers listen on stdio as a method
+    it does not have.
+  - `bote_req_mark` / `bote_req_release`: give back what a function put on the arena once it has copied what it keeps.
+- `registry_validate_def_a`, `prompt_registry_serving` and `resource_registry_serving`: what a call is judged by and what
+  serves it, from one look.
+- **`BOTE_LISTEN_MAX`** (256; 0 turns listen off) and **`BOTE_LISTEN_KEEPALIVE_MS`** (15000) in the binary, for `http`,
+  `bridge` and `streamable`, logged at INFO.
+
+### Changed
+
+- **A `tools/call`, `prompts/get` and `resources/read` are judged and served by one look at the registries**: the tool, its
+  handler and the version asked for (`_dsp_tool_serving`); the prompt and its handler; the handler that serves a URI and the
+  scopes it requires.
+- **A thread waiting on the registries' lock yields every 64 turns** (`BOTE_RW_SPINS`).
+- **sigil's P-256 tables are built once for the process** (`_jwt_p256_warm`), not for every EC key of every set that changes.
+- **CI runs every test file in `tests/`, by glob.** The list it kept had missed three since each was added.
+- SECURITY.md said scopes gate `tools/call` only and that a WebSocket checks its token once. Both stopped being true at
+  3.6.6, and the section above them already said so.
+
+### Fixed
+
+From the review of 3.7.1:
+
+- **A call could run a scoped tool for a token without the scope**, while the tool was registered: the check found no tool
+  and so no scopes, and validation and the handler then found it. A probe ran 3,198 calls of 69,361 that way. A prompt or a
+  resource replaced meanwhile was judged by one registration and served by another.
+- **Loading an EC key kept the loading thread one of sigil's 64 crypto lanes for life** (since 3.6.2). bote's curve check
+  called `_ecv_init`, the verify's tables, which outside a scope of sigil's takes a lane for good. At startup that thread is
+  the main one, so 64 workers shared 63, and a worker that refreshed the keys and exited kept its lane. sigil's
+  `pt_is_on_curve` makes what it needs itself, so the call is gone; the verify's tables are the warm's, whose sign and
+  verify open their own scopes.
+- **P-256's tables were built for every EC key of every set that changed** (3.7.1): a sign and a verify each, 13 ms. 256
+  keys took 5.6 s, inside the worker answering a request.
+- **Two threads registering a dispatcher's first prompt or resource each made a registry**, and the one stored first was lost
+  with what was registered in it. A probe of 3,000 dispatchers lost a prompt on 2,927. It is made by compare-and-swap.
+- **`fs_read`'s buffer stayed on the arena for the rest of its message** (3.7.1): 64 KB a batch element, up to 6.5 MB for a
+  batch of a hundred on each thread's arena, and 128 KB a call where nothing rewinds the arena. It is released once the
+  result is made.
+- **A count from the environment counted leading zeros toward saturating**: `BOTE_WORKERS=0000000000` started 64 workers,
+  not the one loop.
+- **`registry_deprecate` wrote a registered tool with no lock**, so a list built beside it could size the reply without the
+  message and then write it in.
+- **The registries' lock spun without yielding.** With more workers than cores, readers spun through whole scheduler slices
+  while the writer they waited for could have run.
+
+### Security
+
+- **The scope bypass above.** It needs a scoped tool, prompt or resource registered while a client with too few scopes calls
+  it, which bote's binary never does; an embedder that registers while serving was exposed.
+- **Listen streams are bounded**: at most `BOTE_LISTEN_MAX` at once, `-32603` "Subscription limit reached" past it, the
+  TypeScript SDK's words. Each holds one socket and keeps nothing on the heap, and the hub thread never waits on a client: a
+  frame the socket cannot take whole ends that stream. A stream's token is checked when it opens and not again; it carries
+  only that a list changed, never what is in it.
+- With no thread of bote's holding a crypto lane, `BOTE_WORKERS`' bound of 64 again means that good ES256 tokens are never
+  turned away.
+
+### Tests
+
+- **4,730 assertions, from 4,536**, on x86_64 and under `qemu-aarch64`.
+  - **`tests/bote_listen.tcyr`**, 169, new:
+    - The filter's every shape, and the honored subset with and without each list.
+    - The router: no carrier, a transport that cannot hold a stream, a legacy request.
+    - Real streams through `_http_handle`, `_strm_handle` and `_bridge_handle` over socketpairs, read with a deadline: the
+      head, the acknowledgement for a string id and a number id, and CORS on the bridge's.
+    - Each stream told only the kinds it asked for; a closed client and one that writes, gone, and their slot reused.
+    - The capacity, nothing honored ending at once with its result, a 256-byte id taken and a 257-byte one refused, a
+      notification's `202`.
+    - Keepalives, and a client that stops reading losing its stream.
+    - 0 heap bytes per stream on all three transports and for each refusal carrying 60 KB.
+    - Four threads opening 200 streams beside a writer, while one stream stays open throughout.
+  - **`tests/bote_threads.tcyr`**, 81, from 74:
+    - Writers changing what serves five names, beside a caller for each, whose token lacks the scope: no guarded handler runs,
+      and no strict handler sees arguments another registration's schema passed.
+    - Four threads registering the first prompt, resource and template on each of 1,000 dispatchers.
+  - **`tests/bote_jwt.tcyr`**, 491, from 483: no lane kept after a load, a check, or a thread that loads and exits; one
+    build of P-256's tables.
+  - **`tests/bote_fs_tools.tcyr`**, 63, from 56: reads never rewound add no chunk, and a batch of fifty holds one buffer.
+  - **`tests/bote_streamable.tcyr`**, 61, from 58: a resource and a template registered reach a session's buffer.
+- **`fuzz/listen_filter.fcyr`**, new: 20,000 filters from a grammar, each judged against a reference made from the choices
+  that drew it, on a dispatcher with every list and one with none, with nothing left on the heap.
+- **51 mutants, all killed.**
+  - Listen: 28 of 28. Two first survived, and each gave a test: an empty string as `resourceSubscriptions`, and the stream
+    flag being off once a message is served.
+  - The fuzz harness: 8 of 8. Its first survivor showed the same missing `""` case.
+  - The one-look fix: 4 of 4. The validation mutant was first killed by one call in thousands, so its writer now replaces
+    the tool with no gap, which kills it about 350 times a run.
+  - The first registry, the read buffer's release, the curve check and the warm: 11 of 11.
+  - **The first fix for the lanes was wrong twice.** A lane scope around the warm survived its mutant, because sigil's sign
+    and verify open their own scopes, so the review was wrong about that half. And a lane scope around the curve check used
+    `crypto_lane_enter`, which only the 6.7.18 fold has: `scripts/bundle-min-cyrius.sh` refused 6.7.13, the stated
+    minimum. A probe then found the lane was taken by `_ecv_init`, a call the curve check never needed.
+- **`scripts/transport-smoke.sh`**: a listen on each of the three transports, keepalives at 200 ms, a client gone in the
+  log, `-32601` over stdio, and `BOTE_WORKERS` with leading zeros.
+- **The official suite** is where 3.7.1 left it, and has no listen scenario yet; the official client passes 410 of 410.
+
+### Performance
+
+**The request path costs what it did, or less.** Interleaved A/B against 3.7.1, 15 rounds pinned to an idle core.
+Minimums, in ns:
+
+| Bench | 3.7.1 | 3.7.2 | Delta |
+|---|---|---|---|
+| `dispatch_tools_call` | 2,215 | 2,064 | −6.8% |
+| `dispatch_tools_call_result` | 1,964 | 1,872 | −4.7% |
+| `dispatch_tools_call_scoped` | 5,296 | 5,018 | −5.2% |
+| `codec_process_message` | 4,069 | 3,942 | −3.1% |
+| `http_era_modern` | 11,295 | 11,003 | −2.6% |
+| `codec_process_message_threaded` | 4,358 | 4,232 | −2.9% |
+
+Rows that run none of this patch's code moved too (`jsonx_get_str_flat` −5.4%, `validate_compiled_simple` −4.8%), which
+is layout. So against a control that keeps this patch's layout and puts `tools/call` back on four lookups, 9 rounds: one
+look saves 88 ns on `dispatch_tools_call` (−4.1%), 109 ns with a CallToolResult (−5.5%) and 258 ns with a scope (−4.9%),
+where the rows that do not reach it moved within ±2.5%.
+
+**`listen_filter`**, the mask and the acknowledgement's params for a filter naming every kind, is 3.7 µs.
+
+**A registration under load no longer waits on spinning readers.** 100 registrations beside 16 threads serving
+`tools/list`, on two cores: 138 to 161 ms in all on 3.7.1, the slowest 34 to 54 ms; 4 to 7 ms on 3.7.2, the slowest 0.5 to
+2 ms. A thread yields only while it waits, so an uncontended lock costs what it did.
+
 ## [3.7.1] — 2026-11-02 · Registering while serving
 
 **Everything a request reaches in bote is safe on worker threads.** 3.7.0 made streamable's own state safe between its
@@ -29,6 +192,18 @@ exposes is an open decision, and nothing technical holds it any more.
 that had no entropy. See the correction notice in 3.7.0.
 
 The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+> ⚠ **Corrected at 3.7.2.** Five claims below were not true, found by an independent review of this release. "Everything a
+> request reaches in bote is safe on worker threads", registering included, missed three things. A `tools/call` checked a
+> tool's scopes under one look at the registry and found its handler under another, so a tool registered beside the call
+> ran for a token without its scope. A prompt or resource replaced meanwhile was judged by one registration and served by
+> another. And two threads registering a dispatcher's first prompt or resource each made a registry, one lost with what was
+> in it. `registry_deprecate` also wrote a registered tool with no lock. "Nothing else in bote holds a lane, so the binary
+> cannot run out" was false once an EC key was loaded: the curve check kept the loading thread a lane for life, the main
+> thread's at startup, so 64 workers shared 63. "A count past nine digits reads as 999999999, which each one's bound then
+> holds" counted leading zeros, so `BOTE_WORKERS=0000000000` started 64 workers, and `BOTE_JWKS_REFRESH` has no bound to
+> hold. "P-256's when it takes an EC key" built them for every EC key of every set that changed, 13 ms each. And `fs_read`'s
+> buffer, once on the arena, stayed there for the rest of its message, 64 KB a batch element. Each is fixed in 3.7.2.
 
 ### Added
 

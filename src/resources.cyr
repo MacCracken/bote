@@ -273,8 +273,8 @@ fn resource_registry_handler(r, uri) {
 # with nothing registered when a required scope is no scope-token.
 fn resource_registry_register_template(r, template, handler_fp) {
     if (bote_scope_list_ok(resource_template_required_scopes(template)) == 0) { return 0 - 1; }
-    store64(template + 32, handler_fp);
     bote_reg_write();
+    store64(template + 32, handler_fp);
     var ts = resource_registry_templates(r);
     var i = 0;
     var placed = 0;
@@ -321,6 +321,29 @@ fn resource_registry_template_named(r, tpl) {
     }
     bote_reg_read_end();
     return found;
+}
+
+# What serves `uri`, from one look at the registry (3.7.2): the handler through *fp_out,
+# and the scopes it requires, or 0 for none. That is the resource registered at `uri` when
+# it has a handler, else the first template `uri` matches; *fp_out is 0 for neither. What
+# resources/read judges and what serves it are then the same registration.
+fn resource_registry_serving(r, uri, fp_out) {
+    bote_reg_read();
+    var fp = 0;
+    var scopes = 0;
+    if (map_has(resource_registry_handlers(r), uri) == 1) { fp = map_get(resource_registry_handlers(r), uri); }
+    if (fp != 0) {
+        scopes = resource_def_required_scopes(_resource_registry_get_u(r, uri));
+    } else {
+        var t = _resource_registry_template_for_u(r, uri);
+        if (t != 0) {
+            fp = resource_template_handler(t);
+            scopes = resource_template_required_scopes(t);
+        }
+    }
+    bote_reg_read_end();
+    store64(fp_out, fp);
+    return scopes;
 }
 
 # Read-handler fn ptr of the first template `uri` matches, or 0.
