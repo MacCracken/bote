@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.7.3"; }
+fn _bote_server_version() { return "3.7.4"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -528,7 +528,12 @@ fn _build_capabilities(sb, d) {
 }
 
 # `lc` is whether listChanged may be promised, which needs a way to deliver it.
-fn _build_capabilities_lc(sb, d, lc) {
+fn _build_capabilities_lc(sb, d, lc) { return _build_capabilities_sub(sb, d, lc, 0); }
+
+# _build_capabilities_lc, and `resources.subscribe` when `sub` is 1 (3.7.4): only where a
+# listen carries `resourceSubscriptions`. The legacy `initialize` never says it, having no
+# `resources/subscribe`.
+fn _build_capabilities_sub(sb, d, lc, sub) {
     str_builder_add_cstr(sb, "{\"tools\":{");
     if (lc == 1) { str_builder_add_cstr(sb, "\"listChanged\":true"); }
     str_builder_add_cstr(sb, "}");
@@ -540,6 +545,10 @@ fn _build_capabilities_lc(sb, d, lc) {
     if (dispatcher_resources(d) != 0) {
         str_builder_add_cstr(sb, ",\"resources\":{");
         if (lc == 1) { str_builder_add_cstr(sb, "\"listChanged\":true"); }
+        if (sub == 1) {
+            if (lc == 1) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"subscribe\":true");
+        }
         str_builder_add_cstr(sb, "}");
     }
     if (dispatcher_completion(d) != 0) {
@@ -1121,7 +1130,7 @@ fn _build_discover_result_a(a, d) {
     # The changes a listen stream carries, where this message's transport carries one
     # (3.7.2; 3.7.3).
     var lc = _dsp_listen_here(d);
-    _build_capabilities_lc(sb, d, lc);
+    _build_capabilities_sub(sb, d, lc, lc);
     str_builder_add_cstr(sb, ",");
     _dsp_emit_modern_meta(sb, d);
     str_builder_add_cstr(sb, ",\"ttlMs\":0,\"cacheScope\":\"private\"}");
@@ -1337,12 +1346,25 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
 # judges the request and the transport carries the stream (src/listen.cyr): what comes
 # back here is the acknowledgement's `notifications`, the honored subset, which the
 # transport sends as the stream's first message. The subset narrows what was asked to
-# what this server delivers: a list's change when it has that list, and never
-# `resourceSubscriptions`, since no `resources.subscribe` is advertised yet.
+# what this server delivers: a list's change when it has that list, and (3.7.4) a resource's
+# update for the URIs of `resourceSubscriptions` it has room for, when it has resources.
+#
+# A URI is honored when it is a non-empty string with no NUL, at most BOTE_LISTEN_URI_MAX
+# bytes decoded, and not a repeat, while there is room: BOTE_LISTEN_URIS of them in
+# BOTE_LISTEN_URI_ROOM bytes, each with its NUL, which is what a stream keeps of them. The
+# acknowledgement lists exactly those, so a client knows which it will hear of. An update
+# names the URI that changed (dispatcher_resource_updated), and reaches every subscription
+# to that URI or to one it falls under: the same URI, or one it begins with followed by `/`,
+# `?` or `#`, or by anything when it ends in `/`. The spec allows the URI sent to be a
+# sub-resource of the one subscribed.
 
 var BOTE_LISTEN_TOOLS = 1;
 var BOTE_LISTEN_PROMPTS = 2;
 var BOTE_LISTEN_RESOURCES = 4;
+var BOTE_LISTEN_UPDATES = 8;
+var BOTE_LISTEN_URIS = 32;
+var BOTE_LISTEN_URI_ROOM = 4096;
+var BOTE_LISTEN_URI_MAX = 1024;
 var DSP_LISTEN_FILTER = "Invalid params: 'notifications' is required and must be a valid SubscriptionFilter";
 
 # 1 when `raw`, a field of the filter, is absent or a boolean, and *on_out says whether it
@@ -1387,13 +1409,70 @@ fn dispatcher_listen_mask_a(a, d, params) {
     if (load64(&t) == 1) { mask = mask | BOTE_LISTEN_TOOLS; }
     if (load64(&p) == 1 && dispatcher_prompts(d) != 0) { mask = mask | BOTE_LISTEN_PROMPTS; }
     if (load64(&r) == 1 && dispatcher_resources(d) != 0) { mask = mask | BOTE_LISTEN_RESOURCES; }
+    if (dispatcher_resources(d) != 0 && _dsp_listen_uris_a(a, jsonx_get_raw_a(a, f, "resourceSubscriptions")) != 0) {
+        mask = mask | BOTE_LISTEN_UPDATES;
+    }
     return mask;
 }
 
+# The string at `pos` of `raw`, decoded on `a`, when it can be a subscription's URI: not
+# empty, no NUL. 0 otherwise.
+fn _dsp_listen_uri_a(a, raw, n, pos) {
+    var s = _jx_str_at_a(a, raw, n, pos);
+    if (s == 0) { return 0; }
+    var sl = strlen(s);
+    var out = alloc_via(a, sl + 1);
+    var dn = _jx_unescape_into(s, sl, out);
+    if (dn == 0 || strlen(out) != dn) { return 0; }
+    return out;
+}
+
+# The URIs of `raw`, a `resourceSubscriptions` already found to be a list of strings, that
+# a stream honors, decoded, on `a`, in the order sent (above). 0 when none is.
+fn _dsp_listen_uris_a(a, raw) {
+    if (raw == 0) { return 0; }
+    var n = strlen(raw);
+    var out = vec_new_a(a);
+    var used = 0;
+    var i = _jx_skip_ws(raw, n, 1);
+    while (i < n && load8(raw + i) != 93 && vec_len(out) < BOTE_LISTEN_URIS) {
+        var u = _dsp_listen_uri_a(a, raw, n, i);
+        if (u != 0) {
+            var ul = strlen(u);
+            if (ul <= BOTE_LISTEN_URI_MAX && used + ul + 1 <= BOTE_LISTEN_URI_ROOM && _dsp_listen_seen(out, u) == 0) {
+                vec_push_a(a, out, u);
+                used = used + ul + 1;
+            }
+        }
+        i = _jx_array_next(raw, n, i);
+    }
+    if (vec_len(out) == 0) { return 0; }
+    return out;
+}
+
+fn _dsp_listen_seen(v, u) {
+    var i = 0;
+    while (i < vec_len(v)) {
+        if (streq(vec_get(v, i), u) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # The acknowledgement's params for the bits `mask`: {"notifications":{...}}.
-fn bote_listen_ack_params_a(a, mask) {
+fn bote_listen_ack_params_a(a, mask) { return bote_listen_ack_uris_a(a, mask, 0); }
+
+# The same, with the honored URIs `uris` (a vec of decoded strings, or 0) as its
+# `resourceSubscriptions` when `mask` has BOTE_LISTEN_UPDATES (3.7.4).
+fn bote_listen_ack_uris_a(a, mask, uris) {
     var sb = str_builder_new_a(a);
-    _sb_grow_a(a, sb, 128);
+    var room = 160;
+    var k = 0;
+    while (uris != 0 && k < vec_len(uris)) {
+        room = room + strlen(vec_get(uris, k)) * 6 + 3;
+        k = k + 1;
+    }
+    _sb_grow_a(a, sb, room);
     str_builder_add_cstr(sb, "{\"notifications\":{");
     var sep = "";
     if ((mask & BOTE_LISTEN_TOOLS) != 0) {
@@ -1408,9 +1487,31 @@ fn bote_listen_ack_params_a(a, mask) {
     if ((mask & BOTE_LISTEN_RESOURCES) != 0) {
         str_builder_add_cstr(sb, sep);
         str_builder_add_cstr(sb, "\"resourcesListChanged\":true");
+        sep = ",";
+    }
+    if ((mask & BOTE_LISTEN_UPDATES) != 0 && uris != 0) {
+        str_builder_add_cstr(sb, sep);
+        str_builder_add_cstr(sb, "\"resourceSubscriptions\":[");
+        k = 0;
+        while (k < vec_len(uris)) {
+            if (k > 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"");
+            bote_json_escape(sb, vec_get(uris, k));
+            str_builder_add_cstr(sb, "\"");
+            k = k + 1;
+        }
+        str_builder_add_cstr(sb, "]");
     }
     str_builder_add_cstr(sb, "}}");
     return str_data(str_builder_build_a(a, sb));
+}
+
+# Say the resource at `uri` has changed (3.7.4): every listen subscribed to it, or to a
+# resource it falls under, is sent `notifications/resources/updated` naming it. Any thread
+# may call it; nothing keeps `uri`. 0, or -1 for no URI.
+fn dispatcher_resource_updated(d, uri) {
+    if (uri == 0 || load8(uri) == 0) { return 0 - 1; }
+    return event_sink_updated(dispatcher_event_sink(d), uri);
 }
 
 # 1 when this message came on a transport that can carry a listen stream for `d`
@@ -1429,9 +1530,15 @@ fn _dsp_listen_here(d) {
 # to send as it is.
 fn _dsp_listen_a(a, d, id, params) {
     if (_dsp_listen_here(d) == 0) { return resp_error_a(a, id, 0 - 32601, "method not found: subscriptions/listen"); }
+    # MCP's ids are never null (3.7.4), and a subscription's id is how it is cancelled.
+    if (streq(id, "null") == 1) { return resp_error_a(a, id, 0 - 32600, "invalid request: a subscriptions/listen id must not be null"); }
     var mask = dispatcher_listen_mask_a(a, d, params);
     if (mask < 0) { return resp_error_a(a, id, 0 - 32602, DSP_LISTEN_FILTER); }
-    return resp_success_a(a, id, bote_listen_ack_params_a(a, mask));
+    var uris = 0;
+    if ((mask & BOTE_LISTEN_UPDATES) != 0) {
+        uris = _dsp_listen_uris_a(a, jsonx_get_raw_a(a, jsonx_get_raw_a(a, params, "notifications"), "resourceSubscriptions"));
+    }
+    return resp_success_a(a, id, bote_listen_ack_uris_a(a, mask, uris));
 }
 
 # The methods themselves, for both eras: what differs between them is around this.

@@ -24,17 +24,33 @@ fn TOPIC_SANDBOX_DESTROYED() { return "bote/sandbox/destroyed"; }
 fn TOPIC_SANDBOX_ERROR()     { return "bote/sandbox/error"; }
 
 # ================================================================
-# EventSink (16 bytes):
+# EventSink (32 bytes):
 #   +0  publish_fp  function pointer (or 0 for no-op sink)
 #   +8  ctx         opaque pointer passed to publish_fp
+#   +16 list_only   1 when it ignores tool-call events
+#   +24 updated_fp  fn(ctx, uri), told a resource's contents changed (3.7.4), or 0
 # ================================================================
 
 fn event_sink_new(publish_fp, ctx) {
-    var s = alloc(24);
+    var s = alloc(32);
     store64(s, publish_fp);
     store64(s + 8, ctx);
     store64(s + 16, 0);
+    store64(s + 24, 0);
     return s;
+}
+
+# A resource update is not an event (3.7.4): it carries a URI and no payload, so nothing
+# is built for it and nothing kept, and a sink hears of it only through this. The listen
+# sinks (src/listen.cyr) do; majra's and the legacy drain's do not.
+fn event_sink_with_updated(s, fp) { store64(s + 24, fp); return s; }
+
+fn event_sink_updated(sink, uri) {
+    if (sink == 0) { return 0; }
+    var fp = load64(sink + 24);
+    if (fp == 0) { return 0; }
+    fncall2(fp, load64(sink + 8), uri);
+    return 0;
 }
 
 # Say this sink ignores tool-call events, so dispatch need not build them.

@@ -51,6 +51,12 @@ The primary security-relevant surface areas are:
   is judged again before a change goes out, as before a frame is served, so a connection
   whose token has expired is closed with 1008 rather than told of a change. The idle
   deadlines count from what the client last sent, not from what bote sent it.
+  Since **3.7.4** a listen can ask for resource updates. What it keeps of its URIs is
+  bounded, at most 32 in 4 KB, in a room per stream slot made the first time that slot
+  needs one and kept for the next, so a listen allocates nothing after its slot's first
+  and the whole is at most `BOTE_LISTEN_MAX` rooms. An update carries a URI and no
+  payload, waits in a queue of 16 per hub or connection, and one that cannot be queued
+  tells every subscription of every URI it holds rather than being lost.
 - **Browsers** — since **3.4.15** every HTTP-family transport refuses a present
   `Origin` that is not on `BOTE_ALLOWED_ORIGINS` with 403, before anything else
   runs, and with no list set every present `Origin` is refused, except since **3.5.2**

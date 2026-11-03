@@ -196,6 +196,13 @@ fn _bote_conn_events_serial(w, topic, payload) {
     return 0;
 }
 
+fn _bote_conn_updated_serial(w, uri) {
+    mutex_lock(load64(w + 8));
+    event_sink_updated(load64(w), uri);
+    mutex_unlock(load64(w + 8));
+    return 0;
+}
+
 fn _bote_conn_serial_wrap(sink) {
     var w = alloc(16);
     store64(w, sink);
@@ -215,6 +222,7 @@ fn bote_conn_serial_sinks(d) {
     if (ev != 0 && event_sink_publish_fp(ev) != 0 && event_sink_publish_fp(ev) != &_bote_conn_events_serial) {
         var ns = event_sink_new(&_bote_conn_events_serial, _bote_conn_serial_wrap(ev));
         store64(ns + 16, load64(ev + 16));
+        if (load64(ev + 24) != 0) { event_sink_with_updated(ns, &_bote_conn_updated_serial); }
         dispatcher_set_events(d, ns);
     }
     return d;

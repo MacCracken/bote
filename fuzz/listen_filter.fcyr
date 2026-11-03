@@ -8,7 +8,9 @@
 # properties, each with its own exit code:
 #
 #   10   the mask is the reference's: -1 for a filter that is none, else the lists asked for
-#        that the dispatcher has, on one with prompts and resources and one with neither;
+#        that the dispatcher has, and (3.7.4) the updates when a URI in `resourceSubscriptions`
+#        can be honored and it has resources, on one with prompts and resources and one with
+#        neither;
 #   20   a round leaves nothing on the heap: the filter is read on the request arena;
 #   30   the rounds drew each outcome, -1, nothing and something, a thousand times at least.
 
@@ -83,9 +85,11 @@ fn _keys() {
 # A flag's value: 1 true, 0 false, -1 anything else.
 var _FLAG_VALS = 0;
 var _FLAG_MEANS = 0;
-# resourceSubscriptions' value: 1 when it is a list of strings.
+# resourceSubscriptions' value: 1 when it is a list of strings, and 1 when it holds a URI
+# that can be honored (not empty, no NUL).
 var _SUB_VALS = 0;
 var _SUB_OK = 0;
+var _SUB_HONOR = 0;
 # Values a member bote does not know may have.
 var _ANY = 0;
 fn _values() {
@@ -101,11 +105,12 @@ fn _values() {
     vec_push(_FLAG_VALS, "[true]"); vec_push(_FLAG_MEANS, 0 - 1);
     _SUB_VALS = vec_new();
     _SUB_OK = vec_new();
-    vec_push(_SUB_VALS, "[]"); vec_push(_SUB_OK, 1);
-    vec_push(_SUB_VALS, "[ ]"); vec_push(_SUB_OK, 1);
-    vec_push(_SUB_VALS, "[\"file:///a\"]"); vec_push(_SUB_OK, 1);
-    vec_push(_SUB_VALS, "[ \"a\" , \"b\\\"c\" ]"); vec_push(_SUB_OK, 1);
-    vec_push(_SUB_VALS, "[\"\"]"); vec_push(_SUB_OK, 1);
+    _SUB_HONOR = vec_new();
+    vec_push(_SUB_VALS, "[]"); vec_push(_SUB_OK, 1); vec_push(_SUB_HONOR, 0);
+    vec_push(_SUB_VALS, "[ ]"); vec_push(_SUB_OK, 1); vec_push(_SUB_HONOR, 0);
+    vec_push(_SUB_VALS, "[\"file:///a\"]"); vec_push(_SUB_OK, 1); vec_push(_SUB_HONOR, 1);
+    vec_push(_SUB_VALS, "[ \"a\" , \"b\\\"c\" ]"); vec_push(_SUB_OK, 1); vec_push(_SUB_HONOR, 1);
+    vec_push(_SUB_VALS, "[\"\"]"); vec_push(_SUB_OK, 1); vec_push(_SUB_HONOR, 0);
     vec_push(_SUB_VALS, "[1]"); vec_push(_SUB_OK, 0);
     vec_push(_SUB_VALS, "[\"a\",2]"); vec_push(_SUB_OK, 0);
     vec_push(_SUB_VALS, "[[\"a\"]]"); vec_push(_SUB_OK, 0);
@@ -173,6 +178,7 @@ fn _round(a, want, want_bare) {
     var first = 1;
     var bad = 0;
     var mask = 0;
+    var honor = 0;
     # The members in an order of their own: each of the four, once at most, and up to two
     # bote does not know, in among them.
     var order[8];
@@ -208,6 +214,7 @@ fn _round(a, want, want_bare) {
                 if (_rand() % 4 == 0) { si = 5 + _rand() % (vec_len(_SUB_VALS) - 5); }
                 _member(sb, first, "resourceSubscriptions", vec_get(_SUB_VALS, si));
                 if (vec_get(_SUB_OK, si) == 0) { bad = 1; }
+                elif (vec_get(_SUB_HONOR, si) == 1) { honor = 1; }
             } else {
                 var uk = "later";
                 if (m == 5) { uk = "x-other"; }
@@ -222,7 +229,8 @@ fn _round(a, want, want_bare) {
         store64(want, 0 - 1);
         store64(want_bare, 0 - 1);
     } else {
-        store64(want, mask);
+        if (honor == 1) { store64(want, mask | BOTE_LISTEN_UPDATES); }
+        else { store64(want, mask); }
         store64(want_bare, mask & BOTE_LISTEN_TOOLS);
     }
     return str_data(str_builder_build_a(a, sb));

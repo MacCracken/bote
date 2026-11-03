@@ -59,6 +59,7 @@ fn _unix_process_lines(cfd, dispatcher, buf, blen_ptr) {
                 if (resp != 0) {
                     if (_unix_reply(cfd, resp) < 0) { return 0 - 1; }
                 }
+                if (bote_listen_line_broken(_unix_listen) == 1) { return 0 - 1; }
                 processed = 1;
             }
             line_start = scanned + 1;

@@ -25,7 +25,7 @@
 # agnos runs its threads one at a time, so a hub thread there would hold the server: there
 # is no hub, and the method is not found.
 #
-# ListenHub (104 B):
+# ListenHub (160 B):
 #   +0  lock          a mutex over the slots
 #   +8  slots         `max` of BOTE_LISTEN_SLOT_BYTES
 #   +16 max
@@ -40,7 +40,33 @@
 #   +88 frame         BOTE_LISTEN_FRAME_MAX bytes, the hub thread's own
 #   +96 polled        max + 1 slot pointers, beside the pollfds
 # A slot (BOTE_LISTEN_SLOT_BYTES): +0 fd, -1 when free and -2 while a worker opens it,
-# +8 the BOTE_LISTEN_* bits it honors, +16 the id's length, +24 the id, a raw JSON literal.
+# +8 the BOTE_LISTEN_* bits it honors, +16 the id's length, +24 the id, a raw JSON literal,
+# (3.7.4) +280 its room for the URIs of `resourceSubscriptions` it honors, made the first
+# time a stream on the slot has any and kept for the next, so a stream allocates nothing
+# after the first, +288 the bytes used there, +296 how many, each a decoded string and NUL,
+# (3.7.4) +304 the BOTE_LISTEN_* kinds it is owed: changes made while it was being opened.
+#
+# A resource's update (3.7.4, dispatcher_resource_updated) comes from any thread with a URI,
+# and is queued: at most BOTE_LISTEN_QUEUE URIs, each one once, under a lock. The thread that
+# writes the streams takes the queue and tells each subscription of every URI it covers.
+# With no stream open an update is kept for nobody; one too long to queue, or one arriving
+# with the queue full, overflows it, and each subscription is then told of every URI it
+# holds: more than happened, never less. A hub and a ListenLine share these fields:
+#   +104 queue        BOTE_LISTEN_QUEUE entries of BOTE_LISTEN_ENTRY bytes
+#   +112 queued       how many
+#   +120 overflowed   1 once one could not be queued
+#   +128 its lock     the hub's mutex, or the line's own
+#   +136 scratch      where the writing thread takes the queue to
+#   +144 arena        the writing thread's, for the frames, rewound at each pass
+#   +152 seen         every change and update counted, whether or not a stream is open
+#
+# A change made while a stream is being opened must reach it (3.7.4): the client lists after
+# its acknowledgement, so a change before the acknowledgement is in what it lists, and one
+# after must be told. A ListenLine counts a subscription open before it writes the
+# acknowledgement, and only its own loop writes, after the message. A hub's worker writes the
+# acknowledgement and the hub thread the changes, so the hub thread may not write first: the
+# worker reads `seen` before it sends anything, and a stream parked with `seen` moved since is
+# owed every kind it honors, which the hub thread then tells it. More than happened, never less.
 #
 # Where the connection is itself the stream, on stdio, a Unix socket or a WebSocket (3.7.3),
 # there is no hub thread: a ListenLine holds that connection's subscriptions, and the loop
@@ -53,8 +79,8 @@
 # listen's first message on the connection, as on HTTP, and `notifications/cancelled` naming
 # the listen's id ends it, after which the server sends nothing more for it.
 #
-# ListenLine (96 B), its middle laid out as a hub's, so the sink and the wake pipe are
-# shared:
+# ListenLine (160 B), its middle laid out as a hub's, so the sink and the wake pipe are
+# shared, and its tail (3.7.4) as a hub's, so the update queue is:
 #   +0  stream        its BoteStream (src/protocol.cyr)
 #   +8  slots         `max` of BOTE_LISTEN_SLOT_BYTES
 #   +16 max
@@ -67,11 +93,12 @@
 #   +72 next          as a hub's
 #   +80 write ctx
 #   +88 frame         BOTE_LISTEN_FRAME_MAX bytes
+#   +96 broken        1 once a write to the connection failed (3.7.4)
 
 var BOTE_LISTEN_MAX_DEFAULT = 256;
 var BOTE_LISTEN_KEEPALIVE_MS = 15000;
 var BOTE_LISTEN_ID_MAX = 256;
-var BOTE_LISTEN_SLOT_BYTES = 288;
+var BOTE_LISTEN_SLOT_BYTES = 312;
 var BOTE_LISTEN_FRAME_MAX = 1024;
 var BOTE_LISTEN_SUB_KEY = "io.modelcontextprotocol/subscriptionId";
 var BOTE_LISTEN_ID_LONG = "a subscriptions/listen id is at most 256 bytes";
@@ -79,6 +106,9 @@ var BOTE_LISTEN_ID_OPEN = "a subscriptions/listen with this id is open";
 var BOTE_LISTEN_FULL = "Subscription limit reached";
 var BOTE_LISTEN_HELD = "internal error: the stream could not be held open";
 var BOTE_LISTEN_MAX_BOUND = 65536;
+var BOTE_LISTEN_QUEUE = 16;
+var BOTE_LISTEN_OWED = 16;      # a pending bit: a stream parked is owed what it honors
+var BOTE_LISTEN_ENTRY = 1032;   # one queued URI: BOTE_LISTEN_URI_MAX bytes and its NUL, rounded
 var BOTE_LISTEN_SSE_PRE = "event: message\ndata: ";
 var BOTE_LISTEN_SSE_POST = "\n\n";
 
@@ -118,6 +148,7 @@ fn bote_listen_line_detach(c) { return 0; }
 fn bote_listen_line_await(c, fd, deadline) { return 1; }
 fn bote_listen_line_wait(c, fd, deadline) { return 1; }
 fn bote_listen_line_deliver(c) { return 0; }
+fn bote_listen_line_broken(c) { return 0; }
 #endif
 
 #ifndef CYRIUS_TARGET_AGNOS
@@ -148,7 +179,7 @@ var _bl_spawn = &thread_create;
 # A hub for at most `max` streams, or 0 for none.
 fn bote_listen_hub_new(max) {
     if (max <= 0) { return 0; }
-    var h = alloc(104);
+    var h = alloc(160);
     var slots = alloc(max * BOTE_LISTEN_SLOT_BYTES);
     var pfd = alloc((max + 1) * 8);
     var polled = alloc((max + 1) * 8);
@@ -158,9 +189,11 @@ fn bote_listen_hub_new(max) {
     var i = 0;
     while (i < max) {
         store64(slots + i * BOTE_LISTEN_SLOT_BYTES, 0 - 1);
+        store64(slots + i * BOTE_LISTEN_SLOT_BYTES + 280, 0);
         i = i + 1;
     }
     store64(h, mutex_new());
+    if (_bl_updates_new(h, load64(h)) < 0) { return 0; }
     store64(h + 8, slots);
     store64(h + 16, max);
     store64(h + 24, 0);
@@ -200,6 +233,7 @@ fn _bl_raise(h, bit) {
 # A change with no stream open tells nobody, and is not kept for the first to open.
 fn _bl_publish(h, topic, payload) {
     var bit = _bl_kind(topic);
+    if (bit != 0) { atomic_fetch_add(h + 152, 1); }
     if (bit != 0 && atomic_load(h + 24) > 0) { _bl_raise(h, bit); }
     var next = load64(h + 72);
     if (next != 0) { event_sink_publish(next, topic, payload); }
@@ -213,8 +247,174 @@ fn bote_listen_sink(h, next) {
     if (h == 0) { return next; }
     store64(h + 72, next);
     var s = event_sink_new(&_bl_publish, h);
+    event_sink_with_updated(s, &_bl_updated);
     if (next == 0 || load64(next + 16) == 1) { event_sink_set_list_only(s); }
     return s;
+}
+
+# ---- resource updates (3.7.4) -----------------------------------------------------
+
+# A hub's or a line's update queue, its scratch and its arena, under `lock`: 0, or -1.
+fn _bl_updates_new(x, lock) {
+    var q = alloc(BOTE_LISTEN_QUEUE * BOTE_LISTEN_ENTRY);
+    var sc = alloc(BOTE_LISTEN_QUEUE * BOTE_LISTEN_ENTRY);
+    var ar = bote_req_arena_new();
+    if (q == 0 || sc == 0 || ar == 0 || lock == 0) { return 0 - 1; }
+    store64(x + 104, q);
+    store64(x + 112, 0);
+    store64(x + 120, 0);
+    store64(x + 128, lock);
+    store64(x + 136, sc);
+    store64(x + 144, ar);
+    store64(x + 152, 0);
+    return 0;
+}
+
+fn _bl_queued(q, cnt, uri) {
+    var i = 0;
+    while (i < cnt) {
+        if (streq(q + i * BOTE_LISTEN_ENTRY, uri) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The update of `uri`, queued for `x`'s subscriptions, and the writing thread woken.
+fn _bl_queue(x, uri) {
+    atomic_fetch_add(x + 152, 1);
+    if (atomic_load(x + 24) <= 0) { return 0; }
+    var n = strlen(uri);
+    mutex_lock(load64(x + 128));
+    var cnt = load64(x + 112);
+    if (n > BOTE_LISTEN_URI_MAX) {
+        store64(x + 120, 1);
+    } elif (_bl_queued(load64(x + 104), cnt, uri) == 0) {
+        if (cnt >= BOTE_LISTEN_QUEUE) {
+            store64(x + 120, 1);
+        } else {
+            memcpy(load64(x + 104) + cnt * BOTE_LISTEN_ENTRY, uri, n + 1);
+            store64(x + 112, cnt + 1);
+        }
+    }
+    mutex_unlock(load64(x + 128));
+    return _bl_raise(x, BOTE_LISTEN_UPDATES);
+}
+
+# The sink's update hook: queued here, and passed on.
+fn _bl_updated(x, uri) {
+    _bl_queue(x, uri);
+    var next = load64(x + 72);
+    if (next != 0) { event_sink_updated(next, uri); }
+    return 0;
+}
+
+# The updates waiting, taken into the scratch, the queue emptied: how many, and through
+# *over_out whether it overflowed.
+fn _bl_take_updates(x, over_out) {
+    mutex_lock(load64(x + 128));
+    var cnt = load64(x + 112);
+    memcpy(load64(x + 136), load64(x + 104), cnt * BOTE_LISTEN_ENTRY);
+    store64(over_out, load64(x + 120));
+    store64(x + 112, 0);
+    store64(x + 120, 0);
+    mutex_unlock(load64(x + 128));
+    return cnt;
+}
+
+# 1 when an update of `u` reaches a subscription to `sub`: the same URI, or one under it,
+# `sub` then `/`, `?` or `#`, or anything after a `sub` that ends in `/`.
+fn _bl_covers(sub, u) {
+    var sl = strlen(sub);
+    if (sl == 0 || strlen(u) < sl || memeq(u, sub, sl) == 0) { return 0; }
+    var c = load8(u + sl);
+    if (c == 0 || load8(sub + sl - 1) == 47) { return 1; }
+    if (c == 47 || c == 63 || c == 35) { return 1; }
+    return 0;
+}
+
+# 1 when one of slot `s`'s URIs covers `u`.
+fn _bl_slot_covers(s, u) {
+    var r = load64(s + 280);
+    var at = 0;
+    var k = 0;
+    while (k < load64(s + 296)) {
+        if (_bl_covers(r + at, u) == 1) { return 1; }
+        at = at + strlen(r + at) + 1;
+        k = k + 1;
+    }
+    return 0;
+}
+
+# The URIs the acknowledgement `ack` lists, kept in slot `s`'s room: how many. The
+# dispatcher bounded them to fit; none clears what a stream before kept there.
+fn _bl_keep_uris(a, s, ack) {
+    store64(s + 288, 0);
+    store64(s + 296, 0);
+    var raw = jsonx_get_raw_a(a, jsonx_get_raw_a(a, ack, "notifications"), "resourceSubscriptions");
+    if (raw == 0) { return 0; }
+    if (load64(s + 280) == 0) { store64(s + 280, alloc(BOTE_LISTEN_URI_ROOM)); }
+    var room = load64(s + 280);
+    var n = strlen(raw);
+    var used = 0;
+    var cnt = 0;
+    var i = _jx_skip_ws(raw, n, 1);
+    while (i < n && load8(raw + i) != 93) {
+        var u = _dsp_listen_uri_a(a, raw, n, i);
+        if (u != 0 && used + strlen(u) + 1 <= BOTE_LISTEN_URI_ROOM) {
+            memcpy(room + used, u, strlen(u) + 1);
+            used = used + strlen(u) + 1;
+            cnt = cnt + 1;
+        }
+        i = _jx_array_next(raw, n, i);
+    }
+    store64(s + 288, used);
+    store64(s + 296, cnt);
+    return cnt;
+}
+
+# The update of `uri` for the subscription in slot `s`, between `pre` and `post`, on `a`.
+fn _bl_update_a(a, s, uri, pre, post) {
+    var idl = load64(s + 16);
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, strlen(uri) * 6 + idl + 200);
+    str_builder_add_cstr(sb, pre);
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":{\"uri\":\"");
+    bote_json_escape(sb, uri);
+    str_builder_add_cstr(sb, "\",\"_meta\":{\"");
+    str_builder_add_cstr(sb, BOTE_LISTEN_SUB_KEY);
+    str_builder_add_cstr(sb, "\":");
+    var k = 0;
+    while (k < idl) {
+        str_builder_add_byte(sb, load8(s + 24 + k));
+        k = k + 1;
+    }
+    str_builder_add_cstr(sb, "}}}");
+    str_builder_add_cstr(sb, post);
+    return str_data(str_builder_build_a(a, sb));
+}
+
+# For slot `s` of `x`: send_fp(x, a, s, uri) for each of the `nu` updates taken that one of
+# its URIs covers, or, overflowed, for each URI it holds. 1, or 0 once one was not taken.
+fn _bl_each_update(x, a, s, nu, over, send_fp) {
+    if (over == 1) {
+        var r = load64(s + 280);
+        var at = 0;
+        var k = 0;
+        while (k < load64(s + 296)) {
+            if (fncall4(send_fp, x, a, s, r + at) == 0) { return 0; }
+            at = at + strlen(r + at) + 1;
+            k = k + 1;
+        }
+        return 1;
+    }
+    var q = load64(x + 136);
+    var j = 0;
+    while (j < nu) {
+        var u = q + j * BOTE_LISTEN_ENTRY;
+        if (_bl_slot_covers(s, u) == 1 && fncall4(send_fp, x, a, s, u) == 0) { return 0; }
+        j = j + 1;
+    }
+    return 1;
 }
 
 # ---- the slots ------------------------------------------------------------------
@@ -252,14 +452,23 @@ fn _bl_drop(h, s, fd) {
     return _bl_release(h, s);
 }
 
-fn _bl_park(h, s, fd, mask, id, idl) {
+# Park the stream in slot `s`. `seen` is the hub's count of changes when its worker began:
+# moved since, the stream is owed every kind it honors, and the hub thread is woken to say so.
+fn _bl_park(h, s, fd, mask, id, idl, seen) {
     mutex_lock(load64(h));
     store64(s + 8, mask);
     store64(s + 16, idl);
     memcpy(s + 24, id, idl);
+    store64(s + 304, 0);
     store64(s, fd);
     store64(h + 24, load64(h + 24) + 1);
+    var owe = 0;
+    if (atomic_load(h + 152) != seen) {
+        store64(s + 304, mask);
+        owe = 1;
+    }
     mutex_unlock(load64(h));
+    if (owe == 1) { _bl_raise(h, BOTE_LISTEN_OWED); }
     return 0;
 }
 
@@ -408,35 +617,57 @@ fn _bl_close_all(h, why) {
 # stream parked meanwhile ends, before and after the next caller may try again (3.7.3): a
 # stream another worker parked while this start was failing was left with nobody to serve it.
 fn _bl_start(h) {
-    if (atomic_load(h + 56) == 1 || atomic_cas(h + 56, 0, 1) == 0) { return 1; }
-    if (fncall2(_bl_spawn, &_bl_run, h) != 0) { return 1; }
-    bote_log(SK_ERROR, "listen: the hub thread did not start; its streams are not served");
-    _bl_close_all(h, "no hub thread");
-    atomic_store(h + 56, 0);
-    _bl_close_all(h, "no hub thread");
+    while (1 == 1) {
+        var st = atomic_load(h + 56);
+        if (st == 2) { return 1; }
+        if (st == 0 && atomic_cas(h + 56, 0, 1) == 1) {
+            if (fncall2(_bl_spawn, &_bl_run, h) != 0) {
+                atomic_store(h + 56, 2);
+                return 1;
+            }
+            bote_log(SK_ERROR, "listen: the hub thread did not start; its streams are not served");
+            _bl_close_all(h, "no hub thread");
+            atomic_store(h + 56, 0);
+            return 0;
+        }
+        # Another start is under way: its outcome, before this stream counts on it (3.7.4).
+        # A second close afterwards, as 3.7.3 had, could end a stream a later start served.
+        sys_sched_yield();
+    }
     return 0;
 }
 
 # The BOTE_LISTEN_* bits the acknowledgement's params `ack` name: bote_listen_ack_params_a's
 # own bytes. A stream honors what its first message said it would (3.7.3): judged again, a
 # prompt registered between the two made the acknowledgement say nothing and the stream stay.
-fn _bl_ack_mask(ack) {
+fn _bl_true(raw) {
+    if (raw == 0) { return 0; }
+    return streq(raw, "true");
+}
+
+fn _bl_ack_mask_a(a, ack) {
+    var f = jsonx_get_raw_a(a, ack, "notifications");
+    if (f == 0) { return 0; }
     var m = 0;
-    if (strstr(ack, "\"toolsListChanged\":true") >= 0) { m = m | BOTE_LISTEN_TOOLS; }
-    if (strstr(ack, "\"promptsListChanged\":true") >= 0) { m = m | BOTE_LISTEN_PROMPTS; }
-    if (strstr(ack, "\"resourcesListChanged\":true") >= 0) { m = m | BOTE_LISTEN_RESOURCES; }
+    if (_bl_true(jsonx_get_raw_a(a, f, "toolsListChanged")) == 1) { m = m | BOTE_LISTEN_TOOLS; }
+    if (_bl_true(jsonx_get_raw_a(a, f, "promptsListChanged")) == 1) { m = m | BOTE_LISTEN_PROMPTS; }
+    if (_bl_true(jsonx_get_raw_a(a, f, "resourcesListChanged")) == 1) { m = m | BOTE_LISTEN_RESOURCES; }
+    if (jsonx_get_raw_a(a, f, "resourceSubscriptions") != 0) { m = m | BOTE_LISTEN_UPDATES; }
     return m;
 }
+
+fn _bl_ack_mask(ack) { return _bl_ack_mask_a(bote_req_alloc(), ack); }
 
 # Serve the listen request `req`, which the dispatcher `d` accepted with `resp`, on the HTTP
 # connection `hc`: 0 once the stream is open, or closed already when nothing asked for can be
 # honored, or a response to send in its place.
 fn bote_listen_http(h, hc, req, resp, d) {
     var a = bote_req_alloc();
+    var seen = atomic_load(h + 152);
     var id = req_id(req);
     var idl = strlen(id);
     if (idl > BOTE_LISTEN_ID_MAX) { return resp_error_a(a, id, 0 - 32602, BOTE_LISTEN_ID_LONG); }
-    var mask = _bl_ack_mask(resp_result(resp));
+    var mask = _bl_ack_mask_a(a, resp_result(resp));
     var cfd = _he_cfd(hc);
     var s = 0;
     var fd = 0 - 1;
@@ -477,7 +708,8 @@ fn bote_listen_http(h, hc, req, resp, d) {
         sandhi_server_send_chunked_end(cfd);
         return 0;
     }
-    _bl_park(h, s, fd, mask, id, idl);
+    _bl_keep_uris(a, s, resp_result(resp));
+    _bl_park(h, s, fd, mask, id, idl, seen);
     if (_bl_start(h) == 0) { return 0; }
     _bl_wake(h);
     var ln[BOTE_LOG_LINE_BYTES];
@@ -542,22 +774,48 @@ fn _bl_take_pending(h) {
 # Every stream that honors one of `bits` gets its notification; one that will not take it
 # whole ends.
 fn _bl_send_changes(h, bits) {
+    var over[8];
+    store64(&over, 0);
+    var nu = 0;
+    if ((bits & BOTE_LISTEN_UPDATES) != 0) { nu = _bl_take_updates(h, &over); }
+    var a = load64(h + 144);
+    reset_via(a);
     mutex_lock(load64(h));
     var i = 0;
     while (i < load64(h + 16)) {
         var s = _bl_slot(h, i);
+        var owed = 0;
+        if (load64(s) >= 0) {
+            owed = load64(s + 304);
+            store64(s + 304, 0);
+        }
+        var sb = bits | owed;
         var b = 1;
         while (b <= BOTE_LISTEN_RESOURCES && load64(s) >= 0) {
-            if ((bits & b) != 0 && (load64(s + 8) & b) != 0) {
+            if ((sb & b) != 0 && (load64(s + 8) & b) != 0) {
                 var n = _bl_change_frame(h, s, _bl_method(b));
                 if (_bl_send(s, load64(h + 88), n) == 0) { _bl_close_held(h, s, "stopped reading"); }
             }
             b = b * 2;
         }
+        if ((sb & BOTE_LISTEN_UPDATES) != 0 && load64(s) >= 0 && (load64(s + 8) & BOTE_LISTEN_UPDATES) != 0) {
+            # Owed, it is told of every URI it holds; else of those taken that it covers.
+            var sover = load64(&over);
+            if ((owed & BOTE_LISTEN_UPDATES) != 0) { sover = 1; }
+            if (_bl_each_update(h, a, s, nu, sover, &_bl_update_send) == 0) { _bl_close_held(h, s, "stopped reading"); }
+        }
         i = i + 1;
     }
     mutex_unlock(load64(h));
     return 0;
+}
+
+# One update to an HTTP stream, as an SSE event in a chunk: 1 when the socket took it whole.
+fn _bl_update_send(h, a, s, uri) {
+    var ev = _bl_update_a(a, s, uri, BOTE_LISTEN_SSE_PRE, BOTE_LISTEN_SSE_POST);
+    var n = strlen(ev);
+    var out = alloc_via(a, n + 32);
+    return _bl_send(s, out, _bl_chunk(out, ev, n));
 }
 
 fn _bl_keepalive(h) {
@@ -615,7 +873,7 @@ fn _bl_run(h) {
 # A ListenLine for at most `max` subscriptions on one connection at a time, or 0 for none.
 fn bote_listen_line_new(max) {
     if (max <= 0) { return 0; }
-    var c = alloc(96);
+    var c = alloc(160);
     var slots = alloc(max * BOTE_LISTEN_SLOT_BYTES);
     var frame = alloc(BOTE_LISTEN_FRAME_MAX);
     var fds[8];
@@ -623,8 +881,10 @@ fn bote_listen_line_new(max) {
     var i = 0;
     while (i < max) {
         store64(slots + i * BOTE_LISTEN_SLOT_BYTES, 0 - 1);
+        store64(slots + i * BOTE_LISTEN_SLOT_BYTES + 280, 0);
         i = i + 1;
     }
+    if (_bl_updates_new(c, mutex_new()) < 0) { return 0; }
     store64(c, bote_stream_new(&_bll_open, &_bll_cancel, c));
     store64(c + 8, slots);
     store64(c + 16, max);
@@ -658,10 +918,18 @@ fn _bll_clear(c) {
         i = i + 1;
     }
     atomic_store(c + 24, 0);
+    store64(c + 96, 0);
     _bl_take_pending(c);
     var drain[64];
     while (sys_read(load64(c + 40), &drain, 64) > 0) { }
     return 0;
+}
+
+# 1 once a write to the connection has failed (3.7.4): the transport then drops it, as it
+# does when a reply will not go. A frame not sent whole leaves the connection out of step.
+fn bote_listen_line_broken(c) {
+    if (c == 0) { return 0; }
+    return load64(c + 96);
 }
 
 # The connection `c` serves from now, on the dispatcher `d`, written to through
@@ -682,6 +950,9 @@ fn bote_listen_line_detach(c) {
     _bll_clear(c);
     store64(c + 64, 0);
     store64(c + 80, 0);
+    # The message being served may not be the last on this thread (3.7.4): one dispatched
+    # after, without a begin, found the stream and a writer of 0.
+    bote_req_set_stream(0);
     if (n > 0) {
         var ln[BOTE_LOG_LINE_BYTES];
         bote_log_line(&ln, SK_DEBUG, "listen subscriptions ended");
@@ -692,12 +963,33 @@ fn bote_listen_line_detach(c) {
     return 0;
 }
 
-# The open subscription whose id is the `idl` bytes at `id`, or 0.
-fn _bll_find(c, id, idl) {
+# The id at `raw`, `n` bytes, as the value it is, on `a` (3.7.4): a string decoded and marked
+# apart from a number, so "a/b" and "a\/b" are one id and "1" and 1 are two. JSON-RPC
+# compares ids by value; through 3.7.3 they were compared byte for byte.
+fn _bll_key_a(a, raw, n) {
+    var k = alloc_via(a, n + 2);
+    if (n > 0 && load8(raw) == 34) {
+        var cp = alloc_via(a, n + 1);
+        memcpy(cp, raw, n);
+        store8(cp + n, 0);
+        var dec = _jx_str_dec_at_a(a, cp, n, 0);
+        store8(k, 115);
+        memcpy(k + 1, dec, strlen(dec) + 1);
+        return k;
+    }
+    store8(k, 110);
+    memcpy(k + 1, raw, n);
+    store8(k + 1 + n, 0);
+    return k;
+}
+
+# The open subscription whose id is the value of the `idl` bytes at `id`, or 0.
+fn _bll_find_a(c, a, id, idl) {
+    var want = _bll_key_a(a, id, idl);
     var i = 0;
     while (i < load64(c + 16)) {
         var s = _bl_slot(c, i);
-        if (load64(s) == 1 && load64(s + 16) == idl && memeq(s + 24, id, idl) == 1) { return s; }
+        if (load64(s) == 1 && streq(_bll_key_a(a, s + 24, load64(s + 16)), want) == 1) { return s; }
         i = i + 1;
     }
     return 0;
@@ -722,9 +1014,10 @@ fn _bll_open(c, a, req, resp) {
     var id = req_id(req);
     var idl = strlen(id);
     if (idl > BOTE_LISTEN_ID_MAX) { return _bll_refuse_a(a, id, 0 - 32602, BOTE_LISTEN_ID_LONG); }
-    if (_bll_find(c, id, idl) != 0) { return _bll_refuse_a(a, id, 0 - 32600, BOTE_LISTEN_ID_OPEN); }
+    if (load64(c + 64) == 0) { return _bll_refuse_a(a, id, 0 - 32601, "method not found: subscriptions/listen"); }
+    if (_bll_find_a(c, a, id, idl) != 0) { return _bll_refuse_a(a, id, 0 - 32600, BOTE_LISTEN_ID_OPEN); }
     var d = load64(c + 56);
-    var mask = _bl_ack_mask(resp_result(resp));
+    var mask = _bl_ack_mask_a(a, resp_result(resp));
     var s = 0;
     if (mask != 0) {
         s = _bll_free_slot(c);
@@ -738,16 +1031,29 @@ fn _bll_open(c, a, req, resp) {
     }
     var w = load64(c + 64);
     var ctx = load64(c + 80);
-    if (fncall2(w, ctx, _bl_ack_a(a, resp_result(resp), id, "", "")) < 0) { return 0; }
-    if (mask == 0) {
-        fncall2(w, ctx, _bl_result_a(a, id, d, "", ""));
+    # Open before the acknowledgement goes (3.7.4), so a change made while it is written is
+    # raised for it, and written after it by this loop: through 3.7.3 a change the instant
+    # the client read the acknowledgement could find none open, and be kept for nobody.
+    if (mask != 0) {
+        _bl_keep_uris(a, s, resp_result(resp));
+        store64(s + 8, mask);
+        store64(s + 16, idl);
+        memcpy(s + 24, id, idl);
+        store64(s, 1);
+        atomic_store(c + 24, load64(c + 24) + 1);
+    }
+    if (fncall2(w, ctx, _bl_ack_a(a, resp_result(resp), id, "", "")) < 0) {
+        store64(c + 96, 1);
+        if (mask != 0) {
+            store64(s, 0 - 1);
+            atomic_store(c + 24, load64(c + 24) - 1);
+        }
         return 0;
     }
-    store64(s + 8, mask);
-    store64(s + 16, idl);
-    memcpy(s + 24, id, idl);
-    store64(s, 1);
-    atomic_store(c + 24, load64(c + 24) + 1);
+    if (mask == 0) {
+        if (fncall2(w, ctx, _bl_result_a(a, id, d, "", "")) < 0) { store64(c + 96, 1); }
+        return 0;
+    }
     var ln[BOTE_LOG_LINE_BYTES];
     bote_log_line(&ln, SK_DEBUG, "listen subscription opened");
     bote_log_int(&ln, "honored", mask);
@@ -761,7 +1067,7 @@ fn _bll_open(c, a, req, resp) {
 # other is a request the line does not hold.
 fn _bll_cancel(c, a, id) {
     if (id == 0) { return 0; }
-    var s = _bll_find(c, id, strlen(id));
+    var s = _bll_find_a(c, a, id, strlen(id));
     if (s == 0) { return 0; }
     store64(s, 0 - 1);
     atomic_store(c + 24, load64(c + 24) - 1);
@@ -810,6 +1116,12 @@ fn bote_listen_line_deliver(c) {
     while (sys_read(load64(c + 40), &drain, 64) > 0) { }
     var bits = _bl_take_pending(c);
     if (bits == 0 || load64(c + 64) == 0) { return 0; }
+    var over[8];
+    store64(&over, 0);
+    var nu = 0;
+    if ((bits & BOTE_LISTEN_UPDATES) != 0) { nu = _bl_take_updates(c, &over); }
+    var a = load64(c + 144);
+    reset_via(a);
     var f = load64(c + 88);
     var at[8];
     var i = 0;
@@ -821,13 +1133,28 @@ fn bote_listen_line_deliver(c) {
                 store64(&at, 0);
                 _bl_note(f, &at, s, _bl_method(b));
                 store8(f + load64(&at), 0);
-                if (fncall2(load64(c + 64), load64(c + 80), f) < 0) { return 0 - 1; }
+                if (fncall2(load64(c + 64), load64(c + 80), f) < 0) {
+                    store64(c + 96, 1);
+                    return 0 - 1;
+                }
             }
             b = b * 2;
+        }
+        if ((bits & BOTE_LISTEN_UPDATES) != 0 && load64(s) == 1 && (load64(s + 8) & BOTE_LISTEN_UPDATES) != 0) {
+            if (_bl_each_update(c, a, s, nu, load64(&over), &_bll_update_write) == 0) {
+                store64(c + 96, 1);
+                return 0 - 1;
+            }
         }
         i = i + 1;
     }
     return 0;
+}
+
+# One update to a line's connection, through its writer: 1 when it took it.
+fn _bll_update_write(c, a, s, uri) {
+    if (fncall2(load64(c + 64), load64(c + 80), _bl_update_a(a, s, uri, "", "")) < 0) { return 0; }
+    return 1;
 }
 
 # bote_listen_line_wait, writing the changes as they come: 1 when `fd` has input or has

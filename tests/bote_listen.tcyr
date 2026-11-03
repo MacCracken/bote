@@ -391,8 +391,56 @@ fn _heap_done(kind, cfg, raw, c) {
     return (alloc_used() - before) / 10;
 }
 
+# Resource updates from four threads at once (3.7.4).
+var _hu_d = 0;
+var _hu_go = 0;
+fn _hu_num(prefix, i) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_int(sb, i);
+    return str_data(str_builder_build(sb));
+}
+fn _hu_updater(i) {
+    while (atomic_load(&_hu_go) == 0) { }
+    var k = 0;
+    while (k < 50) {
+        dispatcher_resource_updated(_hu_d, _hu_num(_hu_num("res://dir/t", i), k));
+        k = k + 1;
+    }
+    return 0;
+}
+
+# A client that, once the worker has begun to write, changes the tools and only then reads, so
+# the change is made while the acknowledgement is written (3.7.4).
+var _wa_c = 0;
+var _wa_d = 0;
+fn _wa_reader(i) {
+    var pfd[8];
+    var ts[16];
+    store32(&pfd, load64(_wa_c));
+    store16(&pfd + 4, 1);
+    store16(&pfd + 6, 0);
+    store64(&ts, 2);
+    store64(&ts + 8, 0);
+    sys_ppoll(&pfd, 1, &ts, 0, 8);
+    dispatcher_register_tool(_wa_d, _tool("wa_tool"), &h_ok);
+    _cl_await(_wa_c, "acknowledged", 5000);
+    return 0;
+}
+
 # A hub thread that does not start (3.7.3).
 fn _no_spawn(fp, arg) { return 0; }
+
+# One that starts, without a thread (3.7.4); and a start under way that ends `_sy_to` after
+# 50 ms.
+fn _yes_spawn(fp, arg) { return 1; }
+var _sy_hub = 0;
+var _sy_to = 0;
+fn _sy_finish(i) {
+    sleep_ms(50);
+    atomic_store(_sy_hub + 56, _sy_to);
+    return 0;
+}
 
 # ---- many at once ---------------------------------------------------------------
 
@@ -492,7 +540,9 @@ fn main() {
     assert_eq(_mask(dm, "{\"toolsListChanged\":true,\"later\":5}"), BOTE_LISTEN_TOOLS, "mask: a member it does not know is ignored");
     assert_eq(_mask(dm, "{\"tools\\u004cistChanged\":true}"), BOTE_LISTEN_TOOLS, "mask: an escaped key is the key it spells");
     assert_eq(_mask(dm, "{\"resourceSubscriptions\":[]}"), 0, "mask: no subscriptions");
-    assert_eq(_mask(dm, "{\"resourceSubscriptions\":[\"file:///a\", \"res://b\"],\"toolsListChanged\":true}"), BOTE_LISTEN_TOOLS, "mask: subscriptions are valid and never honored");
+    assert_eq(_mask(dm, "{\"resourceSubscriptions\":[\"file:///a\", \"res://b\"],\"toolsListChanged\":true}"), BOTE_LISTEN_TOOLS | BOTE_LISTEN_UPDATES, "mask: subscriptions honored where there are resources (3.7.4)");
+    assert_eq(_mask(dt, "{\"resourceSubscriptions\":[\"file:///a\"],\"toolsListChanged\":true}"), BOTE_LISTEN_TOOLS, "mask: ...and not where there are none");
+    assert_eq(_mask(dm, "{\"resourceSubscriptions\":[\"\"]}"), 0, "mask: an empty URI is not honored");
     assert_eq(_mask(dm, "{\"resourceSubscriptions\":[ ]}"), 0, "mask: an empty array with space");
     assert_eq(_mask(dm, "{\"resourceSubscriptions\":[1]}"), 0 - 1, "mask: a number is no URI");
     assert_eq(_mask(dm, "{\"resourceSubscriptions\":[\"a\",1]}"), 0 - 1, "mask: ...nor the second");
@@ -530,7 +580,7 @@ fn main() {
     var disc = codec_process_message(_mb("server/discover"), dm, 0);
     assert(_has(disc, "\"tools\":{\"listChanged\":true}"), "discover: tools listChanged with a carrier");
     assert(_has(disc, "\"prompts\":{\"listChanged\":true}"), "discover: prompts listChanged");
-    assert(_has(disc, "\"resources\":{\"listChanged\":true}"), "discover: resources listChanged");
+    assert(_has(disc, "\"resources\":{\"listChanged\":true,\"subscribe\":true}"), "discover: resources listChanged, and subscribe (3.7.4)");
     bote_req_begin();
     var disc_nt = codec_process_message(_mb("server/discover"), dm, 0);
     assert(_has(disc_nt, "listChanged") == 0, "discover: none for a message on a transport that cannot carry the stream, a hub or not");
@@ -652,7 +702,7 @@ fn main() {
     assert(_has(_cl_buf(ce), "\"id\":\"e\""), "full: ...to its id");
     _cl_close(ce);
     assert_eq(bote_listen_open(h), 4, "full: still four");
-    _cl_open(ce, 0, hc, _post(_lb("\"f\"", "{\"resourceSubscriptions\":[\"file:///x\"]}")), 0);
+    _cl_open(ce, 0, hc, _post(_lb("\"f\"", "{\"resourceSubscriptions\":[\"\"]}")), 0);
     assert_eq(_cl_eof(ce, 2000), 1, "nothing honored: the stream ends at once");
     var fb = _cl_buf(ce);
     assert(_has(fb, "\"params\":{\"notifications\":{},\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":\"f\"}}"), "nothing honored: acknowledged as nothing");
@@ -816,7 +866,7 @@ fn main() {
     var bp[16];
     sys_socketpair(1, 1, 0, &bp);
     var bs = _bl_reserve(hz);
-    _bl_park(hz, bs, load32(&bp), BOTE_LISTEN_TOOLS, "\"other\"", 7);
+    _bl_park(hz, bs, load32(&bp), BOTE_LISTEN_TOOLS, "\"other\"", 7, atomic_load(hz + 152));
     store64(hz + 56, 0);
     _bl_spawn = &_no_spawn;
     _cl_open(ce, 0, hcz, _post(_lb("\"z\"", _TOOLS)), 0);
@@ -829,6 +879,163 @@ fn main() {
     _bl_spawn = &thread_create;
     _cl_close(ce);
     _cl_close(bcl);
+    # A start under way is waited for (3.7.4), never closed around: it ends started, or it
+    # ends not, and the waiter then starts it itself.
+    var hy = bote_listen_hub_new(1);
+    store64(hy + 56, 1);
+    _sy_hub = hy;
+    _sy_to = 2;
+    var syt = thread_create(&_sy_finish, 0);
+    assert_eq(_bl_start(hy), 1, "start: one under way, then started, is waited for");
+    thread_join(syt);
+    store64(hy + 56, 1);
+    _sy_to = 0;
+    _bl_spawn = &_yes_spawn;
+    syt = thread_create(&_sy_finish, 0);
+    assert_eq(_bl_start(hy), 1, "start: one under way that failed, and the waiter starts it");
+    thread_join(syt);
+    assert_eq(atomic_load(hy + 56), 2, "start: ...started");
+    _bl_spawn = &thread_create;
+
+    # ---------------- a change while a stream is opened (3.7.4) ----------------
+    # Counted even with no stream open, so a worker can tell one happened while it opened.
+    var hw = bote_listen_hub_new(4);
+    bote_listen_hub_with_keepalive(hw, 600000);
+    var dw = _mk_d(1);
+    dispatcher_set_listen(dw, hw);
+    dispatcher_set_events(dw, bote_listen_sink(hw, 0));
+    var seen0 = atomic_load(hw + 152);
+    dispatcher_register_tool(dw, _tool("w_counted"), &h_ok);
+    dispatcher_resource_updated(dw, "res://a");
+    assert_eq(atomic_load(hw + 152), seen0 + 2, "seen: a change and an update counted with none open");
+    # A stream parked with the count moved since its worker began is owed what it honors, and
+    # told after its acknowledgement; one parked with the count as it was is owed nothing.
+    var owp[16];
+    sys_socketpair(1, 1, 0, &owp);
+    var ows = _bl_reserve(hw);
+    _bl_keep_uris(bote_req_begin(), ows, "{\"notifications\":{\"toolsListChanged\":true,\"resourceSubscriptions\":[\"res://o\"]}}");
+    _bl_park(hw, ows, load32(&owp), BOTE_LISTEN_TOOLS | BOTE_LISTEN_UPDATES, "\"ow\"", 4, atomic_load(hw + 152) - 1);
+    _bl_start(hw);
+    var owc = _cl_new();
+    store64(owc, load32(&owp + 4));
+    assert_eq(_cl_await(owc, _note(_TL, "\"ow\""), 2000), 1, "owed: the list change made while it opened");
+    assert_eq(_cl_await(owc, "\"uri\":\"res://o\"", 2000), 1, "owed: ...and an update of each URI it holds");
+    var onp[16];
+    sys_socketpair(1, 1, 0, &onp);
+    var ons = _bl_reserve(hw);
+    _bl_park(hw, ons, load32(&onp), BOTE_LISTEN_TOOLS, "\"on\"", 4, atomic_load(hw + 152));
+    var onc = _cl_new();
+    store64(onc, load32(&onp + 4));
+    assert_eq(load64(ons + 304), 0, "owed: a stream parked with the count as it was owes nothing");
+    dispatcher_register_tool(dw, _tool("w_after"), &h_ok);
+    assert_eq(_cl_await(onc, _note(_TL, "\"on\""), 2000), 1, "owed: and hears the next change as any stream does");
+    assert_eq(_cl_await_n(owc, _note(_TL, "\"ow\""), 2, 2000), 1, "owed: the owed stream hears it too");
+    assert_eq(_count(_cl_buf(owc), "\"uri\":\"res://o\""), 1, "owed: ...and is told what it was owed once");
+    _cl_close(owc);
+    _cl_close(onc);
+    assert_eq(_await_open(hw, 0, 2000), 1, "owed: both end with their clients");
+    # What a stream was owed goes with it: one that ends before the hub thread tells it leaves
+    # nothing owed to the next on its slot.
+    var hv = bote_listen_hub_new(1);
+    var vp[16];
+    sys_socketpair(1, 1, 0, &vp);
+    var vs = _bl_reserve(hv);
+    _bl_park(hv, vs, load32(&vp), BOTE_LISTEN_TOOLS, "\"v1\"", 4, atomic_load(hv + 152) - 1);
+    mutex_lock(load64(hv));
+    _bl_close_held(hv, vs, "test");
+    mutex_unlock(load64(hv));
+    sys_socketpair(1, 1, 0, &vp);
+    assert_eq(_bl_reserve(hv), vs, "owed: the next stream takes the slot");
+    _bl_park(hv, vs, load32(&vp), BOTE_LISTEN_TOOLS, "\"v2\"", 4, atomic_load(hv + 152));
+    assert_eq(load64(vs + 304), 0, "owed: ...and is owed nothing of the last one's");
+    # Through bote_listen_http: a head longer than the socket takes keeps the worker writing
+    # until the client reads, and the client changes the tools first.
+    var wa = bote_req_begin();
+    var werr[8];
+    var wreq = _cdc_admit_a(wa, _lb("\"wa\"", _TOOLS), &werr);
+    var wresp = resp_success_a(wa, "\"wa\"", "{\"notifications\":{\"toolsListChanged\":true}}");
+    var wsp[16];
+    sys_socketpair(1, 1, 0, &wsp);
+    var wv[8];
+    store64(&wv, 4096);
+    sys_setsockopt(load32(&wsp), 1, 7, &wv, 4);
+    var wpad = alloc(40016);
+    memcpy(wpad, "X-Pad: ", 7);
+    memset(wpad + 7, 97, 40000);
+    memcpy(wpad + 40007, "\r\n", 3);
+    var whc[48];
+    bote_http_ctx(&whc, load32(&wsp), "http", "", 0, wpad);
+    _wa_c = _cl_new();
+    store64(_wa_c, load32(&wsp + 4));
+    _wa_d = dw;
+    var wat = thread_create(&_wa_reader, 0);
+    assert_eq(bote_listen_http(hw, &whc, wreq, wresp, dw), 0, "window: served");
+    sys_close(load32(&wsp));
+    thread_join(wat);
+    assert(_has(_cl_buf(_wa_c), "acknowledged"), "window: the client is acknowledged");
+    assert_eq(_cl_await(_wa_c, _note(_TL, "\"wa\""), 2000), 1, "window: and told of a change made while the acknowledgement was written");
+    _cl_close(_wa_c);
+    _await_open(hw, 0, 2000);
+
+    # ---------------- resource updates on HTTP (3.7.4) ----------------
+    var hu_ev = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":{\"uri\":";
+    _cl_open(ca, 0, hc, _post(_lb("\"u1\"", "{\"resourceSubscriptions\":[\"res://a\",\"res://dir/\"]}")), 0);
+    assert_eq(_cl_await(ca, "acknowledged", 2000), 1, "updates: an http stream");
+    assert(_has(_cl_buf(ca), "\"notifications\":{\"resourceSubscriptions\":[\"res://a\",\"res://dir/\"]},\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":\"u1\"}"), "updates: its acknowledgement lists the URIs");
+    _cl_open(cd, 1, sc, _post(_lb("\"u2\"", "{\"toolsListChanged\":true,\"resourceSubscriptions\":[\"res://b\"]}")), 0);
+    assert_eq(_cl_await(cd, "acknowledged", 2000), 1, "updates: a streamable stream");
+    dispatcher_resource_updated(d, "res://a");
+    assert_eq(_cl_await(ca, _cat3(hu_ev, "\"res://a\",\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":\"u1\"}}}\n\n", ""), 2000), 1, "updates: an SSE event, stamped");
+    dispatcher_resource_updated(d, "res://dir/x/y");
+    assert_eq(_cl_await(ca, "\"uri\":\"res://dir/x/y\"", 2000), 1, "updates: a sub-resource");
+    dispatcher_resource_updated(d, "res://b");
+    assert_eq(_cl_await(cd, _cat3(hu_ev, "\"res://b\",\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":\"u2\"}}}\n\n", ""), 2000), 1, "updates: to the streamable one");
+    assert(_has(_cl_buf(ca), "res://b") == 0 && _has(_cl_buf(cd), "res://a") == 0, "updates: each stream only its own");
+    # A URI too long to queue overflows the queue on its own, whatever the hub thread has taken.
+    var hui = 0;
+    dispatcher_resource_updated(d, _cat3("res://none/", _rep("x", 1100), ""));
+    assert_eq(_cl_await_n(cd, "\"uri\":\"res://b\"", 2, 2000), 1, "overflow: told again of its own");
+    assert(_cl_await(ca, "\"uri\":\"res://dir/\"", 2000) == 1 && _count(_cl_buf(ca), "\"uri\":\"res://a\"") == 2, "overflow: ...each stream every URI it holds");
+    assert(_has(_cl_buf(ca), "res://none") == 0, "overflow: and none it does not");
+    # The heap: an update to a stream is built on the hub's own arena, rewound each pass; long
+    # enough, and often enough, that an arena not rewound would outgrow its first chunk.
+    var hu_uri = _cat3("res://a/h", _rep("h", 1000), "");
+    var hu_needle = _cat3("\"uri\":\"", hu_uri, "\"");
+    dispatcher_resource_updated(d, hu_uri);
+    _cl_await(ca, hu_needle, 2000);
+    var hu_before = alloc_used();
+    var hu_got = 0;
+    hui = 0;
+    while (hui < 100) {
+        store64(ca + 16, 0);
+        store8(_cl_buf(ca), 0);
+        dispatcher_resource_updated(d, hu_uri);
+        hu_got = hu_got + _cl_await(ca, hu_needle, 2000);
+        hui = hui + 1;
+    }
+    assert_eq(hu_got, 100, "heap: every update delivered");
+    assert_eq((alloc_used() - hu_before) / 100, 0, "heap: an update to a stream keeps nothing");
+    # Four threads at once.
+    _hu_d = d;
+    _hu_go = 0;
+    var hu_ts = alloc(32);
+    hui = 0;
+    while (hui < 4) {
+        store64(hu_ts + hui * 8, thread_create(&_hu_updater, hui));
+        hui = hui + 1;
+    }
+    atomic_store(&_hu_go, 1);
+    hui = 0;
+    while (hui < 4) {
+        thread_join(load64(hu_ts + hui * 8));
+        hui = hui + 1;
+    }
+    dispatcher_resource_updated(d, "res://dir/last");
+    assert_eq(_cl_await(ca, "\"uri\":\"res://dir/last\"", 5000), 1, "threads: updates from four threads, and the last");
+    assert_eq(_cl_ended(ca), 0, "threads: the stream still open");
+    _cl_close(ca);
+    _cl_close(cd);
+    assert_eq(_await_open(h, 0, 2000), 1, "updates: both streams end with their clients");
 
     # ---------------- the heap ----------------
     assert_eq(_heap_per(0, hc, _post(_lb("\"a\"", _TOOLS)), h, 0, ce), 0, "heap: a stream opened and closed keeps nothing");

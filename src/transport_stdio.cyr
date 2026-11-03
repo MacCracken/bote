@@ -1,5 +1,5 @@
 # bote::transport::stdio — line-oriented JSON-RPC over stdin/stdout
-# Mirrors rust-old/src/transport/stdio.rs (sync path; streaming deferred)
+# Mirrors rust-old/src/transport/stdio.rs; (3.7.3) listen through a ListenLine
 
 # Buffer for in-flight stdin data (large enough for any reasonable JSON-RPC line).
 # Heap-allocated to avoid the cyrius static-buffer size limit.
@@ -14,7 +14,18 @@ var _stdio_out = 1;
 var _stdio_listen = 0;
 fn transport_stdio_with_listen(c) { _stdio_listen = c; return c; }
 
-# The line's writer: one message, one line.
+# SIGPIPE, ignored while stdio serves (3.7.4), as sandhi's serve loops ignore it: a client
+# that closed its end of stdout killed the process with it, where a write now fails and the
+# loop ends, saying so.
+var BOTE_SIGPIPE = 13;
+
+# The loop ends: stdout will not take a reply or a change.
+fn _stdio_gone() {
+    bote_log_warn("stdio: stdout is gone; stopping");
+    return 0;
+}
+
+# A reply's writer and the line's: one message, one line. -1 once stdout has gone.
 fn _stdio_listen_write(fd, json) {
     if (sys_write(fd, json, strlen(json)) < 0) { return 0 - 1; }
     if (sys_write(fd, "\n", 1) < 0) { return 0 - 1; }
@@ -43,10 +54,8 @@ fn _stdio_process_lines(dispatcher) {
             if (line_len > 0) {
                 var line_ptr = _stdio_buf + line_start;
                 var resp = codec_process_message_a(bote_listen_line_begin(_stdio_listen), line_ptr, dispatcher, 0);
-                if (resp != 0) {
-                    sys_write(_stdio_out, resp, strlen(resp));
-                    sys_write(_stdio_out, "\n", 1);
-                }
+                if (resp != 0 && _stdio_listen_write(_stdio_out, resp) < 0) { return 0 - 1; }
+                if (bote_listen_line_broken(_stdio_listen) == 1) { return 0 - 1; }
                 processed = 1;
             }
             line_start = scanned + 1;
@@ -70,6 +79,7 @@ fn transport_stdio_run(dispatcher) { return _stdio_serve(dispatcher, 0, 1); }
 
 # The loop over `in_fd` and `out_fd`, the connection's two ends.
 fn _stdio_serve(dispatcher, in_fd, out_fd) {
+    signal_ignore(BOTE_SIGPIPE);
     _stdio_init();
     _stdio_out = out_fd;
     bote_listen_line_attach(_stdio_listen, dispatcher, &_stdio_listen_write, out_fd);
@@ -83,25 +93,20 @@ fn _stdio_loop(dispatcher, in_fd) {
     while (1 == 1) {
         var space = STDIO_BUF_SIZE - _stdio_buf_len;
         if (space <= 0) {
-            var over = codec_line_too_long();
-            sys_write(_stdio_out, over, strlen(over));
-            sys_write(_stdio_out, "\n", 1);
+            if (_stdio_listen_write(_stdio_out, codec_line_too_long()) < 0) { return _stdio_gone(); }
             skipping = 1;
             _stdio_buf_len = 0;
             space = STDIO_BUF_SIZE;
         }
         # A client gone from stdout is gone.
-        if (_stdio_listen != 0 && bote_listen_line_await(_stdio_listen, in_fd, 0) < 0) { return 0; }
+        if (_stdio_listen != 0 && bote_listen_line_await(_stdio_listen, in_fd, 0) < 0) { return _stdio_gone(); }
         var n = sys_read(in_fd, _stdio_buf + _stdio_buf_len, space);
         if (n <= 0) {
             # EOF — process any final line that lacks a trailing newline
             if (_stdio_buf_len > 0) {
                 store8(_stdio_buf + _stdio_buf_len, 0);
                 var resp = codec_process_message_a(bote_listen_line_begin(_stdio_listen), _stdio_buf, dispatcher, 0);
-                if (resp != 0) {
-                    sys_write(_stdio_out, resp, strlen(resp));
-                    sys_write(_stdio_out, "\n", 1);
-                }
+                if (resp != 0) { _stdio_listen_write(_stdio_out, resp); }
             }
             return 0;
         }
@@ -114,7 +119,7 @@ fn _stdio_loop(dispatcher, in_fd) {
             if (n > 0) { memcpy(at, at + le, n); }
         }
         _stdio_buf_len = _stdio_buf_len + n;
-        _stdio_process_lines(dispatcher);
+        if (_stdio_process_lines(dispatcher) < 0) { return _stdio_gone(); }
     }
     return 0;
 }

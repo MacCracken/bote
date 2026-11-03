@@ -34,22 +34,19 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.7.4 — `resourceSubscriptions` and `notifications/resources/updated`.** The rest of item 1 of 3.7.x below.
+**3.7.5 — Cancellation.** Item 1 of 3.7.x below.
 
 ## 3.7.x — Threaded dispatch and `subscriptions/listen`
 
 `bote streamable` serves on worker threads since 3.7.0, and since 3.7.1 everything a request reaches in bote is safe there.
-`subscriptions/listen` serves list changes on every transport: on `http`, `bridge` and `streamable` since 3.7.2, its streams
-held by a hub thread off the serving threads, and on stdio, unix and WebSocket since 3.7.3, where the connection is the
-stream and its own loop writes the changes. **Large: small bites.** The other transports' buffers (`_ws_frame_buf`,
-`_ws_token_buf`, `_unix_buf`, stdio's) matter only if those transports take workers too.
+`subscriptions/listen` is whole since 3.7.4: list changes and resource updates, on every transport, its HTTP streams held by
+a hub thread off the serving threads and, on stdio, unix and WebSocket, the connection itself the stream. **Large: small
+bites.** The other transports' buffers (`_ws_frame_buf`, `_ws_token_buf`, `_unix_buf`, stdio's) matter only if those
+transports take workers too.
 
-1. `resourceSubscriptions` and `notifications/resources/updated`, which need `resources.subscribe` advertised and a way for
-   an embedder to say a resource changed: a call that names a URI, matched against each subscription's list, with the
-   bound a list of URIs needs. Until then the filter's `resourceSubscriptions` is checked and never honored.
-2. Cancellation: on Streamable HTTP closing the response stream cancels the request, and on stdio
+1. Cancellation: on Streamable HTTP closing the response stream cancels the request, and on stdio
    `notifications/cancelled`. `bote_cancel_token_*` is the data layer.
-3. `notifications/progress` on a request's own response stream.
+2. `notifications/progress` on a request's own response stream.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption.
@@ -117,11 +114,6 @@ Not planned, because the current spec removes or deprecates them: the held-open 
   can listen: one client opening 256 streams takes every slot. A stream's age (the server ends it with its
   result, and the client listens again), a bound per client or per token, or both. Either changes what a
   client that never listens again sees, and the TypeScript SDK's server has neither.
-- **A change between the acknowledgement and the park.** A change made after a listen's acknowledgement is
-  built and before its stream is parked reaches the streams already open and not that one. A review's probe
-  missed none in 400 rounds of a change the instant the client saw its acknowledgement, and a client lists
-  after its acknowledgement; counting a reserved slot as open, with bits per slot applied at park, would close
-  it.
 - **`libro_retention`'s archive.** `chain_apply_retention` returns what it removed, and the tool drops
   it, so "archived" means deleted. It also ignores `claims`. It reaches nothing in the binary, whose
   chain is empty, but an embedder with an audit sink gets a destructive tool any client can call. Hand
@@ -189,6 +181,10 @@ No open blockers. Filed, each in its project's `docs/development/issues/`:
   variant would make a connection keep nothing either.
 
 To file, none blocking:
+
+- **sandhi — accepted sockets are not close-on-exec.** A WebSocket connection, and since 3.7.3 its listens, lives as long
+  as its client, and a program an embedder's runner executes inherits it. bote's own Unix transport accepts with
+  `sys_accept4(sfd, 0, 0, 0)` and could pass `SOCK_CLOEXEC`; the HTTP family's sockets are sandhi's to mark.
 
 - **sandhi — DNS has no deadline.** `_SANDHI_RESOLVE_TIMEOUT_MS` is reserved and unused, and the request
   deadline starts after the resolve, so a lost DNS reply hangs the request. bote's outbound requests are made

@@ -84,6 +84,19 @@ async function exercise(label, transport, mode, want) {
     for (let i = 0; i < 60 && heard === 0; i++) { await new Promise(r => setTimeout(r, 50)); }
     ok(`${label} a change heard`, heard >= 1, heard);
     if (sub) { await attempt(`${label} listen close`, () => sub.close()); }
+    // (3.7.4) resourceSubscriptions: the URIs honored come back, and an update under one of them
+    // is heard, and one under none is not.
+    const updated = [];
+    c.setNotificationHandler('notifications/resources/updated', n => { updated.push(n.params.uri); });
+    const want = ['test://static-text', 'test://template/'];
+    const rs = await attempt(`${label} listen for updates`, () => c.listen({ resourceSubscriptions: want }));
+    ok(`${label} updates honored`, rs && JSON.stringify(rs.honoredFilter.resourceSubscriptions) === JSON.stringify(want), rs && rs.honoredFilter);
+    await attempt(`${label} update an unasked one`, () => c.callTool({ name: 'bote_update_resource', arguments: { uri: 'test://static-binary' } }));
+    await attempt(`${label} update one under a subscription`, () => c.callTool({ name: 'bote_update_resource', arguments: { uri: 'test://template/42/data' } }));
+    for (let i = 0; i < 60 && !updated.includes('test://template/42/data'); i++) { await new Promise(r => setTimeout(r, 50)); }
+    ok(`${label} an update heard`, updated.includes('test://template/42/data'), updated);
+    ok(`${label} and none unasked for`, !updated.includes('test://static-binary'), updated);
+    if (rs) { await attempt(`${label} updates close`, () => rs.close()); }
     const after = await attempt(`${label} after the listen`, () => c.callTool({ name: 'test_simple_text', arguments: {} }));
     ok(`${label} still served after the listen`, after && after.content[0].text.startsWith('This is a simple'), after);
   }

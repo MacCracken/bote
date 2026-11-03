@@ -215,7 +215,12 @@ fn _ws_recheck_due(now, last) {
 }
 
 # The next data frame as a cstr, in _ws_frame_buf, valid until the next call.
-# 0 when the peer closed, a frame broke a bound, or the socket failed.
+# 0 when the peer closed, a frame broke a bound, or the socket failed, and BOTE_WS_CONTROL
+# once a ping or a pong is answered (3.7.4): the frame loop then waits on its listen line
+# again, where through 3.7.3 it read on, and a client that pinged heard no change until it
+# sent a request.
+var BOTE_WS_CONTROL = 1;
+
 fn _bote_ws_recv(ws) {
     if (_ws_frame_buf == 0) { _ws_frame_buf = alloc(WS_MAX_PAYLOAD + 1); }
     var op_slot[8];
@@ -230,6 +235,7 @@ fn _bote_ws_recv(ws) {
         if (op >= 8) {
             if (n > 125) { return 0; }
             if (op == WS_OP_PING) { ws_server_send_pong(ws, _ws_frame_buf, n); }
+            return BOTE_WS_CONTROL;
         } elif (op == WS_OP_TEXT || op == WS_OP_BINARY || op == WS_OP_CONTINUATION) {
             store8(_ws_frame_buf + n, 0);
             return _ws_frame_buf;
@@ -389,26 +395,41 @@ fn _ws_frames(config, ws, cfd, ws_claims, ws_token, ws_held) {
     var judged[8];
     store64(&judged, clock_now_ms());
     var heard = clock_now_ms();
+    var mark[16];
     while (1 == 1) {
         if (lc != 0) {
             var deadline = 0;
             if (idle_ms > 0) { deadline = heard + idle_ms; }
             var w = bote_listen_line_wait(lc, cfd, deadline);
             while (w == 2) {
-                if (_ws_token_holds(config, ws, ws_held, &judged) == 0) { return 0; }
+                # Between messages nothing rewinds the arena, so what judging the token puts
+                # there goes with the judgement (3.7.4): a quiet client with its cache off
+                # grew it 87 bytes a change.
+                bote_req_mark(&mark);
+                var holds = _ws_token_holds(config, ws, ws_held, &judged);
+                bote_req_release(&mark);
+                if (holds == 0) { return 0; }
                 if (bote_listen_line_deliver(lc) < 0) { return 0; }
                 w = bote_listen_line_wait(lc, cfd, deadline);
             }
-            if (w == 0) { return 0; }
+            if (w == 0) {
+                var il[BOTE_LOG_LINE_BYTES];
+                bote_log_line(&il, SK_DEBUG, "ws client idle; closed");
+                bote_log_int(&il, "idle_ms", idle_ms);
+                bote_log_emit(&il);
+                return 0;
+            }
         }
         var a = bote_listen_line_begin(lc);
         if (ws_token == 1) { bote_req_note_token_kept(ws_claims, ws_kept); }
         var msg = _bote_ws_recv(ws);
         if (msg == 0) { return 0; }
         heard = clock_now_ms();
+        if (msg == BOTE_WS_CONTROL) { continue; }
         if (_ws_token_holds(config, ws, ws_held, &judged) == 0) { return 0; }
         var resp = codec_process_message_a(a, msg, ws_config_dispatcher(config), ws_claims);
         if (ws_token == 1) { ws_kept = bote_req_kept(); }
+        if (bote_listen_line_broken(lc) == 1) { return 0; }
         if (resp != 0) {
             # 3.4.3: a failed frame write (the send deadline firing, or the
             # peer gone) leaves the stream desynchronised mid-frame, so the

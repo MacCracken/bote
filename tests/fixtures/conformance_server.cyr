@@ -186,6 +186,15 @@ fn t_trigger_tool(args, claims) {
     return content_text_response("tool list changed");
 }
 
+# bote_update_resource (3.7.4): says the resource at `uri` changed, which a client listening
+# with `resourceSubscriptions` covering it is told of. The suite does not call it; the
+# official client does.
+fn t_update_resource(args, claims) {
+    var uri = jsonx_get_str_dec_a(bote_req_alloc(), args, "uri");
+    if (uri == 0 || dispatcher_resource_updated(_fx_d, uri) != 0) { return content_text_error_response("no uri"); }
+    return content_text_response("resource updated");
+}
+
 fn t_trigger_prompt(args, claims) {
     dispatcher_register_prompt(_fx_d, prompt_def_new(_fx_name("test_added_prompt_"), "Added by test_trigger_prompt_change", vec_new()), &p_simple);
     return content_text_response("prompt list changed");
@@ -223,6 +232,11 @@ fn fixture_dispatcher() {
     dispatcher_set_completion(d, &complete);
     _tool(d, "test_trigger_tool_change", "Registers a tool", &t_trigger_tool);
     _tool(d, "test_trigger_prompt_change", "Registers a prompt", &t_trigger_prompt);
+    var up = vec_new();
+    vec_push(up, schema_prop_new("uri", "{\"type\":\"string\"}"));
+    var ur = vec_new();
+    vec_push(ur, "uri");
+    dispatcher_register_tool(d, tool_def_new("bote_update_resource", "Says a resource changed", schema_new("object", up, ur)), &t_update_resource);
     _fx_d = d;
     return d;
 }

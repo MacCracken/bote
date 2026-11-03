@@ -229,7 +229,10 @@ attaches each connection with a writer (`bote_listen_line_attach(line, d, write_
 `bote_listen_line_begin(line)` in place of `bote_req_begin()`, waits for input with
 `bote_listen_line_await(line, fd, deadline)`, which writes the changes meanwhile, and
 detaches when the connection ends. The core bundle has no listen: a message dispatched
-without a stream answers `subscriptions/listen` as a method not found.
+without a stream answers `subscriptions/listen` as a method not found. A resource that
+changed is announced with `dispatcher_resource_updated(d, uri)` (3.7.4), which reaches
+the listens through the dispatcher's event sinks: a sink of the consumer's own hears it
+through `event_sink_with_updated`, and one with no such hook does not.
 
 ## How to produce both bundles
 

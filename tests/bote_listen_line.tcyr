@@ -60,6 +60,24 @@ include "src/transport_unix.cyr"
 include "src/transport_ws.cyr"
 
 fn h_ok(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+# A writer that changes the tools while it writes, the instant a client reads (3.7.4).
+var _cw_d = 0;
+var _cw_done = 0;
+fn _cap_write_change(ctx, json) {
+    _cap_write(ctx, json);
+    if (_cw_done == 0) {
+        _cw_done = 1;
+        dispatcher_register_tool(_cw_d, tool_def_new("cw_tool", "T", schema_new("object", 0, vec_new())), &h_ok);
+    }
+    return 0;
+}
+
+# A tool that counts its calls, to tell a dropped connection from one served on (3.7.4).
+var _ran = 0;
+fn h_count(args, claims) {
+    _ran = _ran + 1;
+    return "{\"content\":[]}";
+}
 fn h_prompt(args, claims) { return "{\"messages\":[]}"; }
 fn h_res(uri, claims) { return "{\"contents\":[]}"; }
 
@@ -210,6 +228,60 @@ fn _heap_per(c, d, body) {
     return (alloc_used() - before) / 10;
 }
 
+# ---- resource updates (3.7.4) --------------------------------------------------
+
+var _UL = "notifications/resources/updated";
+
+# The update of `uri` for the subscription `id`, as the bytes go out.
+fn _upd(uri_json, id) { return _cat3("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":{\"uri\":", uri_json, _cat3(",\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":", id, "}}}")); }
+
+# A sink after the listen's, which counts the updates it is passed.
+var _next_updates = 0;
+var _next_last = 0;
+fn _next_publish(ctx, topic, payload) { return 0; }
+fn _next_updated(ctx, uri) {
+    _next_updates = _next_updates + 1;
+    _next_last = uri;
+    return 0;
+}
+
+# A URI of `n` bytes, told apart by `i`.
+fn _long_uri(i, n) {
+    var u = alloc(n + 1);
+    memset(u, 120, n);
+    memcpy(u, "res://", 6);
+    store8(u + 6, 65 + i);
+    store8(u + n, 0);
+    return u;
+}
+
+fn _uris_filter(v) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"resourceSubscriptions\":[");
+    var i = 0;
+    while (i < vec_len(v)) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"");
+        str_builder_add_cstr(sb, vec_get(v, i));
+        str_builder_add_cstr(sb, "\"");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return str_data(str_builder_build(sb));
+}
+
+var _up_d = 0;
+var _up_go = 0;
+fn _updater(i) {
+    while (atomic_load(&_up_go) == 0) { }
+    var k = 0;
+    while (k < 50) {
+        dispatcher_resource_updated(_up_d, _num(_num("res://t/", i), k));
+        k = k + 1;
+    }
+    return 0;
+}
+
 #ifndef CYRIUS_TARGET_AGNOS
 # ---- a reader with a deadline ---------------------------------------------------
 
@@ -316,6 +388,25 @@ fn _ws_client_frame(dst, payload) {
     return at + 4 + n;
 }
 
+# A masked client PING (3.7.4).
+fn _ws_ping(fd) {
+    var f[16];
+    store8(&f, 0x89);
+    store8(&f + 1, 0x80 | 2);
+    store8(&f + 2, 0x11); store8(&f + 3, 0x22); store8(&f + 4, 0x33); store8(&f + 5, 0x44);
+    store8(&f + 6, 104 ^ 0x11);
+    store8(&f + 7, 105 ^ 0x22);
+    sock_send_all(fd, &f, 8);
+    return 0;
+}
+
+# A validator that holds the token and leaves `_ws_spend` bytes on the request arena.
+var _ws_spend = 0;
+fn _ws_tok_spend(token, ctx) {
+    if (_ws_spend > 0) { alloc_via(bote_req_alloc(), _ws_spend); }
+    return token;
+}
+
 fn _ws_send(fd, payload) {
     var f = alloc(strlen(payload) + 16);
     sock_send_all(fd, f, _ws_client_frame(f, payload));
@@ -363,7 +454,7 @@ fn main() {
     _cap_reset();
     assert(_has(_run(c, d, _lb("\"c\"", _TOOLS)), "\"code\":-32603,\"message\":\"Subscription limit reached\""), "full: -32603");
     assert(_cap_len == 0, "full: no acknowledgement");
-    assert(streq(_run(c, d, _lb("\"e\"", "{\"resourceSubscriptions\":[\"file:///x\"]}")), "") == 1, "nothing honored: no reply in its place");
+    assert(streq(_run(c, d, _lb("\"e\"", "{\"resourceSubscriptions\":[\"\"]}")), "") == 1, "nothing honored: no reply in its place");
     assert(_has(_cap, _cat3(_ack("{}", "\"e\""), "\n{\"jsonrpc\":\"2.0\",\"id\":\"e\",\"result\":{\"resultType\":\"complete\",\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":\"e\",\"io.modelcontextprotocol/serverInfo\":{", "")), "nothing honored: the acknowledgement, then the result that ends it");
     assert_eq(bote_listen_open(c), 2, "nothing honored: even when full, and holds no slot");
     _cap_reset();
@@ -413,6 +504,21 @@ fn main() {
     _run(c, d, _cancel("1"));
     assert_eq(bote_listen_open(c), 1, "cancel: a number id is matched whole too");
     _run(c, d, _cancel("12"));
+    # Ids by value (3.7.4): one string spelled two ways is one id; a number and the string of
+    # its digits are two.
+    _run(c, d, _lb("\"a/b\"", _TOOLS));
+    assert(_has(_run(c, d, _lb("\"a\\/b\"", _TOOLS)), BOTE_LISTEN_ID_OPEN), "id: an escape spells the same id");
+    _run(c, d, _cancel("\"\\u0061/b\""));
+    assert_eq(bote_listen_open(c), 0, "id: a cancel spelling it another way ends it");
+    _run(c, d, _lb("7", _TOOLS));
+    assert(streq(_run(c, d, _lb("\"7\"", _TOOLS)), "") == 1, "id: the string \"7\" is not the number 7");
+    assert_eq(bote_listen_open(c), 2, "id: ...two open");
+    _run(c, d, _cancel("\"7\""));
+    assert_eq(bote_listen_open(c), 1, "id: and a cancel of one leaves the other");
+    _run(c, d, _cancel("7"));
+    assert(_has(_run(c, d, _lb("null", _TOOLS)), "\"code\":-32600"), "id: a null id is refused");
+    assert_eq(bote_listen_open(c), 0, "id: ...and opens nothing");
+    _cap_reset();
     _cap_reset();
     dispatcher_register_tool(d, _tool("t_three"), &h_ok);
     assert_eq(atomic_load(c + 32), 0, "change: with none open, kept for nobody");
@@ -424,12 +530,36 @@ fn main() {
     assert_eq(bote_listen_line_deliver(c), 0 - 1, "write: a failed one is reported");
     _cap_fail = 0;
     _cap_reset();
+    # A failed write marks the line broken, for the transport to drop the connection (3.7.4).
+    assert_eq(bote_listen_line_broken(c), 1, "broken: a failed write to a change");
+    _run(c, d, _cancel("\"f\""));
+    bote_listen_line_attach(c, d, &_cap_write, 0);
+    assert_eq(bote_listen_line_broken(c), 0, "broken: a new connection is not");
+    _cap_fail = 1;
+    _run(c, d, _lb("\"fa\"", _TOOLS));
+    _cap_fail = 0;
+    assert_eq(bote_listen_line_broken(c), 1, "broken: a failed acknowledgement");
+    assert_eq(bote_listen_open(c), 0, "broken: ...which opens nothing");
+    assert_eq(_bll_find_a(c, bote_req_begin(), "\"fa\"", 4), 0, "broken: ...and holds no slot for its id");
+    bote_listen_line_attach(c, d, &_cap_write, 0);
+    _run(c, d, _lb("\"f\"", _TOOLS));
+    _cap_reset();
     dispatcher_register_tool(d, _tool("t_left"), &h_ok);
     assert(atomic_load(c + 32) != 0, "detach: with a change still waiting");
     bote_listen_line_detach(c);
     assert_eq(atomic_load(c + 32), 0, "detach: ...which goes with the connection");
     assert_eq(bote_listen_open(c), 0, "detach: nothing held");
     assert(_has(_run(c, d, _lb("\"g\"", _TOOLS)), "\"code\":-32601"), "detach: and the method is gone with the connection");
+    # The stream word goes with it (3.7.4): a listen dispatched next on this thread, with no
+    # begin, crashed on the line's writer of 0.
+    bote_listen_line_attach(c, d, &_cap_write, 0);
+    bote_listen_line_begin(c);
+    bote_listen_line_detach(c);
+    assert_eq(bote_req_stream(), 0, "detach: the stream word cleared");
+    assert(_has(codec_process_message(_lb("\"g2\"", _TOOLS), d, 0), "\"code\":-32601"), "detach: a listen after it, with no begin, is not found");
+    bote_req_set_stream(load64(c));
+    assert(_has(codec_process_message(_lb("\"g3\"", _TOOLS), d, 0), "\"code\":-32601"), "detach: and with the stream word but no writer, refused, not crashed");
+    bote_req_begin();
     dispatcher_register_tool(d, _tool("t_five"), &h_ok);
     bote_listen_line_attach(c, d, &_cap_write, 0);
     assert(bote_listen_open(c) == 0 && atomic_load(c + 32) == 0, "attach: a connection starts with nothing open or pending");
@@ -443,6 +573,20 @@ fn main() {
     assert(_has(_cap, _ack("{}", "\"m\"")) && _has(_cap, "\"resultType\":\"complete\""), "ack: an acknowledgement of nothing, then the result");
     assert_eq(bote_listen_open(c), 0, "ack: ...holding nothing");
     assert((sys_fcntl(load64(c + 40), F_GETFD, 0) & FD_CLOEXEC) != 0 && (sys_fcntl(load64(c + 48), F_GETFD, 0) & FD_CLOEXEC) != 0, "cloexec: the line's wake pipe");
+    _cap_reset();
+
+    # A change made while the acknowledgement is written is told, after it (3.7.4).
+    var cwd = _mk_d(0);
+    var cwc = bote_listen_line_new(2);
+    dispatcher_set_events(cwd, bote_listen_sink(cwc, 0));
+    _cw_d = cwd;
+    _cw_done = 0;
+    bote_listen_line_attach(cwc, cwd, &_cap_write_change, 0);
+    _cap_reset();
+    _run(cwc, cwd, _lb("\"cw\"", _TOOLS));
+    bote_listen_line_deliver(cwc);
+    assert(strstr(_cap, "acknowledged") >= 0 && strstr(_cap, _note(_TL, "\"cw\"")) > strstr(_cap, "acknowledged"), "window: a change while the acknowledgement is written, told after it");
+    bote_listen_line_detach(cwc);
     _cap_reset();
 
     # The heap: an open and its cancel keep nothing, nor does any refusal.
@@ -481,6 +625,154 @@ fn main() {
     }
     assert(alloc_used() - dbefore < 4096, "heap: a delivery keeps nothing but the dispatcher's event");
     bote_listen_line_detach(c);
+
+    # ---------------- resource updates (3.7.4) ----------------
+    var rsd = _mk_d(1);
+    var rsc = bote_listen_line_new(4);
+    var rsnext = event_sink_with_updated(event_sink_new(&_next_publish, 0), &_next_updated);
+    dispatcher_set_events(rsd, bote_listen_sink(rsc, rsnext));
+    bote_listen_line_attach(rsc, rsd, &_cap_write, 0);
+    _cap_reset();
+    assert(_has(_run(rsc, rsd, _mb("server/discover")), "\"resources\":{\"listChanged\":true,\"subscribe\":true}"), "updates: discover says subscribe on the line");
+    assert(_has(_run_plain(rsd, _mb("server/discover")), "subscribe") == 0, "updates: ...and not off it");
+    assert(_has(_run(rsc, rsd, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\"}}"), "subscribe") == 0, "updates: the legacy initialize never says it");
+    dispatcher_set_notifications(rsd, 1);
+    var rsinit = _run(rsc, rsd, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\"}}");
+    assert(_has(rsinit, "\"resources\":{\"listChanged\":true}") && _has(rsinit, "subscribe") == 0, "updates: ...not even with its listChanged on");
+    dispatcher_set_notifications(rsd, 0);
+    _cap_reset();
+    # The acknowledgement lists what is honored: decoded, escaped again, once each, and no
+    # empty URI or one holding a NUL.
+    _run(rsc, rsd, _lb("\"r1\"", "{\"resourceSubscriptions\":[\"file:///a\",\"file:///a\",\"\",\"file:///n\\u0000x\",\"file:\\/\\/\\/dir\\/\",\"res://q?x=\\\"1\\\"\"]}"));
+    assert(streq(_cap, _cat3(_ack("{\"resourceSubscriptions\":[\"file:///a\",\"file:///dir/\",\"res://q?x=\\\"1\\\"\"]}", "\"r1\""), "\n", "")) == 1, "ack: the honored URIs, and only them");
+    _cap_reset();
+    _run(rsc, rsd, _lb("\"r2\"", "{\"toolsListChanged\":true,\"resourceSubscriptions\":[\"file:///other\"]}"));
+    assert(_has(_cap, "{\"toolsListChanged\":true,\"resourceSubscriptions\":[\"file:///other\"]}"), "ack: beside a list's change");
+    _cap_reset();
+    assert_eq(dispatcher_resource_updated(rsd, "file:///a"), 0, "update: told");
+    assert_eq(_next_updates, 1, "update: passed on to the next sink");
+    assert(streq(_next_last, "file:///a") == 1, "update: ...naming it");
+    bote_listen_line_deliver(rsc);
+    assert(streq(_cap, _cat3(_upd("\"file:///a\"", "\"r1\""), "\n", "")) == 1, "update: to the subscription to it, stamped, and no other");
+    _cap_reset();
+    dispatcher_resource_updated(rsd, "file:///dir/x/y");
+    dispatcher_resource_updated(rsd, "file:///a/b");
+    dispatcher_resource_updated(rsd, "file:///a?v=2");
+    dispatcher_resource_updated(rsd, "file:///a#f");
+    dispatcher_resource_updated(rsd, "file:///ab");
+    dispatcher_resource_updated(rsd, "file:///di");
+    dispatcher_resource_updated(rsd, "res://q?x=\"1\"");
+    bote_listen_line_deliver(rsc);
+    assert(_has(_cap, _upd("\"file:///dir/x/y\"", "\"r1\"")), "cover: anything under a URI that ends in /");
+    assert(_has(_cap, _upd("\"file:///a/b\"", "\"r1\"")), "cover: a path under it");
+    assert(_has(_cap, _upd("\"file:///a?v=2\"", "\"r1\"")), "cover: its query");
+    assert(_has(_cap, _upd("\"file:///a#f\"", "\"r1\"")), "cover: its fragment");
+    assert(_has(_cap, "file:///ab") == 0 && _has(_cap, "file:///di\"") == 0, "cover: not a URI that only begins the same");
+    assert(_has(_cap, _upd("\"res://q?x=\\\"1\\\"\"", "\"r1\"")), "cover: a URI escaped where it goes out");
+    assert_eq(_count(_cap, _UL), 5, "cover: five, in all");
+    _cap_reset();
+    dispatcher_resource_updated(rsd, "file:///other");
+    dispatcher_resource_updated(rsd, "file:///other");
+    bote_listen_line_deliver(rsc);
+    assert(streq(_cap, _cat3(_upd("\"file:///other\"", "\"r2\""), "\n", "")) == 1, "queue: one URI twice before a delivery is told once");
+    _cap_reset();
+    assert_eq(dispatcher_resource_updated(rsd, 0), 0 - 1, "update: no URI is refused");
+    assert_eq(dispatcher_resource_updated(rsd, ""), 0 - 1, "update: ...nor an empty one");
+    # Overflow: more URIs than the queue holds, or one too long, and every subscription is
+    # told of every URI it holds.
+    var rsoi = 0;
+    while (rsoi < 17) {
+        dispatcher_resource_updated(rsd, _num("res://none/", rsoi));
+        rsoi = rsoi + 1;
+    }
+    assert(atomic_load(rsc + 120) == 1, "overflow: the queue full");
+    bote_listen_line_deliver(rsc);
+    assert(_has(_cap, _upd("\"file:///a\"", "\"r1\"")) && _has(_cap, _upd("\"file:///dir/\"", "\"r1\"")) && _has(_cap, _upd("\"res://q?x=\\\"1\\\"\"", "\"r1\"")), "overflow: each of r1's URIs");
+    assert(_has(_cap, _upd("\"file:///other\"", "\"r2\"")), "overflow: ...and r2's");
+    assert_eq(_count(_cap, _UL), 4, "overflow: no more than that");
+    assert(atomic_load(rsc + 120) == 0 && atomic_load(rsc + 112) == 0, "overflow: and the queue is empty again");
+    _cap_reset();
+    dispatcher_resource_updated(rsd, _long_uri(0, 1025));
+    bote_listen_line_deliver(rsc);
+    assert_eq(_count(_cap, _UL), 4, "overflow: a URI too long to queue overflows it too");
+    _cap_reset();
+    # Bounds: BOTE_LISTEN_URIS of them, and what fits in BOTE_LISTEN_URI_ROOM.
+    var rsmany = vec_new();
+    var rsmi = 0;
+    while (rsmi < 40) {
+        vec_push(rsmany, _num("res://m/", rsmi));
+        rsmi = rsmi + 1;
+    }
+    _run(rsc, rsd, _lb("\"r3\"", _uris_filter(rsmany)));
+    assert(_has(_cap, "\"res://m/31\"") && _has(_cap, "\"res://m/32\"") == 0, "bound: 32 URIs honored, not 40");
+    _run(rsc, rsd, _cancel("\"r3\""));
+    _cap_reset();
+    var rsbig = vec_new();
+    rsmi = 0;
+    while (rsmi < 5) {
+        vec_push(rsbig, _long_uri(rsmi, 1000));
+        rsmi = rsmi + 1;
+    }
+    vec_push(rsbig, _long_uri(6, 1025));
+    vec_push(rsbig, "res://small");
+    _run(rsc, rsd, _lb("\"r4\"", _uris_filter(rsbig)));
+    assert_eq(_count(_cap, "res://"), 5, "bound: four of 1000 bytes fit the room, the fifth not, one past the longest not, and a short one after");
+    assert(_has(_cap, "res://small"), "bound: ...the short one honored");
+    _run(rsc, rsd, _cancel("\"r4\""));
+    _cap_reset();
+    var rslong = vec_new();
+    vec_push(rslong, _long_uri(7, 1025));
+    assert(_has(_run(rsc, rsd, _lb("\"r5\"", _uris_filter(rslong))), "") == 1 && _has(_cap, _ack("{}", "\"r5\"")), "bound: a URI past the longest alone is not honored");
+    _cap_reset();
+    # Where there are no resources, nothing is honored.
+    var rsnd = _mk_d(0);
+    var rsnc = bote_listen_line_new(2);
+    bote_listen_line_attach(rsnc, rsnd, &_cap_write, 0);
+    _run(rsnc, rsnd, _lb("\"n\"", "{\"resourceSubscriptions\":[\"file:///a\"]}"));
+    assert(_has(_cap, _ack("{}", "\"n\"")) && _has(_cap, "\"resultType\":\"complete\""), "no resources: honored as nothing, and ended");
+    bote_listen_line_detach(rsnc);
+    _cap_reset();
+    # Through the workers' serial sinks, the hook is kept.
+    bote_conn_serial_sinks(rsd);
+    assert(load64(dispatcher_event_sink(rsd) + 24) == &_bote_conn_updated_serial, "serial: the update hook kept");
+    dispatcher_resource_updated(rsd, "file:///a");
+    bote_listen_line_deliver(rsc);
+    assert(_has(_cap, _upd("\"file:///a\"", "\"r1\"")), "serial: ...and an update through it");
+    _cap_reset();
+    # The heap: the room is made once a slot, and a delivery is built on the line's arena.
+    var rsub = _lb("\"h\"", "{\"resourceSubscriptions\":[\"file:///h\",\"file:///h2\"]}");
+    var rsuk = _cancel("\"h\"");
+    _run(rsc, rsd, rsub);
+    _run(rsc, rsd, rsuk);
+    _cap_reset();
+    var rsbefore = alloc_used();
+    var rsui = 0;
+    while (rsui < 10) {
+        codec_process_message_a(bote_listen_line_begin(rsc), rsub, rsd, 0);
+        codec_process_message_a(bote_listen_line_begin(rsc), rsuk, rsd, 0);
+        _cap_reset();
+        rsui = rsui + 1;
+    }
+    assert_eq((alloc_used() - rsbefore) / 10, 0, "heap: a listen with URIs and its cancel keep nothing, once its slot has a room");
+    # Long enough, and often enough, that a delivery not rewinding the line's arena would
+    # outgrow its first chunk.
+    var rsuu = _cat3("file:///a/", _rep("d", 1000), "");
+    dispatcher_resource_updated(rsd, rsuu);
+    bote_listen_line_deliver(rsc);
+    _cap_reset();
+    rsbefore = alloc_used();
+    rsui = 0;
+    while (rsui < 100) {
+        dispatcher_resource_updated(rsd, rsuu);
+        bote_listen_line_deliver(rsc);
+        _cap_reset();
+        rsui = rsui + 1;
+    }
+    assert_eq((alloc_used() - rsbefore) / 100, 0, "heap: an update and its delivery keep nothing");
+    # With nothing open, an update is kept for nobody.
+    bote_listen_line_detach(rsc);
+    dispatcher_resource_updated(rsd, "file:///a");
+    assert(atomic_load(rsc + 112) == 0 && atomic_load(rsc + 32) == 0, "update: with none open, kept for nobody");
 
     # ---------------- waiting on two at once ----------------
     var wp[16];
@@ -556,6 +848,40 @@ fn main() {
     }
     assert_eq(lbad, 0, "stdio: every line one whole message");
 
+    # A client that closed its end of stdout (3.7.4): the loop ends, where SIGPIPE killed the
+    # process.
+    sys_pipe(&ip);
+    sys_pipe(&op);
+    _st_in = load32(&ip);
+    _st_out = load32(&op + 4);
+    sw = load32(&ip + 4);
+    sys_close(load32(&op));
+    st = thread_create(&_stdio_thread, 0);
+    _send_line(sw, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}");
+    thread_join(st);
+    assert(1 == 1, "stdio: a reply to a closed stdout ends the loop, and the process lives");
+    sys_close(sw);
+    sys_close(_st_out);
+
+    # A listen whose acknowledgement cannot be written drops the connection, before the next
+    # message is served (3.7.4).
+    dispatcher_register_tool(sd, _tool("s_count"), &h_count);
+    var lcall = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"s_count\"}}";
+    sys_pipe(&ip);
+    sys_pipe(&op);
+    _st_in = load32(&ip);
+    _st_out = load32(&op + 4);
+    sw = load32(&ip + 4);
+    sys_close(load32(&op));
+    _ran = 0;
+    var lboth = _cat3(_lb("\"lb\"", _TOOLS), "\n", lcall);
+    _send_line(sw, lboth);
+    st = thread_create(&_stdio_thread, 0);
+    thread_join(st);
+    assert_eq(_ran, 0, "broken: stdio drops before serving the next message");
+    sys_close(sw);
+    sys_close(_st_out);
+
     # Changes from four threads at once, beside the loop's own replies.
     sys_pipe(&ip);
     sys_pipe(&op);
@@ -608,6 +934,50 @@ fn main() {
         li = li + 1;
     }
     assert_eq(lbad, 0, "threads: every line one whole message, with changes from four threads");
+    # An update from another thread, over the real stdio loop (3.7.4).
+    sys_pipe(&ip);
+    sys_pipe(&op);
+    _st_in = load32(&ip);
+    _st_out = load32(&op + 4);
+    sw = load32(&ip + 4);
+    so = _rd_new(load32(&op));
+    st = thread_create(&_stdio_thread, 0);
+    _send_line(sw, _lb("\"ru\"", "{\"resourceSubscriptions\":[\"res://t/\"]}"));
+    _rd_await(so, "acknowledged", 2000);
+    _up_d = sd;
+    _up_go = 0;
+    var uts = alloc(32);
+    ci = 0;
+    while (ci < 4) {
+        store64(uts + ci * 8, thread_create(&_updater, ci));
+        ci = ci + 1;
+    }
+    atomic_store(&_up_go, 1);
+    ci = 0;
+    while (ci < 4) {
+        thread_join(load64(uts + ci * 8));
+        ci = ci + 1;
+    }
+    dispatcher_resource_updated(sd, "res://t/last");
+    assert_eq(_rd_await(so, _upd("\"res://t/last\"", "\"ru\""), 5000), 1, "stdio: updates from four threads, written while the client is quiet");
+    sys_close(sw);
+    thread_join(st);
+    sys_close(_st_out);
+    _rd_eof(so, 2000);
+    lines = _rd_buf(so);
+    lbad = 0;
+    ls = 0;
+    li = 0;
+    ln = strlen(lines);
+    while (li < ln) {
+        if (load8(lines + li) == 10) {
+            if (jsonx_valid(lines + ls, li - ls) == 0) { lbad = lbad + 1; }
+            ls = li + 1;
+        }
+        li = li + 1;
+    }
+    assert_eq(lbad, 0, "stdio: every update one whole line");
+    assert(_rd_count(so, _UL) >= 2, "stdio: the updates told");
     transport_stdio_with_listen(0);
 
     # ---------------- a Unix connection, on a thread ----------------
@@ -633,6 +1003,19 @@ fn main() {
     thread_join(ut);
     sys_close(_ux_fd);
     assert_eq(bote_listen_open(uc), 0, "unix: its subscriptions end with the connection");
+    # A failed acknowledgement drops the connection before the next message (3.7.4).
+    dispatcher_register_tool(ud, _tool("u_count"), &h_count);
+    sys_socketpair(1, 1, 0, &up);
+    _ux_fd = load32(&up);
+    ucl = load32(&up + 4);
+    sock_shutdown(_ux_fd, 1);
+    _ran = 0;
+    _send_line(ucl, _cat3(_lb("\"ub\"", _TOOLS), "\n", "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"u_count\"}}"));
+    ut = thread_create(&_unix_thread, 0);
+    thread_join(ut);
+    assert_eq(_ran, 0, "broken: unix drops before serving the next message");
+    sys_close(_ux_fd);
+    sys_close(ucl);
     # The idle deadline counts from what the client last sent, not from the changes.
     BOTE_UNIX_IDLE_MS = 300;
     sys_socketpair(1, 1, 0, &up);
@@ -715,6 +1098,61 @@ fn main() {
     sys_close(wcl);
     assert_eq(bote_listen_open(wc), 0, "ws: its subscriptions end with the connection");
     BOTE_WS_RECHECK_MS = keep_recheck;
+    # A failed acknowledgement drops the connection before the next frame is served (3.7.4).
+    dispatcher_register_tool(wd, _tool("w_count"), &h_count);
+    sys_socketpair(1, 1, 0, &wsp);
+    _ws_fd = load32(&wsp);
+    wcl = load32(&wsp + 4);
+    wr = _rd_new(wcl);
+    _ws_ok = 1;
+    wt = thread_create(&_ws_thread, 0);
+    _rd_await(wr, "\r\n\r\n", 2000);
+    sock_shutdown(_ws_fd, 1);
+    _ran = 0;
+    _ws_send(wcl, _lb("\"wb\"", _TOOLS));
+    _ws_send(wcl, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"w_count\"}}");
+    thread_join(wt);
+    assert_eq(_ran, 0, "broken: ws drops before serving the next frame");
+    sys_close(_ws_fd);
+    sys_close(wcl);
+
+    # A ping does not stop the changes (3.7.4): the loop waits on its line again after it.
+    _ws_ok = 1;
+    sys_socketpair(1, 1, 0, &wsp);
+    _ws_fd = load32(&wsp);
+    wcl = load32(&wsp + 4);
+    wr = _rd_new(wcl);
+    wt = thread_create(&_ws_thread, 0);
+    _rd_await(wr, "\r\n\r\n", 2000);
+    _ws_send(wcl, _lb("\"wp\"", _TOOLS));
+    _rd_await(wr, "acknowledged", 2000);
+    _ws_ping(wcl);
+    assert_eq(_rd_await(wr, "\x8a\x02hi", 2000), 1, "ws ping: answered");
+    dispatcher_register_tool(wd, _tool("w_after_ping"), &h_ok);
+    assert_eq(_rd_await_n(wr, _note(_TL, "\"wp\""), 1, 2000), 1, "ws ping: a change after it goes out with no frame from the client");
+    # What judging the token puts on the arena goes with each judgement.
+    ws_config_with_bearer_validator(_ws_cfg, &_ws_tok_spend, 0);
+    BOTE_WS_RECHECK_MS = 0;
+    # 64 KB a judgement, fifty of them: more than the arena, which earlier cases grew, holds.
+    _ws_spend = 65536;
+    dispatcher_register_tool(wd, _tool("w_spend_0"), &h_ok);
+    _rd_await_n(wr, _note(_TL, "\"wp\""), 2, 2000);
+    var wab = bote_req_arena_bytes(bote_req_alloc());
+    var wsi = 1;
+    while (wsi <= 50) {
+        dispatcher_register_tool(wd, _tool(_num("w_spend_", wsi)), &h_ok);
+        _rd_await_n(wr, _note(_TL, "\"wp\""), 2 + wsi, 2000);
+        wsi = wsi + 1;
+    }
+    assert_eq(_rd_count(wr, _note(_TL, "\"wp\"")), 52, "ws arena: every change delivered");
+    assert_eq(bote_req_arena_bytes(bote_req_alloc()), wab, "ws arena: fifty judgements between frames leave it as it was");
+    _ws_spend = 0;
+    BOTE_WS_RECHECK_MS = keep_recheck;
+    ws_config_with_bearer_validator(_ws_cfg, &_ws_tok, 0);
+    sys_close(wcl);
+    thread_join(wt);
+    sys_close(_ws_fd);
+
     # The idle deadline, with changes going out: from the client's last frame.
     _ws_ok = 1;
     ws_config_with_idle_ms(_ws_cfg, 300);

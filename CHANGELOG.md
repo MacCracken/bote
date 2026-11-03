@@ -18,6 +18,141 @@ have per release.
 
 _(empty)_
 
+## [3.7.4] — 2026-11-02 · Resource updates
+
+**`subscriptions/listen` is whole: `resourceSubscriptions` and `notifications/resources/updated`.** A client names the URIs
+it wants to hear of, and the acknowledgement lists those bote honors. An embedder says a resource changed with
+`dispatcher_resource_updated(d, uri)`, from any thread, and every listen subscribed to that URI, or to one it falls under,
+is told, on every transport. `server/discover` advertises `resources.subscribe` where listen is carried. The official
+client hears an update on all four of its transports.
+
+**Seven defects in 3.7.3 land ahead of it**, from an independent review of that release. The worst stopped a WebSocket's
+changes once its client pinged. See the correction notice in 3.7.3. **And a change made while a listen was opened, which
+could reach nobody**, on every carrier since it was added: the aarch64 sweep lost one in 3 runs of 3.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Added
+
+- **`dispatcher_resource_updated(d, uri)`** (core): the resource at `uri` changed. Nothing keeps `uri`.
+- **What a listen may ask for** (core):
+  - `BOTE_LISTEN_UPDATES`, honored where the dispatcher has resources. A URI is honored when it is not empty, holds no
+    NUL and is at most `BOTE_LISTEN_URI_MAX` (1024) bytes decoded, once each, while there is room: `BOTE_LISTEN_URIS`
+    (32) of them in `BOTE_LISTEN_URI_ROOM` (4096) bytes.
+  - `bote_listen_ack_uris_a`, the acknowledgement that lists them, decoded and escaped again.
+- **The update hook** (`src/events.cyr`, core): EventSink grows to 32 B, and `event_sink_with_updated` /
+  `event_sink_updated` carry a URI with no payload, so nothing is built or kept for an update. `bote_conn_serial_sinks`
+  keeps it. A sink with no hook, majra's and the legacy drain's among them, hears nothing.
+- **Updates in a hub and a ListenLine** (`src/listen.cyr`). A slot (312 B) keeps the URIs its acknowledgement lists, in a
+  room made the first time the slot needs one and kept for the next. Each hub and line (160 B) queues an update's URI,
+  `BOTE_LISTEN_QUEUE` (16) of them, each once, under a lock. The thread that writes its streams tells each subscription of
+  every URI it covers: the same URI, one followed by `/`, `?` or `#`, or anything after one that ends in `/`. It builds
+  each frame with `bote_json_escape` on the carrier's own arena, rewound each pass. A URI too long to queue, or one
+  arriving with the queue full, overflows it, and each subscription is then told of every URI it holds: more than
+  happened, never less. With none open an update is kept for nobody.
+- `bote_listen_line_broken(c)`: 1 once a write to the connection failed, which each transport now drops on.
+- `bote_update_resource` in the conformance fixture: a real `dispatcher_resource_updated`, which the official client calls.
+
+### Changed
+
+- `server/discover` says `resources.subscribe` where listen is carried (`_build_capabilities_sub`). The legacy `initialize`
+  never does, having no `resources/subscribe`.
+- A listen with a null id is `-32600`: MCP's ids are never null, and a subscription's id is how it is cancelled.
+- A WebSocket closed at its idle deadline logs a DEBUG line, as the Unix socket's does.
+
+### Fixed
+
+From the review of 3.7.3:
+
+- **A WebSocket's changes stopped once its client pinged.** After answering a ping the loop read on for the next frame,
+  where it should have waited on the listen too, so a client that keeps its socket alive with pings heard nothing until it
+  sent a request. `_bote_ws_recv` returns after a control frame (`BOTE_WS_CONTROL`).
+- **A listen whose acknowledgement could not be written left the connection served**, and the next message's handler ran
+  for a client already gone, or after a WebSocket frame sent in part. The line is marked broken, and the transport drops it.
+- **A listen dispatched after a connection ended, on the same thread and with no new begin, crashed** on the line's writer
+  of 0. Detaching clears the stream word, and an open with no writer is refused.
+- **On stdio, a client that closed stdout killed the process with SIGPIPE.** stdio ignores it now, as sandhi's serve loops do,
+  and a write that fails ends the loop with a WARN.
+- **Listen ids were compared byte for byte**, so `"a/b"` and `"a\/b"` were two subscriptions, and a cancel spelled another way
+  ended nothing. They are compared by value, a string decoded and kept apart from a number.
+- **Judging a WebSocket's token while changes went out grew the request arena**, which nothing rewinds between frames: about
+  87 bytes a change with the cache off. The judgement is in a mark and its release.
+- **A hub-thread start that failed could, on its second close, end a stream that a later start served.** A start under way is
+  waited for now, and there is one close, by the start that failed.
+
+Found here:
+
+- **A change made while a listen was opened could reach nobody.** A client lists after its acknowledgement, so a change
+  before it is in what the client lists, and one after must be told. One in between found no subscription open to raise it
+  for, and was kept for nobody. Under `qemu-aarch64` a change the instant a Unix client read its acknowledgement was lost in
+  3 runs of 3; the 3.7.3 roadmap's 400 clean rounds were on x86. A ListenLine now counts the subscription open before it
+  writes the acknowledgement, which only its own loop follows with changes, and takes it back if the write fails. On HTTP
+  the worker writes the acknowledgement and the hub thread the changes, so the hub thread may not write first: each hub
+  counts every change and update (`seen`, +152), whether or not a stream is open, the worker reads the count before it
+  sends anything, and a stream parked with the count moved since is owed every kind it honors (`BOTE_LISTEN_OWED`, a slot's
+  +304). The hub thread then tells it, of every URI it holds for an owed update. More than happened, never less.
+
+### Security
+
+- **What a listen keeps of its URIs is bounded**, at most 32 in 4 KB in a room per slot, at most `BOTE_LISTEN_MAX` rooms in
+  all, and an update allocates nothing. A queue that overflows tells too much rather than too little.
+- The 3.7.3 fixes above. The worst a client could do with them was crash a thread that dispatched without beginning, which
+  bote's own transports never do.
+
+### Tests
+
+- **4,938 assertions, from 4,842**, on x86_64 and under `qemu-aarch64`.
+  - **`tests/bote_listen_line.tcyr`**, 160, from 97:
+    - The acknowledgement's honored URIs: decoded and escaped again, once each, never empty or with a NUL. The bounds:
+      32 of 40, what fits the room, none past the longest.
+    - What an update reaches: the same URI, a path, a query and a fragment under it, anything under a trailing `/`, never a
+      URI that only begins the same. An escaped URI escaped where it goes out.
+    - The queue: a repeat told once, overflow by count and by a URI too long, kept for nobody with none open, passed on
+      to the next sink, kept through the workers' serial sinks.
+    - `server/discover`'s `subscribe` on the line and not off it, and never in the legacy `initialize`, its `listChanged`
+      on or not.
+    - 0 heap bytes for a listen with URIs and its cancel once its slot has a room, and for a hundred updates of a
+      kilobyte URI.
+    - Four threads updating beside the real stdio loop, every line whole.
+    - From the review: a WebSocket that pings and then hears a change with no frame of its own, and its arena unmoved by
+      fifty judgements of 64 KB between frames. A failed acknowledgement dropping each transport before its next message.
+      The stream word gone at detach, and an open with no writer refused. stdio surviving a closed stdout. Ids by value,
+      and a null id refused.
+    - A change made by the writer while it writes the acknowledgement, told after it, and a failed acknowledgement
+      holding no slot for its id.
+  - **`tests/bote_listen.tcyr`**, 217, from 184:
+    - An HTTP stream and a streamable one told each of its own URIs, a sub-resource, overflow by a URI too long.
+    - A hundred updates of a kilobyte URI delivered with 0 heap bytes, and four threads updating while a stream reads.
+    - A hub start under way waited for, then started or taken over.
+    - The window: a change and an update counted with none open; a stream parked with the count moved told what it honors
+      and every URI it holds, once; one parked with the count unmoved owing nothing, nor inheriting what a stream before
+      it on the slot was owed; and through `bote_listen_http`, a
+      client that changes the tools while a head longer than its socket takes keeps the worker writing, then hears it.
+- **`fuzz/listen_filter.fcyr`**'s reference counts the updates bit.
+- **70 mutants, 69 killed.** The one left was an empty-URI check the decoded-length check already makes, and it is gone.
+  Four first survived on the tests: an arena check that spent too little to outgrow the chunks earlier cases made, a
+  mutant I had specified wrong, and two of the window's 16, an owed mark the next stream on a slot inherited and a failed
+  acknowledgement that kept its slot.
+- **The official client** passes 434 checks, from 422, hearing an update on all four of its transports. The suite is where
+  3.7.3 left it.
+
+### Performance
+
+**The request path costs what it did.** Interleaved A/B against 3.7.3, 15 rounds pinned to one core, run after the
+window's fix. Minimums, in ns:
+
+| Bench | 3.7.3 | 3.7.4 | Delta |
+|---|---|---|---|
+| `codec_process_message` | 3,956 | 3,927 | −0.7% |
+| `codec_process_message_threaded` | 4,265 | 4,224 | −1.0% |
+| `http_era_modern` | 11,047 | 11,015 | −0.3% |
+| `listen_filter` | 3,697 | 3,751 | +1.5% |
+
+`listen_filter`'s dispatcher has no resources, so its URIs are not read. Rows that run none of this patch's code moved
+further (`dispatch_tools_list` −5.5%, `jsonx_get_raw_nested` −2.9%, `codec_parse_request` +2.5%), which is layout. The
+window's fix adds one atomic add to a change or an update and one atomic load to opening an HTTP stream, neither on a
+benched path.
+
 ## [3.7.3] — 2026-11-02 · Listen everywhere
 
 **`subscriptions/listen` on stdio, unix and WebSocket**, where the connection is itself the stream. A listen's
@@ -35,6 +170,17 @@ correction notice in 3.7.2, which also corrects a claim this release does not fi
 keeps its stream for days.
 
 The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+> ⚠ **Corrected at 3.7.4.** Two claims below were not true, found by an independent review of this release. "Each change
+> it asked for goes out between the replies to other requests, from whatever thread made it" failed on a WebSocket whose
+> client had pinged: after the pong the loop read on and waited on nothing else, so a client that keeps its socket alive
+> with pings heard no change until it sent a request. And "every parked stream ends, before and after the next caller may
+> try again" overreached: the second close could end a stream that a later, successful start was serving. "A cancel matches
+> the listen's id byte for byte" was true and wrong, since JSON-RPC compares ids by value. The review also found a failed
+> acknowledgement leaving its connection served, a crash for a listen dispatched after a connection ended, SIGPIPE killing
+> stdio, and the request arena growing while a WebSocket's token was judged between frames. Each is fixed in 3.7.4. The
+> first claim also failed for a change made while a listen was opened, which found no subscription open and reached nobody:
+> the aarch64 sweep lost one in 3 runs of 3, where the roadmap below had 400 clean rounds on x86. Fixed in 3.7.4 too.
 
 ### Added
 
@@ -159,6 +305,10 @@ The handler ABI and the stated minimum cyrius are unchanged.
 > own look at the filter, when the acknowledgement said nothing and the stream stayed. A stream acknowledged before its socket
 > was held was also cut off, with no word in the log, when the process had no descriptor to spare. All but the first are fixed
 > in 3.7.3.
+
+> ⚠ **Corrected at 3.7.4.** "Then one notification for each change it asked for" missed a change made after the
+> acknowledgement was built and before the stream was parked, which reached the streams already open and not that one.
+> 3.7.3 listed it as an open decision; 3.7.4 fixes it.
 
 ### Added
 
