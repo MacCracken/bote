@@ -95,6 +95,18 @@ The primary security-relevant surface areas are:
   result held. What the judging and the shaping allocate is on the request arena; through
   3.7.7 part of the text block bote made of a handler's bare value stayed on the heap, 160 B
   to 1.2 KB a call, for good.
+  Since **3.8.1** that holds inside `structuredContent` too: a key named twice in any object
+  of it is refused, and a key of any length is read as it decodes, where through 3.8.0 a
+  repeated `temperature` passed a number property with a string and a long escaped key went
+  unjudged. A result naming one of the three twice is refused from any tool, with a schema or
+  not. An outputSchema whose `type` is written with an escape is judged by that type, where it
+  judged nothing.
+- **Icons and titles** — since **3.8.1** an icon's `src` is an `http://` or `https://` URL
+  with a host, or a `data:` URI of Base64 data, every byte one a URI may hold; nothing else is
+  registered, a `javascript:` or `file:` source included. bote fetches no icon. The spec asks
+  a client to take care with an SVG and with an icon from another domain, and that care is the
+  client's. serverInfo's icons and description go in `initialize` and `server/discover` only,
+  so a large `data:` icon is not repeated in every reply.
 - **Progress** — since **3.7.6** a handler's reports go only on the request's own stream, for a
   request that asked with a `progressToken`, and only while it runs: never on a listen stream, never
   for a request cancelled or answered, never with a `progress` that does not increase. A report is

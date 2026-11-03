@@ -18,6 +18,152 @@ have per release.
 
 _(empty)_
 
+## [3.8.1] — 2026-11-03 · Titles, icons and instructions
+
+**Tools, prompts, resources, templates and the server carry a `title` and `icons`, and the server its `instructions`.**
+A title is for people, where `name` is for programs. Prompt arguments carry a title too. serverInfo also gets its
+`description` and `websiteUrl`. Each is checked where it is registered or set, and refused when the spec would not
+allow it, since the official client refuses a whole list over one icon it cannot read. A list then sends exactly what
+passed. `instructions` goes in `initialize`'s result on 2025-11-25 and in `server/discover`'s on 2026-07-28.
+
+**Ten defects in 3.8.0 land ahead of it**, from an independent review of that release. The worst let a result whose
+`structuredContent` names a key twice pass its outputSchema: bote judged the first value, and a client reads the last.
+See the correction notice in 3.8.0.
+
+The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+### Added
+
+- **Icons** (core, `src/jsonx.cyr`, beside the escaper their JSON is built with, as every registry uses them): `bote_icon_new(src)`, `bote_icon_with_mime_type`, `bote_icon_with_sizes`,
+  `bote_icon_with_theme`, and their getters. An Icon is 32 B.
+  - `bote_icons_check(icons)` says why a list cannot be sent, or 0.
+    - `src` is an `http://` or `https://` URL with a host, or a `data:` URI of Base64 data. Every byte must be one a URI
+      may hold.
+    - `mimeType` is type/subtype.
+    - Each size is WxH or `any`.
+    - `theme` is `light` or `dark`.
+  - `bote_display_check(title, icons)` also refuses an empty title. `bote_web_url_ok(url)` is the URL test.
+- **Titles and icons on each definition** (core):
+  - `tool_def_with_title` / `_with_icons` (ToolDef 128 B);
+  - `prompt_def_with_title` / `_with_icons` (PromptDef 56 B), and `prompt_arg_with_title` (PromptArgument 40 B);
+  - `resource_def_with_title` / `_with_icons` (ResourceDef 64 B);
+  - `resource_template_with_title` / `_with_icons` (ResourceTemplate 72 B).
+
+  Each is checked at registration and kept as the JSON fragment that passed, which its list sends after the name. A
+  definition changed after it is registered sends what it was registered with until it is registered again.
+- **`dispatcher_set_server_details(d, title, description, website_url, icons)`** (core), 0 or a BoteError. serverInfo is
+  built in two forms when it is set:
+  - every field, for `initialize` and `server/discover`;
+  - the name, title and version, for the `_meta` of every other 2026-07-28 result and a listen's, so that a `data:` icon
+    of some kilobytes is not in every reply.
+- **`dispatcher_set_instructions(d, text)`** (core): in `initialize`'s and `server/discover`'s results, escaped once
+  when set. The Dispatcher grows to 176 B.
+- The conformance fixture has a titled tool, prompt, resource and template, and the server's details and instructions,
+  which the official client reads back.
+
+### Fixed
+
+From the review of 3.8.0:
+
+- **A key named twice inside `structuredContent` passed the outputSchema.** bote judged its first value, and a client
+  reads the last. The check refused a repeat at the result's top level only. `_jx_repeats_a` now finds one in any object
+  of the value, and the result is refused.
+- **A key of 256 bytes or more, written with an escape, was compared as written.** The scanner (`_jx_scan`) decoded
+  shorter keys only, so such a member was never judged by the property it names. It decodes any key now, on the request
+  arena, and gives the bytes back once compared.
+- **The validator read `type` without decoding it.** `"object"` judged nothing, and it was still listed as an
+  object root. `"null"` judged nothing either. Both are judged now (`SCH_NULL`).
+- **`required` names and string `enum` values were compared with their escapes left in**, so `"required":["é"]`
+  refused every result. They are decoded on both sides now (`_sch_str_dec_a`), for arguments as for results.
+- **A tool without an outputSchema let a result name `content`, `structuredContent` or `isError` twice.** Such a result
+  was shaped and audited by its first member while a client reads its last, so the audit recorded a failure the client
+  saw as a success. It is refused now, from every tool.
+- **A schema property named with a NUL still matched**, as written, a member spelled that way. The member walker now
+  leaves such a property out, so it matches nothing. An outputSchema holding one is refused at registration, since a
+  client would judge it and bote cannot.
+- **The 2025-11-25 form left a 2019-09 `$recursiveRef: "#"` as it was.** It then named the wrapper. It now becomes a
+  `$ref` to `#/properties/result`, or an `allOf` entry beside a `$ref`, under the SDK's own test: a 2019-09 `$schema` and
+  no `$recursiveAnchor: true` at the root.
+- **An integer of 2^62 or more in a result was refused**, by the bound arguments have so that a handler reads what was
+  sent. A client reads a result whole, so the bound does not apply there.
+- **Keywords bote does not enforce went unnamed.** `additionalProperties`, the exclusive bounds, `multipleOf`,
+  `uniqueItems`, the property counts, `prefixItems`, `contains`, the conditionals, `propertyNames`,
+  `patternProperties`, the dependents, the `unevaluated` pair and `$dynamicRef` / `$recursiveRef` now each get a WARN at
+  registration. So do an unknown type and an `enum` on a type other than string. This covers inputSchema and
+  outputSchema alike (`BOTE_UNENFORCED`, `_reg_warn_schema`).
+- **A bare content block whose `type` is written with an escape** went out as a text block holding it. It is lifted now
+  (`_dsp_type_is_content`).
+
+Found while fixing these:
+
+- **An outputSchema naming a dialect bote does not know was taken.** It is refused now. The spec says "Clients and
+  servers MUST handle unsupported dialects gracefully", and bote knows the SDK's four: 2020-12, 2019-09, draft-07 and
+  draft-06. An outputSchema that repeats a key in one object, or holds a key with a NUL, is refused too.
+
+### Security
+
+- The first two fixes: a handler's result could pass its schema with a value a client reads differently.
+- The third and fourth: a schema could judge less than it says, or refuse what it allows.
+- An icon `src` that is `javascript:`, `file:` or anything else that is no web URL or Base64 `data:` URI is refused.
+  bote fetches no icon.
+
+### Tests
+
+- **5,510 assertions, from 5,353**, on x86_64 and under `qemu-aarch64`.
+  - **`tests/bote_display.tcyr`**, 100, new:
+    - Every `src` an icon may and may not have: http and https, capitals, percent-encoding, an IPv6 host, `data:` with
+      and without a type or a parameter. Refused: empty, none, other schemes, `javascript:`, `file:`, a relative
+      reference, no host, a space, a quote, a backslash, a line feed, bad percent signs, and `data:` that is not Base64
+      or has a space, a percent sign or a type a URI cannot hold.
+    - `mimeType`, sizes, themes, a missing icon, an empty title, the website.
+    - Registration refusing each kind of definition, with why, and registering nothing.
+    - Each list's exact bytes, escaped, on both revisions. A definition changed after its registration, and then
+      registered again.
+    - serverInfo: by default; refused details setting nothing; every field in `initialize` and `server/discover`, and
+      the name, title and version elsewhere; renamed with its details kept. `instructions`, set and cleared.
+    - The heap: ten of each list, `initialize`, `server/discover` and a 2026-07-28 call, with every field long and a
+      60 KB `data:` icon. Nothing kept.
+  - **`tests/bote_output.tcyr`**, 179, from 122: each review finding above, through the codec on both revisions.
+- **87 mutants, 87 killed**: 57 on titles, icons, serverInfo and instructions, and 30 on the review's fixes. Fifteen
+  first died by a crash rather than a failed assertion: a refusal let through handed `assert_streq` a 0 in place of a
+  reason. The two files now report that as a failure.
+- **The official suite** is where 3.8.0 left it. **The official client** passes 525 checks, from 483. It reads
+  back a titled tool, prompt, resource and template, serverInfo's title, description, website and icons, and the
+  instructions, on each of its transports and revisions. It does not read back a prompt argument's title. bote sends
+  it, as the spec's PromptArgument has it, but the client's own schema for an argument has no `title`, so its parse
+  drops it. `tests/bote_display.tcyr` checks the bytes instead.
+
+### Performance
+
+**Correctness costs a little on every lookup, and about a microsecond on a result judged by its schema.** Interleaved
+A/B against 3.8.0, 15 rounds pinned to one core. Minimums, in ns:
+
+| Bench | 3.8.0 | 3.8.1 | Delta |
+|---|---|---|---|
+| `dispatch_tools_call_output` | 6,522 | 7,474 | +14.6% |
+| `dispatch_tools_call_structured` | 3,547 | 3,587 | +1.1% |
+| `dispatch_tools_call` | 2,233 | 2,256 | +1.0% |
+| `dispatch_tools_list` | 1,730 | 1,849 | +6.9% |
+| `dispatch_initialize` | 1,732 | 1,785 | +3.1% |
+| `codec_process_message` | 4,174 | 4,128 | −1.1% |
+| `jsonx_get_str_flat` | 156 | 163 | +4.5% |
+| `validate_compiled_simple` | 446 | 476 | +6.7% |
+| `schema_compile_nested` | 6,244 | 6,509 | +4.2% |
+| `session_validate` (untouched) | 1,649 | 1,686 | +2.2% |
+
+- **`dispatch_tools_call_output`, +950 ns:** the check for a key repeated inside `structuredContent`. It walks the
+  value with the member walker, which copies each member. That is the price of judging what a client reads, since
+  bote cannot judge a value a client may read differently. The first build cost 1.1 µs; passing over scalars, which
+  hold no key, took off about 150 ns.
+- **The scanner, about +7 ns a lookup** (`jsonx_get_str_flat`): `_jx_scan` is now a call around its walk, so that the
+  arena a long key is decoded on is given back once. The first build did that bookkeeping for every key and cost
+  more.
+- **`validate_compiled_simple`, +30 ns:** that scanner call, and the validator's word that says it is judging a result.
+- **`schema_compile_nested`:** registration now decodes `type`, `required` and `enum`.
+- **`dispatch_tools_list` (+119 ns) and `dispatch_initialize` (+53 ns):** neither is explained by the code each adds,
+  which is a few loads: the kept fragment and the cached serverInfo. `session_validate`, which this release does not
+  touch, moved +2.2% in the same run. No layout control was run.
+
 ## [3.8.0] — 2026-11-03 · Output schemas
 
 **A tool can declare an `outputSchema`, and every result is judged by it.** Build one with
@@ -32,6 +178,31 @@ is shown an object, wrapped as `{"result": …}`, the way the official SDK does 
 miss a cancellation queued for the next request. See the correction notice in 3.7.7.
 
 The handler ABI and the stated minimum cyrius (6.7.13) are unchanged.
+
+> ⚠ **Corrected at 3.8.1.** These claims below were not true, found by an independent review of this release.
+> - "A handler's bug cannot hand a client data its schema says it will not get" and "whose structuredContent does not
+>   match, is a tool error". A key named twice inside `structuredContent` was judged by its first value, and a client
+>   reads the last, so `{"temperature":1,…,"temperature":"hot"}` passed a `number` property. So did a member of 256
+>   bytes or more written with an escape: the scanner compared such a key as written, so the property it names never
+>   judged it.
+> - "Any root type is judged". A `type` written with an escape (`"obj\u0065ct"`) was read as written, judged nothing,
+>   and was still listed as an object. `"null"`, and any type bote does not know, judged nothing too, with no warning.
+> - `required` names and string `enum` values were compared with their escapes left in, so a schema's
+>   `"required":["\u00e9"]` refused every result.
+> - "A repeated content, structuredContent or isError is refused" held for a tool with an outputSchema only. From any
+>   other tool such a result went out, shaped by its first `structuredContent`, while a client reads its last.
+> - "Kept as it was written, and matches nothing". A property named with a NUL was kept as written, `n\u0000`, and
+>   judged a message's member written that way.
+> - "These are the official SDK's rules". The SDK also turns a 2019-09 `$recursiveRef: "#"` into a reference under
+>   `properties/result`. bote left it, and it then named the wrapper.
+> - An integer of 2^62 or more in a result was refused, by a bound that is the input side's.
+> - Not every keyword bote does not enforce was warned of: `additionalProperties`, `enum` on a type other than a
+>   string, and a dozen others were neither enforced nor named.
+> - "A path is named only for a violation" held for the root's own properties. A path is still built for each array
+>   element and each property below the root.
+> - A bare content block whose `type` is written with an escape went out as a text block holding it.
+>
+> Each is fixed in 3.8.1, except the paths below the root, which are named as before.
 
 ### Added
 

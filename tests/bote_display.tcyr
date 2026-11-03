@@ -1,0 +1,386 @@
+# bote_display.tcyr — titles and icons on tools, prompts, their arguments, resources and
+# templates, the rest of serverInfo, and instructions (3.8.1): what the checks refuse,
+# what each list, initialize and server/discover send, byte for byte, on both revisions,
+# what a definition changed after its registration sends, and the heap.
+#
+# Run: cyrius test tests/bote_display.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+
+
+fn h_tool(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+fn h_prompt(args, claims) { return "{\"messages\":[]}"; }
+fn h_res(uri, claims) { return "{\"contents\":[]}"; }
+
+var _M = ",\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}";
+var _MH_unused = "{\"resultType\":\"complete\",\"_meta\":{\"io.modelcontextprotocol/serverInfo\":{\"name\":\"bote\",\"version\":\"";
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
+
+fn _msg(method, params, modern) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, "\",\"params\":{");
+    str_builder_add_cstr(sb, params);
+    if (modern == 1) {
+        if (strlen(params) == 0) { str_builder_add_cstr(sb, _M + 1); } else { str_builder_add_cstr(sb, _M); }
+    }
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}
+
+
+fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+fn _ends(s, suf) {
+    if (s == 0) { return 0; }
+    var n = strlen(s);
+    var k = strlen(suf);
+    if (k > n) { return 0; }
+    return streq(s + n - k, suf);
+}
+fn _icon(src) { return bote_icon_new(src); }
+fn _one(icon) { var v = vec_new(); vec_push(v, icon); return v; }
+fn _strs1(a) { var v = vec_new(); vec_push(v, a); return v; }
+fn _icons_why(icon) { return bote_icons_check(_one(icon)); }
+fn _src_ok(src) { if (_icons_why(_icon(src)) == 0) { return 1; } return 0; }
+fn _tool(name) { return tool_def_new(name, "d", schema_new("object", 0, vec_new())); }
+fn _reason(e) { if (e == 0) { return 0; } return bote_err_reason(e); }
+fn _list_m(d, method, modern) { return codec_process_message(_msg(method, "", modern), d, 0); }
+fn _ver() { return _bote_server_version(); }
+
+var ICON_SRC = "https://example.com/icon.png";
+var FULL_ICON = "{\"src\":\"https://example.com/icon.png\",\"mimeType\":\"image/png\",\"sizes\":[\"48x48\",\"any\"],\"theme\":\"dark\"}";
+
+fn _full_icon() {
+    var i = bote_icon_new(ICON_SRC);
+    bote_icon_with_mime_type(i, "image/png");
+    var sz = vec_new();
+    vec_push(sz, "48x48");
+    vec_push(sz, "any");
+    bote_icon_with_sizes(i, sz);
+    bote_icon_with_theme(i, "dark");
+    return i;
+}
+
+fn _two_icons() {
+    var v = vec_new();
+    vec_push(v, _full_icon());
+    vec_push(v, bote_icon_new("data:image/svg+xml;base64,PHN2Zz4="));
+    return v;
+}
+var TWO = "\"icons\":[{\"src\":\"https://example.com/icon.png\",\"mimeType\":\"image/png\",\"sizes\":[\"48x48\",\"any\"],\"theme\":\"dark\"},{\"src\":\"data:image/svg+xml;base64,PHN2Zz4=\"}]";
+
+# A string of `n` copies of `s`.
+fn _rep(s, n) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < n) { str_builder_add_cstr(sb, s); i = i + 1; }
+    return str_data(str_builder_build(sb));
+}
+
+# assert_streq, with nothing on either side a failure rather than a crash: a mutant that
+# lets a refusal through hands it 0 where a reason was.
+fn _ase(got, want, name) {
+    if (got == 0 || want == 0) {
+        if (got == want) { return assert(1 == 1, name); }
+        return assert(0 == 1, name);
+    }
+    return assert_streq(got, want, name);
+}
+
+fn main() {
+    sakshi_set_level(SK_ERROR);
+
+    # ---- What an icon may be ----
+    assert_eq(_src_ok("https://example.com/i.png"), 1, "src: an https URL");
+    assert_eq(_src_ok("http://example.com/a?b=c#d"), 1, "src: an http URL, query and fragment");
+    assert_eq(_src_ok("HTTPS://Example.COM/x"), 1, "src: a scheme in capitals");
+    assert_eq(_src_ok("https://e.org/a%20b"), 1, "src: a percent-encoded byte");
+    assert_eq(_src_ok("https://[::1]:8443/i"), 1, "src: an IPv6 literal and a port");
+    assert_eq(_src_ok("data:image/png;base64,iVBORw0KGgo="), 1, "src: a data: URI of Base64");
+    assert_eq(_src_ok("DATA:image/svg+xml;charset=utf-8;BASE64,PHN2Zz4="), 1, "src: data: with a parameter, in capitals");
+    assert_eq(_src_ok("data:;base64,AAAA"), 1, "src: data: with no media type");
+    assert_eq(_src_ok(""), 0, "src: empty");
+    assert_eq(_icons_why(bote_icon_new(0)) != 0, 1, "src: none");
+    assert_eq(_src_ok("ftp://example.com/i.png"), 0, "src: another scheme");
+    assert_eq(_src_ok("javascript:alert(1)"), 0, "src: javascript:");
+    assert_eq(_src_ok("file:///etc/passwd"), 0, "src: file:");
+    assert_eq(_src_ok("/icon.png"), 0, "src: a relative reference");
+    assert_eq(_src_ok("https://"), 0, "src: no host");
+    assert_eq(_src_ok("https:///x"), 0, "src: an empty host");
+    assert_eq(_src_ok("https://e.org/a b"), 0, "src: a space");
+    assert_eq(_src_ok("https://e.org/\"x"), 0, "src: a quote");
+    assert_eq(_src_ok("https://e.org/a\\b"), 0, "src: a backslash");
+    assert_eq(_src_ok("https://e.org/\nx"), 0, "src: a line feed");
+    assert_eq(_src_ok("https://e.org/%zz"), 0, "src: a percent sign before no hex");
+    assert_eq(_src_ok("https://e.org/%2"), 0, "src: a percent sign cut short");
+    assert_eq(_src_ok("data:image/png,AAAA"), 0, "src: data: that is not Base64");
+    assert_eq(_src_ok("data:image/png;base64,"), 0, "src: data: with nothing after the comma");
+    assert_eq(_src_ok("data:image/png;base64,AA AA"), 0, "src: data: with a space in the data");
+    assert_eq(_src_ok("data:image/png;base64,AA%41"), 0, "src: data: with a percent sign in the data");
+    assert_eq(_src_ok("data:image/<png>;base64,AAAA"), 0, "src: data: with a media type a URI cannot hold");
+    assert_eq(_src_ok("data:base64,AAAA"), 0, "src: data: with no ;base64");
+    var m = _icon(ICON_SRC);
+    bote_icon_with_mime_type(m, "image/svg+xml");
+    assert_eq(_icons_why(m), 0, "mimeType: type/subtype with a plus");
+    var mb = vec_new();
+    vec_push(mb, "image"); vec_push(mb, "/png"); vec_push(mb, "image/"); vec_push(mb, "image/png; q=1"); vec_push(mb, "a/b/c"); vec_push(mb, "");
+    var mi = 0;
+    var mbad = 0;
+    while (mi < vec_len(mb)) {
+        var mx = _icon(ICON_SRC);
+        bote_icon_with_mime_type(mx, vec_get(mb, mi));
+        if (_icons_why(mx) != 0) { mbad = mbad + 1; }
+        mi = mi + 1;
+    }
+    assert_eq(mbad, 6, "mimeType: six that are no type/subtype, each refused");
+    _ase(_icons_why(bote_icon_with_mime_type(_icon(ICON_SRC), "image")), "an icon's mimeType must be type/subtype", "mimeType: why");
+    var sg = vec_new();
+    vec_push(sg, "48x48"); vec_push(sg, "any"); vec_push(sg, "1x1"); vec_push(sg, "99999x99999");
+    assert_eq(_icons_why(bote_icon_with_sizes(_icon(ICON_SRC), sg)), 0, "sizes: WxH and any");
+    var sbad = vec_new();
+    vec_push(sbad, "48"); vec_push(sbad, "x48"); vec_push(sbad, "48x"); vec_push(sbad, "48X48"); vec_push(sbad, "123456x1");
+    vec_push(sbad, "48x48 "); vec_push(sbad, ""); vec_push(sbad, "Any"); vec_push(sbad, "4 8x48");
+    var si = 0;
+    var sref = 0;
+    while (si < vec_len(sbad)) {
+        if (_icons_why(bote_icon_with_sizes(_icon(ICON_SRC), _strs1(vec_get(sbad, si)))) != 0) { sref = sref + 1; }
+        si = si + 1;
+    }
+    assert_eq(sref, 9, "sizes: nine that are neither, each refused");
+    _ase(_icons_why(bote_icon_with_sizes(_icon(ICON_SRC), _strs1(0))), "an icon's size must be WxH or \"any\"", "sizes: a missing one, and why");
+    assert_eq(_icons_why(bote_icon_with_theme(_icon(ICON_SRC), "light")), 0, "theme: light");
+    assert_eq(_icons_why(bote_icon_with_theme(_icon(ICON_SRC), "dark")), 0, "theme: dark");
+    _ase(_icons_why(bote_icon_with_theme(_icon(ICON_SRC), "auto")), "an icon's theme must be \"light\" or \"dark\"", "theme: another, and why");
+    assert_eq(_icons_why(bote_icon_with_theme(_icon(ICON_SRC), "Light")) != 0, 1, "theme: in capitals");
+    var withnull = vec_new();
+    vec_push(withnull, _icon(ICON_SRC));
+    vec_push(withnull, 0);
+    _ase(bote_icons_check(withnull), "an icon is missing", "icons: a missing one in a list");
+    assert_eq(bote_icons_check(vec_new()), 0, "icons: an empty list");
+    assert_eq(bote_icons_check(0), 0, "icons: none");
+    _ase(bote_display_check("", 0), "a title must not be empty", "title: empty");
+    assert_eq(bote_display_check("T", 0), 0, "title: any other");
+    assert_eq(bote_web_url_ok("https://example.com"), 1, "website: an https URL");
+    assert_eq(bote_web_url_ok("example.com"), 0, "website: no scheme");
+
+    # ---- Registration refuses what a client would refuse ----
+    var d = dispatcher_new(tool_registry_new());
+    var bt = tool_def_with_icons(_tool("t_bad"), _one(bote_icon_with_theme(_icon(ICON_SRC), "auto")));
+    _ase(_reason(dispatcher_register_tool(d, bt, &h_tool)), "an icon's theme must be \"light\" or \"dark\"", "register: a tool with a bad icon, and why");
+    assert_eq(registry_contains(dispatcher_registry(d), "t_bad"), 0, "register: ...and it is not registered");
+    _ase(_reason(dispatcher_register_tool(d, tool_def_with_title(_tool("t_empty"), ""), &h_tool)), "a title must not be empty", "register: a tool with an empty title");
+    _ase(registry_check_tool_def(tool_def_with_icons(_tool("t_c"), _one(_icon("ftp://x/y")))), "an icon's src must be an http:// or https:// URL, or a data: URI of Base64 data", "register: registry_check_tool_def says why");
+    var bp = prompt_def_with_icons(prompt_def_new("p_bad", "d", 0), _one(_icon("javascript:x")));
+    assert_eq(_reason(dispatcher_register_prompt(d, bp, &h_prompt)) != 0, 1, "register: a prompt with a bad icon");
+    var pargs = vec_new();
+    vec_push(pargs, prompt_arg_with_title(prompt_arg_new("a", "d", 1), ""));
+    _ase(_reason(dispatcher_register_prompt(d, prompt_def_new("p_arg", "d", pargs), &h_prompt)), "a title must not be empty", "register: a prompt argument with an empty title");
+    assert_eq(dispatcher_prompts(d), 0, "register: ...and no prompt registry was made for them");
+    var preg = prompt_registry_new();
+    assert_eq(prompt_registry_register(preg, bp, &h_prompt), 0 - 1, "register: prompt_registry_register refuses it too");
+    assert_eq(_reason(dispatcher_register_resource(d, resource_def_with_title(resource_def_new("res://a", "a", "d", 0), ""), &h_res)) != 0, 1, "register: a resource with an empty title");
+    assert_eq(_reason(dispatcher_register_resource_template(d, resource_template_with_icons(resource_template_new("res://t/{id}", "t", "d", 0), _one(_icon("https://"))), &h_res)) != 0, 1, "register: a template with a bad icon");
+    assert_eq(dispatcher_resources(d), 0, "register: ...and no resource registry was made for them");
+    var rreg = resource_registry_new();
+    assert_eq(resource_registry_register(rreg, resource_def_with_title(resource_def_new("res://a", "a", "d", 0), ""), &h_res), 0 - 1, "register: resource_registry_register refuses it too");
+    assert_eq(resource_registry_register_template(rreg, resource_template_with_title(resource_template_new("res://t/{id}", "t", "d", 0), ""), &h_res), 0 - 1, "register: ...and resource_registry_register_template");
+
+    # ---- What each list sends ----
+    var t = tool_def_with_icons(tool_def_with_title(_tool("t_weather"), "Weather \"now\"\u0001"), _two_icons());
+    assert_eq(dispatcher_register_tool(d, t, &h_tool), 0, "list: a tool with a title and two icons registers");
+    dispatcher_register_tool(d, _tool("t_plain"), &h_tool);
+    var tl = _list_m(d, "tools/list", 0);
+    assert(_has(tl, _cat3("{\"name\":\"t_weather\",\"title\":\"Weather \\\"now\\\"\\u0001\",", TWO, ",\"description\":\"d\",\"inputSchema\":{\"type\":\"object\"}}")) == 1, "tools/list: the title escaped and the icons, after the name");
+    assert(_has(tl, "{\"name\":\"t_plain\",\"description\":\"d\",\"inputSchema\":{\"type\":\"object\"}}") == 1, "tools/list: a tool with neither as it was");
+    assert(_has(_list_m(d, "tools/list", 1), _cat3("{\"name\":\"t_weather\",\"title\":\"Weather \\\"now\\\"\\u0001\",", TWO, ",\"description\"")) == 1, "tools/list 2026-07-28: the same");
+    tool_def_with_title(t, "Changed");
+    tool_def_with_icons(t, 0);
+    assert(_has(_list_m(d, "tools/list", 0), "\"title\":\"Weather \\\"now\\\"\\u0001\"") == 1, "tools/list: a definition changed after its registration sends what was registered");
+    dispatcher_register_tool(d, t, &h_tool);
+    assert(_has(_list_m(d, "tools/list", 0), "{\"name\":\"t_weather\",\"title\":\"Changed\",\"description\"") == 1, "tools/list: ...and what it is registered again with");
+
+    var pa = vec_new();
+    vec_push(pa, prompt_arg_with_title(prompt_arg_new("city", "Which city", 1), "City"));
+    vec_push(pa, prompt_arg_new("units", 0, 0));
+    var p = prompt_def_with_icons(prompt_def_with_title(prompt_def_new("p_weather", "Ask about weather", pa), "Weather"), _two_icons());
+    assert_eq(dispatcher_register_prompt(d, p, &h_prompt), 0, "list: a prompt with a title, icons and a titled argument registers");
+    dispatcher_register_prompt(d, prompt_def_new("p_plain", 0, 0), &h_prompt);
+    var pl = _list_m(d, "prompts/list", 0);
+    assert(_has(pl, _cat3("{\"name\":\"p_weather\",\"title\":\"Weather\",", TWO, ",\"description\":\"Ask about weather\",\"arguments\":[{\"name\":\"city\",\"title\":\"City\",\"description\":\"Which city\",\"required\":true},{\"name\":\"units\"}]}")) == 1, "prompts/list: the prompt's title and icons, and the argument's title");
+    assert(_has(pl, "{\"name\":\"p_plain\"}") == 1, "prompts/list: a prompt with neither as it was");
+    assert(_has(_list_m(d, "prompts/list", 1), "{\"name\":\"p_weather\",\"title\":\"Weather\",") == 1, "prompts/list 2026-07-28: the same");
+
+    var r = resource_def_with_icons(resource_def_with_title(resource_def_new("res://w", "w", "d", "text/plain"), "W"), _two_icons());
+    assert_eq(dispatcher_register_resource(d, r, &h_res), 0, "list: a resource with a title and icons registers");
+    dispatcher_register_resource(d, resource_def_new("res://p", "p", 0, 0), &h_res);
+    var rl = _list_m(d, "resources/list", 0);
+    assert(_has(rl, _cat3("{\"uri\":\"res://w\",\"name\":\"w\",\"title\":\"W\",", TWO, ",\"description\":\"d\",\"mimeType\":\"text/plain\"}")) == 1, "resources/list: the title and icons, after the name");
+    assert(_has(rl, "{\"uri\":\"res://p\",\"name\":\"p\"}") == 1, "resources/list: a resource with neither as it was");
+    var rt = resource_template_with_icons(resource_template_with_title(resource_template_new("res://t/{id}", "t", "d", 0), "T"), _one(_full_icon()));
+    assert_eq(dispatcher_register_resource_template(d, rt, &h_res), 0, "list: a template with a title and an icon registers");
+    var tml = _list_m(d, "resources/templates/list", 1);
+    assert(_has(tml, _cat3("{\"uriTemplate\":\"res://t/{id}\",\"name\":\"t\",\"title\":\"T\",\"icons\":[", FULL_ICON, "],\"description\":\"d\"}")) == 1, "resources/templates/list: the title and icon, after the name");
+
+    # ---- serverInfo and instructions ----
+    var sd = dispatcher_new(tool_registry_new());
+    var init = _msg("initialize", "\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"c\",\"version\":\"1\"}", 0);
+    var disc = _msg("server/discover", "", 1);
+    var plain_info = _cat3("\"serverInfo\":{\"name\":\"bote\",\"version\":\"", _ver(), "\"}}");
+    assert(_ends(codec_process_message(init, sd, 0), _cat(plain_info, "}")) == 1, "serverInfo: by default, as it was");
+    assert(_has(codec_process_message(disc, sd, 0), "instructions") == 0, "instructions: none by default");
+    _ase(_reason(dispatcher_set_server_details(sd, "T", 0, "ftp://e.org", 0)), "the website must be an http:// or https:// URL", "details: a website that is no web URL, and why");
+    assert_eq(_reason(dispatcher_set_server_details(sd, "", 0, 0, 0)) != 0, 1, "details: an empty title");
+    assert_eq(_reason(dispatcher_set_server_details(sd, 0, 0, 0, _one(_icon("https://")))) != 0, 1, "details: a bad icon");
+    assert(_ends(codec_process_message(init, sd, 0), _cat(plain_info, "}")) == 1, "details: ...and a refusal sets nothing");
+    dispatcher_set_server_info(sd, "acme", "2.0");
+    assert_eq(dispatcher_set_server_details(sd, "Acme \"MCP\"", "Tools for\nAcme", "https://acme.example/mcp", _one(_full_icon())), 0, "details: set");
+    dispatcher_set_instructions(sd, "Prefer \"get_weather\".\nNever guess.");
+    var full = _cat3("{\"name\":\"acme\",\"title\":\"Acme \\\"MCP\\\"\",\"version\":\"2.0\",\"description\":\"Tools for\\nAcme\",\"websiteUrl\":\"https://acme.example/mcp\",\"icons\":[", FULL_ICON, "]}");
+    var ins = ",\"instructions\":\"Prefer \\\"get_weather\\\".\\nNever guess.\"";
+    var ir = codec_process_message(init, sd, 0);
+    assert(_ends(ir, _cat3(",\"serverInfo\":", full, _cat(ins, "}}"))) == 1, "initialize: every field of serverInfo, and the instructions");
+    var dr = codec_process_message(disc, sd, 0);
+    assert(_has(dr, _cat(ins, ",\"_meta\":{\"io.modelcontextprotocol/serverInfo\":")) == 1, "server/discover: the instructions");
+    assert(_has(dr, _cat3("\"io.modelcontextprotocol/serverInfo\":", full, "}")) == 1, "server/discover: every field of serverInfo");
+    var short = "{\"name\":\"acme\",\"title\":\"Acme \\\"MCP\\\"\",\"version\":\"2.0\"}";
+    var ml = _list_m(sd, "tools/list", 1);
+    assert(_has(ml, _cat3("\"io.modelcontextprotocol/serverInfo\":", short, "}")) == 1, "2026-07-28: another result's serverInfo is the name, the title and the version");
+    assert(_has(ml, "icons") == 0 && _has(ml, "instructions") == 0, "2026-07-28: ...with no icons and no instructions");
+    dispatcher_set_server_info(sd, "acme2", 0);
+    assert(_has(codec_process_message(init, sd, 0), "{\"name\":\"acme2\",\"title\":\"Acme \\\"MCP\\\"\",\"version\":\"") == 1, "serverInfo: renamed after its details, with them kept");
+    dispatcher_set_instructions(sd, 0);
+    assert(_has(codec_process_message(init, sd, 0), "instructions") == 0, "instructions: cleared");
+
+    # ---- The heap ----
+    # Each list, initialize, server/discover and a 2026-07-28 result, with every field
+    # long, keeps nothing after the first message.
+    var hd = dispatcher_new(tool_registry_new());
+    var long_title = _rep("\\u0007T", 700);
+    var long_icon = _cat("data:image/png;base64,", _rep("QUJD", 1000));
+    var hi = 0;
+    while (hi < 40) {
+        var nb = str_builder_new();
+        str_builder_add_cstr(nb, "t_long_");
+        str_builder_add_int(nb, hi);
+        var nm = str_data(str_builder_build(nb));
+        var lic = vec_new();
+        vec_push(lic, bote_icon_with_theme(bote_icon_with_sizes(bote_icon_with_mime_type(bote_icon_new(long_icon), "image/png"), _strs1("48x48")), "light"));
+        dispatcher_register_tool(hd, tool_def_with_icons(tool_def_with_title(_tool(nm), long_title), lic), &h_tool);
+        var lpa = vec_new();
+        vec_push(lpa, prompt_arg_with_title(prompt_arg_new("a", "d", 1), long_title));
+        dispatcher_register_prompt(hd, prompt_def_with_icons(prompt_def_with_title(prompt_def_new(nm, "d", lpa), long_title), lic), &h_prompt);
+        dispatcher_register_resource(hd, resource_def_with_icons(resource_def_with_title(resource_def_new(_cat("res://", nm), nm, "d", 0), long_title), lic), &h_res);
+        dispatcher_register_resource_template(hd, resource_template_with_icons(resource_template_with_title(resource_template_new(_cat3("res://", nm, "/{id}"), nm, "d", 0), long_title), lic), &h_res);
+        hi = hi + 1;
+    }
+    var big_icon = _cat("data:image/png;base64,", _rep("QUJD", 15000));
+    dispatcher_set_server_details(hd, long_title, _rep("\\u0001", 5000), _cat("https://e.org/", _rep("a", 4000)), _one(bote_icon_new(big_icon)));
+    dispatcher_set_instructions(hd, _rep("\\u0002\"", 10000));
+    var msgs = vec_new();
+    vec_push(msgs, _msg("tools/list", "", 0)); vec_push(msgs, _msg("tools/list", "", 1));
+    vec_push(msgs, _msg("prompts/list", "", 0)); vec_push(msgs, _msg("prompts/list", "", 1));
+    vec_push(msgs, _msg("resources/list", "", 0)); vec_push(msgs, _msg("resources/list", "", 1));
+    vec_push(msgs, _msg("resources/templates/list", "", 0)); vec_push(msgs, _msg("resources/templates/list", "", 1));
+    vec_push(msgs, init); vec_push(msgs, disc);
+    vec_push(msgs, _msg("tools/call", "\"name\":\"t_long_1\",\"arguments\":{}", 1));
+    var names = vec_new();
+    vec_push(names, "tools/list, 2025-11-25"); vec_push(names, "tools/list, 2026-07-28");
+    vec_push(names, "prompts/list, 2025-11-25"); vec_push(names, "prompts/list, 2026-07-28");
+    vec_push(names, "resources/list, 2025-11-25"); vec_push(names, "resources/list, 2026-07-28");
+    vec_push(names, "templates/list, 2025-11-25"); vec_push(names, "templates/list, 2026-07-28");
+    vec_push(names, "initialize"); vec_push(names, "server/discover"); vec_push(names, "a 2026-07-28 tools/call, beside its args");
+    var call_base = 0;
+    var mi2 = 0;
+    while (mi2 < vec_len(msgs)) {
+        var mm = vec_get(msgs, mi2);
+        codec_process_message_a(bote_req_begin(), mm, hd, 0);
+        var h0 = alloc_used();
+        var k = 0;
+        while (k < 10) { codec_process_message_a(bote_req_begin(), mm, hd, 0); k = k + 1; }
+        var kept = alloc_used() - h0;
+        if (mi2 == vec_len(msgs) - 1) {
+            # A call copies its `args` to the heap for the handler, which may keep them.
+            var cm = _msg("tools/call", "\"name\":\"t_long_1\",\"arguments\":{}", 0);
+            codec_process_message_a(bote_req_begin(), cm, hd, 0);
+            var c0 = alloc_used();
+            k = 0;
+            while (k < 10) { codec_process_message_a(bote_req_begin(), cm, hd, 0); k = k + 1; }
+            call_base = alloc_used() - c0;
+            kept = kept - call_base;
+        }
+        assert_eq(kept, 0, _cat("heap: ten of each, every field long, keep nothing: ", vec_get(names, mi2)));
+        mi2 = mi2 + 1;
+    }
+    var big_disc = codec_process_message(disc, hd, 0);
+    assert(jsonx_valid(big_disc, strlen(big_disc)) == 1 && _has(big_disc, big_icon) == 1, "heap: ...and server/discover with them is JSON, the icon in it");
+    var big_call = codec_process_message(_msg("tools/call", "\"name\":\"t_long_1\",\"arguments\":{}", 1), hd, 0);
+    assert(_has(big_call, big_icon) == 0, "2026-07-28: a call's result does not carry the server's icon");
+
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit_group(rc);

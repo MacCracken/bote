@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.8.0"; }
+fn _bote_server_version() { return "3.8.1"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -120,8 +120,16 @@ fn validate_tool_name(name) {
 #   +104 listen               what carries `subscriptions/listen` streams (3.7.2): a
 #                           ListenHub (src/listen.cyr), opaque here, or 0, when the
 #                           method is not served. Set by the transport wiring.
+#   +112 server_title        cstr or 0 \
+#   +120 server_description  cstr or 0  | serverInfo's other fields (3.8.1), set
+#   +128 server_website      cstr or 0  | together via dispatcher_set_server_details
+#   +136 server_icons        vec of Icon or 0 /
+#   +144 instructions        cstr or 0 (3.8.1, dispatcher_set_instructions)
+#   +152 instructions_json   `,"instructions":"…"`, escaped when set, or 0
+#   +160 server_info_full    serverInfo's JSON, every field, built when any is set, or 0
+#   +168 server_info_short   the same with name, version and title only, or 0
 fn dispatcher_new(reg) {
-    var d = alloc(112);
+    var d = alloc(176);
     store64(d, reg);
     store64(d + 8, map_new());
     store64(d + 16, map_new());
@@ -136,6 +144,8 @@ fn dispatcher_new(reg) {
     store64(d + 88, 0);
     store64(d + 96, 0);
     store64(d + 104, 0);
+    var k = 112;
+    while (k < 176) { store64(d + k, 0); k = k + 8; }
     return d;
 }
 
@@ -167,7 +177,109 @@ fn dispatcher_server_version(d) { return load64(d + 80); }
 fn dispatcher_set_server_info(d, name, version) {
     store64(d + 72, name);
     store64(d + 80, version);
+    _dsp_server_info_build(d);
     return d;
+}
+
+fn dispatcher_server_title(d)       { return load64(d + 112); }
+fn dispatcher_server_description(d) { return load64(d + 120); }
+fn dispatcher_server_website(d)     { return load64(d + 128); }
+fn dispatcher_server_icons(d)       { return load64(d + 136); }
+fn dispatcher_instructions(d)       { return load64(d + 144); }
+
+# The rest of `serverInfo` (3.8.1, the spec's Implementation): a title for people, a
+# description, the website's URL and icons, each 0 for none. Returns 0, or a BoteError,
+# with nothing set, when the title is empty, the URL is no http:// or https:// URL, or an
+# icon is not what the spec says (bote_icons_check). Set before serving: what is sent is
+# built here, once.
+#
+# `initialize` and `server/discover` send every field. Every other 2026-07-28 result
+# carries serverInfo in its `_meta` too, and sends the name, the version and the title
+# only, so that an icon, which may be a data: URI of some kilobytes, is not in every reply.
+fn dispatcher_set_server_details(d, title, description, website_url, icons) {
+    var why = bote_display_check(title, icons);
+    if (why == 0 && website_url != 0 && bote_web_url_ok(website_url) == 0) {
+        why = "the website must be an http:// or https:// URL";
+    }
+    if (why != 0) { return bote_err_new(BOTE_ERR_INVALID_PARAMS, "", why); }
+    store64(d + 112, title);
+    store64(d + 120, description);
+    store64(d + 128, website_url);
+    store64(d + 136, icons);
+    _dsp_server_info_build(d);
+    return 0;
+}
+
+# What the server tells a client's model about using it (3.8.1), or 0 for nothing: in
+# `initialize`'s result on 2025-11-25 and in `server/discover`'s on 2026-07-28. Set
+# before serving. Returns `d`.
+fn dispatcher_set_instructions(d, text) {
+    store64(d + 144, text);
+    store64(d + 152, 0);
+    if (text != 0) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, ",\"instructions\":\"");
+        bote_json_escape(sb, text);
+        str_builder_add_cstr(sb, "\"");
+        store64(d + 152, str_data(str_builder_build(sb)));
+    }
+    return d;
+}
+
+# serverInfo's two forms, built from what is set: every field, and name, version and title.
+fn _dsp_server_info_build(d) {
+    var sname = dispatcher_server_name(d);
+    if (sname == 0) { sname = "bote"; }
+    var sver = dispatcher_server_version(d);
+    if (sver == 0) { sver = _bote_server_version(); }
+    var title = dispatcher_server_title(d);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"name\":\"");
+    bote_json_escape(sb, sname);
+    str_builder_add_cstr(sb, "\"");
+    if (title != 0) {
+        str_builder_add_cstr(sb, ",\"title\":\"");
+        bote_json_escape(sb, title);
+        str_builder_add_cstr(sb, "\"");
+    }
+    str_builder_add_cstr(sb, ",\"version\":\"");
+    bote_json_escape(sb, sver);
+    str_builder_add_cstr(sb, "\"");
+    var head = str_data(str_builder_build(sb));
+    store64(d + 168, _dsp_named_msg(head, "}", 0));
+    var fb = str_builder_new();
+    str_builder_add_cstr(fb, head);
+    var desc = dispatcher_server_description(d);
+    if (desc != 0) {
+        str_builder_add_cstr(fb, ",\"description\":\"");
+        bote_json_escape(fb, desc);
+        str_builder_add_cstr(fb, "\"");
+    }
+    var site = dispatcher_server_website(d);
+    if (site != 0) {
+        str_builder_add_cstr(fb, ",\"websiteUrl\":\"");
+        bote_json_escape(fb, site);
+        str_builder_add_cstr(fb, "\"");
+    }
+    var icons = _bote_display_json(0, dispatcher_server_icons(d));
+    if (icons != 0) { str_builder_add_cstr(fb, icons); }
+    str_builder_add_cstr(fb, "}");
+    store64(d + 160, str_data(str_builder_build(fb)));
+    return 0;
+}
+
+# How many bytes _dsp_emit_server_info writes, at most.
+fn _dsp_server_info_room(d, full) {
+    var c = load64(d + 168);
+    if (full == 1) { c = load64(d + 160); }
+    if (c != 0) { return strlen(c); }
+    return 64 + 6 * strlen(_bote_server_version());
+}
+
+fn _dsp_instructions_room(d) {
+    var c = load64(d + 152);
+    if (c == 0) { return 0; }
+    return strlen(c);
 }
 
 # Who can say what a token grants. Claims are opaque to bote, so what reads them is
@@ -329,6 +441,8 @@ fn dispatcher_register_prompt(d, prompt_def, handler_fp) {
     if (bote_scope_list_ok(prompt_def_required_scopes(prompt_def)) == 0) {
         return bote_err_new(BOTE_ERR_INVALID_PARAMS, prompt_def_name(prompt_def), DSP_SCOPE_NOT_TOKEN);
     }
+    var pwhy = prompt_display_check(prompt_def);
+    if (pwhy != 0) { return bote_err_new(BOTE_ERR_INVALID_PARAMS, prompt_def_name(prompt_def), pwhy); }
     var preg = dispatcher_prompts(d);
     if (preg == 0) { preg = _dsp_made(d, 40, prompt_registry_new()); }
     prompt_registry_register(preg, prompt_def, handler_fp);
@@ -355,6 +469,8 @@ fn dispatcher_register_resource(d, resource_def, handler_fp) {
     if (bote_scope_list_ok(resource_def_required_scopes(resource_def)) == 0) {
         return bote_err_new(BOTE_ERR_INVALID_PARAMS, resource_def_uri(resource_def), DSP_SCOPE_NOT_TOKEN);
     }
+    var rwhy = bote_display_check(resource_def_title(resource_def), resource_def_icons(resource_def));
+    if (rwhy != 0) { return bote_err_new(BOTE_ERR_INVALID_PARAMS, resource_def_uri(resource_def), rwhy); }
     var rreg = dispatcher_resources(d);
     if (rreg == 0) { rreg = _dsp_made(d, 48, resource_registry_new()); }
     resource_registry_register(rreg, resource_def, handler_fp);
@@ -381,6 +497,8 @@ fn dispatcher_register_resource_template(d, template, handler_fp) {
     if (bote_scope_list_ok(resource_template_required_scopes(template)) == 0) {
         return bote_err_new(BOTE_ERR_INVALID_PARAMS, resource_template_name(template), DSP_SCOPE_NOT_TOKEN);
     }
+    var twhy = bote_display_check(resource_template_title(template), resource_template_icons(template));
+    if (twhy != 0) { return bote_err_new(BOTE_ERR_INVALID_PARAMS, resource_template_name(template), twhy); }
     var rreg = dispatcher_resources(d);
     if (rreg == 0) { rreg = _dsp_made(d, 48, resource_registry_new()); }
     resource_registry_register_template(rreg, template, handler_fp);
@@ -561,7 +679,15 @@ fn _build_capabilities_sub(sb, d, lc, sub) {
 # Build the initialize response result body.
 # {"name":...,"version":...}. Escaped since 3.4.6: both come from the embedder
 # through dispatcher_set_server_info, and a quote in either broke the reply.
-fn _dsp_emit_server_info(sb, d) {
+# serverInfo: `full` 1 for every field, as `initialize` and `server/discover` send it,
+# and 0 for the name, the version and the title, as every other result's `_meta`.
+fn _dsp_emit_server_info(sb, d, full) {
+    var c = load64(d + 168);
+    if (full == 1) { c = load64(d + 160); }
+    if (c != 0) {
+        str_builder_add_cstr(sb, c);
+        return 0;
+    }
     var sname = dispatcher_server_name(d);
     if (sname == 0) { sname = "bote"; }
     var sver = dispatcher_server_version(d);
@@ -580,13 +706,15 @@ fn _build_initialize_result_a(a, d, params_cstr) {
     if (_mcp_is_supported(requested) == 1) { negotiated = requested; }
 
     var sb = str_builder_new_a(a);
-    _sb_grow_a(a, sb, 512);
+    _sb_grow_a(a, sb, 512 + _dsp_server_info_room(d, 1) + _dsp_instructions_room(d));
     str_builder_add_cstr(sb, "{\"protocolVersion\":\"");
     str_builder_add_cstr(sb, negotiated);
     str_builder_add_cstr(sb, "\",\"capabilities\":");
     _build_capabilities(sb, d);
     str_builder_add_cstr(sb, ",\"serverInfo\":");
-    _dsp_emit_server_info(sb, d);
+    _dsp_emit_server_info(sb, d, 1);
+    var ins = load64(d + 152);
+    if (ins != 0) { str_builder_add_cstr(sb, ins); }
     str_builder_add_cstr(sb, "}");
     return str_data(str_builder_build_a(a, sb));
 }
@@ -601,12 +729,14 @@ fn _build_prompts_list_result(a, preg) {
     while (i < n) {
         var c = _prompt_registry_get_u(preg, vec_get(names, i));
         room = room + 64 + _dsp_room(prompt_def_name(c)) + _dsp_room(prompt_def_description(c));
+        room = room + _dsp_len(prompt_def_display(c));
         var cargs = prompt_def_arguments(c);
         if (cargs != 0) {
             var ci = 0;
             while (ci < vec_len(cargs)) {
                 var carg = vec_get(cargs, ci);
                 room = room + 64 + _dsp_room(prompt_arg_name(carg)) + _dsp_room(prompt_arg_description(carg));
+                room = room + _dsp_len(prompt_arg_display(carg));
                 ci = ci + 1;
             }
         }
@@ -621,6 +751,8 @@ fn _build_prompts_list_result(a, preg) {
         var p = _prompt_registry_get_u(preg, vec_get(names, i));
         str_builder_add_cstr(sb, "{");
         _json_emit_str_field(sb, "name", prompt_def_name(p));
+        var pdisp = prompt_def_display(p);
+        if (pdisp != 0) { str_builder_add_cstr(sb, pdisp); }
         var pd = prompt_def_description(p);
         if (pd != 0) {
             str_builder_add_cstr(sb, ",");
@@ -636,6 +768,8 @@ fn _build_prompts_list_result(a, preg) {
                 var parg = vec_get(pargs, ai);
                 str_builder_add_cstr(sb, "{");
                 _json_emit_str_field(sb, "name", prompt_arg_name(parg));
+                var adisp = prompt_arg_display(parg);
+                if (adisp != 0) { str_builder_add_cstr(sb, adisp); }
                 var ad = prompt_arg_description(parg);
                 if (ad != 0) {
                     str_builder_add_cstr(sb, ",");
@@ -678,8 +812,15 @@ fn _dsp_room(cstr) {
     return 6 * strlen(cstr);
 }
 
+# The room for what is sent as it is kept, already escaped (3.8.1).
+fn _dsp_len(cstr) {
+    if (cstr == 0) { return 0; }
+    return strlen(cstr);
+}
+
 fn _dsp_tool_list_room(t) {
     var n = 256 + _dsp_room(tool_def_name(t)) + _dsp_room(tool_def_description(t));
+    n = n + _dsp_len(tool_def_display(t));
     n = n + _dsp_room(tool_def_version(t)) + _dsp_room(tool_def_deprecated(t));
     var props = schema_properties(tool_def_input_schema(t));
     if (props != 0) {
@@ -730,6 +871,8 @@ fn _build_tools_list_result_a(a, reg, profile, modern) {
         emitted = emitted + 1;
         str_builder_add_cstr(sb, "{");
         _json_emit_str_field(sb, "name", tool_def_name(t));
+        var tdisp = tool_def_display(t);
+        if (tdisp != 0) { str_builder_add_cstr(sb, tdisp); }
         str_builder_add_cstr(sb, ",");
         _json_emit_str_field(sb, "description", tool_def_description(t));
         str_builder_add_cstr(sb, ",\"inputSchema\":");
@@ -883,6 +1026,18 @@ fn _dsp_is_content_type(p, n) {
     return 0;
 }
 
+# 1 when the `n` bytes at `p`, a string's inside, decode to an MCP content type (3.8.1):
+# `"t\u0065xt"` is "text", to a client and so here. Through 3.8.0 the bytes were
+# compared as written, so such a block went out as a text block holding its JSON. A
+# content type is short, so a value of 64 bytes or more is none.
+fn _dsp_type_is_content(p, n) {
+    if (_jx_has_escape(p, n) == 0) { return _dsp_is_content_type(p, n); }
+    if (n >= 64) { return 0; }
+    var dec[64];
+    var dn = _jx_unescape_into(p, n, &dec);
+    return _dsp_is_content_type(&dec, dn);
+}
+
 # What a handler's result (valid JSON) is, from one pass over its top-level
 # members, with nothing allocated: bit 1 when `content` is an array, bit 2
 # when `isError` is true, bit 4 when `type` is an MCP content type. 0 for a
@@ -944,7 +1099,7 @@ fn _dsp_result_shape(buf, info) {
                 if (errs != 0) { flags = flags | DSP_SHAPE_TWICE_ISERROR; }
                 errs = 1;
                 if (vc == 116 && _dsp_bytes_eq(buf + vs, ve - vs, "true") == 1) { flags = flags | DSP_SHAPE_ISERROR; }
-            } elif (vc == 34 && _dsp_bytes_eq(kp, klen, "type") == 1 && _dsp_is_content_type(buf + vs + 1, ve - vs - 2) == 1) {
+            } elif (vc == 34 && _dsp_bytes_eq(kp, klen, "type") == 1 && _dsp_type_is_content(buf + vs + 1, ve - vs - 2) == 1) {
                 flags = flags | DSP_SHAPE_BLOCK;
             }
         }
@@ -1067,6 +1222,8 @@ fn _dsp_result_rebuild_a(a, result, n, sp, wrap, text) {
         var kr = vec_get(m, i + 1);
         var v = vec_get(m, i + 2);
         i = i + 3;
+        # A key that decodes to hold a NUL names nothing bote reads.
+        if (k == 0) { k = ""; }
         if (streq(k, "structuredContent") == 1) { continue; }
         if (sep == 1) { str_builder_add_cstr(sb, ","); }
         sep = 1;
@@ -1132,23 +1289,30 @@ fn _dsp_tool_result_out_a(a, t, name, result, fail_out, modern, keep, info) {
     var flags = load64(info + 16);
     var prop = 0;
     if (t != 0) { prop = tool_def_output_prop(t); }
-    if (prop == 0 && sp < 0) { return result; }
+    # A result naming one of the three twice is refused from every tool (3.8.1), with an
+    # outputSchema or not: bote shapes and audits the first, and a client reads the last.
+    var twice = 0;
+    if ((flags & DSP_SHAPE_TWICE_CONTENT) != 0) { twice = "content"; }
+    elif ((flags & DSP_SHAPE_TWICE_SC) != 0) { twice = "structuredContent"; }
+    elif ((flags & DSP_SHAPE_TWICE_ISERROR) != 0) { twice = "isError"; }
+    if (prop == 0 && sp < 0 && twice == 0) { return result; }
     var n = strlen(result);
-    if (prop != 0) {
-        var why = 0;
-        var reason = 0;
-        var twice = 0;
-        if ((flags & DSP_SHAPE_TWICE_CONTENT) != 0) { twice = "content"; }
-        elif ((flags & DSP_SHAPE_TWICE_SC) != 0) { twice = "structuredContent"; }
-        elif ((flags & DSP_SHAPE_TWICE_ISERROR) != 0) { twice = "isError"; }
-        if (twice != 0) {
-            reason = "the result names a member twice";
-            why = _dsp_named_msg_a(a, "the result names ", twice, " more than once");
-        } elif ((flags & DSP_SHAPE_ISERROR) == 0 && sp < 0) {
-            reason = "no structuredContent";
-            why = "the tool has an outputSchema and the result has no structuredContent";
-        } elif ((flags & DSP_SHAPE_ISERROR) == 0) {
-            var vs = _sch_check_value_a(a, prop, "structuredContent", _jx_raw_at_a(a, result, n, sp));
+    var why = 0;
+    var reason = 0;
+    if (twice != 0) {
+        reason = "the result names a member twice";
+        why = _dsp_named_msg_a(a, "the result names ", twice, " more than once");
+    } elif (prop != 0 && (flags & DSP_SHAPE_ISERROR) == 0 && sp < 0) {
+        reason = "no structuredContent";
+        why = "the tool has an outputSchema and the result has no structuredContent";
+    } elif (prop != 0 && (flags & DSP_SHAPE_ISERROR) == 0) {
+        var sc = _jx_raw_at_a(a, result, n, sp);
+        # A key named twice in any object of it (3.8.1): the schema would judge the first.
+        if (_jx_repeats_a(a, sc, 0) == 1) {
+            reason = "structuredContent names a member twice";
+            why = "the result's structuredContent names a member twice in one object";
+        } else {
+            var vs = _sch_check_value_a(a, prop, "structuredContent", sc);
             if (vs != 0) {
                 reason = "structuredContent does not match the outputSchema";
                 var vb = str_builder_new_a(a);
@@ -1162,16 +1326,16 @@ fn _dsp_tool_result_out_a(a, t, name, result, fail_out, modern, keep, info) {
                 why = str_data(str_builder_build_a(a, vb));
             }
         }
-        if (why != 0) {
-            _dsp_log_output_refused(name, reason);
-            var msg = str_data(bote_err_format_a(a, bote_err_new_a(a, BOTE_ERR_EXEC_FAILED, name, why)));
-            if (keep == 1) {
-                store64(fail_out, _slice_cstr(default_alloc(), msg, 0, strlen(msg)));
-            } else {
-                store64(fail_out, msg);
-            }
-            return _dsp_tool_error_result_a(a, msg);
+    }
+    if (why != 0) {
+        _dsp_log_output_refused(name, reason);
+        var msg = str_data(bote_err_format_a(a, bote_err_new_a(a, BOTE_ERR_EXEC_FAILED, name, why)));
+        if (keep == 1) {
+            store64(fail_out, _slice_cstr(default_alloc(), msg, 0, strlen(msg)));
+        } else {
+            store64(fail_out, msg);
         }
+        return _dsp_tool_error_result_a(a, msg);
     }
     if (sp < 0) { return result; }
     var obj = 0;
@@ -1242,6 +1406,7 @@ fn _build_resources_list_result(a, rreg) {
         var c = _resource_registry_get_u(rreg, vec_get(uris, i));
         room = room + 64 + _dsp_room(resource_def_uri(c)) + _dsp_room(resource_def_name(c));
         room = room + _dsp_room(resource_def_description(c)) + _dsp_room(resource_def_mime_type(c));
+        room = room + _dsp_len(resource_def_display(c));
         i = i + 1;
     }
     var sb = str_builder_new_a(a);
@@ -1255,6 +1420,8 @@ fn _build_resources_list_result(a, rreg) {
         _json_emit_str_field(sb, "uri", resource_def_uri(r));
         str_builder_add_cstr(sb, ",");
         _json_emit_str_field(sb, "name", resource_def_name(r));
+        var rdisp = resource_def_display(r);
+        if (rdisp != 0) { str_builder_add_cstr(sb, rdisp); }
         var rd = resource_def_description(r);
         if (rd != 0) {
             str_builder_add_cstr(sb, ",");
@@ -1284,6 +1451,7 @@ fn _build_resource_templates_result(a, rreg) {
         var c = vec_get(ts, i);
         room = room + 64 + _dsp_room(resource_template_uri(c)) + _dsp_room(resource_template_name(c));
         room = room + _dsp_room(resource_template_description(c)) + _dsp_room(resource_template_mime_type(c));
+        room = room + _dsp_len(resource_template_display(c));
         i = i + 1;
     }
     var sb = str_builder_new_a(a);
@@ -1297,6 +1465,8 @@ fn _build_resource_templates_result(a, rreg) {
         _json_emit_str_field(sb, "uriTemplate", resource_template_uri(t));
         str_builder_add_cstr(sb, ",");
         _json_emit_str_field(sb, "name", resource_template_name(t));
+        var tdis = resource_template_display(t);
+        if (tdis != 0) { str_builder_add_cstr(sb, tdis); }
         var td = resource_template_description(t);
         if (td != 0) {
             str_builder_add_cstr(sb, ",");
@@ -1347,16 +1517,17 @@ fn dispatcher_dispatch(d, request, claims) {
 var DSP_META_VERSION = "io.modelcontextprotocol/protocolVersion";
 var DSP_META_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities";
 
-fn _dsp_emit_modern_meta(sb, d) {
+# `full` as _dsp_emit_server_info's: 1 on server/discover, 0 on every other result.
+fn _dsp_emit_modern_meta(sb, d, full) {
     str_builder_add_cstr(sb, "\"_meta\":{\"io.modelcontextprotocol/serverInfo\":");
-    _dsp_emit_server_info(sb, d);
+    _dsp_emit_server_info(sb, d, full);
     str_builder_add_cstr(sb, "}");
     return 0;
 }
 
 fn _build_discover_result_a(a, d) {
     var sb = str_builder_new_a(a);
-    _sb_grow_a(a, sb, 512);
+    _sb_grow_a(a, sb, 512 + _dsp_server_info_room(d, 1) + _dsp_instructions_room(d));
     str_builder_add_cstr(sb, "{\"resultType\":\"complete\",\"supportedVersions\":");
     _mcp_emit_versions(sb);
     str_builder_add_cstr(sb, ",\"capabilities\":");
@@ -1364,8 +1535,10 @@ fn _build_discover_result_a(a, d) {
     # (3.7.2; 3.7.3).
     var lc = _dsp_listen_here(d);
     _build_capabilities_sub(sb, d, lc, lc);
+    var ins = load64(d + 152);
+    if (ins != 0) { str_builder_add_cstr(sb, ins); }
     str_builder_add_cstr(sb, ",");
-    _dsp_emit_modern_meta(sb, d);
+    _dsp_emit_modern_meta(sb, d, 1);
     str_builder_add_cstr(sb, ",\"ttlMs\":0,\"cacheScope\":\"private\"}");
     return str_data(str_builder_build_a(a, sb));
 }
@@ -1395,7 +1568,7 @@ fn _dsp_cacheable(method) {
 # alone: a repeated key would make the object ambiguous.
 fn _dsp_modern_result(a, d, method, result) {
     var sb = str_builder_new_a(a);
-    _sb_grow_a(a, sb, strlen(result) + 256);
+    _sb_grow_a(a, sb, strlen(result) + 256 + _dsp_server_info_room(d, 0));
     str_builder_add_cstr(sb, "{");
     var sep = "";
     if (jsonx_has(result, "resultType") == 0) {
@@ -1409,7 +1582,7 @@ fn _dsp_modern_result(a, d, method, result) {
     }
     if (jsonx_has(result, "_meta") == 0) {
         str_builder_add_cstr(sb, sep);
-        _dsp_emit_modern_meta(sb, d);
+        _dsp_emit_modern_meta(sb, d, 0);
         sep = ",";
     }
     var n = strlen(result);

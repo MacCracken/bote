@@ -59,7 +59,7 @@ async function exercise(label, transport, mode, want) {
   ok(`${label} prompt`, prompt && prompt.messages[0].content.text.includes("arg2='wörld'"), prompt);
 
   const res = await attempt(`${label} listResources`, () => c.listResources());
-  ok(`${label} resources`, res && res.resources.length === 2, res);
+  ok(`${label} resources`, res && res.resources.length === 3, res);
   const tpl = await attempt(`${label} listResourceTemplates`, () => c.listResourceTemplates());
   ok(`${label} templates`, tpl && tpl.resourceTemplates[0].uriTemplate === 'test://template/{id}/data', tpl);
   const read = await attempt(`${label} read`, () => c.readResource({ uri: 'test://static-text' }));
@@ -95,6 +95,24 @@ async function exercise(label, transport, mode, want) {
   ok(`${label} structured list`, sl && !sl.isError && Array.isArray(users) && users[1].name === 'Bob', sl);
   const sb = await attempt(`${label} structured, refused`, () => c.callTool({ name: 'bote_structured_bad', arguments: {} }));
   ok(`${label} a result its schema refuses is a tool error`, sb && sb.isError === true && sb.content[0].text.includes('structuredContent.temperature: expected number'), sb);
+
+  // (3.8.1) Titles, icons, serverInfo's other fields and instructions, read back as sent.
+  const iconOk = icons => Array.isArray(icons) && icons.length === 2 && icons[0].src === 'https://example.com/bote.png'
+    && icons[0].theme === 'dark' && icons[0].sizes[0] === '48x48' && icons[1].src.startsWith('data:image/svg+xml;base64,');
+  ok(`${label} a tool's title and icons`, sw && sw.title === 'Weather now' && iconOk(sw.icons), sw);
+  const lp = await attempt(`${label} listPrompts`, () => c.listPrompts());
+  const tp = lp && lp.prompts.find(p => p.name === 'bote_titled_prompt');
+  // An argument's title is in the spec's PromptArgument, and bote sends it (tests/bote_display.tcyr checks the
+  // bytes), but this client's schema for PromptArgument has no `title`, so its parse drops it.
+  ok(`${label} a prompt's title and icons`, tp && tp.title === 'Titled prompt' && iconOk(tp.icons) && tp.arguments[0].name === 'topic', tp);
+  const tr = res && res.resources.find(r => r.uri === 'test://bote-titled');
+  ok(`${label} a resource's title and icons`, tr && tr.title === 'Titled resource' && iconOk(tr.icons), tr);
+  const tt = tpl && tpl.resourceTemplates.find(t => t.uriTemplate === 'test://bote-titled/{id}');
+  ok(`${label} a template's title and icons`, tt && tt.title === 'Titled template' && iconOk(tt.icons), tt);
+  const si = c.getServerVersion();
+  ok(`${label} serverInfo's title, description, website and icons`, si && si.title === 'bote conformance fixture' && si.websiteUrl === 'https://github.com/MacCracken/bote'
+    && si.description.startsWith('The servers') && iconOk(si.icons), si);
+  ok(`${label} instructions`, c.getInstructions() === 'Call bote_structured for the weather.\nIt has an outputSchema.', c.getInstructions());
 
   const done = await attempt(`${label} complete`, () => c.complete({ ref: { type: 'ref/prompt', name: 'test_prompt_with_arguments' }, argument: { name: 'arg1', value: 'par' } }));
   ok(`${label} completion`, done && done.completion.values.length === 3, done);

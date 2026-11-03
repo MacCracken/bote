@@ -27,22 +27,36 @@
 # ResourceDef — resource metadata (surfaced in resources/list)
 # ================================================================
 #
-# Layout (40 bytes):
+# Layout (64 bytes):
 #   +0  uri             cstr
 #   +8  name            cstr
 #   +16 description     cstr or 0
 #   +24 mime_type       cstr or 0
 #   +32 required_scopes vec of cstr or 0: all of them, for a token to read this resource
+#   +40 title           cstr or 0 (3.8.1)
+#   +48 icons           vec of Icon or 0 (3.8.1, src/jsonx.cyr)
+#   +56 display         cstr or 0: the title and icons as resources/list sends them
 
 fn resource_def_new(uri, name, description, mime_type) {
-    var r = alloc(40);
+    var r = alloc(64);
     store64(r, uri);
     store64(r + 8, name);
     store64(r + 16, description);
     store64(r + 24, mime_type);
     store64(r + 32, 0);
+    store64(r + 40, 0);
+    store64(r + 48, 0);
+    store64(r + 56, 0);
     return r;
 }
+
+# A title for people and icons (3.8.1). Both are checked at registration, and sent as
+# they were then.
+fn resource_def_with_title(r, title) { store64(r + 40, title); return r; }
+fn resource_def_with_icons(r, icons) { store64(r + 48, icons); return r; }
+fn resource_def_title(r) { return load64(r + 40); }
+fn resource_def_icons(r) { return load64(r + 48); }
+fn resource_def_display(r) { return load64(r + 56); }
 
 fn resource_def_uri(r) { return load64(r); }
 fn resource_def_name(r) { return load64(r + 8); }
@@ -74,16 +88,28 @@ fn resource_def_with_required_scopes(r, scopes) { store64(r + 32, scopes); retur
 # writes, where two could make it quadratic. A handler gets the URI as sent, reads
 # the value with resource_template_var_a and owns its percent-decoding.
 
+# Layout (72 bytes): +0 uri_template, +8 name, +16 description, +24 mime_type, +32 the
+# handler (set at registration), +40 required_scopes, and (3.8.1) +48 title, +56 icons,
+# +64 display, as a ResourceDef's.
 fn resource_template_new(uri_template, name, description, mime_type) {
-    var t = alloc(48);
+    var t = alloc(72);
     store64(t, uri_template);
     store64(t + 8, name);
     store64(t + 16, description);
     store64(t + 24, mime_type);
     store64(t + 32, 0);
     store64(t + 40, 0);
+    store64(t + 48, 0);
+    store64(t + 56, 0);
+    store64(t + 64, 0);
     return t;
 }
+
+fn resource_template_with_title(t, title) { store64(t + 48, title); return t; }
+fn resource_template_with_icons(t, icons) { store64(t + 56, icons); return t; }
+fn resource_template_title(t) { return load64(t + 48); }
+fn resource_template_icons(t) { return load64(t + 56); }
+fn resource_template_display(t) { return load64(t + 64); }
 
 fn resource_template_uri(t) { return load64(t); }
 fn resource_template_name(t) { return load64(t + 8); }
@@ -228,9 +254,12 @@ fn resource_registry_handlers(r) { return load64(r + 16); }
 fn resource_registry_templates(r) { return load64(r + 24); }
 
 # Register (or replace) a resource + its read handler. Returns 0, or -1 with nothing
-# registered when a required scope is no scope-token: it would go out in a 403's header.
+# registered when a required scope is no scope-token: it would go out in a 403's header,
+# or (3.8.1) its title or an icon is not what the spec says.
 fn resource_registry_register(r, resource_def, handler_fp) {
     if (bote_scope_list_ok(resource_def_required_scopes(resource_def)) == 0) { return 0 - 1; }
+    if (bote_display_check(resource_def_title(resource_def), resource_def_icons(resource_def)) != 0) { return 0 - 1; }
+    store64(resource_def + 56, _bote_display_json(resource_def_title(resource_def), resource_def_icons(resource_def)));
     var uri = resource_def_uri(resource_def);
     # Under the registries' lock (3.7.1, src/protocol.cyr), as every function below.
     bote_reg_write();
@@ -270,9 +299,12 @@ fn resource_registry_handler(r, uri) {
 }
 
 # Register (or replace, by uriTemplate) a template + its read handler. Returns 0, or -1
-# with nothing registered when a required scope is no scope-token.
+# with nothing registered when a required scope is no scope-token, or (3.8.1) its title
+# or an icon is not what the spec says.
 fn resource_registry_register_template(r, template, handler_fp) {
     if (bote_scope_list_ok(resource_template_required_scopes(template)) == 0) { return 0 - 1; }
+    if (bote_display_check(resource_template_title(template), resource_template_icons(template)) != 0) { return 0 - 1; }
+    store64(template + 64, _bote_display_json(resource_template_title(template), resource_template_icons(template)));
     bote_reg_write();
     store64(template + 32, handler_fp);
     var ts = resource_registry_templates(r);

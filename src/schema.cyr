@@ -20,6 +20,7 @@ enum SchemaTypeTag {
     SCH_OBJECT = 5;
     SCH_ANY = 6;
     SCH_NEVER = 7;
+    SCH_NULL = 8;
 }
 
 # ================================================================
@@ -237,6 +238,18 @@ fn _sch_unquote_a(a, v) {
 # The value of the JSON number v, truncated toward zero (0 when v is not a
 # number). It reads fractions and exponents through _sch_num_parse, so a
 # bound or an argument written `5e2` is 500, not 5 (3.4.8).
+# The string `v` (a JSON string's raw bytes) as it decodes (3.8.1), on `a`, or as it was
+# written when it decodes to hold a NUL, which no cstr can say. `required` names and
+# string `enum` values are compared with what they mean, on both sides: through 3.8.0 a
+# schema's `"required":["\u00e9"]` was never met.
+fn _sch_str_dec_a(a, v) {
+    var n = strlen(v);
+    var at = _jx_skip_ws(v, n, 0);
+    var s = _jx_str_dec_at_a(a, v, n, at);
+    if (s == 0) { return _sch_unquote_a(a, v); }
+    return s;
+}
+
 fn _sch_parse_int(v) {
     var t[8];
     _sch_num_parse(v, &t);
@@ -280,7 +293,9 @@ fn parse_property(raw_json) {
     # The schema `false` allows nothing (2020-12). Read as "no type", it allowed
     # anything.
     if (raw_json != 0 && streq(raw_json, "false") == 1) { return prop_new(SCH_NEVER); }
-    var type_str = jsonx_get_str(raw_json, "type");
+    # (3.8.1) The type as it decodes, as a client reads it: `"obj\u0065ct"` is an object.
+    # Through 3.8.0 it was read as written, judged nothing, and so did "null".
+    var type_str = jsonx_get_str_dec_a(default_alloc(), raw_json, "type");
     var tag = SCH_ANY;
     if (type_str != 0) {
         if (streq(type_str, "string") == 1) { tag = SCH_STRING; }
@@ -289,6 +304,7 @@ fn parse_property(raw_json) {
         elif (streq(type_str, "boolean") == 1) { tag = SCH_BOOLEAN; }
         elif (streq(type_str, "array") == 1) { tag = SCH_ARRAY; }
         elif (streq(type_str, "object") == 1) { tag = SCH_OBJECT; }
+        elif (streq(type_str, "null") == 1) { tag = SCH_NULL; }
     }
     var p = prop_new(tag);
     store64(p + 8, jsonx_get_str(raw_json, "description"));
@@ -303,7 +319,7 @@ fn parse_property(raw_json) {
             while (ei < ne) {
                 var ev = vec_get(elems, ei);
                 if (_sch_is_string(ev) == 1) {
-                    vec_push(vals, _sch_unquote(ev));
+                    vec_push(vals, _sch_str_dec_a(default_alloc(), ev));
                 }
                 ei = ei + 1;
             }
@@ -356,7 +372,7 @@ fn _compile_object_body(raw_json) {
         while (ei < ne) {
             var ev = vec_get(elems, ei);
             if (_sch_is_string(ev) == 1) {
-                vec_push(req_vec, _sch_unquote(ev));
+                vec_push(req_vec, _sch_str_dec_a(default_alloc(), ev));
             }
             ei = ei + 1;
         }
@@ -394,7 +410,7 @@ fn compiled_compile(schema) {
 #
 # Returns vec of violation cstrs. Empty vec == ok.
 
-# `slot` is {vec, allocator, count}. The vec is created by the first violation,
+# `slot` is {vec, allocator, count, output}. The vec is created by the first violation,
 # so a request that passes validation allocates none. Collection stops at
 # BOTE_SCH_MAX_VIOLATIONS: a message can hold far more, and a client learns
 # nothing from the thousandth that it did not from the thirty-second.
@@ -441,7 +457,7 @@ fn _validate_value(path, value, prop, violations) {
         }
         var allowed = prop_enum_values(prop);
         if (allowed != 0) {
-            var raw_str = _sch_unquote_a(_vs_alloc(violations), value);
+            var raw_str = _sch_str_dec_a(_vs_alloc(violations), value);
             var n = vec_len(allowed);
             var i = 0;
             var found = 0;
@@ -495,8 +511,9 @@ fn _validate_value(path, value, prop, violations) {
         }
         var iv = load64(&islot);
         # Past the range a value can be held in, a handler would read a
-        # different number from the one sent.
-        if (iv >= SCH_NUM_SAT || iv <= 0 - SCH_NUM_SAT) {
+        # different number from the one sent. A result's value goes to a client, which
+        # reads it whole, so judging one (3.8.1, the slot's +24) leaves it be.
+        if (load64(violations + 24) == 0 && (iv >= SCH_NUM_SAT || iv <= 0 - SCH_NUM_SAT)) {
             _violation(violations, path, "integer out of range");
             return 0;
         }
@@ -512,6 +529,13 @@ fn _validate_value(path, value, prop, violations) {
     if (tag == SCH_BOOLEAN) {
         if (_sch_is_boolean(value) == 0) {
             _violation(violations, path, "expected boolean");
+        }
+        return 0;
+    }
+
+    if (tag == SCH_NULL) {
+        if (_sch_is_null(value) == 0) {
+            _violation(violations, path, "expected null");
         }
         return 0;
     }
@@ -627,10 +651,11 @@ fn compiled_validate(compiled, params_cstr) {
 # ": expected object" at the root, "[0].id: ..." under it in an array, a bare
 # "missing required field: x" for the root's own, and "a.b: ..." elsewhere.
 fn _sch_check_value_a(a, prop, root, value) {
-    var slot[24];
+    var slot[32];
     store64(&slot, 0);
     store64(&slot + 8, a);
     store64(&slot + 16, 0);
+    store64(&slot + 24, 1);
     _validate_value("", value, prop, &slot);
     var vs = load64(&slot);
     if (vs == 0) { return 0; }
@@ -660,10 +685,11 @@ fn _sch_starts(s, lit) {
 # compiled_validate without the empty vec: the violations, on `a`, or 0 when
 # there are none.
 fn compiled_check_a(a, compiled, params_cstr) {
-    var slot[24];
+    var slot[32];
     store64(&slot, 0);
     store64(&slot + 8, a);
     store64(&slot + 16, 0);
+    store64(&slot + 24, 0);
     if (_sch_is_object(params_cstr) == 0) {
         _violation_push(&slot, "params must be an object");
         return load64(&slot);

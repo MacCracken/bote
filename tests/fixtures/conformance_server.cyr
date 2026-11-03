@@ -182,6 +182,23 @@ fn _otool(d, name, desc, os, fp) {
     return dispatcher_register_tool(d, tool_def_with_output_schema(tool_def_new(name, desc, schema_new("object", 0, vec_new())), os), fp);
 }
 
+# (3.8.1) Titles, icons, the rest of serverInfo and instructions, which the official client
+# reads back. Not read by the suite.
+fn _fx_icons() {
+    var i = bote_icon_new("https://example.com/bote.png");
+    bote_icon_with_mime_type(i, "image/png");
+    var sz = vec_new();
+    vec_push(sz, "48x48");
+    bote_icon_with_sizes(i, sz);
+    bote_icon_with_theme(i, "dark");
+    var v = vec_new();
+    vec_push(v, i);
+    vec_push(v, bote_icon_new("data:image/svg+xml;base64,PHN2Zz4="));
+    return v;
+}
+fn p_titled(args, claims) { return "{\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"titled\"}}]}"; }
+fn r_titled(uri, claims) { return "{\"contents\":[{\"uri\":\"test://bote-titled\",\"mimeType\":\"text/plain\",\"text\":\"titled\"}]}"; }
+
 # ---- the server ----
 
 fn _tool(d, name, desc, fp) {
@@ -258,7 +275,14 @@ fn fixture_dispatcher() {
     var ur = vec_new();
     vec_push(ur, "uri");
     dispatcher_register_tool(d, tool_def_new("bote_update_resource", "Says a resource changed", schema_new("object", up, ur)), &t_update_resource);
-    _otool(d, "bote_structured", "Weather, as structured content", _FX_WEATHER, &t_structured);
+    dispatcher_register_tool(d, tool_def_with_icons(tool_def_with_title(tool_def_with_output_schema(tool_def_new("bote_structured", "Weather, as structured content", schema_new("object", 0, vec_new())), _FX_WEATHER), "Weather now"), _fx_icons()), &t_structured);
+    var ta = vec_new();
+    vec_push(ta, prompt_arg_with_title(prompt_arg_new("topic", "What to write about", 0), "Topic"));
+    dispatcher_register_prompt(d, prompt_def_with_icons(prompt_def_with_title(prompt_def_new("bote_titled_prompt", "A prompt with a title", ta), "Titled prompt"), _fx_icons()), &p_titled);
+    dispatcher_register_resource(d, resource_def_with_icons(resource_def_with_title(resource_def_new("test://bote-titled", "bote-titled", "A resource with a title", "text/plain"), "Titled resource"), _fx_icons()), &r_titled);
+    dispatcher_register_resource_template(d, resource_template_with_icons(resource_template_with_title(resource_template_new("test://bote-titled/{id}", "bote-titled-template", "A template with a title", "text/plain"), "Titled template"), _fx_icons()), &r_titled);
+    dispatcher_set_server_details(d, "bote conformance fixture", "The servers the official suite and client are run against", "https://github.com/MacCracken/bote", _fx_icons());
+    dispatcher_set_instructions(d, "Call bote_structured for the weather.\nIt has an outputSchema.");
     _otool(d, "bote_structured_list", "Users, an array", _FX_USERS, &t_structured_list);
     _otool(d, "bote_structured_bad", "A result its schema refuses", _FX_WEATHER, &t_structured_bad);
     _fx_d = d;

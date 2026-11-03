@@ -33,7 +33,7 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.1 — `title` and `icons`**, the next item of 3.8.x below.
+**3.8.2 — multi round-trip requests**, the next item of 3.8.x below.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
@@ -42,8 +42,6 @@ stdio's) are each one connection's, and a worker per connection would need a hom
 
 ## 3.8.x — The tool surface
 
-- **`title` and `icons`** on tools, prompts and resources, and `instructions` from the server. Check their
-  status against the 2026-07-28 schema first.
 - **Multi round-trip requests.** `InputRequiredResult` is how a server now asks a client for input. It
   needs an additive handler entry beside the 2.0 ABI, which sees `arguments` and not `inputResponses`.
   It is also the first feature that needs a capability the client declares, so it adds `-32021` for a
@@ -60,7 +58,9 @@ stdio's) are each one connection's, and a worker per connection would need a hom
   `not`, `$ref`, `pattern`, the length and item bounds, `const`, type arrays and non-string enums. Enforce
   them, with the resource bounds the spec asks for on `$ref` and composition. And judge an object with one pass of the
   scanner for all of its names: each property and each required name is a scan of its own today, 2.6 µs for an object
-  of three, which an outputSchema now pays on every result as an inputSchema does on every call.
+  of three, which an outputSchema now pays on every result as an inputSchema does on every call. Name a violation's
+  path only once there is one, below the root too: a path is built today for every array element and every property
+  under the root, violation or not.
 - **What a valid tool call still leaves on the heap.** A request costs bote nothing that outlives it, except
   `args` and whatever a handler allocates, because the 2.0 ABI lets a handler keep both. bote's own
   libro, fs and web handlers need not: give them the request arena, and bound the binary. `fs_read` of a

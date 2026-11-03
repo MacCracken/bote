@@ -660,7 +660,7 @@ fn _bl_ack_event_a(a, ack, id) { return _bl_ack_a(a, ack, id, BOTE_LISTEN_SSE_PR
 # The stream's result, which ends it, for `id`, between `pre` and `post`, on `a`.
 fn _bl_result_a(a, id, d, pre, post) {
     var sb = str_builder_new_a(a);
-    _sb_grow_a(a, sb, strlen(id) * 2 + 512);
+    _sb_grow_a(a, sb, strlen(id) * 2 + 512 + _dsp_server_info_room(d, 0));
     str_builder_add_cstr(sb, pre);
     str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":");
     str_builder_add_cstr(sb, id);
@@ -669,7 +669,7 @@ fn _bl_result_a(a, id, d, pre, post) {
     str_builder_add_cstr(sb, "\":");
     str_builder_add_cstr(sb, id);
     str_builder_add_cstr(sb, ",\"io.modelcontextprotocol/serverInfo\":");
-    _dsp_emit_server_info(sb, d);
+    _dsp_emit_server_info(sb, d, 0);
     str_builder_add_cstr(sb, "}}}");
     str_builder_add_cstr(sb, post);
     return str_data(str_builder_build_a(a, sb));

@@ -34,6 +34,7 @@ apps don't each reimplement the same protocol.
 | **Tool registry** — register / discover / version / deprecate, insertion-order list | ✅ |
 | **Compiled schema validation** — type, enum, bounds, nested objects, multi-violation | ✅ |
 | **Output schemas** — `outputSchema` listed, and every result's `structuredContent` judged by it, in the shape each revision allows | ✅ (3.8.0) |
+| **Titles, icons and instructions** — on tools, prompts, resources, templates and serverInfo, each checked once and sent as checked | ✅ (3.8.1) |
 | **Dispatch** — `initialize`, `tools/list`, `tools/call`; `project_tool` name validation | ✅ |
 | **Prompts / resources / completion** — `prompts/*`, `resources/*`, `completion/complete`; polled `list_changed` push | ✅ |
 | **Stdio transport** — line-oriented JSON-RPC | ✅ |
@@ -324,6 +325,33 @@ dispatcher_register_tool(d, tool_def_with_output_schema(tool_def_new("svc_weathe
 Registration refuses a schema that is not a JSON object. bote judges the subset it judges an `inputSchema` by, and
 warns at registration of the keywords it lists and does not enforce.
 
+### Titles, icons and instructions
+
+What a client shows people: a `title` beside the `name`, which is for programs, and `icons`. Tools, prompts, prompt
+arguments (a title only), resources, resource templates and the server itself carry them, on both revisions:
+
+```cyrius
+var icon = bote_icon_with_theme(bote_icon_with_mime_type(bote_icon_new("https://example.com/weather.png"), "image/png"), "light");
+var icons = vec_new();
+vec_push(icons, icon);
+dispatcher_register_tool(d, tool_def_with_icons(tool_def_with_title(tool_def_new("svc_weather", "The weather now", schema), "Weather"), icons), &h_weather);
+
+dispatcher_set_server_details(d, "Acme MCP", "Weather and maps for Acme", "https://acme.example/mcp", icons);
+dispatcher_set_instructions(d, "Prefer svc_weather for forecasts.");
+```
+
+- **An icon** is `bote_icon_new(src)`, with `_with_mime_type`, `_with_sizes` (a vec of `"48x48"` or `"any"`) and
+  `_with_theme` (`"light"` or `"dark"`). `src` is an `http://` or `https://` URL or a `data:` URI of Base64 data.
+  bote checks each field where it is registered and refuses one the spec does not allow: the official client refuses a
+  whole list over one icon it cannot read. `bote_icons_check` gives the reason first.
+- **Checked once, sent as checked:** each list sends what passed the check at registration. A definition changed after
+  that sends what it was registered with until it is registered again.
+- **serverInfo:** `dispatcher_set_server_details(d, title, description, website_url, icons)` returns 0 or a BoteError.
+  `initialize` and `server/discover` send every field. Every other 2026-07-28 result names the server in its `_meta`
+  with the name, the version and the title only, so a `data:` icon of some kilobytes is not in every reply.
+- **Instructions** go in `initialize`'s result on 2025-11-25 and in `server/discover`'s on 2026-07-28, where the spec
+  moved them.
+
 ### Connection deadlines
 
 Every transport but streamable serves one client at a time, so each connection gets a **send deadline**:
@@ -513,9 +541,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 5353 total across twenty-four files (+ a core-only drift smoke)
+### Tests — 5510 total across twenty-five files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5353 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5510 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 969 — core protocol/dispatch/codec/schema/session/transports
@@ -533,7 +561,8 @@ cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_listen.tcyr        # 224 — subscriptions/listen: the filter, and real streams on the three HTTP handlers
 cyrius test tests/bote_listen_line.tcyr   # 192 — subscriptions/listen where the connection is the stream: stdio, unix, WebSocket
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
-cyrius test tests/bote_output.tcyr        # 122 — outputSchema: registration, the 2025-11-25 form, tools/list, each result judged and shaped, the heap
+cyrius test tests/bote_display.tcyr       # 100 — titles, icons, serverInfo's details and instructions: the checks, each list, the heap
+cyrius test tests/bote_output.tcyr        # 179 — outputSchema: registration, the 2025-11-25 form, tools/list, each result judged and shaped, the heap
 cyrius test tests/bote_progress.tcyr      # 110 — progress on a request's own stream: the writer, stdio, unix, WebSocket, HTTP's SSE response
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter

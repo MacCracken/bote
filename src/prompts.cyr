@@ -20,40 +20,94 @@
 # PromptArgument — one declared argument (surfaced in prompts/list)
 # ================================================================
 #
-# Layout (24 bytes):
+# Layout (40 bytes):
 #   +0  name        cstr
 #   +8  description cstr or 0
 #   +16 required    i64 (0 = optional, 1 = required)
+#   +24 title       cstr or 0 (3.8.1)
+#   +32 display     cstr or 0: the title as prompts/list sends it, built at registration
 
 fn prompt_arg_new(name, description, required) {
-    var a = alloc(24);
+    var a = alloc(40);
     store64(a, name);
     store64(a + 8, description);
     store64(a + 16, required);
+    store64(a + 24, 0);
+    store64(a + 32, 0);
     return a;
 }
 
 fn prompt_arg_name(a) { return load64(a); }
 fn prompt_arg_description(a) { return load64(a + 8); }
 fn prompt_arg_required(a) { return load64(a + 16); }
+fn prompt_arg_title(a) { return load64(a + 24); }
+fn prompt_arg_display(a) { return load64(a + 32); }
+
+# A title for people (3.8.1). Checked at registration, and sent as it was then.
+fn prompt_arg_with_title(a, title) { store64(a + 24, title); return a; }
 
 # ================================================================
 # PromptDef — prompt metadata
 # ================================================================
 #
-# Layout (32 bytes):
+# Layout (56 bytes):
 #   +0  name            cstr
 #   +8  description     cstr or 0
 #   +16 arguments       vec of PromptArgument ptrs or 0
 #   +24 required_scopes vec of cstr or 0: all of them, for a token to get this prompt
+#   +32 title           cstr or 0 (3.8.1)
+#   +40 icons           vec of Icon or 0 (3.8.1, src/jsonx.cyr)
+#   +48 display         cstr or 0: the title and icons as prompts/list sends them
 
 fn prompt_def_new(name, description, arguments) {
-    var p = alloc(32);
+    var p = alloc(56);
     store64(p, name);
     store64(p + 8, description);
     store64(p + 16, arguments);
     store64(p + 24, 0);
+    store64(p + 32, 0);
+    store64(p + 40, 0);
+    store64(p + 48, 0);
     return p;
+}
+
+# A title for people and icons (3.8.1). Both are checked at registration, and sent as
+# they were then.
+fn prompt_def_with_title(p, title) { store64(p + 32, title); return p; }
+fn prompt_def_with_icons(p, icons) { store64(p + 40, icons); return p; }
+fn prompt_def_title(p) { return load64(p + 32); }
+fn prompt_def_icons(p) { return load64(p + 40); }
+fn prompt_def_display(p) { return load64(p + 48); }
+
+# Why the prompt's titles and icons, its own and its arguments', cannot be sent, or 0.
+fn prompt_display_check(p) {
+    var why = bote_display_check(prompt_def_title(p), prompt_def_icons(p));
+    if (why != 0) { return why; }
+    var args = prompt_def_arguments(p);
+    if (args != 0) {
+        var i = 0;
+        while (i < vec_len(args)) {
+            var t = prompt_arg_title(vec_get(args, i));
+            if (t != 0 && strlen(t) == 0) { return "a title must not be empty"; }
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# The prompt's and its arguments' title and icons as prompts/list sends them, kept.
+fn _prompt_display_build(p) {
+    store64(p + 48, _bote_display_json(prompt_def_title(p), prompt_def_icons(p)));
+    var args = prompt_def_arguments(p);
+    if (args != 0) {
+        var i = 0;
+        while (i < vec_len(args)) {
+            var a = vec_get(args, i);
+            store64(a + 32, _bote_display_json(prompt_arg_title(a), 0));
+            i = i + 1;
+        }
+    }
+    return 0;
 }
 
 fn prompt_def_name(p) { return load64(p); }
@@ -87,9 +141,12 @@ fn prompt_registry_names(r) { return load64(r + 8); }
 fn prompt_registry_handlers(r) { return load64(r + 16); }
 
 # Register (or replace) a prompt + its generator handler. Returns 0, or -1 with nothing
-# registered when a required scope is no scope-token: it would go out in a 403's header.
+# registered when a required scope is no scope-token: it would go out in a 403's header,
+# or (3.8.1) a title or an icon is not what the spec says.
 fn prompt_registry_register(r, prompt_def, handler_fp) {
     if (bote_scope_list_ok(prompt_def_required_scopes(prompt_def)) == 0) { return 0 - 1; }
+    if (prompt_display_check(prompt_def) != 0) { return 0 - 1; }
+    _prompt_display_build(prompt_def);
     var name = prompt_def_name(prompt_def);
     # Under the registries' lock (3.7.1, src/protocol.cyr), as every function below.
     bote_reg_write();

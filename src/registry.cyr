@@ -116,6 +116,9 @@ fn schema_prop_value(p) { return load64(p + 8); }
 #   +80 output_schema cstr or 0: the tool's outputSchema, its JSON as written (3.8.0)
 #   +88 output_prop  PropertyDef or 0 (compiled from it at registration)
 #   +96 output_legacy cstr or 0: what 2025-11-25 is shown when the root is not an object
+#   +104 title       cstr or 0, for people, where `name` is for programs (3.8.1)
+#   +112 icons       vec of Icon or 0 (3.8.1)
+#   +120 display     cstr or 0: the title and icons as tools/list sends them, built at registration
 #
 # Profiles are opaque consumer-defined tags (e.g. "security", "web", "full")
 # used to expose curated tool subsets via a `profile` filter on tools/list.
@@ -123,7 +126,7 @@ fn schema_prop_value(p) { return load64(p + 8); }
 # (profiles == 0) is in no profile. See _build_tools_list_result_a in dispatch.
 
 fn tool_def_new(name, description, input_schema) {
-    var d = alloc(104);
+    var d = alloc(128);
     store64(d, name);
     store64(d + 8, description);
     store64(d + 16, input_schema);
@@ -137,8 +140,16 @@ fn tool_def_new(name, description, input_schema) {
     store64(d + 80, 0);
     store64(d + 88, 0);
     store64(d + 96, 0);
+    store64(d + 104, 0);
+    store64(d + 112, 0);
+    store64(d + 120, 0);
     return d;
 }
+
+# A title for people (3.8.1), which a client shows before `annotations.title` and the
+# name, and icons. Both are checked at registration, and sent as they were then.
+fn tool_def_with_title(d, title) { store64(d + 104, title); return d; }
+fn tool_def_with_icons(d, icons) { store64(d + 112, icons); return d; }
 
 # `schema` is a whole JSON Schema, as the tools spec's outputSchema: a JSON object,
 # whose root may be any type on MCP 2026-07-28. It is listed as written, and the
@@ -165,6 +176,9 @@ fn tool_def_required_scopes(d) { return load64(d + 72); }
 fn tool_def_output_schema(d) { return load64(d + 80); }
 fn tool_def_output_prop(d) { return load64(d + 88); }
 fn tool_def_output_legacy(d) { return load64(d + 96); }
+fn tool_def_title(d) { return load64(d + 104); }
+fn tool_def_icons(d) { return load64(d + 112); }
+fn tool_def_display(d) { return load64(d + 120); }
 
 # Exact-match membership: 1 if `profile` (non-null) is one of the tool's
 # profile tags, else 0. A null profile or an untagged tool returns 0.
@@ -447,6 +461,7 @@ fn _reg_scan_tool(tool_def, out) {
 #   property and each required entry has a name.
 # - Each `x-mcp-header` keeps the rules of MCP 2026-07-28.
 # - (3.8.0) An outputSchema is valid JSON and an object.
+# - (3.8.1) A title is not empty, and each icon is what the spec says (bote_icons_check).
 # - Each required scope is a scope-token.
 #
 # Public, so a consumer can check a definition before it registers one.
@@ -487,7 +502,17 @@ fn registry_check_tool_def(tool_def) {
     if (os != 0) {
         if (jsonx_valid(os, strlen(os)) == 0) { return "the outputSchema is not valid JSON"; }
         if (jsonx_is_object(os) == 0) { return "the outputSchema must be a JSON Schema object"; }
+        # (3.8.1) A key named twice in one object, or one that decodes to hold a NUL, is
+        # read one way here and another by a client, or cannot be judged at all.
+        if (_jx_repeats_a(default_alloc(), os, 1) == 1) {
+            return "the outputSchema names a key twice in one object, or one that holds a NUL";
+        }
+        if (_reg_dialect_known(os) == 0) {
+            return "the outputSchema's $schema names a dialect bote does not support (2020-12, 2019-09, draft-07, draft-06)";
+        }
     }
+    var dwhy = bote_display_check(tool_def_title(tool_def), tool_def_icons(tool_def));
+    if (dwhy != 0) { return dwhy; }
     var scopes = tool_def_required_scopes(tool_def);
     if (scopes != 0) {
         var k = 0;
@@ -531,24 +556,48 @@ fn _reg_warn_kw(tool, key, kw) {
     return 0;
 }
 
+# The keywords bote lists and does not enforce, each a WARN (3.8.1 adds those through
+# 3.8.0 passed over in silence: additionalProperties among them, which a schema for a tool
+# with no parameters is told to say).
+var BOTE_UNENFORCED = "anyOf oneOf allOf not $ref $dynamicRef $recursiveRef pattern minLength maxLength minItems maxItems const additionalProperties exclusiveMinimum exclusiveMaximum multipleOf uniqueItems minProperties maxProperties prefixItems contains if then else propertyNames patternProperties dependentRequired dependentSchemas unevaluatedProperties unevaluatedItems ";
+
+# Every WARN the schema `v`, at `key` of tool `tool`, earns: each keyword in `kws` it
+# holds, a type array, a type bote does not know, and an `enum` on a type other than a
+# string, which bote judges for strings only.
+fn _reg_warn_schema(tool, key, v, kws) {
+    var k = 0;
+    while (k < vec_len(kws)) {
+        if (jsonx_has(v, vec_get(kws, k)) == 1) { _reg_warn_kw(tool, key, vec_get(kws, k)); }
+        k = k + 1;
+    }
+    var ty = jsonx_get_str_dec_a(default_alloc(), v, "type");
+    if (jsonx_has(v, "type") == 1 && ty == 0) { _reg_warn_kw(tool, key, "type array"); }
+    if (ty != 0 && _reg_type_known(ty) == 0) { _reg_warn_kw(tool, key, "an unknown type"); }
+    if (jsonx_has(v, "enum") == 1 && (ty == 0 || streq(ty, "string") == 0)) {
+        _reg_warn_kw(tool, key, "enum on a type other than string");
+    }
+    return 0;
+}
+
+fn _reg_type_known(ty) {
+    var known = "string number integer boolean array object null ";
+    var ws = _reg_words(known);
+    var i = 0;
+    while (i < vec_len(ws)) {
+        if (streq(ty, vec_get(ws, i)) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn _reg_warn_unenforced(tool_def) {
     var props = schema_properties(tool_def_input_schema(tool_def));
     if (props == 0) { return 0; }
-    var kws = _reg_words("anyOf oneOf allOf not $ref pattern minLength maxLength minItems maxItems const ");
+    var kws = _reg_words(BOTE_UNENFORCED);
     var i = 0;
     while (i < vec_len(props)) {
         var pair = vec_get(props, i);
-        var v = schema_prop_value(pair);
-        var k = 0;
-        while (k < vec_len(kws)) {
-            if (jsonx_has(v, vec_get(kws, k)) == 1) {
-                _reg_warn_kw(tool_def_name(tool_def), schema_prop_key(pair), vec_get(kws, k));
-            }
-            k = k + 1;
-        }
-        if (jsonx_has(v, "type") == 1 && jsonx_get_str(v, "type") == 0) {
-            _reg_warn_kw(tool_def_name(tool_def), schema_prop_key(pair), "type array");
-        }
+        _reg_warn_schema(tool_def_name(tool_def), schema_prop_key(pair), schema_prop_value(pair), kws);
         i = i + 1;
     }
     return 0;
@@ -556,32 +605,36 @@ fn _reg_warn_unenforced(tool_def) {
 
 # The same warnings for an outputSchema: its root, and each of the root's properties.
 fn _reg_warn_output(tool_def) {
-    var kws = _reg_words("anyOf oneOf allOf not $ref pattern minLength maxLength minItems maxItems const ");
+    var kws = _reg_words(BOTE_UNENFORCED);
     var os = tool_def_output_schema(tool_def);
-    var at = vec_new();
-    vec_push(at, "outputSchema");
-    vec_push(at, os);
+    _reg_warn_schema(tool_def_name(tool_def), "outputSchema", os, kws);
     var members = _jx_members(jsonx_get_raw(os, "properties"));
     var mi = 0;
     while (mi < vec_len(members)) {
-        vec_push(at, _dsp_named_msg("outputSchema.", vec_get(members, mi), 0));
-        vec_push(at, vec_get(members, mi + 1));
+        _reg_warn_schema(tool_def_name(tool_def), _dsp_named_msg("outputSchema.", vec_get(members, mi), 0), vec_get(members, mi + 1), kws);
         mi = mi + 2;
     }
+    return 0;
+}
+
+# 1 when an outputSchema's `$schema`, if it has one, names a dialect bote knows: 2020-12,
+# which it judges by, and 2019-09, draft-07 and draft-06, whose keywords bote judges the
+# same way. The official SDK knows these four. "Clients and servers MUST handle
+# unsupported dialects gracefully by returning an appropriate error" (the spec's JSON
+# Schema usage), so registration refuses another (3.8.1).
+fn _reg_dialect_known(os) {
+    var d = jsonx_get_raw(os, "$schema");
+    if (d == 0) { return 1; }
+    var u = jsonx_get_str_dec_a(default_alloc(), os, "$schema");
+    if (u == 0) { return 0; }
+    var n = strlen(u);
+    if (n > 0 && load8(u + n - 1) == 35) { u = _slice_cstr(default_alloc(), u, 0, n - 1); }
+    var ok = "https://json-schema.org/draft/2020-12/schema http://json-schema.org/draft/2020-12/schema https://json-schema.org/draft/2019-09/schema http://json-schema.org/draft/2019-09/schema https://json-schema.org/draft-07/schema http://json-schema.org/draft-07/schema https://json-schema.org/draft-06/schema http://json-schema.org/draft-06/schema ";
+    var ws = _reg_words(ok);
     var i = 0;
-    while (i < vec_len(at)) {
-        var v = vec_get(at, i + 1);
-        var k = 0;
-        while (k < vec_len(kws)) {
-            if (jsonx_has(v, vec_get(kws, k)) == 1) {
-                _reg_warn_kw(tool_def_name(tool_def), vec_get(at, i), vec_get(kws, k));
-            }
-            k = k + 1;
-        }
-        if (jsonx_has(v, "type") == 1 && jsonx_get_str(v, "type") == 0) {
-            _reg_warn_kw(tool_def_name(tool_def), vec_get(at, i), "type array");
-        }
-        i = i + 2;
+    while (i < vec_len(ws)) {
+        if (streq(u, vec_get(ws, i)) == 1) { return 1; }
+        i = i + 1;
     }
     return 0;
 }
@@ -620,13 +673,16 @@ fn _reg_kw_in(k, ws) {
     return 0;
 }
 
+var BOTE_RESULT_REF = "{\"$ref\":\"#/properties/result\"}";
+
 # `v`, a part of an outputSchema, into `sb` with every reference to the document
 # moved under properties/result. `mode` is 0 where `v` is in a keyword's place, 1
 # where it is a map from names to schemas (properties, $defs), and 2 at the root,
 # whose `$schema` the wrapper carries instead. A value that is data (const, enum,
 # default, examples) is copied as it is, and so is a subschema that starts a new
 # base. The rules are the official SDK's (wrapOutputSchemaForLegacy). `kw` holds
-# the two keyword lists: data at +0, name maps at +8.
+# the two keyword lists, data at +0 and name maps at +8, and at +16 whether a
+# `$recursiveRef` is converted.
 fn _reg_rw_refs(sb, v, mode, kw) {
     var c = _vp_first_nonws(v);
     if (c == 91) {
@@ -647,6 +703,22 @@ fn _reg_rw_refs(sb, v, mode, kw) {
     }
     # Each key judged as it decodes and written as it was (3.8.0), so it means what it did.
     var m = _jx_members_raw_a(default_alloc(), v);
+    # (3.8.1) A 2019-09 `$recursiveRef: "#"` means the document's root, which wrapping moves:
+    # where `kw`'s +16 says so, it becomes a `$ref` to #/properties/result, or an `allOf`
+    # entry beside a `$ref` the object already has, as the official SDK does it.
+    var has_ref = 0;
+    var has_all = 0;
+    var conv = 0;
+    var p = 0;
+    while (p < vec_len(m)) {
+        var pk = vec_get(m, p);
+        if (pk != 0) {
+            if (streq(pk, "$ref") == 1) { has_ref = 1; }
+            elif (streq(pk, "allOf") == 1) { has_all = 1; }
+            elif (mode != 1 && load64(kw + 16) == 1 && streq(pk, "$recursiveRef") == 1 && _reg_is_hash(vec_get(m, p + 2)) == 1) { conv = 1; }
+        }
+        p = p + 3;
+    }
     str_builder_add_cstr(sb, "{");
     var sep = 0;
     var i = 0;
@@ -655,7 +727,10 @@ fn _reg_rw_refs(sb, v, mode, kw) {
         var kr = vec_get(m, i + 1);
         var val = vec_get(m, i + 2);
         i = i + 3;
+        # A key that decodes to hold a NUL names no keyword.
+        if (k == 0) { k = ""; }
         if (mode == 2 && streq(k, "$schema") == 1) { continue; }
+        if (conv == 1 && streq(k, "$recursiveRef") == 1 && _reg_is_hash(val) == 1) { continue; }
         if (sep == 1) { str_builder_add_cstr(sb, ","); }
         sep = 1;
         str_builder_add_cstr(sb, "\"");
@@ -672,6 +747,20 @@ fn _reg_rw_refs(sb, v, mode, kw) {
             } else {
                 str_builder_add_cstr(sb, val);
             }
+        } elif (conv == 1 && has_ref == 1 && streq(k, "allOf") == 1) {
+            if (_vp_first_nonws(val) == 91) {
+                _reg_rw_refs(sb, val, 0, kw);
+                # The array just written, with the root's reference as its last entry.
+                var bl = load64(sb + 8);
+                store64(sb + 8, bl - 1);
+                if (load8(load64(sb) + bl - 2) != 91) { str_builder_add_cstr(sb, ","); }
+                str_builder_add_cstr(sb, BOTE_RESULT_REF);
+                str_builder_add_cstr(sb, "]");
+            } else {
+                str_builder_add_cstr(sb, "[");
+                str_builder_add_cstr(sb, BOTE_RESULT_REF);
+                str_builder_add_cstr(sb, "]");
+            }
         } elif (_reg_kw_in(k, load64(kw)) == 1) {
             str_builder_add_cstr(sb, val);
         } elif (_reg_kw_in(k, load64(kw + 8)) == 1) {
@@ -680,15 +769,46 @@ fn _reg_rw_refs(sb, v, mode, kw) {
             _reg_rw_refs(sb, val, 0, kw);
         }
     }
+    if (conv == 1 && has_ref == 0) {
+        if (sep == 1) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"$ref\":\"#/properties/result\"");
+    } elif (conv == 1 && has_all == 0) {
+        if (sep == 1) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"allOf\":[");
+        str_builder_add_cstr(sb, BOTE_RESULT_REF);
+        str_builder_add_cstr(sb, "]");
+    }
     str_builder_add_cstr(sb, "}");
     return 0;
 }
 
+# 1 when the raw JSON value `v` is the string "#", however it is spelled.
+fn _reg_is_hash(v) {
+    if (load8(v) != 34) { return 0; }
+    var s = _jx_str_dec_at_a(default_alloc(), v, strlen(v), 0);
+    if (s != 0 && streq(s, "#") == 1) { return 1; }
+    return 0;
+}
+
+# 1 when the schema `os` declares JSON Schema 2019-09 and its root sets no
+# `$recursiveAnchor: true`: the SDK's test for converting `$recursiveRef`.
+fn _reg_converts_recursive(os) {
+    var u = jsonx_get_str_dec_a(default_alloc(), os, "$schema");
+    if (u == 0) { return 0; }
+    var n = strlen(u);
+    if (n > 0 && load8(u + n - 1) == 35) { u = _slice_cstr(default_alloc(), u, 0, n - 1); }
+    if (streq(u, "https://json-schema.org/draft/2019-09/schema") == 0 && streq(u, "http://json-schema.org/draft/2019-09/schema") == 0) { return 0; }
+    var ra = jsonx_get_raw(os, "$recursiveAnchor");
+    if (ra != 0 && streq(ra, "true") == 1) { return 0; }
+    return 1;
+}
+
 # What 2025-11-25 is shown for an outputSchema whose root is not an object.
 fn _reg_output_legacy(os) {
-    var kw[16];
+    var kw[24];
     store64(&kw, _reg_words("const enum default examples "));
     store64(&kw + 8, _reg_words("properties patternProperties $defs definitions dependentSchemas dependencies "));
+    store64(&kw + 16, _reg_converts_recursive(os));
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{");
     var sch = jsonx_get_raw(os, "$schema");
@@ -736,6 +856,7 @@ fn _registry_prepare(tool_def) {
     if (vec_len(headers) > 0) { store64(tool_def + 64, headers); }
     _reg_warn_unenforced(tool_def);
     _reg_prepare_output(tool_def);
+    store64(tool_def + 120, _bote_display_json(tool_def_title(tool_def), tool_def_icons(tool_def)));
     return 0;
 }
 

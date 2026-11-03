@@ -111,7 +111,7 @@ fn _ends(s, suf) {
 fn _expect(d, tool, r, want_legacy, want_modern, name) {
     _ret = r;
     var l = _call(d, tool, 0);
-    assert_streq(l, _legacy(want_legacy), _cat(name, " (2025-11-25)"));
+    _ase(l, _legacy(want_legacy), _cat(name, " (2025-11-25)"));
     var m = _call(d, tool, 1);
     var ok = 0;
     if (_has(m, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"resultType\":\"complete\",") == 1 && _ends(m, _modern_tail(want_modern)) == 1) { ok = 1; }
@@ -120,9 +120,18 @@ fn _expect(d, tool, r, want_legacy, want_modern, name) {
     return 0;
 }
 
+fn _rep_s(x, n) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < n) { str_builder_add_cstr(sb, x); i = i + 1; }
+    return str_data(str_builder_build(sb));
+}
+
 fn _tool(name, os) {
     return tool_def_with_output_schema(tool_def_new(name, "d", schema_new("object", 0, vec_new())), os);
 }
+
+fn _reason(e) { if (e == 0) { return 0; } return bote_err_reason(e); }
 
 fn _refused(d, name, os) {
     var e = dispatcher_register_tool(d, _tool(name, os), &h_ret);
@@ -171,21 +180,36 @@ fn _err_result(tool, why) {
     return _cat3(_cat3("{\"content\":[{\"type\":\"text\",\"text\":\"tool execution failed: ", tool, " - "), why, "\"}],\"isError\":true}");
 }
 
+# assert_streq, with nothing on either side a failure rather than a crash: a mutant that
+# lets a refusal through hands it 0 where a reason was.
+fn _ase(got, want, name) {
+    if (got == 0 || want == 0) {
+        if (got == want) { return assert(1 == 1, name); }
+        return assert(0 == 1, name);
+    }
+    return assert_streq(got, want, name);
+}
+
 fn main() {
     sakshi_set_level(SK_ERROR);
     var d = dispatcher_new(tool_registry_new());
 
     # ---- Registration ----
-    assert_streq(_refused(d, "t_bad1", "{\"type\":"), "the outputSchema is not valid JSON", "registration: an outputSchema that is not JSON");
-    assert_streq(_refused(d, "t_bad2", "true"), "the outputSchema must be a JSON Schema object", "registration: the schema true is no object");
-    assert_streq(_refused(d, "t_bad3", "[]"), "the outputSchema must be a JSON Schema object", "registration: an array");
-    assert_streq(_refused(d, "t_bad4", " \"object\""), "the outputSchema must be a JSON Schema object", "registration: a string");
+    _ase(_refused(d, "t_bad1", "{\"type\":"), "the outputSchema is not valid JSON", "registration: an outputSchema that is not JSON");
+    _ase(_refused(d, "t_bad2", "true"), "the outputSchema must be a JSON Schema object", "registration: the schema true is no object");
+    _ase(_refused(d, "t_bad3", "[]"), "the outputSchema must be a JSON Schema object", "registration: an array");
+    _ase(_refused(d, "t_bad4", " \"object\""), "the outputSchema must be a JSON Schema object", "registration: a string");
     assert_eq(registry_contains(dispatcher_registry(d), "t_bad1"), 0, "registration: ...and nothing refused is registered");
     assert_eq(registry_check_tool_def(_tool("t_ok", WEATHER)), 0, "registration: a JSON Schema object passes the check");
     assert_eq(dispatcher_register_tool(d, _tool("t_weather", WEATHER), &h_ret), 0, "registration: an object root");
     assert_eq(dispatcher_register_tool(d, _tool("t_users", USERS), &h_ret), 0, "registration: an array root");
     assert_eq(dispatcher_register_tool(d, tool_def_new("t_plain", "d", schema_new("object", 0, vec_new())), &h_ret), 0, "registration: no outputSchema");
-    assert_eq(dispatcher_register_tool(d, _tool("t_nul", "{\"type\":\"object\",\"properties\":{\"n\\u0000\":{\"type\":\"string\"}}}"), &h_ret), 0, "registration: a property whose name holds a NUL");
+    _ase(_reason(dispatcher_register_tool(d, _tool("t_nul", "{\"type\":\"object\",\"properties\":{\"n\\u0000\":{\"type\":\"string\"}}}"), &h_ret)), "the outputSchema names a key twice in one object, or one that holds a NUL", "registration: a property whose name holds a NUL, refused (3.8.1)");
+    assert_eq(_reason(dispatcher_register_tool(d, _tool("t_rep", "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"type\":\"number\"}}}"), &h_ret)) != 0, 1, "registration: a key twice in a nested object, refused (3.8.1)");
+    assert_eq(_reason(dispatcher_register_tool(d, _tool("t_rep2", "{\"type\":\"object\",\"typ\\u0065\":\"array\"}"), &h_ret)) != 0, 1, "registration: a key twice, spelled two ways");
+    _ase(_reason(dispatcher_register_tool(d, _tool("t_d4", "{\"$schema\":\"http://json-schema.org/draft-04/schema#\",\"type\":\"object\"}"), &h_ret)), "the outputSchema's $schema names a dialect bote does not support (2020-12, 2019-09, draft-07, draft-06)", "registration: a dialect bote does not know, refused (3.8.1)");
+    assert_eq(dispatcher_register_tool(d, _tool("t_d7", "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\"}"), &h_ret), 0, "registration: draft-07, its trailing # taken off");
+    assert_eq(dispatcher_register_tool(d, _tool("t_d19", "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"object\"}"), &h_ret), 0, "registration: 2019-09");
     assert_eq(dispatcher_register_tool(d, _tool("t_untyped", "{\"properties\":{\"a\":{\"type\":\"string\"}}}"), &h_ret), 0, "registration: a root with no type");
     var tw = registry_get(dispatcher_registry(d), "t_weather");
     assert_eq(prop_tag(tool_def_output_prop(tw)), SCH_OBJECT, "registration: the schema is compiled");
@@ -203,24 +227,24 @@ fn main() {
     assert_eq(prop_tag(tool_def_output_prop(rr)), SCH_OBJECT, "registration: ...and is compiled again");
     var ml = _tool("t_lines", "{\n  \"type\": \"object\",\r\n  \"properties\": {\"a\": {\"type\": \"string\"}}\n}");
     dispatcher_register_tool(d, ml, &h_ret);
-    assert_streq(tool_def_output_schema(ml), "{  \"type\": \"object\",  \"properties\": {\"a\": {\"type\": \"string\"}}}", "registration: a schema on several lines is kept on one");
+    _ase(tool_def_output_schema(ml), "{  \"type\": \"object\",  \"properties\": {\"a\": {\"type\": \"string\"}}}", "registration: a schema on several lines is kept on one");
 
     # ---- The 2025-11-25 form ----
-    assert_streq(_legacy_form(USERS), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"id\",\"name\"]}}},\"required\":[\"result\"]}", "legacy form: an array root is the property result of an object");
-    assert_streq(_legacy_form("{\"type\":\"string\"}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"string\"}},\"required\":[\"result\"]}", "legacy form: a string root");
-    assert_streq(_legacy_form("{\"properties\":{\"a\":{}}}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"properties\":{\"a\":{}}}},\"required\":[\"result\"]}", "legacy form: a root with no type is wrapped, as the SDK reads it");
+    _ase(_legacy_form(USERS), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"id\",\"name\"]}}},\"required\":[\"result\"]}", "legacy form: an array root is the property result of an object");
+    _ase(_legacy_form("{\"type\":\"string\"}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"string\"}},\"required\":[\"result\"]}", "legacy form: a string root");
+    _ase(_legacy_form("{\"properties\":{\"a\":{}}}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"properties\":{\"a\":{}}}},\"required\":[\"result\"]}", "legacy form: a root with no type is wrapped, as the SDK reads it");
     assert_eq(_legacy_form("{\"type\":\"obj\\u0065ct\"}"), 0, "legacy form: an escaped \"object\" is an object");
     assert_eq(_legacy_form("{\"type\":\"object\",\"properties\":{}}"), 0, "legacy form: none for an object root");
-    assert_streq(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"array\"}"), "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\"}},\"required\":[\"result\"]}", "legacy form: $schema moves to the wrapper");
-    assert_streq(_legacy_form("{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"},\"$defs\":{\"u\":{\"type\":\"object\",\"properties\":{\"$ref\":{\"type\":\"string\"},\"next\":{\"$ref\":\"#\"},\"o\":{\"$ref\":\"other.json#/a\"},\"n\":{\"$ref\":\"#anchor\"}}}},\"default\":{\"$ref\":\"#/x\"},\"enum\":[{\"$ref\":\"#/y\"}],\"anyOf\":[{\"$dynamicRef\":\"#/$defs/u\"}]}"),
+    _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"array\"}"), "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\"}},\"required\":[\"result\"]}", "legacy form: $schema moves to the wrapper");
+    _ase(_legacy_form("{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"},\"$defs\":{\"u\":{\"type\":\"object\",\"properties\":{\"$ref\":{\"type\":\"string\"},\"next\":{\"$ref\":\"#\"},\"o\":{\"$ref\":\"other.json#/a\"},\"n\":{\"$ref\":\"#anchor\"}}}},\"default\":{\"$ref\":\"#/x\"},\"enum\":[{\"$ref\":\"#/y\"}],\"anyOf\":[{\"$dynamicRef\":\"#/$defs/u\"}]}"),
       "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/$defs/u\"},\"$defs\":{\"u\":{\"type\":\"object\",\"properties\":{\"$ref\":{\"type\":\"string\"},\"next\":{\"$ref\":\"#/properties/result\"},\"o\":{\"$ref\":\"other.json#/a\"},\"n\":{\"$ref\":\"#anchor\"}}}},\"default\":{\"$ref\":\"#/x\"},\"enum\":[{\"$ref\":\"#/y\"}],\"anyOf\":[{\"$dynamicRef\":\"#/properties/result/$defs/u\"}]}},\"required\":[\"result\"]}",
       "legacy form: references to the document move under properties/result; names, data, anchors and other documents do not");
-    assert_streq(_legacy_form("{\"type\":\"array\",\"items\":{\"properties\":{\"default\":{\"$ref\":\"#/$defs/d\"},\"$id\":{\"type\":\"string\"},\"x\":{\"$ref\":\"#/$defs/x\"}}}}"),
+    _ase(_legacy_form("{\"type\":\"array\",\"items\":{\"properties\":{\"default\":{\"$ref\":\"#/$defs/d\"},\"$id\":{\"type\":\"string\"},\"x\":{\"$ref\":\"#/$defs/x\"}}}}"),
       "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"properties\":{\"default\":{\"$ref\":\"#/properties/result/$defs/d\"},\"$id\":{\"type\":\"string\"},\"x\":{\"$ref\":\"#/properties/result/$defs/x\"}}}}},\"required\":[\"result\"]}",
       "legacy form: a property named for a keyword is a name, and its schema is read");
-    assert_streq(_legacy_form("{\"$id\":\"https://e.org/u\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"}}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"$id\":\"https://e.org/u\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"}}},\"required\":[\"result\"]}", "legacy form: a root with its own base is copied as it is");
-    assert_streq(_legacy_form("{\"type\":\"array\",\"items\":{\"$id\":\"https://e.org/i\",\"$ref\":\"#/$defs/z\"},\"prefixItems\":[{\"$id\":\"#frag\",\"$ref\":\"#/a\"}]}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$id\":\"https://e.org/i\",\"$ref\":\"#/$defs/z\"},\"prefixItems\":[{\"$id\":\"#frag\",\"$ref\":\"#/properties/result/a\"}]}},\"required\":[\"result\"]}", "legacy form: a subschema with its own base is kept; a fragment $id is no base");
-    assert_streq(_legacy_form("{\"type\":\"array\",\"items\":{\"$r\\u0065f\":\"\\u0023/$defs/q\",\"a\\\"b\":1}}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$r\\u0065f\":\"#/properties/result/$defs/q\",\"a\\\"b\":1}}},\"required\":[\"result\"]}", "legacy form: keys and references read as they decode, keys written as they were");
+    _ase(_legacy_form("{\"$id\":\"https://e.org/u\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"}}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"$id\":\"https://e.org/u\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"}}},\"required\":[\"result\"]}", "legacy form: a root with its own base is copied as it is");
+    _ase(_legacy_form("{\"type\":\"array\",\"items\":{\"$id\":\"https://e.org/i\",\"$ref\":\"#/$defs/z\"},\"prefixItems\":[{\"$id\":\"#frag\",\"$ref\":\"#/a\"}]}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$id\":\"https://e.org/i\",\"$ref\":\"#/$defs/z\"},\"prefixItems\":[{\"$id\":\"#frag\",\"$ref\":\"#/properties/result/a\"}]}},\"required\":[\"result\"]}", "legacy form: a subschema with its own base is kept; a fragment $id is no base");
+    _ase(_legacy_form("{\"type\":\"array\",\"items\":{\"$r\\u0065f\":\"\\u0023/$defs/q\",\"a\\\"b\":1}}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$r\\u0065f\":\"#/properties/result/$defs/q\",\"a\\\"b\":1}}},\"required\":[\"result\"]}", "legacy form: keys and references read as they decode, keys written as they were");
 
     # ---- What registration warns of ----
     _lc_begin();
@@ -293,8 +317,6 @@ fn main() {
     var una = "{\"content\":[{\"type\":\"text\",\"text\":\"a\"}],\"structuredContent\":{\"a\":\"x\"}}";
     _expect(d, "t_untyped", una, "{\"content\":[{\"type\":\"text\",\"text\":\"a\"}],\"structuredContent\":{\"result\":{\"a\":\"x\"}}}", una, "call: an object, wrapped before 2026-07-28 where the listed schema was");
 
-    var nn = "{\"content\":[{\"type\":\"text\",\"text\":\"n\"}],\"structuredContent\":{\"n\":5}}";
-    _expect(d, "t_nul", nn, nn, nn, "call: a property named \"n\\u0000\" judges no \"n\" (it judged one through 3.7.7)");
     var esc_err = "{\"content\":[],\"is\\u0045rror\":true}";
     _expect(d, "t_weather", esc_err, esc_err, esc_err, "call: an escaped isError is an error, as a client reads it");
 
@@ -347,8 +369,8 @@ fn main() {
     assert_eq(tool_call_event_success(vec_get(_aud, 0)), 1, "audit: a result that matches succeeded");
     assert_eq(tool_call_event_success(vec_get(_aud, 1)), 0, "audit: one that does not failed");
     assert(_has(tool_call_event_error(vec_get(_aud, 1)), "tool execution failed: t_weather - the result's structuredContent does not match the outputSchema: ") == 1, "audit: ...with why, kept past the next messages");
-    assert_streq(tool_call_event_error(vec_get(_aud, 2)), "tool execution failed: t_weather - the tool has an outputSchema and the result has no structuredContent", "audit: no structuredContent failed, on 2026-07-28 too");
-    assert_streq(tool_call_event_error(vec_get(_aud, 3)), "tool execution failed: t_weather - the handler returned no result", "audit: a handler returning nothing, kept past the next message");
+    _ase(tool_call_event_error(vec_get(_aud, 2)), "tool execution failed: t_weather - the tool has an outputSchema and the result has no structuredContent", "audit: no structuredContent failed, on 2026-07-28 too");
+    _ase(tool_call_event_error(vec_get(_aud, 3)), "tool execution failed: t_weather - the handler returned no result", "audit: a handler returning nothing, kept past the next message");
     assert_eq(tool_call_event_success(vec_get(_aud, 4)), 1, "audit: the next good call succeeded");
 
     # ---- A batch ----
@@ -356,6 +378,99 @@ fn main() {
     var bt = codec_process_message(_cat3("[", _cat3(_call_msg("t_weather", 0), ",", _call_msg("t_plain", 0)), "]"), d, 0);
     assert(_has(bt, "\"isError\":true") == 1, "batch: an element is judged by its tool");
     assert(_has(bt, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[],\"structuredContent\":{\"temperature\":\"x\"}}}") == 1, "batch: ...and its neighbour by its own");
+
+    # ---- From the review of 3.8.0 ----
+    # A key twice inside structuredContent: bote would judge the first, a client reads the last.
+    var rep = _err_result("t_weather", "the result's structuredContent names a member twice in one object");
+    _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2,\"temperature\":\"hot\"}}", rep, rep, "review: a key twice in structuredContent is refused");
+    _expect(d, "t_weather", "{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2,\"conditions\":[]}", rep, rep, "review: ...in a bare record");
+    _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2,\"extra\":{\"a\":1,\"a\":2}}}", rep, rep, "review: ...in an object no property names");
+    _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2,\"temper\\u0061ture\":\"hot\"}}", rep, rep, "review: ...spelled two ways");
+    var urep = _err_result("t_users", "the result's structuredContent names a member twice in one object");
+    _expect(d, "t_users", "[{\"id\":\"1\",\"name\":\"A\",\"id\":2}]", urep, urep, "review: ...in an array's item");
+    # A key of 256 bytes or more, written with an escape, is judged as it decodes.
+    var la = _rep_s("a", 300);
+    var rld = dispatcher_new(tool_registry_new());
+    assert_eq(dispatcher_register_tool(rld, _tool("t_long", _cat3("{\"type\":\"object\",\"properties\":{\"", la, "\":{\"type\":\"number\"}}}")), &h_ret), 0, "review: a property with a 300-byte name");
+    var lmsg = _err_result("t_long", _cat3("the result's structuredContent does not match the outputSchema: structuredContent.", la, ": expected number"));
+    _expect(rld, "t_long", _cat3("{\"content\":[],\"structuredContent\":{\"", _rep_s("a", 299), "\\u0061\":\"str\"}}"), lmsg, lmsg, "review: a long key written with an escape is judged by the property it names");
+    var lb = _cat3("{\"x\":1,\"", _rep_s("b", 299), "\\u0062\":2}");
+    assert_eq(_jx_find_value_pos(lb, strlen(lb), _rep_s("b", 300)) > 0, 1, "review: the scanner finds a long key written with an escape");
+    # The type as it decodes, and null.
+    var rod = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(rod, _tool("t_esc", "{\"type\":\"obj\\u0065ct\",\"properties\":{\"t\":{\"type\":\"number\"}},\"required\":[\"t\"]}"), &h_ret);
+    var e1 = _err_result("t_esc", "the result's structuredContent does not match the outputSchema: structuredContent: missing required field: t");
+    _expect(rod, "t_esc", "{\"content\":[],\"structuredContent\":{}}", e1, e1, "review: an escaped object type judges its required field");
+    var e2 = _err_result("t_esc", "the result's structuredContent does not match the outputSchema: structuredContent.t: expected number");
+    _expect(rod, "t_esc", "{\"content\":[],\"structuredContent\":{\"t\":\"str\"}}", e2, e2, "review: ...and its property");
+    var e3 = _err_result("t_esc", "the result's structuredContent does not match the outputSchema: structuredContent: expected object");
+    _expect(rod, "t_esc", "{\"content\":[],\"structuredContent\":[1]}", e3, e3, "review: ...and its type");
+    dispatcher_register_tool(rod, _tool("t_null", "{\"type\":\"null\"}"), &h_ret);
+    var e4 = _err_result("t_null", "the result's structuredContent does not match the outputSchema: structuredContent: expected null");
+    _expect(rod, "t_null", "{\"content\":[],\"structuredContent\":{\"a\":1}}", e4, e4, "review: a null root judges its value");
+    _expect(rod, "t_null", "{\"content\":[{\"type\":\"text\",\"text\":\"n\"}],\"structuredContent\":null}",
+      "{\"content\":[{\"type\":\"text\",\"text\":\"n\"}],\"structuredContent\":{\"result\":null}}",
+      "{\"content\":[{\"type\":\"text\",\"text\":\"n\"}],\"structuredContent\":null}", "review: ...and passes null, wrapped before 2026-07-28");
+    dispatcher_register_tool(rod, _tool("t_nn", "{\"type\":\"object\",\"properties\":{\"z\":{\"type\":\"null\"}}}"), &h_ret);
+    var e5 = _err_result("t_nn", "the result's structuredContent does not match the outputSchema: structuredContent.z: expected null");
+    _expect(rod, "t_nn", "{\"content\":[],\"structuredContent\":{\"z\":5}}", e5, e5, "review: a null property");
+    # required and enum as they decode.
+    dispatcher_register_tool(rod, _tool("t_enc", "{\"type\":\"object\",\"properties\":{\"ab\":{\"type\":\"string\",\"enum\":[\"caf\\u00e9\"]}},\"required\":[\"\\u0061b\"]}"), &h_ret);
+    var ok_enc = "{\"content\":[],\"structuredContent\":{\"ab\":\"caf\xc3\xa9\"}}";
+    _expect(rod, "t_enc", ok_enc, ok_enc, ok_enc, "review: an escaped required name and enum value, met as written in UTF-8");
+    var ok_enc2 = "{\"content\":[],\"structuredContent\":{\"ab\":\"caf\\u00e9\"}}";
+    _expect(rod, "t_enc", ok_enc2, ok_enc2, ok_enc2, "review: ...and as written escaped");
+    var e6 = _err_result("t_enc", "the result's structuredContent does not match the outputSchema: structuredContent.ab: value 'cafe' not in enum");
+    _expect(rod, "t_enc", "{\"content\":[],\"structuredContent\":{\"ab\":\"cafe\"}}", e6, e6, "review: ...and another value refused");
+    # The same on the input side: a string enum's escaped value is met.
+    var ip = vec_new();
+    vec_push(ip, schema_prop_new("x", "{\"type\":\"string\",\"enum\":[\"caf\\u00e9\"]}"));
+    vec_push(ip, schema_prop_new("o", "{\"type\":\"object\",\"properties\":{\"n\\u0000\":{\"type\":\"string\"}}}"));
+    dispatcher_register_tool(rod, tool_def_new("t_in", "d", schema_new("object", ip, vec_new())), &h_ret);
+    _ret = "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}";
+    var in1 = codec_process_message(_msg("tools/call", "\"name\":\"t_in\",\"arguments\":{\"x\":\"caf\xc3\xa9\",\"o\":{\"n\":5,\"n\\\\u0000\":6}}", 0), rod, 0);
+    assert(_has(in1, "\"isError\"") == 0 && _has(in1, "\"text\":\"ok\"") == 1, "review: an argument meets an escaped enum value, and a property named with a NUL judges nothing");
+    # A repeated member from a tool with no outputSchema.
+    var prep = _err_result("t_plain", "the result names structuredContent more than once");
+    _expect(d, "t_plain", "{\"content\":[],\"structuredContent\":{\"a\":1},\"structuredContent\":[1]}", prep, prep, "review: a repeated member from a tool with no outputSchema is refused");
+    var perr = _err_result("t_plain", "the result names isError more than once");
+    _expect(d, "t_plain", "{\"content\":[{\"type\":\"text\",\"text\":\"x\"}],\"isError\":true,\"isError\":false}", perr, perr, "review: ...isError twice too");
+    # A bare block's type as it decodes.
+    var blk = "{\"type\":\"t\\u0065xt\",\"text\":\"hi\"}";
+    _expect(d, "t_plain", blk, _cat3("{\"content\":[", blk, "]}"), _cat3("{\"content\":[", blk, "]}"), "review: a bare block whose type is escaped is lifted");
+    # A large integer is a client's to read.
+    dispatcher_register_tool(rod, _tool("t_int", "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}}}"), &h_ret);
+    var big_i = "{\"content\":[],\"structuredContent\":{\"id\":4611686018427387904}}";
+    _expect(rod, "t_int", big_i, big_i, big_i, "review: an integer of 2^62 in a result is not refused");
+    var e7 = _err_result("t_int", "the result's structuredContent does not match the outputSchema: structuredContent.id: expected integer");
+    _expect(rod, "t_int", "{\"content\":[],\"structuredContent\":{\"id\":1.5}}", e7, e7, "review: ...a fraction still is");
+    # $recursiveRef, as the SDK converts it for 2019-09.
+    var d19 = "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"object\",\"properties\":{\"result\":";
+    _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"kids\":{\"$recursiveRef\":\"#\"}}}}"),
+      _cat3(d19, "{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"kids\":{\"$ref\":\"#/properties/result\"}}}}", "},\"required\":[\"result\"]}"), "review: $recursiveRef becomes a $ref to the result");
+    _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema#\",\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\",\"$ref\":\"#/$defs/x\"}}"),
+      "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema#\",\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/$defs/x\",\"allOf\":[{\"$ref\":\"#/properties/result\"}]}}},\"required\":[\"result\"]}", "review: ...an allOf entry beside a $ref");
+    _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$ref\":\"#/a\",\"allOf\":[{\"type\":\"string\"}],\"$recursiveRef\":\"#\"}}"),
+      _cat3(d19, "{\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/a\",\"allOf\":[{\"type\":\"string\"},{\"$ref\":\"#/properties/result\"}]}}", "},\"required\":[\"result\"]}"), "review: ...the last of an allOf it already has");
+    _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$ref\":\"#/a\",\"allOf\":[],\"$recursiveRef\":\"#\"}}"),
+      _cat3(d19, "{\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/a\",\"allOf\":[{\"$ref\":\"#/properties/result\"}]}}", "},\"required\":[\"result\"]}"), "review: ...the only one of an empty allOf");
+    _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"$recursiveAnchor\":true,\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\"}}"),
+      "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"object\",\"properties\":{\"result\":{\"$recursiveAnchor\":true,\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\"}}},\"required\":[\"result\"]}", "review: ...not under a root that is a $recursiveAnchor");
+    _ase(_legacy_form("{\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\"}}"),
+      "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\"}}},\"required\":[\"result\"]}", "review: ...nor in 2020-12, which has none");
+    _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#/x\"}}"),
+      _cat3(d19, "{\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#/x\"}}", "},\"required\":[\"result\"]}"), "review: ...nor one that is not \"#\"");
+    # The keywords now warned of.
+    _lc_begin();
+    dispatcher_register_tool(rod, _tool("t_kw", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"i\":{\"type\":\"integer\",\"enum\":[1,2]},\"u\":{\"type\":\"strnig\"}}}"), &h_ret);
+    var kp = vec_new();
+    vec_push(kp, schema_prop_new("m", "{\"type\":\"number\",\"exclusiveMinimum\":0}"));
+    dispatcher_register_tool(rod, tool_def_new("t_kwin", "d", schema_new("object", kp, vec_new())), &h_ret);
+    _lc_end();
+    assert(_lc_find("property=outputSchema keyword=additionalProperties") != 0, "review: additionalProperties is warned of");
+    assert(_lc_find("property=outputSchema.i keyword=\"enum on a type other than string\"") != 0, "review: an enum on an integer is warned of");
+    assert(_lc_find("property=outputSchema.u keyword=\"an unknown type\"") != 0, "review: an unknown type is warned of");
+    assert(_lc_find("tool=t_kwin property=m keyword=exclusiveMinimum") != 0, "review: ...and on the input side");
 
     # ---- The heap ----
     # A call costs `args` on the heap, as since 3.4.15; nothing in its result's handling

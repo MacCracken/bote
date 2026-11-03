@@ -259,6 +259,16 @@ allows, so a transport has nothing to wire. A `ToolDef` is 104 bytes from 3.8.0,
 `tool_def_new` allocates; code that reads one through the `tool_def_*` getters is
 unaffected.
 
+Titles and icons (3.8.1) are the core's too: `bote_icon_*`, `tool_def_with_title` /
+`_with_icons`, `prompt_def_with_title` / `_with_icons`, `prompt_arg_with_title`,
+`resource_def_with_title` / `_with_icons`, `resource_template_with_title` / `_with_icons`,
+`dispatcher_set_server_details` and `dispatcher_set_instructions`. The structs they extend
+grow, each appended at its end: a `ToolDef` is 128 bytes, a `PromptDef` 56, a
+`PromptArgument` 40, a `ResourceDef` 64, a `ResourceTemplate` 72 and a `Dispatcher` 176. Code
+that makes them with their `_new` functions and reads them through their getters is
+unaffected. Set a definition's title and icons before registering it: what is sent is what
+passed the check then.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`

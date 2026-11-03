@@ -192,8 +192,21 @@ fn _jx_has_escape(p, n) {
 # -1. This is the one key scanner: _jx_find_value_pos is its one-key form, so
 # the codec, the dispatcher and the validator cannot read a message differently.
 # A key is matched as what it decodes to: `"c\u006et"` is the key `cnt`, here for
-# the validator and for a handler alike.
+# the validator and for a handler alike. (3.8.1) Whatever its length: a key of 256 bytes
+# or more is decoded on the request arena, given back once it is compared. Through 3.8.0
+# such a key was compared as written, where a client decodes it, so a result's member
+# spelled with an escape was never judged by the outputSchema property it names.
 fn _jx_scan(buf, len, keys, n, pos) {
+    var mk[16];
+    store64(&mk, 0);
+    _jx_scan_in(buf, len, keys, n, pos, &mk);
+    if (load64(&mk) != 0) { bote_req_release(&mk); }
+    return 0;
+}
+
+# _jx_scan's walk. `mk` is marked the first time a long key is decoded, and _jx_scan gives
+# the arena back once, after the walk: a key costs nothing more for the rare long one.
+fn _jx_scan_in(buf, len, keys, n, pos, mk) {
     var k = 0;
     while (k < n) { store64(pos + k * 8, 0 - 1); k = k + 1; }
     var i = _jx_skip_ws(buf, len, 0);
@@ -209,9 +222,16 @@ fn _jx_scan(buf, len, keys, n, pos) {
         var ke = _jx_skip_string(buf, len, i);
         var kl = ke - ks - 1;
         var kp = buf + ks;
-        if (kl > 0 && kl < 256 && _jx_has_escape(kp, kl) == 1) {
-            kl = _jx_unescape_into(kp, kl, &dec);
-            kp = &dec;
+        if (kl > 0 && _jx_has_escape(kp, kl) == 1) {
+            if (kl < 256) {
+                kl = _jx_unescape_into(kp, kl, &dec);
+                kp = &dec;
+            } else {
+                if (load64(mk) == 0) { bote_req_mark(mk); }
+                var big = alloc_via(bote_req_alloc(), kl + 1);
+                kl = _jx_unescape_into(kp, kl, big);
+                kp = big;
+            }
         }
         i = _jx_skip_ws(buf, len, ke);
         if (i >= len || load8(buf + i) != 58) { return 0; }
@@ -239,17 +259,19 @@ fn _jx_scan(buf, len, keys, n, pos) {
 # schema's `properties`, read at registration. A vec on the heap of key, raw value,
 # key, raw value, in order. Each key is what it decodes to, as _jx_scan matches
 # one, so a name read here is one a message can reach. Empty for anything else.
-# (3.8.0) A key whose decoding holds a NUL stays as it was written: as a cstr it
-# would mean less, and match a name the scanner does not. Through 3.7.7 it was cut
-# at the NUL, so a nested property named "a\u0000b" judged a message's "a".
+# A member whose key decodes to hold a NUL is left out (3.8.1): no cstr can name it, so
+# nothing the scanner finds is it. Through 3.7.7 the key was cut at the NUL, so a nested
+# property named "a\u0000b" judged a message's "a", and in 3.8.0 it was kept as written,
+# so it judged a message's "a\\u0000b".
 fn _jx_members(obj) { return _jx_members_x(default_alloc(), obj, 0); }
 
 # _jx_members on `a`.
 fn _jx_members_a(a, obj) { return _jx_members_x(a, obj, 0); }
 
-# Each member as three: its key as _jx_members has it, its key as written (between
-# the quotes, escapes and all), and its raw value. For code that writes an object
-# again: the key as written means what the original did, and is valid in JSON.
+# Each member as three: its key as _jx_members has it, or 0 when it decodes to hold a
+# NUL, its key as written (between the quotes, escapes and all), and its raw value. For
+# code that writes an object again: the key as written means what the original did, and
+# is valid in JSON. No member is left out.
 fn _jx_members_raw_a(a, obj) { return _jx_members_x(a, obj, 1); }
 
 fn _jx_members_x(a, obj, raw) {
@@ -270,22 +292,81 @@ fn _jx_members_x(a, obj, raw) {
         var key = as;
         if (kl > 0 && _jx_has_escape(as, kl) == 1) {
             var dk = alloc_via(a, kl + 1);
+            key = 0;
             if (_jx_unescape_into(as, kl, dk) == strlen(dk)) { key = dk; }
         }
         i = _jx_skip_ws(obj, len, ke);
         if (i >= len || load8(obj + i) != 58) { return out; }
         i = _jx_skip_ws(obj, len, i + 1);
         var ve = _jx_skip_value(obj, len, i);
-        var val = alloc_via(a, ve - i + 1);
-        memcpy(val, obj + i, ve - i);
-        store8(val + ve - i, 0);
-        vec_push_a(a, out, key);
-        if (raw == 1) { vec_push_a(a, out, as); }
-        vec_push_a(a, out, val);
+        if (raw == 1 || key != 0) {
+            var val = alloc_via(a, ve - i + 1);
+            memcpy(val, obj + i, ve - i);
+            store8(val + ve - i, 0);
+            vec_push_a(a, out, key);
+            if (raw == 1) { vec_push_a(a, out, as); }
+            vec_push_a(a, out, val);
+        }
         i = _jx_skip_ws(obj, len, ve);
         if (i < len && load8(obj + i) == 44) { i = i + 1; }
     }
     return out;
+}
+
+# 1 when an object anywhere in the JSON value `v` names a key twice, keys compared as
+# they decode (3.8.1), or, with `nul` 1, names one that decodes to hold a NUL. bote reads
+# the first of a repeated key and a client may read the last, so what bote judged and
+# what a client reads would differ. What it reads is given back to `a` once it is done.
+fn _jx_repeats_a(a, v, nul) {
+    var mk[16];
+    bote_arena_mark(a, &mk);
+    var r = _jx_repeats_in(a, v, nul);
+    bote_arena_release(a, &mk);
+    return r;
+}
+
+fn _jx_repeats_in(a, v, nul) {
+    var n = strlen(v);
+    var i = _jx_skip_ws(v, n, 0);
+    if (i >= n) { return 0; }
+    var c = load8(v + i);
+    if (c == 91) {
+        i = _jx_skip_ws(v, n, i + 1);
+        while (i < n && load8(v + i) != 93) {
+            # Only an object or an array can hold a key: a scalar is passed over uncopied.
+            var ec = load8(v + i);
+            if (ec == 123 || ec == 91) {
+                var e = _jx_skip_value(v, n, i);
+                var el = alloc_via(a, e - i + 1);
+                memcpy(el, v + i, e - i);
+                store8(el + e - i, 0);
+                if (_jx_repeats_in(a, el, nul) == 1) { return 1; }
+            }
+            i = _jx_array_next(v, n, i);
+        }
+        return 0;
+    }
+    if (c != 123) { return 0; }
+    var m = _jx_members_raw_a(a, v);
+    var k = 0;
+    while (k < vec_len(m)) {
+        var key = vec_get(m, k);
+        if (key == 0) {
+            if (nul == 1) { return 1; }
+        } else {
+            var j = 0;
+            while (j < k) {
+                var other = vec_get(m, j);
+                if (other != 0 && streq(other, key) == 1) { return 1; }
+                j = j + 3;
+            }
+        }
+        var mv = vec_get(m, k + 2);
+        var mc = load8(mv);
+        if ((mc == 123 || mc == 91) && _jx_repeats_in(a, mv, nul) == 1) { return 1; }
+        k = k + 3;
+    }
+    return 0;
 }
 
 # Past the array element at buf[i]: the next element, its closing `]`, or len when
@@ -713,3 +794,250 @@ fn bote_json_escape(sb, cstr) {
 fn _json_emit_escaped(sb, cstr) {
     return bote_json_escape(sb, cstr);
 }
+
+# ================================================================
+# Titles and icons (3.8.1)
+# ================================================================
+#
+# What a client shows for a tool, a prompt, a resource, a template or the server: a
+# `title` for people, where `name` is for programs, and `icons` (MCP 2025-11-25 and
+# 2026-07-28 alike). An Icon (32 bytes):
+#   +0  src        cstr: an http:// or https:// URL, or a data: URI of Base64 image data
+#   +8  mime_type  cstr or 0, type/subtype
+#   +16 sizes      vec of cstr or 0, each WxH ("48x48") or "any"
+#   +24 theme      cstr or 0, "light" or "dark"
+# Each is checked where it is registered or set, and refused unless every field is what
+# the spec says: the official client refuses a whole list over one theme it does not know.
+# Here, beside the escaper the fragment is built with, because every registry uses them:
+# the tool registry, the prompt registry and the resource registry, each its own module.
+
+fn bote_icon_new(src) {
+    var i = alloc(32);
+    store64(i, src);
+    store64(i + 8, 0);
+    store64(i + 16, 0);
+    store64(i + 24, 0);
+    return i;
+}
+
+fn bote_icon_with_mime_type(i, mime_type) { store64(i + 8, mime_type); return i; }
+fn bote_icon_with_sizes(i, sizes) { store64(i + 16, sizes); return i; }
+fn bote_icon_with_theme(i, theme) { store64(i + 24, theme); return i; }
+
+fn bote_icon_src(i) { return load64(i); }
+fn bote_icon_mime_type(i) { return load64(i + 8); }
+fn bote_icon_sizes(i) { return load64(i + 16); }
+fn bote_icon_theme(i) { return load64(i + 24); }
+
+fn _bote_lc(c) {
+    if (c >= 65 && c <= 90) { return c + 32; }
+    return c;
+}
+
+# 1 when cstr `s` starts with `lit` (lower case), whatever the case of `s`.
+fn _bote_starts_ci(s, lit) {
+    var i = 0;
+    while (load8(lit + i) != 0) {
+        if (_bote_lc(load8(s + i)) != load8(lit + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn _bote_alnum(c) {
+    if (c >= 48 && c <= 57) { return 1; }
+    if (c >= 65 && c <= 90) { return 1; }
+    if (c >= 97 && c <= 122) { return 1; }
+    return 0;
+}
+
+# 1 when byte `c` (not NUL) is one of the cstr `set`.
+fn _bote_in(set, c) {
+    if (strchr(set, c) >= 0) { return 1; }
+    return 0;
+}
+
+fn _bote_hex(c) {
+    if (c >= 48 && c <= 57) { return 1; }
+    if (c >= 65 && c <= 70) { return 1; }
+    if (c >= 97 && c <= 102) { return 1; }
+    return 0;
+}
+
+# 1 when the bytes of `s` from `i` are all a URI may hold (RFC 3986: unreserved,
+# reserved, and a percent sign before two hex digits), and there is at least one.
+fn _bote_uri_rest_ok(s, i) {
+    var n = strlen(s);
+    if (i >= n) { return 0; }
+    while (i < n) {
+        var c = load8(s + i);
+        if (c == 37) {
+            if (i + 2 >= n || _bote_hex(load8(s + i + 1)) == 0 || _bote_hex(load8(s + i + 2)) == 0) { return 0; }
+            i = i + 3;
+        } else {
+            if (_bote_alnum(c) == 0 && _bote_in("-._~:/?#[]@!$&'()*+,;=", c) == 0) { return 0; }
+            i = i + 1;
+        }
+    }
+    return 1;
+}
+
+# 1 when `url` is an absolute http:// or https:// URL with a host: what an icon's `src`
+# may be beside a data: URI, and what `websiteUrl` must be.
+fn bote_web_url_ok(url) {
+    if (url == 0) { return 0; }
+    var at = 0;
+    if (_bote_starts_ci(url, "https://") == 1) { at = 8; }
+    elif (_bote_starts_ci(url, "http://") == 1) { at = 7; }
+    else { return 0; }
+    var h = load8(url + at);
+    if (h == 0 || h == 47 || h == 63 || h == 35) { return 0; }
+    return _bote_uri_rest_ok(url, at);
+}
+
+# 1 when `uri` is data: with a media type, `;base64`, and Base64 after the comma, as the
+# spec has an icon's: "a data: URI with Base64-encoded image data".
+fn _bote_data_uri_ok(uri) {
+    if (_bote_starts_ci(uri, "data:") == 0) { return 0; }
+    var n = strlen(uri);
+    var comma = 5;
+    while (comma < n && load8(uri + comma) != 44) { comma = comma + 1; }
+    if (comma >= n || comma < 12) { return 0; }
+    if (_bote_starts_ci(uri + comma - 7, ";base64") == 0) { return 0; }
+    var i = 5;
+    while (i < comma - 7) {
+        var c = load8(uri + i);
+        if (_bote_alnum(c) == 0 && _bote_in("-._~!$&'()*+;=/", c) == 0) { return 0; }
+        i = i + 1;
+    }
+    i = comma + 1;
+    if (i >= n) { return 0; }
+    while (i < n) {
+        var b = load8(uri + i);
+        if (_bote_alnum(b) == 0 && b != 43 && b != 47 && b != 61) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# 1 when `m` is type/subtype, each of RFC 6838's restricted-name characters.
+fn _bote_mime_ok(m) {
+    var n = strlen(m);
+    var slash = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        var c = load8(m + i);
+        if (c == 47) {
+            if (slash >= 0 || i == 0) { return 0; }
+            slash = i;
+        } elif (_bote_alnum(c) == 0 && _bote_in("!#$&-^_.+", c) == 0) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    if (slash < 0 || slash == n - 1) { return 0; }
+    return 1;
+}
+
+# 1 when `s` is "any" or WxH, each side 1 to 5 digits.
+fn _bote_size_ok(s) {
+    if (streq(s, "any") == 1) { return 1; }
+    var i = 0;
+    var w = 0;
+    while (load8(s + i) >= 48 && load8(s + i) <= 57) { i = i + 1; w = w + 1; }
+    if (w == 0 || w > 5 || load8(s + i) != 120) { return 0; }
+    i = i + 1;
+    var h = 0;
+    while (load8(s + i) >= 48 && load8(s + i) <= 57) { i = i + 1; h = h + 1; }
+    if (h == 0 || h > 5 || load8(s + i) != 0) { return 0; }
+    return 1;
+}
+
+# Why the vec of Icons `icons` cannot be sent, or 0 when it can (an absent list can).
+# Public, so a consumer can check a list before it sets one.
+fn bote_icons_check(icons) {
+    if (icons == 0) { return 0; }
+    var i = 0;
+    while (i < vec_len(icons)) {
+        var ic = vec_get(icons, i);
+        if (ic == 0) { return "an icon is missing"; }
+        var src = bote_icon_src(ic);
+        if (src == 0 || (bote_web_url_ok(src) == 0 && _bote_data_uri_ok(src) == 0)) {
+            return "an icon's src must be an http:// or https:// URL, or a data: URI of Base64 data";
+        }
+        var m = bote_icon_mime_type(ic);
+        if (m != 0 && _bote_mime_ok(m) == 0) { return "an icon's mimeType must be type/subtype"; }
+        var sz = bote_icon_sizes(ic);
+        if (sz != 0) {
+            var k = 0;
+            while (k < vec_len(sz)) {
+                var one = vec_get(sz, k);
+                if (one == 0 || _bote_size_ok(one) == 0) { return "an icon's size must be WxH or \"any\""; }
+                k = k + 1;
+            }
+        }
+        var th = bote_icon_theme(ic);
+        if (th != 0 && streq(th, "light") == 0 && streq(th, "dark") == 0) {
+            return "an icon's theme must be \"light\" or \"dark\"";
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Why `title` and `icons` cannot be sent beside a name, or 0 when they can.
+fn bote_display_check(title, icons) {
+    if (title != 0 && strlen(title) == 0) { return "a title must not be empty"; }
+    return bote_icons_check(icons);
+}
+
+# What a list says beside a name, `,"title":"…","icons":[…]`, or 0 for neither: built
+# once, from what passed bote_display_check, so a list appends bytes already escaped.
+fn _bote_display_json(title, icons) {
+    if (title == 0 && icons == 0) { return 0; }
+    var sb = str_builder_new();
+    if (title != 0) {
+        str_builder_add_cstr(sb, ",\"title\":\"");
+        bote_json_escape(sb, title);
+        str_builder_add_cstr(sb, "\"");
+    }
+    if (icons != 0) {
+        str_builder_add_cstr(sb, ",\"icons\":[");
+        var i = 0;
+        while (i < vec_len(icons)) {
+            var ic = vec_get(icons, i);
+            if (i > 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"src\":\"");
+            bote_json_escape(sb, bote_icon_src(ic));
+            str_builder_add_cstr(sb, "\"");
+            if (bote_icon_mime_type(ic) != 0) {
+                str_builder_add_cstr(sb, ",\"mimeType\":\"");
+                bote_json_escape(sb, bote_icon_mime_type(ic));
+                str_builder_add_cstr(sb, "\"");
+            }
+            var sz = bote_icon_sizes(ic);
+            if (sz != 0) {
+                str_builder_add_cstr(sb, ",\"sizes\":[");
+                var k = 0;
+                while (k < vec_len(sz)) {
+                    if (k > 0) { str_builder_add_cstr(sb, ","); }
+                    str_builder_add_cstr(sb, "\"");
+                    bote_json_escape(sb, vec_get(sz, k));
+                    str_builder_add_cstr(sb, "\"");
+                    k = k + 1;
+                }
+                str_builder_add_cstr(sb, "]");
+            }
+            if (bote_icon_theme(ic) != 0) {
+                str_builder_add_cstr(sb, ",\"theme\":\"");
+                bote_json_escape(sb, bote_icon_theme(ic));
+                str_builder_add_cstr(sb, "\"");
+            }
+            str_builder_add_cstr(sb, "}");
+            i = i + 1;
+        }
+        str_builder_add_cstr(sb, "]");
+    }
+    return str_data(str_builder_build(sb));
+}
+

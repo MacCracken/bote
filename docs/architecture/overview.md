@@ -194,7 +194,8 @@ tests/
 ├── bote_libro_tools.tcyr      — 73 (libro_tools; incl. the tampered-chain
 │                                 error decode + populated-chain proof paths)
 ├── bote_log.tcyr              — 50 (src/log.cyr: levels, line bytes, escaping, truncation)
-├── bote_output.tcyr           — 122 (3.8.0: a tool's outputSchema, registration to the heap)
+├── bote_display.tcyr          — 100 (3.8.1: titles, icons, serverInfo's details and instructions)
+├── bote_output.tcyr           — 179 (3.8.0: a tool's outputSchema, registration to the heap)
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 53 (streamable HTTP / SSE)
@@ -301,6 +302,12 @@ result's `structuredContent`. 2025-11-25 allows an object in both places, so a t
 is listed there with it as an object's `result` (built at registration, `_reg_output_legacy`), and
 `structuredContent` that is no object goes as `{"result": …}` (`_dsp_tool_result_out_a`). Before that, the result
 is judged by the tool's outputSchema, and one that fails is a tool error.
+
+Titles and icons (3.8.1) are checked where a definition is registered, and each keeps the JSON fragment that passed
+(`_bote_display_json`), which its list appends after the name. serverInfo is built once, when it is set, in two forms:
+every field for `initialize` and `server/discover`, and the name, title and version for the `_meta` of every other
+2026-07-28 result, so an icon is not repeated in each reply. `instructions` goes in `initialize`'s result and in
+`server/discover`'s, the place each revision gives it.
 
 ---
 
@@ -456,8 +463,8 @@ standing rules are in CLAUDE.md under Key Principles.
 |---|---|---|
 | Core unit tests | 969 | `tests/bote.tcyr` |
 | Protocol conformance | 218 | `tests/conformance.tcyr` — by spec clause, through `codec_process_message` (3.4.5) |
-| Module tests | 4166 | the other twenty-two `tests/bote_*.tcyr` files; each is listed with its count in CLAUDE.md's testing table |
-| **Total assertions** | **5353** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
+| Module tests | 4323 | the other twenty-three `tests/bote_*.tcyr` files; each is listed with its count in CLAUDE.md's testing table |
+| **Total assertions** | **5510** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
 | Benchmarks | 42 | `tests/bote.bcyr` |
 | Third-party conformance | 26 of 37, 22 of 30 | `scripts/conformance.sh`: the official suite's required lists for 2026-07-28 and 2025-11-25, and the official client on all four of its transports, its OAuth flow included |
 | Fuzz harnesses | 15 | `fuzz/*.fcyr` |
