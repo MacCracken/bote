@@ -116,6 +116,41 @@ fn _many(n) {
     return str_data(str_builder_build(sb));
 }
 
+# 1 when the JSON string whose body is `body` counts `c` characters by maxLength and minLength:
+# held to c and to c-1, and asked for c and c+1.
+fn _bound(kw, n) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"type\":\"string\",\"");
+    str_builder_add_cstr(sb, kw);
+    str_builder_add_cstr(sb, "\":");
+    str_builder_add_int(sb, n);
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+fn _counts(body, c) {
+    var v = _cat3("\"", body, "\"");
+    if (_ok(_bound("maxLength", c), v) == 0) { return 0; }
+    if (c > 0 && _ok(_bound("maxLength", c - 1), v) == 1) { return 0; }
+    if (_ok(_bound("minLength", c), v) == 0) { return 0; }
+    if (_ok(_bound("minLength", c + 1), v) == 1) { return 0; }
+    return 1;
+}
+fn _rep_str(t, n) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < n) { str_builder_add_cstr(sb, t); i = i + 1; }
+    return str_data(str_builder_build(sb));
+}
+# The first violation of `v`, or "(none)".
+fn _first(v) {
+    if (v == 0 || vec_len(v) == 0) { return "(none)"; }
+    return vec_get(v, 0);
+}
+var _rq_calls = 0;
+fn h_rq(args, claims) { _rq_calls = _rq_calls + 1; return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+var _bytes_ret = 0;
+fn h_bytes(args, claims) { return _bytes_ret; }
+
 var _lc_all = 0;
 fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
     var n = msg_len;
@@ -311,6 +346,109 @@ fn main() {
     _sch_check_value_a(ba, bp, "v", bigv);
     assert_eq(bote_req_arena_bytes(ba), before, "heap: a 60 KB string judged takes no arena chunk (it was copied out)");
     bote_arena_release(ba, &bm);
+
+    # ---- (3.8.6, from the 3.8.5 review) bytes that are no UTF-8, counted as a client reads them ----
+    # Each count is Node's: TextDecoder's U+FFFD for each maximal part, then code points.
+    assert(_counts("\x80\x80\x80\x80\x80", 5), "count: five stray continuation bytes are five");
+    assert(_counts("\x80", 1), "count: one is one");
+    assert(_counts("\xe0\x80\x80", 3), "count: an overlong form is three");
+    assert(_counts("\xed\xa0\x80", 3), "count: an encoded surrogate is three");
+    assert(_counts("\xf4\x90\x80\x80", 4), "count: past U+10FFFF is four");
+    assert(_counts("\xe1\x80", 1), "count: a sequence cut short at the end is one");
+    assert(_counts("\xe1\x80A", 2), "count: ...and before a letter, two");
+    assert(_counts("\xc3\\u0041", 2), "count: ...and before an escape, two");
+    assert(_counts("\xf0\x90\x80", 1), "count: a four-byte sequence cut short is one");
+    assert(_counts("\xe0\xa0", 1), "count: ...a three-byte one, one");
+    assert(_counts("\xc2", 1), "count: ...a two-byte one, one");
+    assert(_counts("\xff", 1), "count: a byte no sequence starts with is one");
+    assert(_counts("\xc0\xaf", 2), "count: ...and C0 AF two");
+    assert(_counts("\xf5\x80", 2), "count: ...and F5 80 two");
+    assert(_counts("\xc0\xaf\xe0\x80\xbf\xf0\x81\x82A", 9), "count: Unicode's table 3-8, nine");
+    assert(_counts("\xc3\xa9\xf0\x9f\x98\x80\xef\xbf\xbd", 3), "count: text stays as it was, three");
+    var stray = _rep_str("\x80", 60000);
+    assert(_ok("{\"type\":\"string\",\"maxLength\":4}", _cat3("\"", stray, "\"")) == 0, "count: 60,000 stray bytes meet no maxLength 4");
+    var rqd = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(rqd, tool_def_new("t_len", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"s\":{\"type\":\"string\",\"maxLength\":4}}}")), &h_rq);
+    var rqr = codec_process_message(_msg("tools/call", _cat3("\"name\":\"t_len\",\"arguments\":{\"s\":\"", stray, "\"}")), rqd, 0);
+    assert(_has(rqr, "s: longer than maxLength") == 1, "count: ...refused through the dispatcher");
+    assert_eq(_rq_calls, 0, "count: ...and its handler never ran");
+    dispatcher_register_tool(rqd, tool_def_with_output_schema(tool_def_new("t_lout", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"s\":{\"type\":\"string\",\"maxLength\":2}}}"), &h_bytes);
+    _bytes_ret = "{\"content\":[],\"structuredContent\":{\"s\":\"\x80\x80\x80\x80\x80\x80\"}}";
+    assert(_has(codec_process_message(_msg("tools/call", "\"name\":\"t_lout\",\"arguments\":{}"), rqd, 0), "structuredContent.s: longer than maxLength") == 1, "count: a result a client reads as six characters refused for maxLength 2");
+    _bytes_ret = "{\"content\":[],\"structuredContent\":{\"s\":\"\xc3\xa9\"}}";
+    assert(_has(codec_process_message(_msg("tools/call", "\"name\":\"t_lout\",\"arguments\":{}"), rqd, 0), "isError") == 0, "count: ...and one character taken");
+
+    # ---- (3.8.6, from the 3.8.5 review) a required name pushed after compiled_set_required ----
+    var hc = compiled_new();
+    compiled_add_property(hc, "x", prop_new(SCH_STRING));
+    vec_push(compiled_required(hc), "x");
+    assert(compiled_check_a(bote_req_begin(), hc, "{\"x\":\"a\"}") == 0, "required: a name pushed into compiled_new's vec is met");
+    assert(_has(_first(compiled_check_a(bote_req_begin(), hc, "{}")), "missing required field: x") == 1, "required: ...and missed");
+    var hc2 = compiled_new();
+    compiled_add_property(hc2, "x", prop_new(SCH_INTEGER));
+    var rv = vec_new();
+    vec_push(rv, "x");
+    compiled_set_required(hc2, rv);
+    vec_push(rv, "y");
+    assert(compiled_check_a(bote_req_begin(), hc2, "{\"x\":1,\"y\":1}") == 0, "required: a name pushed after compiled_set_required is met");
+    assert(_has(_first(compiled_check_a(bote_req_begin(), hc2, "{\"x\":1}")), "missing required field: y") == 1, "required: ...and missed");
+    vec_set(rv, 0, "z");
+    assert(_has(_first(compiled_check_a(bote_req_begin(), hc2, "{\"x\":1,\"y\":1}")), "missing required field: z") == 1, "required: a name replaced is the new one");
+    assert(compiled_check_a(bote_req_begin(), hc2, "{\"z\":1,\"y\":1}") == 0, "required: ...met by its own member");
+    assert(compiled_check_a(bote_req_begin(), hc2, "{\"\\u007a\":1,\"y\":1}") == 0, "required: ...as its key decodes");
+
+    # ---- (3.8.6, from the 3.8.5 review) a keyword bote judges, with a value it cannot judge by ----
+    _lc_begin();
+    var wd2 = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(wd2, tool_def_with_output_schema(tool_def_new("w_bad", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"additionalProperties\":\"no\",\"minProperties\":-1,\"properties\":{\"n\":{\"type\":\"number\",\"minimum\":5,\"exclusiveMinimum\":true,\"maximum\":\"9\"},\"s\":{\"type\":\"string\",\"maxLength\":\"3\",\"minLength\":1.5},\"a\":{\"type\":\"array\",\"minItems\":-1}}}"), &h_ret);
+    dispatcher_register_tool(wd2, tool_def_with_output_schema(tool_def_new("w_good", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"additionalProperties\":true,\"properties\":{\"s\":{\"type\":\"string\",\"maxLength\":2.0,\"minLength\":0},\"o\":{\"type\":\"object\",\"additionalProperties\":{}},\"f\":{\"type\":\"object\",\"additionalProperties\":false},\"n\":{\"type\":\"number\",\"exclusiveMinimum\":-1e2}}}"), &h_ret);
+    _lc_end();
+    assert(_lc_find("additionalProperties that is no boolean or object") != 0, "warn: additionalProperties a string");
+    assert(_lc_find("minProperties that is no non-negative integer") != 0, "warn: minProperties -1");
+    assert(_lc_find("exclusiveMinimum that is no number") != 0, "warn: draft-04's exclusiveMinimum true");
+    assert(_lc_find("maximum that is no number") != 0, "warn: maximum a string");
+    assert(_lc_find("maxLength that is no non-negative integer") != 0, "warn: maxLength a string");
+    assert(_lc_find("minLength that is no non-negative integer") != 0, "warn: minLength 1.5");
+    assert(_lc_find("minItems that is no non-negative integer") != 0, "warn: minItems -1");
+    assert(_lc_find("w_good") == 0, "warn: none for 2.0, 0, true, false, {} and -1e2");
+
+    # ---- (3.8.6, from the 3.8.5 review) a large schema's seen table given back ----
+    var bigo = str_builder_new();
+    str_builder_add_cstr(bigo, "{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{");
+    li = 0;
+    while (li < 1000) {
+        if (li > 0) { str_builder_add_cstr(bigo, ","); }
+        str_builder_add_cstr(bigo, "\"q");
+        str_builder_add_int(bigo, li);
+        str_builder_add_cstr(bigo, "\":{\"type\":\"integer\"}");
+        li = li + 1;
+    }
+    str_builder_add_cstr(bigo, "}}}");
+    var bigp = parse_property(str_data(str_builder_build(bigo)));
+    var items = str_builder_new();
+    str_builder_add_cstr(items, "[");
+    li = 0;
+    while (li < 19000) {
+        if (li > 0) { str_builder_add_cstr(items, ","); }
+        str_builder_add_cstr(items, "{}");
+        li = li + 1;
+    }
+    str_builder_add_cstr(items, "]");
+    var itv = str_data(str_builder_build(items));
+    var na = bote_req_arena_new();
+    assert(_sch_check_value_a(na, bigp, "v", itv) == 0, "seen: 19,000 objects against 1,000 properties pass");
+    assert(bote_req_arena_bytes(na) < 1048576, "seen: ...on less than a megabyte of arena (19 MB at 3.8.5)");
+    var itbad = _cat("[{\"q0\":\"x\"},", itv + 1);
+    var na2 = bote_req_arena_new();
+    var vb = _sch_check_value_a(na2, bigp, "v", itbad);
+    assert(vb != 0 && _has(vec_get(vb, 0), "v[0].q0: expected integer") == 1, "seen: a violation in the first object kept");
+    assert(bote_req_arena_bytes(na2) < 1048576, "seen: ...and the rest given back");
+    # A violation in the next object too, whose bytes would land on the first's had its table
+    # been given back with them.
+    var itbad2 = _cat("[{\"q0\":\"x\"},{\"q1\":\"y\"},{\"q2\":\"z\"},", itv + 1);
+    var vb2 = _sch_check_value_a(bote_req_arena_new(), bigp, "v", itbad2);
+    assert(vb2 != 0 && vec_len(vb2) == 3, "seen: three objects with a violation each, three violations");
+    assert(vb2 != 0 && vec_len(vb2) == 3 && streq(vec_get(vb2, 0), "v[0].q0: expected integer") == 1 && streq(vec_get(vb2, 1), "v[1].q1: expected integer") == 1 && streq(vec_get(vb2, 2), "v[2].q2: expected integer") == 1, "seen: ...each as it was written");
 
     return assert_summary();
 }

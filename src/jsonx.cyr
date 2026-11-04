@@ -356,37 +356,55 @@ fn _jx_members_x(a, obj, raw) {
 # 62 deep, and compared every pair of keys in an object.
 fn _jx_repeats_a(a, v, nul) {
     if (v == 0) { return 0; }
+    return _jx_repeats_n_a(a, v, strlen(v), nul);
+}
+
+# _jx_repeats_a for the `n` bytes at `v`.
+fn _jx_repeats_n_a(a, v, n, nul) {
     var mk[16];
     bote_arena_mark(a, &mk);
-    var n = strlen(v);
     var r = 0;
     var i = _jx_skip_ws(v, n, 0);
-    if (i < n) { r = _jx_rep_value(a, v, n, i, nul); }
+    if (i < n && _jx_rep_value(a, v, n, i, nul) < 0) { r = 1; }
     bote_arena_release(a, &mk);
     return r;
 }
 
-# _jx_repeats_a for the value at v[i], in the n bytes at v.
+# _jx_repeats_a for the value at v[i], in the n bytes at v: the index past it, or -1 for a
+# key named twice (or the rest _jx_repeats_a refuses). Each byte is read once (3.8.6): a
+# nested value was walked again by the level above it, so 60 KB nested 62 deep was read 63
+# times, and one escaped key in a request now sends a message here.
 fn _jx_rep_value(a, v, n, i, nul) {
     var c = load8(v + i);
     if (c == 34) {
-        if (nul == 0) { return 0; }
-        var sl = _jx_skip_string(v, n, i) - i - 2;
-        if (sl <= 0 || _jx_has_escape(v + i + 1, sl) == 0) { return 0; }
+        var se = _jx_skip_string(v, n, i);
+        if (nul == 0) { return se; }
+        var sl = se - i - 2;
+        if (sl <= 0 || _jx_has_escape(v + i + 1, sl) == 0) { return se; }
         var ds = alloc_via(a, sl + 1);
-        return _jx_has_nul(ds, _jx_unescape_into(v + i + 1, sl, ds));
+        if (_jx_has_nul(ds, _jx_unescape_into(v + i + 1, sl, ds)) == 1) { return 0 - 1; }
+        return se;
     }
     if (c == 91) {
         i = _jx_skip_ws(v, n, i + 1);
         while (i < n && load8(v + i) != 93) {
             # Only an object or an array can hold a key, and a string a NUL.
             var ec = load8(v + i);
-            if ((ec == 123 || ec == 91 || (nul == 1 && ec == 34)) && _jx_rep_value(a, v, n, i, nul) == 1) { return 1; }
-            i = _jx_array_next(v, n, i);
+            var e = 0;
+            if (ec == 123 || ec == 91 || (nul == 1 && ec == 34)) {
+                e = _jx_rep_value(a, v, n, i, nul);
+                if (e < 0) { return 0 - 1; }
+            } else {
+                e = _jx_skip_value(v, n, i);
+            }
+            if (e <= i) { return n; }
+            i = _jx_skip_ws(v, n, e);
+            if (i < n && load8(v + i) == 44) { i = _jx_skip_ws(v, n, i + 1); }
         }
-        return 0;
+        if (i < n) { i = i + 1; }
+        return i;
     }
-    if (c != 123) { return 0; }
+    if (c != 123) { return _jx_skip_value(v, n, i); }
     # Each key as it decodes, a pointer and a length: into `v` where it has no escape.
     var ks = vec_new_a(a);
     i = _jx_skip_ws(v, n, i + 1);
@@ -394,24 +412,35 @@ fn _jx_rep_value(a, v, n, i, nul) {
         var ke = _jx_skip_string(v, n, i);
         var kp = v + i + 1;
         var kl = ke - i - 2;
-        if (_jx_key_text_ok(kp, kl) == 0) { return 1; }
+        if (_jx_key_text_ok(kp, kl) == 0) { return 0 - 1; }
         if (kl > 0 && _jx_has_escape(kp, kl) == 1) {
             var dk = alloc_via(a, kl + 1);
             kl = _jx_unescape_into(kp, kl, dk);
             kp = dk;
-            if (nul == 1 && _jx_has_nul(kp, kl) == 1) { return 1; }
+            if (nul == 1 && _jx_has_nul(kp, kl) == 1) { return 0 - 1; }
         }
         vec_push_a(a, ks, kp);
         vec_push_a(a, ks, kl);
         i = _jx_skip_ws(v, n, ke);
-        if (i >= n || load8(v + i) != 58) { return _jx_rep_keys(a, ks); }
+        if (i >= n || load8(v + i) != 58) {
+            if (_jx_rep_keys(a, ks) == 1) { return 0 - 1; }
+            return n;
+        }
         i = _jx_skip_ws(v, n, i + 1);
         var vc = load8(v + i);
-        if ((vc == 123 || vc == 91 || (nul == 1 && vc == 34)) && _jx_rep_value(a, v, n, i, nul) == 1) { return 1; }
-        i = _jx_skip_ws(v, n, _jx_skip_value(v, n, i));
+        var ve = 0;
+        if (vc == 123 || vc == 91 || (nul == 1 && vc == 34)) {
+            ve = _jx_rep_value(a, v, n, i, nul);
+            if (ve < 0) { return 0 - 1; }
+        } else {
+            ve = _jx_skip_value(v, n, i);
+        }
+        i = _jx_skip_ws(v, n, ve);
         if (i < n && load8(v + i) == 44) { i = _jx_skip_ws(v, n, i + 1); }
     }
-    return _jx_rep_keys(a, ks);
+    if (_jx_rep_keys(a, ks) == 1) { return 0 - 1; }
+    if (i < n) { i = i + 1; }
+    return i;
 }
 
 # 1 when two of the keys in `ks` (pointer, length, pointer, length, ...) are the same.
@@ -704,6 +733,46 @@ fn _jx_valid_string(buf, len, i) {
     return 0 - 1;
 }
 
+# _jx_valid_string for a key the validator checks (3.8.6): the index after it when its body is
+# plain ASCII with no escape, minus that index when it is valid but is not, or -1. The test is
+# made in the same pass as the syntax's.
+fn _jx_valid_key_string(buf, len, i) {
+    i = i + 1;
+    var plain = 1;
+    while (i < len) {
+        var c = load8(buf + i);
+        if (c == 34) {
+            if (plain == 1) { return i + 1; }
+            return 0 - (i + 1);
+        }
+        if (c < 32) { return 0 - 1; }
+        if (c >= 128) {
+            plain = 0;
+            i = i + 1;
+        } elif (c == 92) {
+            plain = 0;
+            if (i + 1 >= len) { return 0 - 1; }
+            var e = load8(buf + i + 1);
+            if (e == 117) {
+                if (i + 6 > len) { return 0 - 1; }
+                var h = 2;
+                while (h < 6) {
+                    if (_jx_is_hex(load8(buf + i + h)) == 0) { return 0 - 1; }
+                    h = h + 1;
+                }
+                i = i + 6;
+            } elif (e == 34 || e == 92 || e == 47 || e == 98 || e == 102 || e == 110 || e == 114 || e == 116) {
+                i = i + 2;
+            } else {
+                return 0 - 1;
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+    return 0 - 1;
+}
+
 # Index after the number at buf[i], or -1. RFC 8259 §6:
 # -? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?
 fn _jx_valid_number(buf, len, i) {
@@ -738,17 +807,56 @@ fn _jx_valid_literal(buf, len, i, lit, n) {
     return i + n;
 }
 
-# Index after the object at buf[i] (a `{`), or -1. `depth` counts this one.
-fn _jx_valid_object(buf, len, i, depth) {
+# One key of an object the validator walks with a key check (3.8.6): `kl` bytes at buf[p],
+# its body between the quotes, plain ASCII with no escape, so its own decoding, and text.
+# `ks` holds the start and length of each key kept so far, `nk` of them; the count kept is
+# returned. *kc becomes 1 when the key is one kept, and 2 past BOTE_KEYS_INLINE keys, when
+# only the exact walker (_jx_repeats_n_a) can say, as for a key holding an escape or a byte
+# past ASCII, which must be read as it decodes (_jx_valid_key_string finds those).
+var BOTE_KEYS_INLINE = 16;
+
+fn _jx_valid_key(buf, p, kl, ks, nk, kc) {
+    var o = 0;
+    while (o < nk) {
+        if (load64(ks + o * 16 + 8) == kl && memeq(buf + load64(ks + o * 16), buf + p, kl) == 1) {
+            store64(kc, 1);
+            return nk;
+        }
+        o = o + 1;
+    }
+    if (nk >= BOTE_KEYS_INLINE) { store64(kc, 2); return nk; }
+    store64(ks + nk * 16, p);
+    store64(ks + nk * 16 + 8, kl);
+    return nk + 1;
+}
+
+# Index after the object at buf[i] (a `{`), or -1. `depth` counts this one. With `kc`, its
+# keys are checked as _jx_valid_key says, until *kc holds a verdict.
+fn _jx_valid_object(buf, len, i, depth, kc) {
     i = _jx_skip_ws(buf, len, i + 1);
     if (i < len && load8(buf + i) == 125) { return i + 1; }
+    var ks[256];
+    var nk = 0;
     while (i < len) {
         if (load8(buf + i) != 34) { return 0 - 1; }
-        i = _jx_valid_string(buf, len, i);
-        if (i < 0) { return 0 - 1; }
+        if (kc != 0 && load64(kc) == 0) {
+            var k0 = i + 1;
+            i = _jx_valid_key_string(buf, len, i);
+            if (i < 0) {
+                # A key with an escape or a byte past ASCII: valid, and the exact walker's.
+                if (i == 0 - 1) { return 0 - 1; }
+                i = 0 - i;
+                store64(kc, 2);
+            } else {
+                nk = _jx_valid_key(buf, k0, i - 1 - k0, &ks, nk, kc);
+            }
+        } else {
+            i = _jx_valid_string(buf, len, i);
+            if (i < 0) { return 0 - 1; }
+        }
         i = _jx_skip_ws(buf, len, i);
         if (i >= len || load8(buf + i) != 58) { return 0 - 1; }
-        i = _jx_valid_value(buf, len, i + 1, depth);
+        i = _jx_valid_value(buf, len, i + 1, depth, kc);
         if (i < 0) { return 0 - 1; }
         i = _jx_skip_ws(buf, len, i);
         if (i >= len) { return 0 - 1; }
@@ -761,11 +869,11 @@ fn _jx_valid_object(buf, len, i, depth) {
 }
 
 # Index after the array at buf[i] (a `[`), or -1. `depth` counts this one.
-fn _jx_valid_array(buf, len, i, depth) {
+fn _jx_valid_array(buf, len, i, depth, kc) {
     i = _jx_skip_ws(buf, len, i + 1);
     if (i < len && load8(buf + i) == 93) { return i + 1; }
     while (i < len) {
-        i = _jx_valid_value(buf, len, i, depth);
+        i = _jx_valid_value(buf, len, i, depth, kc);
         if (i < 0) { return 0 - 1; }
         i = _jx_skip_ws(buf, len, i);
         if (i >= len) { return 0 - 1; }
@@ -779,15 +887,15 @@ fn _jx_valid_array(buf, len, i, depth) {
 
 # Index after the value at buf[i] (leading whitespace skipped), or -1.
 # `depth` is the number of containers already open around it.
-fn _jx_valid_value(buf, len, i, depth) {
+fn _jx_valid_value(buf, len, i, depth, kc) {
     i = _jx_skip_ws(buf, len, i);
     if (i >= len) { return 0 - 1; }
     var c = load8(buf + i);
     if (c == 34) { return _jx_valid_string(buf, len, i); }
     if (c == 123 || c == 91) {
         if (depth >= JSONX_MAX_DEPTH) { return 0 - 1; }
-        if (c == 123) { return _jx_valid_object(buf, len, i, depth + 1); }
-        return _jx_valid_array(buf, len, i, depth + 1);
+        if (c == 123) { return _jx_valid_object(buf, len, i, depth + 1, kc); }
+        return _jx_valid_array(buf, len, i, depth + 1, kc);
     }
     if (c == 116) { return _jx_valid_literal(buf, len, i, "true", 4); }
     if (c == 102) { return _jx_valid_literal(buf, len, i, "false", 5); }
@@ -799,9 +907,25 @@ fn _jx_valid_value(buf, len, i, depth) {
 # allowed; 0 otherwise, or when buf is 0.
 fn jsonx_valid(buf, len) {
     if (buf == 0) { return 0; }
-    var end = _jx_valid_value(buf, len, 0, 0);
+    var end = _jx_valid_value(buf, len, 0, 0, 0);
     if (end < 0) { return 0; }
     if (_jx_skip_ws(buf, len, end) != len) { return 0; }
+    return 1;
+}
+
+# jsonx_valid and _jx_repeats_n_a(a, buf, len, 0) in one walk (3.8.6), for a request: 0 when
+# buf[0..len) is no JSON text, 2 when it is one that names a key twice in any object or a
+# key that is no text, else 1. The keys of plain ASCII are compared as the syntax is read,
+# allocating nothing; the exact walker reads the message only when one is not, or an object
+# holds more than BOTE_KEYS_INLINE of them, and gives back what it reads.
+fn _jx_valid_keys_a(a, buf, len) {
+    if (buf == 0) { return 0; }
+    var kc = 0;
+    var end = _jx_valid_value(buf, len, 0, 0, &kc);
+    if (end < 0) { return 0; }
+    if (_jx_skip_ws(buf, len, end) != len) { return 0; }
+    if (kc == 0) { return 1; }
+    if (kc == 1 || _jx_repeats_n_a(a, buf, len, 0) == 1) { return 2; }
     return 1;
 }
 

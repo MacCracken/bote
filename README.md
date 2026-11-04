@@ -618,12 +618,12 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 6017 total across twenty-eight files (+ a core-only drift smoke)
+### Tests — 6195 total across twenty-nine files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 6017 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 6195 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
-cyrius test tests/bote.tcyr               # 969 — core protocol/dispatch/codec/schema/session/transports
+cyrius test tests/bote.tcyr               # 973 — core protocol/dispatch/codec/schema/session/transports
 cyrius test tests/conformance.tcyr        # 218 — JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28 conformance, by spec clause
 cyrius test tests/bote_auth.tcyr          # 91 — bearer + allowlist + JWT + PKCE validators, the head check
 cyrius test tests/bote_cancel.tcyr        # 141 — cancelling a request in flight: the check, the codec, stdio, unix, HTTP, a fetch's child
@@ -631,7 +631,7 @@ cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fetch.tcyr         # 62 — a request made in a child: the record, the cap, the deadline, a real GET
 cyrius test tests/bote_fs_tools.tcyr      # 78 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 207 — host registry + SSRF guard (IPv4 + IPv6)
-cyrius test tests/bote_http_era.tcyr      # 1863 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
+cyrius test tests/bote_http_era.tcyr      # 1912 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
 cyrius test tests/bote_jwks.tcyr          # 49 — a jwks_uri: what it may be, and real fetches from a child
 cyrius test tests/bote_jwt.tcyr           # 510 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
 cyrius test tests/bote_libro_tools.tcyr   # 103 — libro_tools wrappers
@@ -642,7 +642,8 @@ cyrius test tests/bote_display.tcyr       # 107 — titles, icons, serverInfo's 
 cyrius test tests/bote_output.tcyr        # 255 — outputSchema: registration, the 2025-11-25 form, tools/list, each result judged and shaped, the heap
 cyrius test tests/bote_input.tcyr         # 148 — multi round-trip requests: what a handler reads and returns, -32021, the sealed state and its binding, the heap
 cyrius test tests/bote_tool_schema.tcyr   # 103 — an inputSchema as its own JSON: what registration reads and refuses, the list, the heap
-cyrius test tests/bote_schema_walk.tcyr   # 79 — one walk of a value: the counting keywords, additionalProperties, paths, the heap
+cyrius test tests/bote_schema_walk.tcyr   # 121 — one walk of a value: the counting keywords, additionalProperties, paths, the heap
+cyrius test tests/bote_request_keys.tcyr  # 83 — a request naming a key twice, or one that is no text, refused on every path
 cyrius test tests/bote_progress.tcyr      # 110 — progress on a request's own stream: the writer, stdio, unix, WebSocket, HTTP's SSE response
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
@@ -714,6 +715,7 @@ cyrius fuzz fuzz/cancel_lines.fcyr
 cyrius fuzz fuzz/output_shape.fcyr
 cyrius fuzz fuzz/input_schema.fcyr
 cyrius fuzz fuzz/schema_walk.fcyr
+cyrius fuzz fuzz/request_keys.fcyr
 # 1 passed, 0 failed each
 ```
 

@@ -5,8 +5,11 @@
 # items, minItems and maxItems, properties, required, additionalProperties (false, true or a
 # schema), minProperties and maxProperties, nested two deep. Values are drawn alike: keys
 # spelled plainly and escaped, some named twice, strings of one to four characters in one
-# to four bytes each, escapes and surrogate pairs among them. The reference judges bayan's
-# parse of both. Exit codes:
+# to four bytes each, escapes and surrogate pairs among them. (3.8.6, from the 3.8.5 review)
+# Strings holding bytes that are no UTF-8, counted as a client's decoder reads them; half
+# the `properties` padded with nine names no value uses, so a key is decoded and looked up
+# past eight names; a 300-byte name, and keys spelling it plainly, with an escape, and one
+# byte short. The reference judges bayan's parse of both. Exit codes:
 #
 #   10   a value bote passes the reference refuses, or the reverse;
 #   20   the rounds drew fewer than a thousand values passed or a thousand refused;
@@ -73,14 +76,31 @@ var _STRS = 0;
 var _ENUMS = 0;
 fn _pools() {
     _NAMES = vec_new();
+    # (3.8.6) A name of 300 bytes, and keys that spell it plainly, with an escape, and one byte
+    # short of it: the walk decodes a long key where a schema has more than eight names.
+    var lg = alloc(301);
+    memset(lg, 76, 300);
+    store8(lg + 300, 0);
+    var lge = alloc(306);
+    memset(lge, 76, 299);
+    memcpy(lge + 299, "\\u004c", 7);
+    var lgs = alloc(300);
+    memset(lgs, 76, 299);
+    store8(lgs + 299, 0);
     vec_push(_NAMES, "a"); vec_push(_NAMES, "b"); vec_push(_NAMES, "c"); vec_push(_NAMES, "d");
+    vec_push(_NAMES, lg);
     _KEYS = vec_new();
     vec_push(_KEYS, "a"); vec_push(_KEYS, "b"); vec_push(_KEYS, "c"); vec_push(_KEYS, "d");
     vec_push(_KEYS, "e"); vec_push(_KEYS, "\\u0061"); vec_push(_KEYS, "\\u0062"); vec_push(_KEYS, "zz");
+    vec_push(_KEYS, lg); vec_push(_KEYS, lge); vec_push(_KEYS, lgs);
     _STRS = vec_new();
     vec_push(_STRS, "\"\""); vec_push(_STRS, "\"x\""); vec_push(_STRS, "\"ab\""); vec_push(_STRS, "\"abc\"");
     vec_push(_STRS, "\"abcd\""); vec_push(_STRS, "\"\\u00e9t\\u00e9\""); vec_push(_STRS, "\"\\ud83d\\ude00\"");
     vec_push(_STRS, "\"a\\nb\""); vec_push(_STRS, "\"é\""); vec_push(_STRS, "\"x\\u0079\""); vec_push(_STRS, "\"日本\"");
+    # (3.8.6) Bytes that are no UTF-8, which a client reads as U+FFFD for each maximal part.
+    vec_push(_STRS, "\"\x80\x80\x80\""); vec_push(_STRS, "\"\xe0\x80\x80\""); vec_push(_STRS, "\"a\xc3\"");
+    vec_push(_STRS, "\"\xc3\\u0041\""); vec_push(_STRS, "\"\xf0\x9f\x98\""); vec_push(_STRS, "\"\xed\xa0\x80b\"");
+    vec_push(_STRS, "\"\xff\xfe\""); vec_push(_STRS, "\"\xe1\x80A\""); vec_push(_STRS, "\"\xc3\xa9\x80\"");
     _ENUMS = vec_new();
     vec_push(_ENUMS, "\"x\""); vec_push(_ENUMS, "\"ab\""); vec_push(_ENUMS, "\"xy\""); vec_push(_ENUMS, "\"\\u00e9t\\u00e9\"");
     return 0;
@@ -143,13 +163,20 @@ fn _schema(a, sb, depth) {
     }
     if (depth < 2 && (t == 6 || _r(6) == 0)) {
         var np = _r(4);
-        if (np > 0) {
+        # (3.8.6) Nine names no value uses, by chance: past eight names a key is decoded and
+        # looked up, where it is compared as written.
+        var pad = _r(2);
+        if (np > 0 || pad == 1) {
             if (sep == 1) { _add(a, sb, ","); }
             _add(a, sb, "\"properties\":{");
             var used = 0;
+            if (pad == 1) {
+                _add(a, sb, "\"pad0\":{},\"pad1\":{},\"pad2\":{},\"pad3\":{},\"pad4\":{},\"pad5\":{},\"pad6\":{},\"pad7\":{},\"pad8\":{}");
+                used = 1 << 10;
+            }
             var pi = 0;
             while (pi < np) {
-                var nm = _r(4);
+                var nm = _r(5);
                 if ((used & (1 << nm)) == 0) {
                     if (used != 0) { _add(a, sb, ","); }
                     used = used | (1 << nm);
@@ -171,12 +198,12 @@ fn _schema(a, sb, depth) {
             var rfirst = 1;
             var ri = 0;
             while (ri < nr) {
-                var rn = _r(5);
+                var rn = _r(6);
                 if ((rused & (1 << rn)) == 0) {
                     rused = rused | (1 << rn);
                     if (rfirst == 0) { _add(a, sb, ","); }
                     rfirst = 0;
-                    if (rn == 4) { _add(a, sb, "\"e\""); }
+                    if (rn == 5) { _add(a, sb, "\"e\""); }
                     else { _add(a, sb, "\""); _add(a, sb, vec_get(_NAMES, rn)); _add(a, sb, "\""); }
                 }
                 ri = ri + 1;
@@ -255,12 +282,35 @@ fn _int_kw(s, kw) {
     if (m == 0 || bayan_json_v_is_int(m) == 0) { return 0 - 99; }
     return bayan_json_v_int(m);
 }
+# Characters as a client counts them (3.8.6): each maximal part of the bytes is one, a
+# sequence whole (a code point) or not (a U+FFFD), the lead byte and each continuation
+# byte that still makes a prefix of one (Unicode 3.9, "maximal subparts"). bayan hands back
+# bytes that are no UTF-8 as they were, and an escape always decodes whole.
 fn _cps(st) {
     var p = str_data(st);
     var n = str_len(st);
     var c = 0;
     var i = 0;
-    while (i < n) { if ((load8(p + i) & 192) != 128) { c = c + 1; } i = i + 1; }
+    while (i < n) {
+        var b = load8(p + i);
+        var need = 0;
+        var lo = 128;
+        var hi = 191;
+        if (b >= 194 && b <= 223) { need = 1; }
+        elif (b >= 224 && b <= 239) { need = 2; if (b == 224) { lo = 160; } if (b == 237) { hi = 159; } }
+        elif (b >= 240 && b <= 244) { need = 3; if (b == 240) { lo = 144; } if (b == 244) { hi = 143; } }
+        var k = 1;
+        while (k <= need && i + k < n) {
+            var cb = load8(p + i + k);
+            var l2 = 128;
+            var h2 = 191;
+            if (k == 1) { l2 = lo; h2 = hi; }
+            if (cb < l2 || cb > h2) { break; }
+            k = k + 1;
+        }
+        c = c + 1;
+        i = i + k;
+    }
     return c;
 }
 fn _is_num(v) {

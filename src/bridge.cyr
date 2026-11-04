@@ -134,13 +134,13 @@ fn wrap_error_result_a(a, message) {
 #              (JSON-RPC 2.0 forbids both result+error; SY wants the envelope)
 # Other methods (initialize, tools/list, batch elements) pass through unchanged.
 
-fn _bridge_process_single(a, line, dispatcher, claims) {
+fn _bridge_process_single(a, line, dispatcher, claims, keys) {
     # The codec's own admission checks, so a request the codec refuses is
     # refused here the same way (3.4.5; this was a second copy before).
     var err_slot[8];
-    var req = _cdc_admit_a(a, line, &err_slot);
+    var req = _cdc_admit_k_a(a, line, &err_slot, keys);
     if (req == 0) { return load64(&err_slot); }
-    var resp = dispatcher_dispatch_a(a, dispatcher, req, claims);
+    var resp = _dsp_dispatch_admitted_a(a, dispatcher, req, claims);
     if (resp == 0) { return 0; }
 
     # Bridge wrapping only applies to tools/call.
@@ -168,13 +168,14 @@ fn bridge_process_message_a(a, input, dispatcher, claims) {
     var len = strlen(input);
     var i = _cdc_skip_ws(input, len, 0);
     if (i >= len) { return _cdc_parse_error_a(a, "empty input"); }
-    if (jsonx_valid(input, len) == 0) { return _cdc_parse_error_a(a, "invalid JSON"); }
+    var kv = _jx_valid_keys_a(a, input, len);
+    if (kv == 0) { return _cdc_parse_error_a(a, "invalid JSON"); }
     var first = load8(input + i);
 
     # Batch arrays defer to the codec (no per-element wrapping; the bridge
     # contract is single-tool-call → MCP envelope).
     if (first == 91) { return codec_process_message_a(a, input, dispatcher, claims); }
-    if (first == 123) { return _bridge_process_single(a, input, dispatcher, claims); }
+    if (first == 123) { return _bridge_process_single(a, input, dispatcher, claims, kv); }
     return _cdc_invalid_request_a(a, "expected object or array");
 }
 

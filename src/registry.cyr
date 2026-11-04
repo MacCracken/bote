@@ -707,6 +707,34 @@ fn _reg_warn_schema(tool, key, v, kws) {
     if (jsonx_has(v, "additionalProperties") == 1 && jsonx_has(v, "patternProperties") == 1) {
         _reg_warn_kw(tool, key, "additionalProperties beside patternProperties");
     }
+    # (3.8.6, from the 3.8.5 review) A keyword bote judges, with a value it cannot judge by,
+    # judges nothing, where a client's validator refuses the schema: said, as 3.8.4 said of
+    # each before bote judged them.
+    var counts = _reg_words("minLength maxLength minItems maxItems minProperties maxProperties ");
+    var ci = 0;
+    while (ci < vec_len(counts)) {
+        var ck = vec_get(counts, ci);
+        if (jsonx_has(v, ck) == 1 && _sch_count_kw(v, ck) < 0) {
+            _reg_warn_kw(tool, key, _dsp_named_msg(ck, " that is no non-negative integer", 0));
+        }
+        ci = ci + 1;
+    }
+    var bounds = _reg_words("minimum maximum exclusiveMinimum exclusiveMaximum ");
+    var bi = 0;
+    while (bi < vec_len(bounds)) {
+        var bk = vec_get(bounds, bi);
+        if (jsonx_has(v, bk) == 1 && _sch_is_number_text(jsonx_get_raw(v, bk)) == 0) {
+            _reg_warn_kw(tool, key, _dsp_named_msg(bk, " that is no number", 0));
+        }
+        bi = bi + 1;
+    }
+    var ap = jsonx_get_raw(v, "additionalProperties");
+    if (ap != 0) {
+        var apc = _sch_first_nonws(ap);
+        if (apc != 123 && streq(ap, "true") == 0 && streq(ap, "false") == 0) {
+            _reg_warn_kw(tool, key, "additionalProperties that is no boolean or object");
+        }
+    }
     return 0;
 }
 

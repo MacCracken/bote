@@ -18,7 +18,142 @@ have per release.
 
 _(empty)_
 
+## [3.8.6] — 2026-11-04 · A key named twice
+
+**A request that names a key twice is refused before anything reads it.** bote's one key scanner reads the first of a
+repeated key, the inputSchema check with it, and a handler is handed the arguments as written: `{"count":3,"count":"x"}`
+passed a schema that wants an integer, and a handler whose parser takes the last of a repeated key acted on `"x"`, a
+value nothing judged. A message that names a key twice in any object (the envelope, `params`, the arguments and every
+object below them, keys compared as they decode), or names a key that is no text, which a client decodes to U+FFFD and
+another key may spell, is now an invalid request, `-32600`. Its id is echoed unless the id is the key named twice. The
+check rides the syntax check the codec already made, so a message is still walked once. Reported by a consumer and
+reproduced in bote first (`docs/development/issues/2026-11-03-request-duplicate-keys-read-first-wins.md`, closed).
+
+**Four defects in 3.8.5 land beside it**, from an independent review of that release. The worst: `maxLength` counted
+no character for a byte from 0x80 to 0xBF that starts no sequence, so 60,000 of them met `maxLength: 4` and reached the
+handler. See the correction notice in 3.8.5.
+
+The stated minimum cyrius (6.7.13) is unchanged.
+
+### Security
+
+- **A request that names a key twice, or a key that is no text, is refused** (core: `src/jsonx.cyr`, `src/codec.cyr`,
+  `src/dispatch.cyr`). Medium: the schema check and a handler could read different values for one argument.
+  - **Where:** in the codec's admission (`_cdc_admit_l_a`), which every transport, the bridge, the modern HTTP path
+    and each cancellation reader go through, ahead of every field it reads; and in `dispatcher_dispatch` /
+    `dispatcher_dispatch_a`, which check the `params` of a request a consumer built.
+  - **What:** a key repeated in one object as it decodes (`"count"` and `"co\u0075nt"` are one key, a surrogate pair
+    and its UTF-8 are one key), past every place the scanner stops early; and a key holding bytes that are no UTF-8 or
+    a surrogate escape that is not one of a pair. A value that is no text is no key, and is not refused here.
+  - **The answer:** `-32600 invalid request: a key named twice, or one that is no text`. Not `-32700`: RFC 8259 asks
+    only that names be unique (§4, I-JSON requires it), and a parse error goes out with a null id, which leaves a
+    client waiting for an answer it cannot match. A batch's element is refused alone. On the HTTP-family transports a
+    2026-07-28 message is a 400 and a legacy one a 200, as their other errors are; a notification is a 400 where it was
+    a 202 (MCP: a server that does not accept the input answers with an HTTP error status).
+  - **The readers around it:** a `notifications/cancelled` that names a key twice cancels nothing, on a line, a
+    WebSocket frame or a POST of its own; the scope gate (`bote_http_scope_gate`) leaves such a message to the codec,
+    where it answered a 403 for the first of two tool names.
+
+### Fixed
+
+From the review of 3.8.5:
+
+- **`minLength` and `maxLength` counted no character for a stray UTF-8 continuation byte.** `_sv_strlen` counted a
+  byte from 0x80 to 0xBF as part of the character before it whether or not one had begun, so 60,000 of them met
+  `maxLength: 4` and were handed to the handler, `minLength: 1` refused one of them, and a result a client reads as six
+  U+FFFD passed `maxLength: 2`, which the client then refused. Overlong forms and encoded surrogates were undercounted
+  too. The count is now a client's: it decodes the message before JSON reads it, and a decoder (WHATWG's, the
+  TypeScript SDK's TextDecoder) gives one U+FFFD for each maximal part of a sequence cut short or broken and one for
+  each byte no sequence starts with (Unicode 3.9). Each test vector's count is Node's.
+- **A `required` name pushed after `compiled_set_required` was never met**, so a CompiledSchema built by hand whose
+  vec gained a name refused every call, where 3.8.4 passed it. Each name is kept beside its Watch, and a name that is
+  not the one kept is looked for in the object, which writes nothing a thread shares.
+- **A keyword bote judges, with a value it cannot judge by, judged nothing in silence**: `maxLength: "3"`,
+  `minLength: 1.5`, `minItems: -1`, draft-04's `exclusiveMinimum: true`, `maximum: "9"`, `additionalProperties: "no"`.
+  3.8.4 warned of each as unenforced; 3.8.5 took them off that list. Registration warns again, `maxLength that is no
+  non-negative integer`, `exclusiveMinimum that is no number`, `additionalProperties that is no boolean or object`.
+  `2.0` and `1e1` are integers, as JSON Schema has them.
+- **A schema of more than 64 names kept its table of seen members on the arena for every object it walked**: a
+  57 KB array of 19,000 empty objects judged by an item schema of 1,000 properties grew the arena by 19 MB. The table
+  is given back when its object's walk adds no violation, and that judgement now takes less than a megabyte.
+
+### Changed
+
+- **The exact repeat walker reads each byte once** (`_jx_rep_value` returns where each value ends): a nested value was
+  walked again by each level above it, so 60 KB nested 62 deep was read 63 times, and since a request with one escaped
+  key now goes through it, a client could have made every message cost that.
+- `dispatcher_dispatch_a` is now the checked entry; `_dsp_dispatch_admitted_a`, with no check, is what the codec, the
+  bridge and the modern HTTP path call after admission has checked the whole message.
+- 3.5.2's test row "a repeated key: the first, as everything here reads it" is now a refusal.
+
+### Tests
+
+- **`tests/bote_request_keys.tcyr`**, 83, new: the report's three rows (on 3.8.5 the first answered `tool not found`,
+  the second a schema violation, and the third ran the handler); a repeat nested, in an array's item, deep, spelled with
+  `\u` and `\/`, a surrogate pair against its UTF-8, past the scanner's early return; the envelope's method, id
+  (answered with null), jsonrpc and params; keys that are no text; what is no repeat; objects past sixteen keys;
+  300-byte keys; the exact walker past an array or an object; every method; a batch; the three cancellation readers; the
+  public dispatcher on a request a consumer built; the DEBUG line, which never holds the key; and 0 heap bytes with 60
+  KB in every field a client controls, through both checks, and for a ramp of 100 rising sizes.
+- **`tests/bote_schema_walk.tcyr`**, 121, from 79: eighteen byte strings counted as Node's TextDecoder counts them,
+  each at and either side of its count; 60,000 stray bytes refused through the dispatcher; a result a client reads as
+  six characters refused for `maxLength: 2`; a `required` name pushed or replaced; the new WARNs and none for valid
+  values; a large schema's table on less than a megabyte of arena, with three objects' violations each kept as written.
+- **`tests/bote_http_era.tcyr`**, 1912, from 1863: the refusal on all three HTTP transports, both eras, a notification,
+  an id named twice; the scope gate leaving a repeated name or argument to the codec.
+- **`tests/bote.tcyr`**, 973, from 969: two arena rows, a repeat beside 60 KB and beside a 60 KB escaped key.
+- **`fuzz/request_keys.fcyr`**, new: 20,000 tools/calls from a grammar that knows whether a key repeats or is no text,
+  checked through both repeat checks and the codec, the handler running exactly when the message is served, no heap.
+- **`fuzz/schema_walk.fcyr`**: strings that are no UTF-8, with the reference counting maximal parts in a form of its
+  own; half the schemas padded past eight names, so keys are decoded and looked up; a 300-byte name spelled three ways.
+- **35 mutants, 35 killed.** Two survived the first run and showed gaps, now tested: a table given back with the
+  violation in it (no later object wrote over its bytes), and a repeat after an array on the exact walker's path, which
+  only the new fuzz harness had caught. Each harness kills, alone, the mutants of its side it was run against.
+
+### Performance
+
+**A message costs about 130 to 180 ns more through the codec, and a request a consumer hands the dispatcher the walk
+of its params.** Interleaved A/B against 3.8.5, 15 rounds pinned to one core, the working tree's benches on both sides.
+Minimums, in ns:
+
+| Bench | 3.8.5 | 3.8.6 | Delta |
+|---|---:|---:|---:|
+| `codec_process_message` | 4,251 | 4,383 | +3.1% |
+| `codec_process_message_arena` | 4,165 | 4,314 | +3.6% |
+| `codec_process_message_threaded` | 4,268 | 4,445 | +4.1% |
+| `http_era_modern` | 11,133 | 11,443 | +2.8% |
+| `jsonx_valid_request` | 564 | 575 | +2.0% |
+| `cancel_lines_scan` | 2,898 | 3,046 | +5.1% |
+| `dispatch_initialize` | 1,798 | 1,955 | +8.7% |
+| `dispatch_tools_call` | 2,369 | 2,717 | +14.7% |
+| `schema_compile_simple` | 8,342 | 8,322 | −0.2% |
+
+- **Through the codec, the check is the keys compared while the syntax is read.** A plain walker over the message
+  first cost a small call 1.3 µs, +30%; folded into the syntax walk, each key of plain ASCII is compared in place as
+  its bytes are checked, and a message holding none other walks once. `jsonx_valid_request`, the syntax check alone,
+  moves 2% with the argument it now passes.
+- **The `dispatch_*` rows call `dispatcher_dispatch`, which checks the params of a request a consumer built.** Measured
+  in one binary against the body with no check: 75 ns with no params, 170 ns for `initialize`'s 33 bytes, about
+  340 ns for the call's 43. The transports call the body after admission, so a message served by bote pays only the
+  codec's cost; the rest of these rows (`dispatch_tools_list` +8.7%, of which 75 ns is the check) is code position.
+- **`cancel_lines_scan`**: each line that may be a cancellation is admitted with its keys checked.
+- **The rest is code position.** `jsonx_get_str_flat` −8.8%, `validate_compiled_simple` −5.3% and `libro_export_100`
+  −4.7% run no code this release changes in a way that would move them.
+
 ## [3.8.5] — 2026-11-03 · One walk of a value
+
+> ⚠ **Corrected at 3.8.6.** These claims below were not true, found by a consumer's report and an independent review
+> of this release.
+> - "A member a schema names, written twice, is judged by its first occurrence, which is what bote hands a handler."
+>   bote hands a handler the arguments as written, both members in them, so a handler whose parser takes the last of a
+>   repeated key acted on a value the schema never judged: `{"count":3,"count":"x"}` passed an integer schema and the
+>   handler read `"x"`. Since 3.8.6 a request that names a key twice is refused.
+> - "`minLength` and `maxLength`, counted in characters as JSON Schema counts them." A byte from 0x80 to 0xBF that
+>   starts no sequence counted none, so 60,000 of them met `maxLength: 4` and reached the handler, and a result a client
+>   decodes to six U+FFFD passed `maxLength: 2`. Overlong forms and encoded surrogates were undercounted too.
+> - DEPS-PATTERN's "one made with `compiled_new` / `compiled_add_property` / `compiled_set_required` and `prop_new`
+>   works as before." A `required` name pushed into the vec after `compiled_set_required`, or into the one
+>   `compiled_new` makes, was never met, so every call was refused.
 
 **bote judges a value in one walk, and judges the counting keywords that walk makes cheap.** Each object's members are
 looked up once, where each property and each required name was a scan of its own; a value is judged where it lies,

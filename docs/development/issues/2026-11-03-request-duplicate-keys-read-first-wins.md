@@ -1,6 +1,6 @@
 # A request that repeats a JSON key is read first-wins; a handler can act on a value the schema check never saw
 
-**Status:** 🟡 **OPEN** — filed 2026-11-03 from szal 2.3.1, against bote 3.8.5 (HEAD `3.8.5`). Measured on
+**Status:** ✅ **CLOSED at 3.8.6** — see "Resolution" at the end. Filed 2026-11-03 from szal 2.3.1, against bote 3.8.5 (HEAD `3.8.5`). Measured on
 the 3.4.10, 3.8.4 and 3.8.5 `dist/bote-core.cyr`, driven through `codec_process_message` on a
 `dispatcher_new` dispatcher with szal's 54 tools registered.
 **Severity:** medium — the dispatcher's inputSchema check and the tool handler can read different values
@@ -67,3 +67,34 @@ every handler see one document:
 ## Closes when
 
 bote refuses duplicate keys in requests, or decides not to and records why here.
+
+## Resolution (3.8.6)
+
+Reproduced in bote first (`tests/bote_request_keys.tcyr`, the three rows above): on 3.8.5 the first
+row answered `tool not found: nope`, the second a schema violation, and the third ran the handler
+with `{"count":3,"count":"x"}`.
+
+bote now refuses a request that names a key twice in any object, the envelope, `params`, the
+arguments and every object below them, keys compared as they decode (`"count"` and `"co\u0075nt"`
+are one key, and so are a surrogate pair and its UTF-8), and one that names a key that is no text
+(bytes that are no UTF-8, a surrogate escape that is not one of a pair). It is checked before
+anything reads the message: in the codec's admission (`_cdc_admit_l_a`), which every transport,
+the bridge and each cancellation reader go through, and in `dispatcher_dispatch` /
+`dispatcher_dispatch_a` for a request a consumer built (its `params`).
+
+- **Answer:** `-32600 invalid request: a key named twice, or one that is no text`, with the
+  request's id, or null when `id` is the key named twice. Not `-32700`: RFC 8259 asks only that
+  names be unique (§4), and a parse error goes out with a null id, which leaves a client waiting.
+  A batch's element is refused on its own. On the HTTP-family transports a 2026-07-28 message is a
+  400, a legacy one a 200 as its other errors are, and a notification a 400 where it was a 202.
+- **How:** the key check rides the syntax check the codec already made (`_jx_valid_keys_a`):
+  keys of plain ASCII are compared in place, sixteen to an object, allocating nothing; a message
+  with a key holding an escape or a byte past ASCII, or an object of more keys, is read by the exact
+  walker (`_jx_repeats_n_a`, a table past eight keys, each key decoded on the request arena and
+  given back). About 130 to 180 ns more a message through the codec, 3 to 4%.
+- **Tests:** the three rows, nested and array duplicates, `\u` and `\/` spellings, a surrogate pair
+  against its UTF-8, a repeat past the scanner's early return, the envelope's members, objects
+  past sixteen keys, 300-byte keys, every method, a batch, the cancellation readers, the public
+  dispatcher, the log, and 0 heap bytes with 60 KB in each field; `fuzz/request_keys.fcyr`
+  checks both checks and the codec against the grammar that drew each message.
+

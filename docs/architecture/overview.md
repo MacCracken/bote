@@ -182,13 +182,13 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
   authentication bypasses).
 
 tests/
-├── bote.tcyr                  — 947 core assertions
+├── bote.tcyr                  — 973 core assertions
 ├── conformance.tcyr           — 218 (JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28, by spec clause, via codec_process_message)
 ├── bote_auth.tcyr             — 91 (bearer + allowlist + JWT + PKCE validators; 401 log lines; the 403; the head check)
 ├── bote_content.tcyr          — 25 (content blocks + annotations)
-├── bote_fetch.tcyr            — 60 (a request made in a child: the record, the cap, the deadline, a real GET, no heap)
+├── bote_fetch.tcyr            — 62 (a request made in a child: the record, the cap, the deadline, a real GET, no heap)
 ├── bote_fs_tools.tcyr         — 78 (fs_tools; refused-path log lines; control bytes read back as valid JSON)
-├── bote_http_era.tcyr         — 1863 (MCP 2026-07-28 on HTTP, on the real handlers over a socketpair; scopes and the 403)
+├── bote_http_era.tcyr         — 1912 (MCP 2026-07-28 on HTTP, on the real handlers over a socketpair; scopes and the 403)
 ├── bote_host.tcyr             — 207 (host registry + SSRF + resolved-address classifiers + the IPv6 parser vs cyrius's)
 ├── bote_jwks.tcyr             — 49 (a jwks_uri: what it may be, real fetches from a child)
 ├── bote_jwt.tcyr              — 510 (JWT: HS256, RS256, ES256, JWK Sets, every claim, scopes, the cache, keys from a source, no heap)
@@ -199,10 +199,11 @@ tests/
 ├── bote_output.tcyr           — 255 (3.8.0: a tool's outputSchema, registration to the heap)
 ├── bote_input.tcyr            — 148 (3.8.2: multi round-trip requests, -32021, the sealed state and its binding, the heap)
 ├── bote_tool_schema.tcyr      — 103 (3.8.3: an inputSchema as its own JSON, what registration refuses, the list, the heap)
-├── bote_schema_walk.tcyr      — 79 (3.8.5: one walk of a value, the counting keywords, additionalProperties, paths, the heap)
+├── bote_schema_walk.tcyr      — 121 (3.8.5: one walk of a value, the counting keywords, additionalProperties, paths, the heap)
+├── bote_request_keys.tcyr     — 83 (3.8.6: a request naming a key twice, or one that is no text, refused on every path)
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
-├── bote_streamable.tcyr       — 53 (streamable HTTP / SSE)
+├── bote_streamable.tcyr       — 64 (streamable HTTP / SSE)
 ├── bote_transport_unix.tcyr   — 76 (unix socket transport + accept policy + deadlines + closed-peer write)
 ├── bote_web_tools.tcyr        — 88 (web_tools; URL + resolved-address SSRF guard; the records their children write)
 ├── bote_ws.tcyr               — 94 (WebSocket; send-deadline drop; `-31403` per frame; what an upgrade and a connection keep)
@@ -222,7 +223,8 @@ fuzz/
 ├── schema_validate.fcyr
 ├── output_shape.fcyr         — (3.8.0) an outputSchema's 2025-11-25 form and a result's shaping are JSON, in each revision's shape, with no heap
 ├── input_schema.fcyr         — (3.8.3) an inputSchema given as JSON is refused or kept as bayan reads it, and listed as written, with no heap
-└── schema_walk.fcyr          — (3.8.5) random schemas over the keywords bote judges and random values, each verdict a reference's on bayan's parse, with no heap
+├── schema_walk.fcyr          — (3.8.5) random schemas over the keywords bote judges and random values, each verdict a reference's on bayan's parse, with no heap
+└── request_keys.fcyr         — (3.8.6) tools/calls whose keys repeat or are no text, by a grammar that knows which, through both checks and the codec
 
 docs/
 ├── architecture/overview.md   — this file
@@ -267,7 +269,11 @@ since cyrius has no nested JSON value type. The `jsonx` module extracts
 subtrees by slicing the source bytes (respecting nested braces,
 brackets, and quoted strings). The extractors trust their input, so
 `codec_process_message` first runs `jsonx_valid` over the whole message
-(3.4.5): invalid JSON is `-32700` and never reaches them.
+(3.4.5): invalid JSON is `-32700` and never reaches them. Since 3.8.6 the
+same walk compares each object's keys (`_jx_valid_keys_a`), and admission
+refuses a message that names a key twice, or one that is no text, with
+`-32600` before anything reads it: the extractors read the first of a
+repeated key, and a handler's parser may read the last.
 
 ### Adapter pattern (for sinks + auth)
 
@@ -338,7 +344,7 @@ has the hook and refuses any state without one.
 | Code | Meaning |
 |---|---|
 | -32700 | Parse error (not valid JSON — `jsonx_valid`, run on every message first) |
-| -32600 | Invalid request (bad jsonrpc version, id or params type; empty batch; non-object element; valid JSON that is not a request) |
+| -32600 | Invalid request (bad jsonrpc version, id or params type; empty batch; non-object element; valid JSON that is not a request; (3.8.6) a key named twice in any object, or one that is no text) |
 | -32601 | Method not found (incl. a method behind an un-advertised capability) |
 | -32602 | Invalid params (unknown tool or tool version, missing / empty / non-string tool name, non-object `arguments`, invalid pagination cursor, unknown prompt or missing required prompt argument, missing `uri`) |
 | -32002 | Resource not found (`resources/read`, URI in `error.data`), legacy path only: it is `-32602` on the 2026-07-28 path |

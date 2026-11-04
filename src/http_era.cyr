@@ -351,7 +351,9 @@ fn _he_admit_modern(hc, body, bv, dispatcher, req_out) {
     var n = _he_n(hc);
     var len = strlen(body);
     var first = _cdc_skip_ws(body, len, 0);
-    if (first >= len || jsonx_valid(body, len) == 0) {
+    var kv = 0;
+    if (first < len) { kv = _jx_valid_keys_a(a, body, len); }
+    if (kv == 0) {
         return _he_refuse_json(hc, SK_DEBUG, HTTP_BAD_REQUEST, "parse_error", _cdc_parse_error_a(a, "invalid JSON"));
     }
     if (load8(body + first) != 123) {
@@ -359,7 +361,7 @@ fn _he_admit_modern(hc, body, bv, dispatcher, req_out) {
           _cdc_invalid_request_a(a, "a POST carries one message"));
     }
     var err_slot[8];
-    var req = _cdc_admit_a(a, body, &err_slot);
+    var req = _cdc_admit_k_a(a, body, &err_slot, kv);
     if (req == 0) {
         return _he_refuse_json(hc, SK_DEBUG, HTTP_BAD_REQUEST, "invalid_request", load64(&err_slot));
     }
@@ -636,7 +638,7 @@ fn bote_http_serve_modern(hc, req, dispatcher, claims) {
     bote_req_set_cancel(&_he_cancelled, ps);
     bote_req_set_request_id(req_id(req));
     bote_req_set_request_params(req_params(req));
-    var resp = dispatcher_dispatch_a(a, dispatcher, req, claims);
+    var resp = _dsp_dispatch_admitted_a(a, dispatcher, req, claims);
     bote_req_set_stream(0);
     bote_req_set_cancel(0, 0);
     bote_req_set_request_params(0);

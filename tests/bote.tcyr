@@ -2521,6 +2521,14 @@ fn main() {
     assert_eq(_ra_heap_per_msg(_ra_fill("prompts/get", "{\"name\":\"ra_prompt\",\"arguments\":{\"other\":\"", 60000, "\"}}"), ra_d, 50), 0, "arena: a prompt missing an argument leaves no heap");
     assert_eq(_ra_heap_per_msg(_ra_fill("resources/read", "{\"uri\":\"", 60000, "\"}"), ra_d, 50), 0, "arena: 60 KB naming no resource leaves no heap");
     assert_eq(_ra_heap_per_msg(_ra_fill_of("resources/read", "{\"uri\":\"", "\\u0001", 10000, "\"}"), ra_d, 50), 0, "arena: a uri of control bytes, six times as long escaped, leaves no heap");
+    # 3.8.6: a request naming a key twice, refused before anything reads it, by the check made
+    # with the syntax's and by the exact walker a key with an escape sends it to.
+    var ra_twice = _ra_fill("tools/call", "{\"name\":\"ra_int\",\"arguments\":{\"a\":1,\"a\":\"", 60000, "\"}}");
+    assert(strstr(codec_process_message(ra_twice, ra_d, 0), "a key named twice") >= 0, "arena: a key named twice beside 60 KB refused");
+    assert_eq(_ra_heap_per_msg(ra_twice, ra_d, 50), 0, "arena: ...and leaves no heap");
+    var ra_twice_esc = _ra_fill_of("tools/call", "{\"name\":\"ra_int\",\"arguments\":{\"b\":1,\"b\":1,\"", "\\u0061", 10000, "\":1}}");
+    assert(strstr(codec_process_message(ra_twice_esc, ra_d, 0), "a key named twice") >= 0, "arena: a key named twice beside a 60 KB escaped key refused");
+    assert_eq(_ra_heap_per_msg(ra_twice_esc, ra_d, 50), 0, "arena: ...and leaves no heap");
     # 3.7.0: messages that each need a little more of the arena than the one before.
     # lib/alloc.cyr's growable arena kept a chunk for every one of them: 300 refused
     # resources/read calls, the URI growing from 12 KB to 42 KB, kept 105 MB. The rows

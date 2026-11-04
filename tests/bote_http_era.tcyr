@@ -515,6 +515,11 @@ fn _scopes(k, prm) {
     assert_eq(_seen_claims, 0, _nm(k, "scope: a repeated name"));
     _run(k, _raw("POST", _ah("nothing"), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"method\":\"tools/list\",\"params\":{\"name\":\"t_scoped\"}}"));
     assert_eq(_seen_claims, 0, _nm(k, "scope: a repeated method"));
+    # (3.8.6) It is the codec's to refuse, whichever of the two the token may not call.
+    assert(_st(k, _raw("POST", _ah("nothing"), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"t_scoped\",\"name\":\"t_echo\"}}")) != 403, _nm(k, "scope: a repeated name is no 403"));
+    assert(_has(_body, "-32600"), _nm(k, "scope: ...but the codec's -32600"));
+    assert(_st(k, _raw("POST", _ah("nothing"), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"prompts/get\",\"params\":{\"name\":\"p_scoped\",\"arguments\":{\"a\":1,\"a\":2}}}")) != 403, _nm(k, "scope: a prompt's repeated argument is no 403"));
+    assert(_has(_body, "-32600"), _nm(k, "scope: ...but the codec's -32600"));
 
     # A batch has no status of its own, so the dispatcher refuses the element.
     _seen_claims = 0;
@@ -706,7 +711,9 @@ fn _params(k) {
     _t(k, _pc("Mcp-Param-Region: us\r\nMcp-Param-Count: 1\r\nMcp-Param-Flag: false\r\nMcp-Param-Deep: x\r\n", "{\"region\":\"us\",\"n\":1,\"flag\":true,\"a\":{\"b\":\"x\"}}"), 400, "-32020", "one of them wrong");
     _t(k, _pc("Mcp-Param-Region: us\r\n", "{\"reg\\u0069on\":\"us\"}"), 200, "", "an escaped key is the same key");
     _t(k, _pc("", "{\"reg\\u0069on\":\"us\"}"), 400, "-32020", "...and needs its header");
-    _t(k, _pc("Mcp-Param-Region: us\r\n", "{\"region\":\"us\",\"region\":\"eu\"}"), 200, "", "a repeated key: the first, as everything here reads it");
+    # (3.8.6) A handler's parser may read the last of a repeated key, so it is refused.
+    _t(k, _pc("Mcp-Param-Region: us\r\n", "{\"region\":\"us\",\"region\":\"eu\"}"), 400, "-32600", "a repeated key refused");
+    _t(k, _pc("Mcp-Param-Region: eu\r\n", "{\"region\":\"us\",\"reg\\u0069on\":\"eu\"}"), 400, "-32600", "...spelled two ways, whichever header");
 
     # A field on two lines combines into a value that matches nothing.
     _t(k, _pc("Mcp-Param-Region: us\r\nMcp-Param-Region: us\r\n", "{\"region\":\"us\"}"), 400, "-32020", "Mcp-Param on two lines");
@@ -811,6 +818,13 @@ fn _clauses(k) {
     # ---- notifications ----
     _t(k, _raw("POST", _V, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/x\"}"), 202, "", "a modern notification");
     assert_eq(strlen(_body), 0, _nm(k, "...has no body"));
+    # (3.8.6) A message naming a key twice is the codec's -32600, with 400 on this path; a
+    # notification's too, which the server does not accept (an HTTP error status, not 202).
+    _t(k, _pc("", "{\"x\":1,\"x\":2}"), 400, "-32600", "arguments naming a key twice");
+    assert(_has(_body, "\"id\":7"), _nm(k, "...with its id"));
+    _t(k, _raw("POST", _V, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/x\",\"params\":{\"a\":1,\"a\":1}}"), 400, "-32600", "a modern notification naming a key twice");
+    _t(k, _raw("POST", _mh("tools/list", 0), "{\"jsonrpc\":\"2.0\",\"id\":7,\"id\":8,\"method\":\"tools/list\",\"params\":{}}"), 400, "-32600", "an id named twice");
+    assert(_has(_body, "\"id\":null"), _nm(k, "...answered with null"));
 
     # ---- no sessions on this path ----
     _t(k, _raw("POST", _mh("tools/list", 0), _mb("tools/list", "")), 200, "", "no session needed");
@@ -834,6 +848,7 @@ fn _clauses(k) {
     assert(_has(_body, "resultType") == 0, _nm(k, "...is legacy"));
     _t(k, _raw("POST", "", _lb("tools/list")), 404, "", "the session gate still holds for legacy traffic");
     _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"), 202, "", "a legacy notification is 202");
+    _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"cursor\":\"a\",\"cursor\":\"b\"}}"), 200, "-32600", "a legacy request naming a key twice (3.8.6)");
     _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"progressToken\":1}}}"), 200, "", "legacy _meta with no version");
     assert(_has(_body, "resultType") == 0, _nm(k, "...is legacy"));
     _t(k, _raw("POST", _cat3("MCP-Protocol-Version: 2025-11-25\r\n", withsid, ""), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2025-11-25\"}}}"), 200, "", "an older revision in both the header and _meta");

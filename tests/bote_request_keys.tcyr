@@ -1,0 +1,324 @@
+# bote_request_keys.tcyr — a request that names a key twice, or one that is no text, is
+# refused before anything reads it (3.8.6): the envelope, params, arguments and every object
+# below them, on every method and transport, the cancellation readers too, and the heap.
+#
+# Run: cyrius test tests/bote_request_keys.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+var _calls = 0;
+var _got = 0;
+fn h_rec(args, claims) {
+    _calls = _calls + 1;
+    _got = args;
+    return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}";
+}
+fn h_prompt(args, claims) { _calls = _calls + 1; return "{\"messages\":[]}"; }
+fn h_res(uri, claims) { _calls = _calls + 1; return "{\"contents\":[]}"; }
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
+fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+fn _msg(method, params) {
+    return _cat3(_cat3("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"", method, "\",\"params\":{"), params, "}}");
+}
+# A tools/call of t_keys with `args` as its arguments.
+fn _call_msg(args) {
+    return _cat3("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"t_keys\",\"arguments\":", args, "}}");
+}
+fn _call(d, args) { return codec_process_message(_call_msg(args), d, 0); }
+# 1 when `r` is the refusal, with `id` as its id.
+fn _refused(r, id) {
+    if (_has(r, "\"code\":-32600,\"message\":\"invalid request: a key named twice, or one that is no text\"") == 0) { return 0; }
+    return _has(r, _cat3("\"id\":", id, ","));
+}
+fn _served(r) { if (_has(r, "\"text\":\"ok\"") == 1 && _has(r, "\"error\"") == 0) { return 1; } return 0; }
+fn _mk() {
+    var d = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(d, tool_def_new("t_keys", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"count\":{\"type\":\"integer\"}}}")), &h_rec);
+    dispatcher_register_prompt(d, prompt_def_new("p_keys", "P", vec_new()), &h_prompt);
+    dispatcher_register_resource(d, resource_def_new("res://keys", "r", "R", "text/plain"), &h_res);
+    return d;
+}
+# `n` distinct keys k0..k(n-1), each `"kI":I`, as members of an object, without the braces.
+fn _keys(n) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"k");
+        str_builder_add_int(sb, i);
+        str_builder_add_cstr(sb, "\":");
+        str_builder_add_int(sb, i);
+        i = i + 1;
+    }
+    return str_data(str_builder_build(sb));
+}
+# `n` bytes of `c`.
+fn _rep(c, n) {
+    var b = alloc(n + 1);
+    memset(b, c, n);
+    store8(b + n, 0);
+    return b;
+}
+
+var _lc_all = 0;
+fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    var b = alloc(n + 1);
+    memcpy(b, msg, n);
+    store8(b + n, 0);
+    vec_push(_lc_all, b);
+    return 0;
+}
+
+# Heap bytes `msg` leaves per message, through the arena, after a warm-up.
+fn _heap(msg, d, n) {
+    codec_process_message_a(bote_req_begin(), msg, d, 0);
+    var before = alloc_used();
+    var i = 0;
+    while (i < n) {
+        codec_process_message_a(bote_req_begin(), msg, d, 0);
+        i = i + 1;
+    }
+    return (alloc_used() - before) / n;
+}
+
+fn main() {
+    alloc_init();
+    var d = _mk();
+
+    # ---- the report's three rows ----
+    _calls = 0;
+    var r1 = codec_process_message(_msg("tools/call", "\"name\":\"nope\",\"name\":\"t_keys\",\"arguments\":{}"), d, 0);
+    assert(_refused(r1, "1"), "report: name twice refused");
+    assert(_refused(_call(d, "{\"count\":\"x\",\"count\":3}"), "1"), "report: count twice, the first a string, refused");
+    assert(_refused(_call(d, "{\"count\":3,\"count\":\"x\"}"), "1"), "report: count twice, the second a string, refused");
+    assert_eq(_calls, 0, "report: no handler ran");
+    assert(_served(_call(d, "{\"count\":3}")), "control: the same call naming it once served");
+    assert_streq(_got, "{\"count\":3}", "control: ...with its arguments");
+    _calls = 0;
+
+    # ---- refused wherever the repeat is ----
+    assert(_refused(_call(d, "{\"o\":{\"a\":1,\"a\":2}}"), "1"), "nested: an object below the arguments");
+    assert(_refused(_call(d, "{\"l\":[{\"a\":1},{\"b\":1,\"b\":2}]}"), "1"), "nested: an array's item");
+    assert(_refused(_call(d, "[[[{\"z\":[{\"y\":{\"x\":1,\"x\":1}}]}]]]"), "1"), "nested: deep in arrays and objects");
+    assert(_refused(_call(d, "{\"count\":3,\"co\\u0075nt\":\"x\"}"), "1"), "escaped: the same key spelled with \\u");
+    assert(_refused(_call(d, "{\"a/b\":1,\"a\\/b\":2}"), "1"), "escaped: ...and with \\/");
+    assert(_refused(_call(d, "{\"\\ud83d\\ude00\":1,\"\xf0\x9f\x98\x80\":2}"), "1"), "escaped: a surrogate pair and its UTF-8, one key");
+    assert(_refused(_call(d, "{\"\":1,\"\":2}"), "1"), "two empty keys");
+    assert(_refused(codec_process_message(_msg("tools/call", "\"name\":\"t_keys\",\"arguments\":{},\"version\":\"1\",\"caller_id\":\"c\",\"_meta\":{},\"name\":\"nope\""), d, 0), "1"),
+      "past the scanner's early return: every key it wants, then one again");
+    assert_eq(_calls, 0, "refused: no handler ran");
+
+    # ---- the envelope ----
+    assert(_refused(codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"method\":\"tools/list\",\"params\":{}}", d, 0), "4"), "envelope: method twice, the id echoed");
+    assert(_refused(codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":4,\"id\":5,\"method\":\"tools/list\"}", d, 0), "null"), "envelope: id twice, answered with null");
+    assert(_refused(codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":4,\"\\u0069d\":5,\"method\":\"tools/list\"}", d, 0), "null"), "envelope: ...spelled two ways");
+    assert(_refused(codec_process_message("{\"jsonrpc\":\"2.0\",\"jsonrpc\":\"1.0\",\"id\":4,\"method\":\"tools/list\"}", d, 0), "4"), "envelope: jsonrpc twice");
+    assert(_refused(codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"t_keys\"},\"params\":{\"name\":\"nope\"}}", d, 0), "4"), "envelope: params twice");
+    assert(_refused(codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/list\",\"x\":{\"a\":1,\"a\":1}}", d, 0), "4"), "envelope: inside a member bote does not read");
+    assert(_refused(codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":\"s\",\"method\":\"tools/list\",\"params\":{\"cursor\":\"a\",\"cursor\":\"b\"}}", d, 0), "\"s\""), "envelope: a string id echoed");
+
+    # ---- keys that are no text ----
+    assert(_refused(_call(d, "{\"\\ud800\":1}"), "1"), "no text: a lone surrogate escape");
+    assert(_refused(_call(d, "{\"a\\udc00\":1}"), "1"), "no text: ...a low one");
+    assert(_refused(_call(d, "{\"\xff\":1}"), "1"), "no text: a byte that is no UTF-8");
+    assert(_refused(_call(d, "{\"a\xc3\":1}"), "1"), "no text: a sequence cut short");
+    assert(_refused(_call(d, "{\"\xe0\x80\x80\":1}"), "1"), "no text: an overlong form");
+    assert(_served(_call(d, "{\"\\ud83d\\ude00\":1,\"\xc3\xa9\":2,\"e\":3}")), "text: a pair, a two-byte character and its base letter are three keys");
+    assert(_served(_call(d, "{\"s\":\"\\ud800\\u0000\xff\"}")), "text: a value that is no text is no key, and not refused here");
+    _calls = 0;
+
+    # ---- what is no repeat ----
+    assert(_served(_call(d, "{\"a\":{\"k\":1},\"b\":{\"k\":2},\"k\":[{\"k\":1},{\"k\":2}]}")), "no repeat: one key in sibling objects");
+    assert(_served(_call(d, "{\"a\":\"b\",\"b\":\"a\"}")), "no repeat: a key's value spelling another key");
+    assert(_served(_call(d, "{\"a\":1,\"A\":1,\"ab\":1,\"a \":1}")), "no repeat: case, a prefix and a space");
+    assert(_served(_call(d, "{\"a\\u0062\":1,\"a\":1,\"b\":1}")), "no repeat: an escaped key and its parts");
+
+    # ---- objects past the inline keys ----
+    assert(_served(_call(d, _cat3("{", _keys(16), "}"))), "inline: sixteen keys");
+    assert(_served(_call(d, _cat3("{", _keys(17), "}"))), "past inline: seventeen, none twice");
+    assert(_refused(_call(d, _cat3("{", _keys(16), ",\"k0\":1}")), "1"), "past inline: the seventeenth one of the sixteen");
+    assert(_refused(_call(d, _cat3("{", _keys(300), ",\"k299\":1}")), "1"), "past inline: the 301st the 300th");
+    assert(_refused(_call(d, _cat3("{", _keys(300), ",\"k\\u0031\":1}")), "1"), "past inline: an escaped key repeating the second");
+    assert(_served(_call(d, _cat3("{", _keys(2000), "}"))), "past inline: two thousand, none twice");
+    # The exact walker past an array or an object: what follows it is read.
+    assert(_refused(_call(d, "{\"a\\u0062\":[1,[2]],\"x\":1,\"x\":2}"), "1"), "exact: a repeat after an array");
+    assert(_refused(_call(d, "{\"a\\u0062\":{\"k\":[]},\"x\":1,\"x\":2}"), "1"), "exact: ...after an object");
+    assert(_refused(_call(d, "[{\"a\\u0062\":1},[],{\"x\":1,\"x\":2}]"), "1"), "exact: ...in an array's item after an array");
+    assert(_served(_call(d, "{\"a\\u0062\":[1,{\"x\":1}],\"x\":1}")), "exact: ...and one key in two objects is none");
+
+    # ---- long keys ----
+    var k300 = _rep(120, 300);
+    assert(_refused(_call(d, _cat3(_cat3("{\"", k300, "\":1,\""), k300, "\":2}")), "1"), "long: two 300-byte keys");
+    var k300b = _cat(_rep(120, 299), "y");
+    assert(_served(_call(d, _cat3(_cat3("{\"", k300, "\":1,\""), k300b, "\":2}"))), "long: ...differing in the last byte");
+    var k300e = _cat(_rep(120, 299), "\\u0078");
+    assert(_refused(_call(d, _cat3(_cat3("{\"", k300, "\":1,\""), k300e, "\":2}")), "1"), "long: ...one spelled with an escape");
+    _calls = 0;
+
+    # ---- every method ----
+    assert(_refused(codec_process_message(_msg("initialize", "\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"capabilities\":{\"x\":1},\"clientInfo\":{\"name\":\"c\",\"version\":\"1\"}"), d, 0), "1"), "initialize");
+    assert(_refused(codec_process_message(_msg("tools/list", "\"cursor\":\"a\",\"cursor\":\"b\""), d, 0), "1"), "tools/list");
+    assert(_refused(codec_process_message(_msg("prompts/get", "\"name\":\"p_keys\",\"arguments\":{\"a\":\"1\",\"a\":\"2\"}"), d, 0), "1"), "prompts/get");
+    assert(_refused(codec_process_message(_msg("resources/read", "\"uri\":\"res://other\",\"uri\":\"res://keys\""), d, 0), "1"), "resources/read");
+    assert(_refused(codec_process_message(_msg("ping", "\"_meta\":{},\"_meta\":{}"), d, 0), "1"), "ping");
+    assert(_refused(codec_process_message(_msg("tools/call", "\"name\":\"t_keys\",\"arguments\":{},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/protocolVersion\":\"2025-11-25\",\"io.modelcontextprotocol/clientCapabilities\":{}}"), d, 0), "1"), "_meta: the revision named twice");
+    assert_eq(_calls, 0, "every method: no handler ran");
+    assert(_refused(codec_process_message("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{\"a\":1,\"a\":2}}", d, 0), "null"), "a notification: answered as an invalid request is, with null");
+
+    # ---- a batch, element by element ----
+    _calls = 0;
+    var good = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"t_keys\",\"arguments\":{\"count\":1}}}";
+    var bad = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"t_keys\",\"arguments\":{\"count\":1,\"count\":\"x\"}}}";
+    var br = codec_process_message(_cat3(_cat3("[", good, ","), bad, _cat3(",", _cat3("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"t_keys\",\"arguments\":{\"count\":3}}}", "", ""), "]")), d, 0);
+    assert(_refused(br, "2"), "batch: the element naming a key twice refused");
+    assert_eq(_calls, 2, "batch: ...and the others served");
+    assert(_has(br, "\"id\":1,\"result\"") == 1 && _has(br, "\"id\":3,\"result\"") == 1, "batch: ...each answered");
+
+    # ---- the cancellation readers ----
+    var a = bote_req_begin();
+    var cl = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":7,\"requestId\":8}}\n";
+    var ok_cl = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":7}}\n";
+    var done[8];
+    assert_eq(codec_lines_cancel_a(a, cl, strlen(cl), "7", &done), 0, "cancel: a line naming requestId twice cancels the first...");
+    assert_eq(codec_lines_cancel_a(a, cl, strlen(cl), "8", &done), 0, "cancel: ...nor the second");
+    assert_eq(codec_lines_cancel_a(a, ok_cl, strlen(ok_cl), "7", &done), 1, "cancel: control: naming it once cancels");
+    assert_eq(codec_message_cancels_a(a, cl, strlen(cl) - 1, "7"), 0, "cancel: a WebSocket frame naming it twice cancels nothing");
+    assert_eq(codec_message_cancels_a(a, ok_cl, strlen(ok_cl) - 1, "7"), 1, "cancel: control: once, it does");
+    var cp[8];
+    assert_eq(codec_cancelled_id_a(a, cl, strlen(cl) - 1, &cp), 0, "cancel: a POST naming it twice has no requestId");
+    var cl2 = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":7,\"reason\":{\"a\":1,\"a\":1}}}";
+    assert_eq(codec_cancelled_id_a(a, cl2, strlen(cl2), &cp), 0, "cancel: ...nor one repeating a key anywhere");
+
+    # ---- a request a consumer built ----
+    _calls = 0;
+    var rq = req_with_params(req_new("5", "tools/call"), "{\"name\":\"t_keys\",\"arguments\":{\"count\":3,\"count\":\"x\"}}");
+    var dr = dispatcher_dispatch(d, rq, 0);
+    assert(dr != 0 && resp_error_obj(dr) != 0 && rpc_err_code(resp_error_obj(dr)) == 0 - 32600, "dispatcher_dispatch: params naming a key twice refused");
+    assert_streq(resp_id(dr), "5", "dispatcher_dispatch: ...with its id");
+    var dr2 = dispatcher_dispatch_a(bote_req_begin(), d, rq, 0);
+    assert(dr2 != 0 && resp_error_obj(dr2) != 0 && rpc_err_code(resp_error_obj(dr2)) == 0 - 32600, "dispatcher_dispatch_a: refused too");
+    assert_eq(_calls, 0, "dispatcher_dispatch: no handler ran");
+    assert_eq(dispatcher_dispatch(d, req_with_params(req_notification("notifications/x"), "{\"a\":1,\"a\":2}"), 0), 0, "dispatcher_dispatch: a notification is not answered");
+    var dr3 = dispatcher_dispatch(d, req_with_params(req_new("6", "tools/call"), "{\"name\":\"t_keys\",\"arguments\":{\"count\":3}}"), 0);
+    assert(dr3 != 0 && resp_error_obj(dr3) == 0, "dispatcher_dispatch: control: served");
+    assert_eq(_calls, 1, "dispatcher_dispatch: ...by its handler");
+
+    # ---- the log ----
+    _lc_all = vec_new();
+    sakshi_set_emit_hook(&_lc_hook);
+    sakshi_set_level(SK_TRACE);
+    codec_process_message(_msg("tools/call", "\"name\":\"t_keys\",\"arguments\":{\"SECRETKEY\":\"SECRETVALUE\",\"SECRETKEY\":1}"), d, 0);
+    sakshi_clear_emit_hook();
+    sakshi_set_level(SK_ERROR);
+    var said = 0;
+    var leaked = 0;
+    var li = 0;
+    while (li < vec_len(_lc_all)) {
+        var ln = vec_get(_lc_all, li);
+        if (_has(ln, "request rejected: a key named twice, or one that is no text") == 1) { said = said + 1; }
+        if (_has(ln, "SECRET") == 1) { leaked = leaked + 1; }
+        li = li + 1;
+    }
+    assert_eq(said, 1, "log: one DEBUG line says why");
+    assert_eq(leaked, 0, "log: ...and never the key or its value");
+
+    # ---- the heap and the arena ----
+    var big = _rep(97, 61440);
+    var long_all = _cat3(_cat3("{\"jsonrpc\":\"2.0\",\"id\":\"", big, "\",\"method\":\""), big, _cat3("\",\"params\":{\"name\":\"", big, _cat3("\",\"arguments\":{\"", big, _cat3("\":\"", big, _cat3("\",\"", big, "\":1}}}")))));
+    assert_eq(_heap(long_all, d, 10), 0, "heap: 60 KB in the id, the method, the name, the key twice and a value: nothing kept");
+    assert(_refused(codec_process_message(long_all, d, 0), _cat3("\"", big, "\"")), "heap: the 60 KB message refused, its id echoed");
+    var long_esc = _call_msg(_cat3(_cat3("{\"", big, "\":1,\""), _cat(_rep(97, 61439), "\\u0061"), "\":2}"));
+    assert(_refused(codec_process_message(long_esc, d, 0), "1"), "heap: the escaped 60 KB key refused");
+    assert_eq(_heap(long_esc, d, 10), 0, "heap: a 60 KB key repeated with an escape, through the exact walker: nothing kept");
+    var many = _call_msg(_cat3("{", _keys(4000), ",\"k3999\":1}"));
+    assert(_refused(codec_process_message(many, d, 0), "1"), "heap: four thousand keys and one twice refused");
+    assert_eq(_heap(many, d, 10), 0, "heap: four thousand keys and one twice, through the table: nothing kept");
+    var batch_bad = _cat3("[", bad, _cat3(",", bad, "]"));
+    assert(_has(codec_process_message(batch_bad, d, 0), "a key named twice") == 1, "heap: the batch refused");
+    assert_eq(_heap(batch_bad, d, 10), 0, "heap: a batch whose elements each name one twice: nothing kept");
+    # A ramp, from past every size above: each message a little longer than the last.
+    var ramp = vec_new();
+    var ri = 0;
+    while (ri < 100) {
+        vec_push(ramp, _call_text(_cat(_rep(98, 70000 + ri * 512), "\\u0062")));
+        ri = ri + 1;
+    }
+    assert(_refused(codec_process_message(vec_get(ramp, 99), d, 0), "1"), "heap: the ramp's last refused");
+    var ra0 = alloc_used();
+    ri = 0;
+    while (ri < 100) {
+        codec_process_message_a(bote_req_begin(), vec_get(ramp, ri), d, 0);
+        ri = ri + 1;
+    }
+    assert(alloc_used() - ra0 < 8388608, "heap: a ramp of 100 refused messages, each a little longer, keeps under 8 MB");
+    return assert_summary();
+}
+
+# A refused call whose repeated key is `k`, on its own heap allocation the ramp accounts for.
+fn _call_text(k) { return _call_msg(_cat3(_cat3("{\"", k, "\":1,\""), k, "\":2}")); }
+
+var rr = main();
+sys_exit(rr);

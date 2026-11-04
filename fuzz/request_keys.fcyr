@@ -1,0 +1,248 @@
+# Fuzz: a request that names a key twice, or one that is no text, is refused before anything
+# reads it (3.8.6), by the check made with the syntax's and by the exact walker alike.
+#
+# A tools/call is drawn from a small grammar: objects nested in its arguments, `_meta` and a
+# member bote does not read, each key a name from a pool spelled plainly or with escapes
+# (`\u`, `\/`, a surrogate pair against its UTF-8), now and then one that is no text (a lone
+# surrogate, a byte that is no UTF-8, a sequence cut short, an overlong form, an encoded
+# surrogate), objects past the sixteen keys checked inline, and now and then the envelope's
+# `id` again. The grammar knows whether a decoded key repeats in one object. Exit codes:
+#
+#   10   _jx_valid_keys_a says 2 exactly when the grammar says a key repeats or is no text;
+#   11   _jx_repeats_n_a says 1 exactly then;
+#   12   the codec answers "a key named twice" exactly then, and the handler runs exactly
+#        when it does not;
+#   20   neither check, nor a refused message through the codec, leaves heap;
+#   30   the rounds drew each verdict a thousand times, and an object past the inline keys
+#        five hundred.
+
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+
+alloc_init();
+
+var _rng = 88172645463325252;
+fn _rand() {
+    _rng = _rng ^ (_rng << 13);
+    _rng = _rng ^ (_rng >> 7);
+    _rng = _rng ^ (_rng << 17);
+    if (_rng < 0) { return 0 - _rng; }
+    return _rng;
+}
+
+var _buf = alloc(1048576);
+var _bp = 0;
+var _truth = 0;
+var _bigs = 0;
+fn _put(s) {
+    var n = strlen(s);
+    memcpy(_buf + _bp, s, n);
+    _bp = _bp + n;
+    return 0;
+}
+fn _putc(c) { store8(_buf + _bp, c); _bp = _bp + 1; return 0; }
+fn _puti(v) {
+    var d[24];
+    var n = 0;
+    if (v == 0) { _putc(48); return 0; }
+    while (v > 0) { store8(&d + n, 48 + v % 10); v = v / 10; n = n + 1; }
+    while (n > 0) { n = n - 1; _putc(load8(&d + n)); }
+    return 0;
+}
+
+# Each name, as the spellings it may take; all of one entry decode to the same key.
+var _K = vec_new();
+fn _names() {
+    var q = alloc(301);
+    memset(q, 113, 300);
+    store8(q + 300, 0);
+    var q2 = alloc(306);
+    memset(q2, 113, 299);
+    memcpy(q2 + 299, "\\u0071", 7);
+    var e = 0;
+    e = vec_new(); vec_push(e, "a"); vec_push(e, "\\u0061"); vec_push(_K, e);
+    e = vec_new(); vec_push(e, "b"); vec_push(_K, e);
+    e = vec_new(); vec_push(e, "count"); vec_push(e, "co\\u0075nt"); vec_push(e, "\\u0063ount"); vec_push(_K, e);
+    e = vec_new(); vec_push(e, "x/y"); vec_push(e, "x\\/y"); vec_push(_K, e);
+    e = vec_new(); vec_push(e, "\xc3\xa9"); vec_push(e, "\\u00e9"); vec_push(e, "\\u00E9"); vec_push(_K, e);
+    e = vec_new(); vec_push(e, "\xf0\x9f\x98\x80"); vec_push(e, "\\ud83d\\ude00"); vec_push(e, "\\uD83D\\uDE00"); vec_push(_K, e);
+    e = vec_new(); vec_push(e, ""); vec_push(_K, e);
+    e = vec_new(); vec_push(e, q); vec_push(e, q2); vec_push(_K, e);
+    e = vec_new(); vec_push(e, "A"); vec_push(e, "\\u0041"); vec_push(_K, e);
+    e = vec_new(); vec_push(e, "ab"); vec_push(e, "a\\u0062"); vec_push(_K, e);
+    e = vec_new(); vec_push(e, "n\\u0000"); vec_push(e, "\\u006e\\u0000"); vec_push(_K, e);
+    e = vec_new(); vec_push(e, "id"); vec_push(e, "\\u0069d"); vec_push(_K, e);
+    return 0;
+}
+var _NOTEXT = vec_new();
+fn _notext() {
+    vec_push(_NOTEXT, "\\ud800");
+    vec_push(_NOTEXT, "\\udc00x");
+    vec_push(_NOTEXT, "\xff");
+    vec_push(_NOTEXT, "a\xc3");
+    vec_push(_NOTEXT, "\xe0\x80\x80");
+    vec_push(_NOTEXT, "\xed\xa0\x80");
+    vec_push(_NOTEXT, "\\ud83d");
+    return 0;
+}
+
+fn _val(depth) {
+    if (_bp > 800000) { _putc(48); return 0; }
+    var r = _rand() % 12;
+    if (depth < 4 && r == 0) { return _obj(depth + 1); }
+    if (depth < 4 && r == 1) {
+        _putc(91);
+        var n = _rand() % 4;
+        var i = 0;
+        while (i < n) {
+            if (i > 0) { _putc(44); }
+            _val(depth + 1);
+            i = i + 1;
+        }
+        _putc(93);
+        return 0;
+    }
+    if (r == 2) { _put("\"v\\u00e9\xff\\ud800\""); return 0; }
+    if (r == 3) { _put("true"); return 0; }
+    if (r == 4) { _put("null"); return 0; }
+    if (r == 5) { _put("\"a\""); return 0; }
+    _puti(_rand() % 1000);
+    return 0;
+}
+
+# An object at `depth`, its keys drawn as the header says; _truth is set by a repeat.
+fn _obj(depth) {
+    _putc(123);
+    var used = 0;
+    var big = 0;
+    var n = _rand() % 5;
+    if (_rand() % 8 == 0) { big = 1; n = 14 + _rand() % 7; _bigs = _bigs + 1; }
+    var m = 0;
+    while (m < n && _bp < 800000) {
+        if (m > 0) { _putc(44); }
+        _putc(34);
+        if (big == 1 && m < n - 1) {
+            # Distinct names, g0, g1, ..., some with an escaped g.
+            if (_rand() % 4 == 0) { _put("\\u0067"); } else { _putc(103); }
+            _puti(m);
+        } elif (big == 1 && _rand() % 2 == 0) {
+            # The last of a big object: one of the g names again, or a new one.
+            var g = _rand() % n;
+            if (g < n - 1) { _truth = 1; }
+            if (_rand() % 2 == 0) { _put("\\u0067"); } else { _putc(103); }
+            _puti(g);
+        } elif (_rand() % 40 == 0) {
+            _put(vec_get(_NOTEXT, _rand() % vec_len(_NOTEXT)));
+            _truth = 1;
+        } else {
+            var k = _rand() % vec_len(_K);
+            if ((used & (1 << k)) != 0) { _truth = 1; }
+            used = used | (1 << k);
+            var sp = vec_get(_K, k);
+            _put(vec_get(sp, _rand() % vec_len(sp)));
+        }
+        _putc(34);
+        _putc(58);
+        _val(depth);
+        m = m + 1;
+    }
+    _putc(125);
+    return 0;
+}
+
+fn _round(rid) {
+    _bp = 0;
+    _truth = 0;
+    _put("{\"jsonrpc\":\"2.0\",\"id\":");
+    _puti(rid);
+    _put(",\"method\":\"tools/call\",\"params\":{\"name\":\"fz_tool\",\"arguments\":");
+    _obj(1);
+    if (_rand() % 4 == 0) { _put(",\"_meta\":"); _obj(1); }
+    _putc(125);
+    if (_rand() % 6 == 0) { _put(",\"x\":"); _obj(1); }
+    if (_rand() % 40 == 0) { _put(",\"\\u0069d\":5"); _truth = 1; }
+    _putc(125);
+    _putc(0);
+    return _bp - 1;
+}
+
+var _calls = 0;
+fn h_fz(args, claims) { _calls = _calls + 1; return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+
+_names();
+_notext();
+var d = dispatcher_new(tool_registry_new());
+dispatcher_register_tool(d, tool_def_new("fz_tool", "d", tool_schema_from_json("{\"type\":\"object\"}")), &h_fz);
+# A round first, so the arena has the chunk every later round uses.
+var n0 = _round(1);
+codec_process_message_a(bote_req_begin(), _buf, d, 0);
+var yes = 0;
+var no = 0;
+var round = 0;
+while (round < 20000) {
+    var n = _round(round + 2);
+    var a = bote_req_begin();
+    var h = alloc_used();
+    var kv = _jx_valid_keys_a(a, _buf, n);
+    var rp = _jx_repeats_n_a(a, _buf, n, 0);
+    if (alloc_used() != h) { sys_exit(20); }
+    if (_truth == 1) {
+        if (kv != 2) { sys_exit(10); }
+        if (rp != 1) { sys_exit(11); }
+        yes = yes + 1;
+    } else {
+        if (kv != 1) { sys_exit(10); }
+        if (rp != 0) { sys_exit(11); }
+        no = no + 1;
+    }
+    var c0 = _calls;
+    var hc = alloc_used();
+    var resp = codec_process_message_a(bote_req_begin(), _buf, d, 0);
+    var refused = 0;
+    if (strstr(resp, "a key named twice") >= 0) { refused = 1; }
+    if (refused != _truth) { sys_exit(12); }
+    if (_truth == 1) {
+        if (_calls != c0) { sys_exit(12); }
+        if (alloc_used() != hc) { sys_exit(20); }
+    } elif (_calls != c0 + 1) { sys_exit(12); }
+    round = round + 1;
+}
+if (yes < 1000 || no < 1000 || _bigs < 500) { sys_exit(30); }
+
+sys_exit(0);

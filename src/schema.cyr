@@ -94,7 +94,9 @@ fn prop_exclusive_max_raw(p) { return load64(p + 136); }
 #   +64 watched     vec of name, Watch, the name's length, in slot order: a schema of
 #                   BOTE_SV_LINEAR names or fewer is matched against these as each key is
 #                   written, with no copy and no hash
-#   +72 required_w  vec of each required name's Watch, or 0 for a name holding a NUL
+#   +72 required_w  vec of each required name and its Watch (0 for a name holding a NUL),
+#                   two words each; a name in `required` that is not the one here, pushed
+#                   after compiled_set_required, is looked for in the object instead
 #
 # An object is judged in one walk of its members (_sv_object): each is looked up in `watch`
 # once, for its property and its slot, and a required name is met when its slot was seen.
@@ -158,6 +160,7 @@ fn compiled_set_required(c, required_vec) {
         while (i < vec_len(required_vec)) {
             var w = 0;
             if (vec_get(required_vec, i) != 0) { w = _sch_watch(c, vec_get(required_vec, i)); }
+            vec_push(rw, vec_get(required_vec, i));
             vec_push(rw, w);
             i = i + 1;
         }
@@ -775,18 +778,39 @@ fn _sv_violation(slot, f, msg) {
 }
 
 # How many characters the string body [s, e) of `buf` holds, as JSON Schema counts them:
-# code points, a surrogate pair one, a lone surrogate one.
+# code points, a surrogate pair one, a lone surrogate one. Bytes that are no UTF-8 are
+# counted as a client reads them (3.8.6): it decodes the message before JSON reads it, and
+# a decoder (WHATWG's, the TypeScript SDK's TextDecoder) gives one U+FFFD for each maximal
+# part of a sequence that is cut short or broken, and one for each byte no sequence starts
+# with. At 3.8.5 a byte from 0x80 to 0xBF counted none, so 60,000 of them met maxLength 4.
 fn _sv_strlen(buf, s, e) {
     var c = 0;
     var i = s;
+    var need = 0;
+    var lo = 128;
+    var hi = 191;
     while (i < e) {
         var b = load8(buf + i);
-        if (b == 92) {
+        if (need > 0) {
+            if (b >= lo && b <= hi) {
+                lo = 128;
+                hi = 191;
+                need = need - 1;
+                if (need == 0) { c = c + 1; }
+                i = i + 1;
+            } else {
+                # Cut short: one U+FFFD, and this byte is read again.
+                c = c + 1;
+                need = 0;
+                lo = 128;
+                hi = 191;
+            }
+        } elif (b == 92) {
             if (i + 1 < e && load8(buf + i + 1) == 117) {
                 var cu = _sv_hex4(buf, i + 2, e);
                 if (cu >= 55296 && cu <= 56319 && i + 11 < e && load8(buf + i + 6) == 92 && load8(buf + i + 7) == 117) {
-                    var lo = _sv_hex4(buf, i + 8, e);
-                    if (lo >= 56320 && lo <= 57343) { i = i + 12; }
+                    var lw = _sv_hex4(buf, i + 8, e);
+                    if (lw >= 56320 && lw <= 57343) { i = i + 12; }
                     else { i = i + 6; }
                 } else {
                     i = i + 6;
@@ -795,11 +819,29 @@ fn _sv_strlen(buf, s, e) {
                 i = i + 2;
             }
             c = c + 1;
+        } elif (b < 128) {
+            c = c + 1;
+            i = i + 1;
+        } elif (b >= 194 && b <= 223) {
+            need = 1;
+            i = i + 1;
+        } elif (b >= 224 && b <= 239) {
+            if (b == 224) { lo = 160; }
+            if (b == 237) { hi = 159; }
+            need = 2;
+            i = i + 1;
+        } elif (b >= 240 && b <= 244) {
+            if (b == 240) { lo = 144; }
+            if (b == 244) { hi = 143; }
+            need = 3;
+            i = i + 1;
         } else {
-            if ((b & 192) != 128) { c = c + 1; }
+            # A byte no sequence starts with: 0x80 to 0xC1, 0xF5 to 0xFF.
+            c = c + 1;
             i = i + 1;
         }
     }
+    if (need > 0) { c = c + 1; }
     return c;
 }
 
@@ -970,7 +1012,15 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
     if (nw == 0 && additional == 0 && mn < 0 && mx < 0 && (req0 == 0 || vec_len(req0) == 0)) { return 0; }
     var seen0[64];
     var seen = &seen0;
-    if (nw > 64) { seen = alloc_via(a, nw); }
+    # A larger table is the arena's, and given back when this object's walk adds no violation
+    # (3.8.6, from the 3.8.5 review): kept, a 57 KB array of objects judged by a schema of
+    # 1,000 properties grew the arena by 19 MB. A violation's bytes come after it, and stay.
+    var smk[16];
+    var sv0 = load64(slot + 16);
+    if (nw > 64) {
+        bote_arena_mark(a, &smk);
+        seen = alloc_via(a, nw);
+    }
     var z = 0;
     while (z < nw && z < 64) { store64(seen + z, 0); z = z + 8; }
     while (z < nw) { store8(seen + z, 0); z = z + 1; }
@@ -1048,9 +1098,17 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
         while (ri < vec_len(req)) {
             var rkey = vec_get(req, ri);
             var met = 0;
-            var rw = 0;
-            if (ri < vec_len(reqw)) { rw = vec_get(reqw, ri); }
-            if (rkey != 0 && rw != 0 && load8(seen + load64(rw) - 1) == 1) { met = 1; }
+            if (rkey != 0) {
+                if (ri * 2 + 1 < vec_len(reqw) && vec_get(reqw, ri * 2) == rkey) {
+                    var rw = vec_get(reqw, ri * 2 + 1);
+                    if (rw != 0 && load8(seen + load64(rw) - 1) == 1) { met = 1; }
+                } elif (_jx_find_value_pos(buf + vs, ve - vs, rkey) >= 0) {
+                    # A name compiled_set_required did not see: pushed into the vec after it
+                    # (3.8.6, from the 3.8.5 review). It is looked for in the object, as 3.8.4
+                    # looked for every name, and nothing shared is written.
+                    met = 1;
+                }
+            }
             if (met == 0 && _vs_full(slot) == 0) {
                 var sb = str_builder_new_a(a);
                 str_builder_add_cstr_a(a, sb, "missing required field: ");
@@ -1066,6 +1124,7 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
     }
     if (mn >= 0 && count < mn) { _sv_violation(slot, f, "fewer properties than minProperties"); }
     if (mx >= 0 && count > mx) { _sv_violation(slot, f, "more properties than maxProperties"); }
+    if (nw > 64 && load64(slot + 16) == sv0) { bote_arena_release(a, &smk); }
     return 0;
 }
 

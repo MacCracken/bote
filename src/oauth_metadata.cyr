@@ -244,23 +244,22 @@ fn bote_prm_route(hc, p, method, path, allowed_origins) {
 # it has been answered. The scopes come from the dispatcher's own functions, so the two
 # cannot judge one request differently. A batch is the dispatcher's alone: one message
 # cannot carry two statuses, and that is why the check lives there as well as here. A body
-# that is no JSON is the codec's to refuse, and a notification gets no reply.
+# that is no JSON, or (3.8.6) one that names a key twice, is the codec's to refuse, and a
+# notification gets no reply: what the gate would read of a repeat is the first, and a 403
+# would ask the client for a scope it may not need.
 fn bote_http_scope_gate(hc, dispatcher, body, claims, p) {
     if (claims == 0) { return 0; }
-    if (jsonx_valid(body, strlen(body)) == 0 || jsonx_has(body, "id") == 0) { return 0; }
     var a = bote_req_alloc();
+    if (_jx_valid_keys_a(a, body, strlen(body)) != 1 || jsonx_has(body, "id") == 0) { return 0; }
     var method = jsonx_get_str_dec_a(a, body, "method");
     if (method == 0) { return 0; }
     var params = jsonx_get_raw_a(a, body, "params");
     var scopes = 0;
+    var name = 0;
     if (streq(method, "tools/call") == 1) {
-        var name = jsonx_get_str_dec_a(a, params, "name");
+        name = jsonx_get_str_dec_a(a, params, "name");
         if (name == 0) { return 0; }
         scopes = dispatcher_scopes_missing(dispatcher, name, claims);
-        if (scopes == 0) { return 0; }
-        var plen = strlen(params);
-        _dsp_record_refusal(dispatcher, name, params, plen, _jx_find_value_pos(params, plen, "caller_id"),
-          _dsp_named_msg_a(a, "insufficient scope for tool: ", name, 0));
     } elif (streq(method, "prompts/get") == 1) {
         scopes = dispatcher_prompt_scopes_missing(dispatcher, jsonx_get_str_dec_a(a, params, "name"), claims);
     } elif (streq(method, "resources/read") == 1) {
@@ -270,6 +269,11 @@ fn bote_http_scope_gate(hc, dispatcher, body, claims, p) {
         scopes = dispatcher_completion_scopes_missing_a(a, dispatcher, params, claims);
     }
     if (scopes == 0) { return 0; }
+    if (name != 0) {
+        var plen = strlen(params);
+        _dsp_record_refusal(dispatcher, name, params, plen, _jx_find_value_pos(params, plen, "caller_id"),
+          _dsp_named_msg_a(a, "insufficient scope for tool: ", name, 0));
+    }
     bote_http_log_refusal(SK_WARN, _he_transport(hc), HTTP_FORBIDDEN, "insufficient_scope");
     auth_send_insufficient_scope(_he_cfd(hc), scopes, bote_prm_metadata(p), _he_extra(hc));
     return 1;

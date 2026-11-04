@@ -232,7 +232,29 @@ fn _cdc_params_ok(raw) {
 # unusable id is answered with null (JSON-RPC 2.0 §5).
 fn _cdc_admit(line, err_out) { return _cdc_admit_a(default_alloc(), line, err_out); }
 
-fn _cdc_admit_l_a(a, line, err_out, log) {
+# 1 when the object `line` names the key `name` (`wl` bytes) more than once among its own
+# members, keys compared as they decode. It allocates nothing.
+fn _cdc_names_twice(line, name, wl) {
+    var n = strlen(line);
+    var i = _cdc_skip_ws(line, n, 0);
+    if (i >= n || load8(line + i) != 123) { return 0; }
+    i = _cdc_skip_ws(line, n, i + 1);
+    var seen = 0;
+    while (i < n && load8(line + i) == 34) {
+        var ke = _jx_skip_string(line, n, i);
+        if (_jx_dec_eq(line + i + 1, ke - i - 2, name, wl) == 1) { seen = seen + 1; }
+        i = _cdc_skip_ws(line, n, ke);
+        if (i >= n || load8(line + i) != 58) { return 0; }
+        i = _cdc_skip_ws(line, n, _jx_skip_value(line, n, _cdc_skip_ws(line, n, i + 1)));
+        if (i < n && load8(line + i) == 44) { i = _cdc_skip_ws(line, n, i + 1); }
+    }
+    if (seen > 1) { return 1; }
+    return 0;
+}
+
+# `keys` is what _jx_valid_keys_a said of `line` (1 none named twice, 2 one is), or 0 for a
+# caller that did not ask, and the check is made here (3.8.6).
+fn _cdc_admit_l_a(a, line, err_out, log, keys) {
     store64(err_out, 0);
     var req = codec_parse_request_a(a, line);
     if (req == 0) {
@@ -241,6 +263,16 @@ fn _cdc_admit_l_a(a, line, err_out, log) {
         var eid = jsonx_get_raw_a(a, line, "id");
         if (eid == 0 || _cdc_id_ok(eid) == 0) { eid = "null"; }
         store64(err_out, codec_serialize_response_a(a, resp_error_a(a, eid, 0 - 32600, "invalid request: malformed object")));
+        return 0;
+    }
+    # A key named twice in any object of the message, or one that is no text (3.8.6), before
+    # anything reads a field: the envelope, params, arguments and all below them. The reading
+    # is given back once done. The id is echoed unless it is the key named twice.
+    if (keys == 2 || (keys == 0 && _jx_repeats_a(a, line, 0) == 1)) {
+        if (log == 1) { bote_log_debug("request rejected: a key named twice, or one that is no text"); }
+        var rid = req_id(req);
+        if (rid == 0 || _cdc_id_ok(rid) == 0 || _cdc_names_twice(line, "id", 2) == 1) { rid = "null"; }
+        store64(err_out, codec_serialize_response_a(a, resp_error_a(a, rid, 0 - 32600, BOTE_REQ_KEYS_MSG)));
         return 0;
     }
     var id = req_id(req);
@@ -266,17 +298,21 @@ fn _cdc_admit_l_a(a, line, err_out, log) {
     return req;
 }
 
-fn _cdc_admit_a(a, line, err_out) { return _cdc_admit_l_a(a, line, err_out, 1); }
+fn _cdc_admit_a(a, line, err_out) { return _cdc_admit_l_a(a, line, err_out, 1, 0); }
+fn _cdc_admit_k_a(a, line, err_out, keys) { return _cdc_admit_l_a(a, line, err_out, 1, keys); }
 
 # Process a single request body. Returns serialized response cstr or 0 (notif).
-fn _cdc_process_single_a(a, line, dispatcher, claims) {
+fn _cdc_process_single_a(a, line, dispatcher, claims) { return _cdc_process_single_k_a(a, line, dispatcher, claims, 0); }
+
+# _cdc_process_single_a with what _jx_valid_keys_a said of `line` (`keys`, as admission takes it).
+fn _cdc_process_single_k_a(a, line, dispatcher, claims, keys) {
     # The clock is read only when DEBUG is on; at the default level the
     # per-request cost of logging is one level compare.
     var dbg = bote_log_enabled(SK_DEBUG);
     var t0 = 0;
     if (dbg == 1) { t0 = clock_now_ns(); }
     var err_slot[8];
-    var req = _cdc_admit_a(a, line, &err_slot);
+    var req = _cdc_admit_k_a(a, line, &err_slot, keys);
     if (req == 0) { return load64(&err_slot); }
     # The request, named for its cancellation check (3.7.5): the state once, for every
     # message, since on a worker it is a thread-local lookup.
@@ -285,7 +321,7 @@ fn _cdc_process_single_a(a, line, dispatcher, claims) {
     # And for its progress (3.7.6): where its token is, none sent yet.
     store64(rs + BOTE_REQ_STATE_PROGRESS + 16, req_params(req));
     store64(rs + BOTE_REQ_STATE_PROGRESS + 32, 0);
-    var resp = dispatcher_dispatch_a(a, dispatcher, req, claims);
+    var resp = _dsp_dispatch_admitted_a(a, dispatcher, req, claims);
     if (dbg == 1) { _cdc_log_request_a(a, req, resp, t0); }
     store64(rs + BOTE_REQ_STATE_CANCEL + 16, 0);
     store64(rs + BOTE_REQ_STATE_PROGRESS + 16, 0);
@@ -379,12 +415,13 @@ fn codec_cancelled_id_a(a, p, n, params_out) {
     var line = alloc_via(a, n + 1);
     memcpy(line, p, n);
     store8(line + n, 0);
-    if (jsonx_valid(line, n) == 0) { return 0; }
+    var kv = _jx_valid_keys_a(a, line, n);
+    if (kv == 0) { return 0; }
     # As the codec admits it (3.7.6): the scanner honored a `"jsonrpc":"1.0"` cancellation
     # the codec refuses (the 3.7.5 review).
     # Without the line the codec logs when it serves it, in its turn (3.7.7).
     var err[8];
-    var req = _cdc_admit_l_a(a, line, &err, 0);
+    var req = _cdc_admit_l_a(a, line, &err, 0, kv);
     if (req == 0 || req_id(req) != 0 || req_method(req) == 0) { return 0; }
     if (streq(req_method(req), "notifications/cancelled") == 0 || req_params(req) == 0) { return 0; }
     store64(params_out, req_params(req));
@@ -550,10 +587,16 @@ fn codec_process_message_a(a, input, dispatcher, claims) {
     var len = strlen(input);
     var i = _cdc_skip_ws(input, len, 0);
     if (i >= len) { return _cdc_parse_error_a(a, "empty input"); }
-    if (jsonx_valid(input, len) == 0) { return _cdc_parse_error_a(a, "invalid JSON"); }
+    # The syntax and the keys in one walk (3.8.6).
+    var kv = _jx_valid_keys_a(a, input, len);
+    if (kv == 0) { return _cdc_parse_error_a(a, "invalid JSON"); }
     var first = load8(input + i);
 
     if (first == 91) {
+        # A batch with none named twice has none in any element; one with one is looked at
+        # element by element, which only such a batch pays for.
+        var ek = 0;
+        if (kv == 1) { ek = 1; }
         # Array (batch)
         var elems = _cdc_split_array(a, input);
         var n = vec_len(elems);
@@ -577,7 +620,7 @@ fn codec_process_message_a(a, input, dispatcher, claims) {
             if (jsonx_is_object(elem) == 0) {
                 vec_push_a(a, responses, _cdc_invalid_request_a(a, "batch element is not an object"));
             } else {
-                var single = _cdc_process_single_a(a, elem, dispatcher, claims);
+                var single = _cdc_process_single_k_a(a, elem, dispatcher, claims, ek);
                 if (single != 0) { vec_push_a(a, responses, single); }
                 # One request's cancellation is not the next one's (3.7.7).
                 bote_req_set_request_id(0);
@@ -599,7 +642,7 @@ fn codec_process_message_a(a, input, dispatcher, claims) {
     }
 
     if (first == 123) {
-        return _cdc_process_single_a(a, input, dispatcher, claims);
+        return _cdc_process_single_k_a(a, input, dispatcher, claims, kv);
     }
 
     return _cdc_invalid_request_a(a, "expected object or array");

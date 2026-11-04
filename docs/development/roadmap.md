@@ -33,7 +33,7 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.6 — JSON Schema coverage, its second bite**: type arrays, `const`, `enum` of any value and
+**3.8.7 — JSON Schema coverage, its second bite**: type arrays, `const`, `enum` of any value and
 `uniqueItems`, which share one piece of work, JSON value equality (numbers by value, objects in any key order).
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,

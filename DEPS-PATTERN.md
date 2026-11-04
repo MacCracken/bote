@@ -310,6 +310,17 @@ the consumer set. A CompiledSchema is 80 bytes and a PropertyDef 144: one made w
 `compiled_new` / `compiled_add_property` / `compiled_set_required` and `prop_new` works as
 before.
 
+(3.8.6) A request that names a key twice in any object, keys compared as they decode, or names a
+key that is no text, is refused with `-32600` before anything reads it: by the codec, every
+transport, and `dispatcher_dispatch` / `dispatcher_dispatch_a`, which check a request a consumer
+built by its `params`. Its id is echoed unless the id is what is named twice. ⚠ **Such a request
+used to be served**, the schema judging the first of the repeated key and the handler handed
+both, so a handler whose parser takes the last acted on a value never judged; a consumer that
+worked around that can drop the workaround. `minLength` and `maxLength` count bytes that are no
+UTF-8 as a client's decoder reads them, one U+FFFD for each maximal part, where 3.8.5 counted a
+stray continuation byte as none. A `required` name pushed into a CompiledSchema's vec after
+`compiled_set_required` is met by its member, as through 3.8.4; 3.8.5 refused every call.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`
