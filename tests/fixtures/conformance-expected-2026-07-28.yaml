@@ -2,11 +2,8 @@
 # @modelcontextprotocol/conformance. scripts/conformance.sh fails on anything else that
 # fails, and on anything here that passes. Each entry is a feature bote lacks.
 server:
-  # Every scenario the suite scores passes (3.8.2, with multi round-trip requests). Not
-  # scored from here down.
-  # inputSchema cannot carry root keywords such as $schema, $defs or
-  # additionalProperties, because ToolSchema is type, properties and required. Roadmap 3.8.x.
-  - json-schema-2020-12
+  # Every scenario the suite scores passes (3.8.2, with multi round-trip requests), and
+  # json-schema-2020-12, which it does not score, since 3.8.3. Not scored from here down.
   # The tasks extension is optional, and bote does not implement it.
   - tasks-capability-negotiation
   - tasks-dispatch-and-envelope

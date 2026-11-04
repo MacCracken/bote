@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.8.2"; }
+fn _bote_server_version() { return "3.8.3"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -90,7 +90,7 @@ fn validate_tool_name(name) {
 }
 
 # ================================================================
-# Dispatcher struct (72 bytes):
+# Dispatcher struct (216 bytes):
 #   +0  registry            ptr
 #   +8  handlers            hashmap: name_cstr -> fn ptr (sync handler)
 #   +16 streaming_handlers  hashmap: name_cstr -> fn ptr (reserved for v1.3)
@@ -131,8 +131,10 @@ fn validate_tool_name(name) {
 #   +176 state_seal          (3.8.2) fn(ctx, a, binding, payload) → the sealed requestState
 #   +184 state_open          fn(ctx, a, binding, state) → the payload, or 0 when it fails
 #   +192 state_ctx           their context; dispatcher_set_state_sealer sets all three
+#   +200 state_principal     (3.8.3) fn(ctx, a, claims) → who the claims name, or 0
+#   +208 state_principal_ctx its context; dispatcher_set_state_principal sets both
 fn dispatcher_new(reg) {
-    var d = alloc(200);
+    var d = alloc(216);
     store64(d, reg);
     store64(d + 8, map_new());
     store64(d + 16, map_new());
@@ -148,21 +150,35 @@ fn dispatcher_new(reg) {
     store64(d + 96, 0);
     store64(d + 104, 0);
     var k = 112;
-    while (k < 200) { store64(d + k, 0); k = k + 8; }
+    while (k < 216) { store64(d + k, 0); k = k + 8; }
     return d;
 }
 
 # What seals and opens the `requestState` of an InputRequiredResult (3.8.2). The spec makes
 # a client's requestState attacker-controlled input, and a server MUST protect its
 # integrity where it can matter, so bote seals every state a handler gives it and opens
-# every one a client brings back, binding each to the method, its target (a tool's or a
-# prompt's name, a resource's URI) and the token the request presented. With no sealer, a
-# handler's state is refused and so is a client's: none can be trusted. The full bundle has
-# one, HMAC-SHA256 with an expiry (src/state_seal.cyr). Set before serving.
+# every one a client brings back, binding each to the request it was made for and who made
+# it (_dsp_state_binding_a). With no sealer, a handler's state is refused and so is a
+# client's: none can be trusted. The full bundle has one, HMAC-SHA256 with an expiry
+# (src/state_seal.cyr). Set before serving.
 fn dispatcher_set_state_sealer(d, seal_fp, open_fp, ctx) {
     store64(d + 176, seal_fp);
     store64(d + 184, open_fp);
     store64(d + 192, ctx);
+    return d;
+}
+
+# Who a request's claims name, for the binding of its requestState (3.8.3): the spec binds a
+# state to the principal. `fp(ctx, a, claims)` gives a cstr naming them, on `a` or for
+# good, or 0 when the claims name no one, and is asked only for claims that are not 0. With
+# none set, or when it gives 0, a state is bound to the token the request presented, which
+# a token refreshed between rounds does not match; and a request whose claims are not that
+# token (a validator that returns a record, a transport that passes its own) can be bound to
+# no one, so its handler's state is refused, and so is a state it brings. The full bundle's
+# jwt_state_principal names a JWT's issuer and subject.
+fn dispatcher_set_state_principal(d, fp, ctx) {
+    store64(d + 200, fp);
+    store64(d + 208, ctx);
     return d;
 }
 
@@ -404,7 +420,7 @@ fn dispatcher_register_tool(d, tool_def, handler_fp) {
     var name = tool_def_name(tool_def);
     var verr = validate_tool_name(name);
     if (verr != 0) { return verr; }
-    var st[48];
+    var st[56];
     var rerr = _registry_prepare(tool_def, &st);
     if (rerr != 0) { return rerr; }
     # The tool and its handler in one write (3.7.1), so a call on another worker never
@@ -589,6 +605,15 @@ fn _emit_schema(sb, schema) {
         str_builder_add_cstr(sb, "]");
     }
     str_builder_add_cstr(sb, "}");
+    return 0;
+}
+
+# A tool's inputSchema as registration kept it, on one line (3.8.3). A definition never
+# registered, as an announcement may hold, has it made here, on the heap.
+fn _emit_input_schema(sb, t) {
+    var ij = tool_def_input_json(t);
+    if (ij == 0) { ij = _reg_input_json(tool_def_input_schema(t)); }
+    str_builder_add_cstr(sb, ij);
     return 0;
 }
 
@@ -840,21 +865,8 @@ fn _dsp_tool_list_room(t) {
     var n = 256 + _dsp_room(tool_def_name(t)) + _dsp_room(tool_def_description(t));
     n = n + _dsp_len(tool_def_display(t));
     n = n + _dsp_room(tool_def_version(t)) + _dsp_room(tool_def_deprecated(t));
-    var props = schema_properties(tool_def_input_schema(t));
-    if (props != 0) {
-        var i = 0;
-        while (i < vec_len(props)) {
-            var pair = vec_get(props, i);
-            n = n + 8 + _dsp_room(schema_prop_key(pair)) + _dsp_room(schema_prop_value(pair));
-            i = i + 1;
-        }
-    }
-    var req = schema_required(tool_def_input_schema(t));
-    if (req != 0) {
-        var j = 0;
-        while (j < vec_len(req)) { n = n + 8 + _dsp_room(vec_get(req, j)); j = j + 1; }
-    }
-    # Each form of an outputSchema is sent as it is kept.
+    # The inputSchema as registration kept it (3.8.3), and each form of an outputSchema.
+    n = n + _dsp_len(tool_def_input_json(t));
     var os = tool_def_output_schema(t);
     if (os != 0) { n = n + 32 + strlen(os); }
     var ol = tool_def_output_legacy(t);
@@ -894,7 +906,7 @@ fn _build_tools_list_result_a(a, reg, profile, modern) {
         str_builder_add_cstr(sb, ",");
         _json_emit_str_field(sb, "description", tool_def_description(t));
         str_builder_add_cstr(sb, ",\"inputSchema\":");
-        _emit_schema(sb, tool_def_input_schema(t));
+        _emit_input_schema(sb, t);
         var os = tool_def_output_schema(t);
         if (os != 0) {
             if (modern == 0 && tool_def_output_legacy(t) != 0) { os = tool_def_output_legacy(t); }
@@ -1002,9 +1014,9 @@ fn _dsp_one_line(a, s) {
 # A prompt, resource or completion handler's result goes into the response as it
 # stands, so it has to be JSON, on one line. Only tools/call checked this.
 # A prompt's or a resource's result (3.8.2): valid JSON, and an InputRequiredResult judged.
-fn _dsp_served_result(a, d, id, method, params, result, modern) {
+fn _dsp_served_result(a, d, id, method, params, result, modern, claims) {
     if (jsonx_valid(result, strlen(result)) == 1 && _dsp_input_result(a, result) == 1) {
-        return _dsp_input_out_a(a, d, id, method, params, _dsp_one_line(a, result), modern);
+        return _dsp_input_out_a(a, d, id, method, params, _dsp_one_line(a, result), modern, claims);
     }
     return _dsp_checked_result(a, id, result);
 }
@@ -1052,25 +1064,25 @@ fn _dsp_is_content_type(p, n) {
     return 0;
 }
 
-# 1 when the `n` bytes at `p`, a string's inside, decode to an MCP content type (3.8.1):
-# `"t\u0065xt"` is "text", to a client and so here. Through 3.8.0 the bytes were
-# compared as written, so such a block went out as a text block holding its JSON. A
-# content type is short, so a value of 64 bytes or more is none.
-# 1 when the `n` bytes at `p`, a string's inside, decode to `lit` (3.8.2).
+# 1 when the `n` bytes at `p`, a string's inside, decode to `lit` (3.8.2), compared as they
+# decode, at any length (3.8.3): through 3.8.2 a value of 64 bytes or more was taken for
+# none, and `input_required` written in escapes is 84, so such an InputRequiredResult went
+# out unjudged and its state unsealed.
 fn _dsp_str_dec_is(p, n, lit) {
     if (_jx_has_escape(p, n) == 0) { return _dsp_bytes_eq(p, n, lit); }
-    if (n >= 64) { return 0; }
-    var dec[64];
-    var dn = _jx_unescape_into(p, n, &dec);
-    return _dsp_bytes_eq(&dec, dn, lit);
+    return _jx_dec_eq(p, n, lit, strlen(lit));
 }
 
+# 1 when the `n` bytes at `p`, a string's inside, decode to an MCP content type (3.8.1):
+# `"t\u0065xt"` is "text", to a client and so here. Through 3.8.0 the bytes were
+# compared as written, so such a block went out as a text block holding its JSON; through
+# 3.8.2 a value of 64 bytes or more was none, `resource_link` in escapes among them.
 fn _dsp_type_is_content(p, n) {
     if (_jx_has_escape(p, n) == 0) { return _dsp_is_content_type(p, n); }
-    if (n >= 64) { return 0; }
-    var dec[64];
-    var dn = _jx_unescape_into(p, n, &dec);
-    return _dsp_is_content_type(&dec, dn);
+    if (_jx_dec_eq(p, n, "text", 4) == 1 || _jx_dec_eq(p, n, "image", 5) == 1) { return 1; }
+    if (_jx_dec_eq(p, n, "audio", 5) == 1 || _jx_dec_eq(p, n, "resource", 8) == 1) { return 1; }
+    if (_jx_dec_eq(p, n, "resource_link", 13) == 1) { return 1; }
+    return 0;
 }
 
 # What a handler's result (valid JSON) is, from one pass over its top-level
@@ -1741,33 +1753,96 @@ fn _dsp_input_method(method) {
     return 0;
 }
 
-# What a requestState is bound to, on `a`: the method, its target (the tool's or the
-# prompt's name, the resource's URI) and the token the request presented, if any, each on
-# a line, so that state made for one call cannot be spent on another or by another token.
-fn _dsp_state_binding_a(a, method, params) {
+# `v`, a JSON value already checked, on `a` with the spacing between its tokens left out,
+# so a client that sends the same value again, compact or pretty, sends the same bytes.
+fn _dsp_compact_a(a, v) {
+    var n = strlen(v);
+    var out = alloc_via(a, n + 1);
+    var o = 0;
+    var i = 0;
+    var instr = 0;
+    while (i < n) {
+        var c = load8(v + i);
+        if (instr == 1) {
+            store8(out + o, c);
+            o = o + 1;
+            if (c == 92 && i + 1 < n) {
+                store8(out + o, load8(v + i + 1));
+                o = o + 1;
+                i = i + 1;
+            } elif (c == 34) {
+                instr = 0;
+            }
+        } elif (c != 32 && c != 9 && c != 10 && c != 13) {
+            if (c == 34) { instr = 1; }
+            store8(out + o, c);
+            o = o + 1;
+        }
+        i = i + 1;
+    }
+    store8(out + o, 0);
+    return out;
+}
+
+fn _dsp_bind_part(sb, p) {
+    str_builder_add_int(sb, strlen(p));
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_cstr(sb, p);
+    return 0;
+}
+
+# What a requestState is bound to, on `a` (3.8.3): the request it was made for and who made
+# it, as the spec asks, each part its length and then its bytes, so no part can borrow from
+# the next. The request is its method, its target (the tool's or the prompt's name, the
+# resource's URI) and its arguments, compact; a retry sends the request again with the
+# answers and the state, which are not bound. Who made it is the principal the dispatcher's
+# principal function names (dispatcher_set_state_principal), else the token the request
+# presented, else no one when the request has no claims. 0 when it has claims and neither
+# names anyone: a state bound to no one would open for anyone who holds it.
+# Through 3.8.2 the binding was the method, the target and the token, one to a line, so a
+# state opened with other arguments, and with claims that were not the token it opened for
+# anyone.
+fn _dsp_state_binding_a(a, d, method, params, claims) {
     var key = "name";
     if (streq(method, "resources/read") == 1) { key = "uri"; }
     var target = 0;
     if (params != 0) { target = jsonx_get_str_dec_a(a, params, key); }
     if (target == 0) { target = ""; }
-    var tok = bote_req_token();
-    if (tok == 0) { tok = ""; }
+    var kind = "n";
+    var who = "";
+    var p = 0;
+    if (load64(d + 200) != 0 && claims != 0) { p = fncall3(load64(d + 200), load64(d + 208), a, claims); }
+    if (p != 0) {
+        kind = "p";
+        who = p;
+    } elif (bote_req_token() != 0) {
+        kind = "t";
+        who = bote_req_token();
+    } elif (claims != 0) {
+        return 0;
+    }
+    var args = "{}";
+    if (params != 0 && streq(method, "resources/read") == 0) {
+        var ar = jsonx_get_raw_a(a, params, "arguments");
+        if (ar != 0) { args = _dsp_compact_a(a, ar); }
+    }
     var sb = str_builder_new_a(a);
-    _sb_grow_a(a, sb, strlen(method) + strlen(target) + strlen(tok) + 8);
-    str_builder_add_cstr(sb, method);
-    str_builder_add_cstr(sb, "\n");
-    str_builder_add_cstr(sb, target);
-    str_builder_add_cstr(sb, "\n");
-    str_builder_add_cstr(sb, tok);
+    _sb_grow_a(a, sb, strlen(method) + strlen(target) + strlen(who) + strlen(args) + 96);
+    _dsp_bind_part(sb, method);
+    _dsp_bind_part(sb, target);
+    str_builder_add_cstr(sb, kind);
+    _dsp_bind_part(sb, who);
+    _dsp_bind_part(sb, args);
     return str_data(str_builder_build_a(a, sb));
 }
 
 # Before a 2026-07-28 request is served: what its handler may ask of it, and, on a retry,
 # its answers and state judged. A response refusing it, or 0. `inputResponses` is an
 # object of the client's results, each an object; `requestState` a string the sealer opens
-# for this method, target and token. The spec makes the state attacker-controlled, and a
-# state that does not open is refused here, before any handler sees it.
-fn _dsp_input_admit_a(a, d, id, method, params, caps) {
+# for this request and who makes it (_dsp_state_binding_a, with `claims`). The spec makes
+# the state attacker-controlled, and a state that does not open is refused here, before any
+# handler sees it.
+fn _dsp_input_admit_a(a, d, id, method, params, caps, claims) {
     if (_dsp_input_method(method) == 0) {
         bote_req_set_input(caps, 0, 0, 0);
         return 0;
@@ -1800,7 +1875,12 @@ fn _dsp_input_admit_a(a, d, id, method, params, caps) {
             if (open_fp == 0) {
                 return resp_error_a(a, id, 0 - 32602, "requestState cannot be verified: this server issues none");
             }
-            payload = fncall4(open_fp, load64(d + 192), a, _dsp_state_binding_a(a, method, params), st);
+            var obind = _dsp_state_binding_a(a, d, method, params, claims);
+            if (obind == 0) {
+                _dsp_log_input(method, "requestState bound to no one: the claims name no principal");
+                return resp_error_a(a, id, 0 - 32602, "requestState cannot be verified: this request's claims name no one it could be bound to");
+            }
+            payload = fncall4(open_fp, load64(d + 192), a, obind, st);
             if (payload == 0) {
                 _dsp_log_input(method, "requestState did not open");
                 return resp_error_a(a, id, 0 - 32602, "requestState did not pass its integrity check, or has expired, or was made for another request");
@@ -1820,10 +1900,14 @@ fn _dsp_log_input(method, reason) {
     return 0;
 }
 
-# 1 when the handler's result `r` (valid JSON) says it is an InputRequiredResult.
+# 1 when the handler's result `r` (valid JSON) says it is an InputRequiredResult, in any of
+# its `resultType` members (3.8.3): through 3.8.2 a prompt's, a resource's or a
+# completion's result was read by its first, and a client reads its last, so
+# `"resultType":"complete","resultType":"input_required"` went out unjudged, its state
+# unsealed. One that names it twice is then refused by _dsp_input_out_a.
 fn _dsp_input_result(a, r) {
-    var rt = jsonx_get_str_dec_a(a, r, "resultType");
-    if (rt != 0 && streq(rt, "input_required") == 1) { return 1; }
+    var info[24];
+    if ((_dsp_result_shape(r, &info) & DSP_SHAPE_INPUT) != 0) { return 1; }
     return 0;
 }
 
@@ -1833,7 +1917,7 @@ fn _dsp_input_result(a, r) {
 # and anything else with -32603. A handler's mistake is -32603 and a WARN; an input request
 # the client did not declare it can take is -32021, naming what it lacks, as the spec says a
 # server MUST answer when it would need a capability the client did not declare.
-fn _dsp_input_out_a(a, d, id, method, params, result, modern) {
+fn _dsp_input_out_a(a, d, id, method, params, result, modern, claims) {
     if (modern == 0 || bote_input_possible() == 0) {
         _dsp_log_input(method, "no input can be asked on this revision or method");
         if (streq(method, "tools/call") == 1) {
@@ -1847,45 +1931,64 @@ fn _dsp_input_out_a(a, d, id, method, params, result, modern) {
     }
     var reqs = jsonx_get_raw_a(a, result, "inputRequests");
     var st = jsonx_get_raw_a(a, result, "requestState");
-    if ((reqs != 0 && jsonx_is_object(reqs) == 0) || (st != 0 && load8(st) != 34) || (reqs == 0 && st == 0)) {
+    # (3.8.3) Every request, each by its key as written: the walker's pairs leave out a
+    # member whose key decodes to hold a NUL, and such a request went out unjudged.
+    var m = 0;
+    if (reqs != 0 && jsonx_is_object(reqs) == 1) { m = _jx_members_raw_a(a, reqs); }
+    var nreq = 0;
+    if (m != 0) { nreq = vec_len(m) / 3; }
+    if ((reqs != 0 && m == 0) || (st != 0 && load8(st) != 34) || (nreq == 0 && st == 0)) {
         _dsp_log_input(method, "no input requests and no state");
-        return resp_error_a(a, id, 0 - 32603, "internal error: an InputRequiredResult holds inputRequests, an object, or requestState, a string, or both");
+        return resp_error_a(a, id, 0 - 32603, "internal error: an InputRequiredResult holds inputRequests, an object of one or more, or requestState, a string, or both");
     }
-    # Each request the spec allows, and the capability it needs, gathered.
+    # Each request the spec allows, in the shape a client parses, and the capability it
+    # needs, gathered.
     var need = 0;
-    if (reqs != 0) {
-        var m = _jx_members_a(a, reqs);
-        var i = 0;
-        while (i < vec_len(m)) {
-            var rq = vec_get(m, i + 1);
-            var rm = jsonx_get_str_dec_a(a, rq, "method");
-            var rp = jsonx_get_raw_a(a, rq, "params");
-            if (rm == 0 || streq(rm, "elicitation/create") == 1) {
-                if (rm == 0) {
-                    _dsp_log_input(method, "an input request with no method");
-                    return resp_error_a(a, id, 0 - 32603, "internal error: an input request names no method");
-                }
-                var mode = 0;
-                if (rp != 0) { mode = jsonx_get_str_dec_a(a, rp, "mode"); }
-                if (mode == 0 || streq(mode, "form") == 1) {
-                    if (bote_client_has("elicitation.form") == 0) { need = need | 1; }
-                } elif (streq(mode, "url") == 1) {
-                    if (bote_client_has("elicitation.url") == 0) { need = need | 2; }
-                } else {
-                    _dsp_log_input(method, "an elicitation of an unknown mode");
-                    return resp_error_a(a, id, 0 - 32603, "internal error: an elicitation's mode is form or url");
-                }
-            } elif (streq(rm, "sampling/createMessage") == 1) {
-                if (bote_client_has("sampling") == 0) { need = need | 4; }
-                elif (rp != 0 && jsonx_has(rp, "tools") == 1 && bote_client_has("sampling.tools") == 0) { need = need | 8; }
-            } elif (streq(rm, "roots/list") == 1) {
-                if (bote_client_has("roots") == 0) { need = need | 16; }
-            } else {
-                _dsp_log_input(method, "an input request the spec does not allow");
-                return resp_error_a(a, id, 0 - 32603, "internal error: an input request is elicitation/create, sampling/createMessage or roots/list");
-            }
-            i = i + 2;
+    var i = 0;
+    while (i < nreq * 3) {
+        if (vec_get(m, i) == 0) {
+            _dsp_log_input(method, "an input request keyed with a NUL");
+            return resp_error_a(a, id, 0 - 32603, "internal error: an input request's key holds a NUL");
         }
+        var rq = vec_get(m, i + 2);
+        var rm = 0;
+        if (jsonx_is_object(rq) == 1) { rm = jsonx_get_str_dec_a(a, rq, "method"); }
+        if (rm == 0) {
+            _dsp_log_input(method, "an input request with no method");
+            return resp_error_a(a, id, 0 - 32603, "internal error: an input request is an object naming its method");
+        }
+        var rp = jsonx_get_raw_a(a, rq, "params");
+        # (3.8.3) A client requires params, an object, of an elicitation and a sampling
+        # request, and allows them on roots/list.
+        var popt = streq(rm, "roots/list");
+        if ((rp == 0 && popt == 0) || (rp != 0 && jsonx_is_object(rp) == 0)) {
+            _dsp_log_input(method, "an input request without its params");
+            return resp_error_a(a, id, 0 - 32603, "internal error: an input request's params are an object, and elicitation/create and sampling/createMessage need them");
+        }
+        if (streq(rm, "elicitation/create") == 1) {
+            var mode = jsonx_get_str_dec_a(a, rp, "mode");
+            if (jsonx_has(rp, "mode") == 1 && mode == 0) {
+                _dsp_log_input(method, "an elicitation of an unknown mode");
+                return resp_error_a(a, id, 0 - 32603, "internal error: an elicitation's mode is form or url");
+            }
+            if (mode == 0 || streq(mode, "form") == 1) {
+                if (bote_client_has("elicitation.form") == 0) { need = need | 1; }
+            } elif (streq(mode, "url") == 1) {
+                if (bote_client_has("elicitation.url") == 0) { need = need | 2; }
+            } else {
+                _dsp_log_input(method, "an elicitation of an unknown mode");
+                return resp_error_a(a, id, 0 - 32603, "internal error: an elicitation's mode is form or url");
+            }
+        } elif (streq(rm, "sampling/createMessage") == 1) {
+            if (bote_client_has("sampling") == 0) { need = need | 4; }
+            elif (jsonx_has(rp, "tools") == 1 && bote_client_has("sampling.tools") == 0) { need = need | 8; }
+        } elif (popt == 1) {
+            if (bote_client_has("roots") == 0) { need = need | 16; }
+        } else {
+            _dsp_log_input(method, "an input request the spec does not allow");
+            return resp_error_a(a, id, 0 - 32603, "internal error: an input request is elicitation/create, sampling/createMessage or roots/list");
+        }
+        i = i + 3;
     }
     if (need != 0) { return _dsp_missing_caps_a(a, id, need); }
     if (st == 0) { return resp_success_a(a, id, result); }
@@ -1895,15 +1998,25 @@ fn _dsp_input_out_a(a, d, id, method, params, result, modern) {
         _dsp_log_input(method, "requestState with no sealer");
         return resp_error_a(a, id, 0 - 32603, "internal error: requestState needs a sealer (dispatcher_set_state_sealer)");
     }
+    var sbind = _dsp_state_binding_a(a, d, method, params, claims);
+    if (sbind == 0) {
+        _dsp_log_input(method, "requestState bound to no one: the claims name no principal");
+        return resp_error_a(a, id, 0 - 32603, "internal error: requestState cannot be bound to who is asking: the claims name no principal (dispatcher_set_state_principal)");
+    }
     var payload = jsonx_get_str_dec_a(a, result, "requestState");
-    var sealed = fncall4(seal_fp, load64(d + 192), a, _dsp_state_binding_a(a, method, params), payload);
+    var sealed = fncall4(seal_fp, load64(d + 192), a, sbind, payload);
     if (sealed == 0) {
         _dsp_log_input(method, "the sealer refused the state");
         return resp_error_a(a, id, 0 - 32603, "internal error: requestState could not be sealed");
     }
     var mem = _jx_members_raw_a(a, result);
     var sb = str_builder_new_a(a);
-    _sb_grow_a(a, sb, strlen(result) + 6 * strlen(sealed) + 64);
+    # Room for the sealed state as it is escaped: a sealer is the dispatcher's to choose, and
+    # most write Base64url, which escaping leaves as it is. At 3.8.2 the room was six times
+    # the state for every sealer.
+    var sroom = strlen(sealed);
+    if (_dsp_needs_escape(sealed) == 1) { sroom = 6 * sroom; }
+    _sb_grow_a(a, sb, strlen(result) + sroom + 64);
     str_builder_add_cstr(sb, "{");
     var sep = 0;
     var k = 0;
@@ -1924,6 +2037,18 @@ fn _dsp_input_out_a(a, d, id, method, params, result, modern) {
     bote_json_escape(sb, sealed);
     str_builder_add_cstr(sb, "\"}");
     return resp_success_a(a, id, str_data(str_builder_build_a(a, sb)));
+}
+
+# 1 when bote_json_escape may write `s` other than as it is: a quote, a backslash, a control
+# byte, or any byte past ASCII, which it writes as U+FFFD where it is no UTF-8.
+fn _dsp_needs_escape(s) {
+    var i = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c < 32 || c == 34 || c == 92 || c >= 128) { return 1; }
+        i = i + 1;
+    }
+    return 0;
 }
 
 # -32021, MissingRequiredClientCapability, with `data.requiredCapabilities` in the
@@ -2114,7 +2239,7 @@ fn dispatcher_dispatch_a(a, d, request, claims) {
         return resp_error_a(a, id, 0 - 32602, DSP_CAPS_MISSING);
     }
     # A retry of a request that asked for input brings the answers and the state (3.8.2).
-    var refused = _dsp_input_admit_a(a, d, id, method, params, caps);
+    var refused = _dsp_input_admit_a(a, d, id, method, params, caps, claims);
     if (refused != 0) { return refused; }
 
     if (streq(method, "server/discover") == 1) {
@@ -2512,7 +2637,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen, modern) {
                 }
             }
         }
-        if (input != 0) { return _dsp_input_out_a(a, d, id, method, params, result, modern); }
+        if (input != 0) { return _dsp_input_out_a(a, d, id, method, params, result, modern, claims); }
         return resp_success_a(a, id, result);
     }
 
@@ -2590,7 +2715,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen, modern) {
         pargs = _slice_cstr(default_alloc(), pargs, 0, strlen(pargs));
         var presult = fncall2(phandler, pargs, bote_req_claims_kept(claims));
         if (presult == 0) { presult = "{\"messages\":[]}"; }
-        return _dsp_served_result(a, d, id, method, params, presult, modern);
+        return _dsp_served_result(a, d, id, method, params, presult, modern, claims);
     }
 
     # resources/* only when the resources capability is enabled (a
@@ -2628,7 +2753,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen, modern) {
         ruri = _slice_cstr(default_alloc(), ruri, 0, strlen(ruri));
         var rresult = fncall2(rhandler, ruri, bote_req_claims_kept(claims));
         if (rresult != 0 && jsonx_valid(rresult, strlen(rresult)) == 1 && _dsp_input_result(a, rresult) == 1) {
-            return _dsp_input_out_a(a, d, id, method, params, _dsp_one_line(a, rresult), modern);
+            return _dsp_input_out_a(a, d, id, method, params, _dsp_one_line(a, rresult), modern, claims);
         }
         if (rresult == 0) { rresult = "{\"contents\":[]}"; }
         return _dsp_checked_result(a, id, rresult);

@@ -151,7 +151,7 @@ fn main() {
     # open roadmap decision, not something a consolidation changes.)
     if (streq(mode, "streamable") == 1) {
         var sdisp = bote_dispatcher_with_echo();
-        if (bote_main_state_from_env(sdisp) < 0) { return 2; }
+        if (bote_main_state_from_env(sdisp, bearer_fp, bearer_ctx) < 0) { return 2; }
         if (bote_main_scopes_from_env(sdisp, mode, bearer_fp == &auth_validator_jwt) < 0) { return 2; }
         # Server→client notification wiring. A SessionStore gives each
         # client a per-session outbound buffer; the client-notification
@@ -182,7 +182,7 @@ fn main() {
     }
     if (streq(mode, "ws") == 1) {
         var wdisp = bote_dispatcher_with_echo();
-        if (bote_main_state_from_env(wdisp) < 0) { return 2; }
+        if (bote_main_state_from_env(wdisp, bearer_fp, bearer_ctx) < 0) { return 2; }
         if (bote_main_scopes_from_env(wdisp, mode, bearer_fp == &auth_validator_jwt) < 0) { return 2; }
         var wport = 8393;
         if (arg != 0) { wport = bote_main_port(arg, 8393); }
@@ -197,7 +197,7 @@ fn main() {
     }
 
     var dispatcher = bote_dispatcher_with_echo();
-    if (bote_main_state_from_env(dispatcher) < 0) { return 2; }
+    if (bote_main_state_from_env(dispatcher, bearer_fp, bearer_ctx) < 0) { return 2; }
 
     # libro audit tools (2.7.5): stand up an in-memory libro chain and
     # register libro_query / verify / export / proof / retention on the

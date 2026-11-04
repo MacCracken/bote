@@ -71,22 +71,62 @@ fn ann_destructive() {
 # ToolSchema — JSON Schema subset
 # ================================================================
 #
-# Layout (24 bytes):
+# Layout (32 bytes):
 #   +0  schema_type cstr ("object", "string", ...)
 #   +8  properties  vec of {key_cstr, value_cstr_raw_json} pairs (16 bytes each) or 0
 #   +16 required    vec of cstr or 0
+#   +24 json        cstr or 0: the whole schema as written, from tool_schema_from_json (3.8.3)
 
 fn schema_new(schema_type, properties_vec, required_vec) {
-    var s = alloc(24);
+    var s = alloc(32);
     store64(s, schema_type);
     store64(s + 8, properties_vec);
     store64(s + 16, required_vec);
+    store64(s + 24, 0);
     return s;
 }
 
 fn schema_type(s) { return load64(s); }
 fn schema_properties(s) { return load64(s + 8); }
 fn schema_required(s) { return load64(s + 16); }
+fn tool_schema_json(s) { return load64(s + 24); }
+
+# An inputSchema as its own JSON (3.8.3), as an outputSchema is: every keyword at its root
+# kept, `$schema`, `$defs`, `allOf`, `additionalProperties` and the rest, and listed as
+# written. Its type, properties and required are read from it here, keys and names as they
+# decode, so everything that reads a ToolSchema reads this one; registration checks the
+# JSON itself (registry_check_tool_def), and judges arguments by what bote enforces of it.
+fn tool_schema_from_json(json) {
+    var s = schema_new(0, 0, 0);
+    store64(s + 24, json);
+    if (json == 0 || jsonx_valid(json, strlen(json)) == 0 || jsonx_is_object(json) == 0) { return s; }
+    var h = default_alloc();
+    store64(s, jsonx_get_str_dec_a(h, json, "type"));
+    var members = _jx_members(jsonx_get_raw(json, "properties"));
+    var props = vec_new();
+    var mi = 0;
+    while (mi < vec_len(members)) {
+        vec_push(props, schema_prop_new(vec_get(members, mi), vec_get(members, mi + 1)));
+        mi = mi + 2;
+    }
+    store64(s + 8, props);
+    var rq = jsonx_get_raw(json, "required");
+    if (rq != 0 && _vp_first_nonws(rq) == 91) {
+        var req = vec_new();
+        var el = _sch_split_array(rq);
+        var ri = 0;
+        while (ri < vec_len(el)) {
+            var ev = vec_get(el, ri);
+            if (_sch_is_string(ev) == 1) {
+                var nm = _sch_str_dec_a(h, ev);
+                if (nm != 0) { vec_push(req, nm); }
+            }
+            ri = ri + 1;
+        }
+        store64(s + 16, req);
+    }
+    return s;
+}
 
 # Property pair (16 bytes): key_cstr, value_cstr (raw JSON literal)
 fn schema_prop_new(key, value) {
@@ -119,6 +159,8 @@ fn schema_prop_value(p) { return load64(p + 8); }
 #   +104 title       cstr or 0, for people, where `name` is for programs (3.8.1)
 #   +112 icons       vec of Icon or 0 (3.8.1)
 #   +120 display     cstr or 0: the title and icons as tools/list sends them, built at registration
+#   +128 input_json  cstr or 0: the inputSchema as tools/list sends it, on one line, made at
+#                    registration (3.8.3)
 #
 # Profiles are opaque consumer-defined tags (e.g. "security", "web", "full")
 # used to expose curated tool subsets via a `profile` filter on tools/list.
@@ -126,7 +168,7 @@ fn schema_prop_value(p) { return load64(p + 8); }
 # (profiles == 0) is in no profile. See _build_tools_list_result_a in dispatch.
 
 fn tool_def_new(name, description, input_schema) {
-    var d = alloc(128);
+    var d = alloc(136);
     store64(d, name);
     store64(d + 8, description);
     store64(d + 16, input_schema);
@@ -143,6 +185,7 @@ fn tool_def_new(name, description, input_schema) {
     store64(d + 104, 0);
     store64(d + 112, 0);
     store64(d + 120, 0);
+    store64(d + 128, 0);
     return d;
 }
 
@@ -179,6 +222,7 @@ fn tool_def_output_legacy(d) { return load64(d + 96); }
 fn tool_def_title(d) { return load64(d + 104); }
 fn tool_def_icons(d) { return load64(d + 112); }
 fn tool_def_display(d) { return load64(d + 120); }
+fn tool_def_input_json(d) { return load64(d + 128); }
 
 # Exact-match membership: 1 if `profile` (non-null) is one of the tool's
 # profile tags, else 0. A null profile or an untagged tool returns 0.
@@ -340,7 +384,8 @@ fn _reg_header_take(raw, path, reach, out) {
     if (name == 0 || _reg_token_ok(name) == 0) {
         return "x-mcp-header must be a non-empty HTTP token";
     }
-    var ty = jsonx_get_str(raw, "type");
+    # (3.8.3) The type as it decodes, as parse_property reads it since 3.8.1.
+    var ty = jsonx_get_str_dec_a(default_alloc(), raw, "type");
     if (ty == 0 || (streq(ty, "string") == 0 && streq(ty, "integer") == 0 && streq(ty, "boolean") == 0)) {
         return "x-mcp-header needs a property of type string, integer or boolean";
     }
@@ -436,6 +481,10 @@ fn _reg_scan_headers(raw, path, reach, out) {
 # Every ParamHeader of `tool_def` into `out`. Returns why one is not allowed, or 0.
 # The property schemas must already have passed registry_check_tool_def's checks.
 fn _reg_scan_tool(tool_def, out) {
+    # (3.8.3) An inputSchema given as JSON from its root, so an annotation under `$defs`,
+    # `allOf` or any keyword of _reg_below there is found, and refused.
+    var js = tool_schema_json(tool_def_input_schema(tool_def));
+    if (js != 0) { return _reg_scan_headers(js, vec_new(), 1, out); }
     var props = schema_properties(tool_def_input_schema(tool_def));
     if (props == 0) { return 0; }
     var i = 0;
@@ -464,6 +513,7 @@ fn _reg_scan_tool(tool_def, out) {
 # - (3.8.1) Each icon is what the spec says (bote_icons_check). (3.8.2) A title may be
 #   empty, as the spec's `title?: string` allows; 3.8.1 refused one.
 # - Each required scope is a scope-token.
+# - (3.8.3) An inputSchema given as JSON is what _reg_check_input_json allows.
 #
 # Public, so a consumer can check a definition before it registers one.
 fn registry_check_tool_def(tool_def) {
@@ -473,6 +523,8 @@ fn registry_check_tool_def(tool_def) {
     }
     var schema = tool_def_input_schema(tool_def);
     if (schema == 0) { return "inputSchema is missing"; }
+    var jwhy = _reg_check_input_json(tool_schema_json(schema));
+    if (jwhy != 0) { return jwhy; }
     var st = schema_type(schema);
     if (st == 0 || streq(st, "object") == 0) { return "inputSchema type must be \"object\""; }
     var props = schema_properties(schema);
@@ -528,6 +580,38 @@ fn registry_check_tool_def(tool_def) {
         }
     }
     return _reg_scan_tool(tool_def, vec_new());
+}
+
+# Why an inputSchema given as JSON (tool_schema_from_json) cannot be registered, or 0
+# (3.8.3). What a client's parser requires of it, as the official SDK reads one: an object
+# whose `properties`, if any, is an object, and whose `required`, if any, is an array of
+# strings, or the client drops the whole list. And what bote requires of an outputSchema:
+# no key twice in one object, none and no string holding a NUL, and a dialect bote knows.
+# The rest is checked on what was read from it, as for any ToolSchema: its `type`, as it
+# decodes, must be "object".
+fn _reg_check_input_json(js) {
+    if (js == 0) { return 0; }
+    if (jsonx_valid(js, strlen(js)) == 0) { return "the inputSchema is not valid JSON"; }
+    if (jsonx_is_object(js) == 0) { return "the inputSchema must be a JSON Schema object"; }
+    if (_jx_repeats_a(default_alloc(), js, 1) == 1) {
+        return "the inputSchema names a key twice in one object, or holds a NUL or a key that is not text";
+    }
+    if (_reg_dialect_known(js) == 0) {
+        return "the inputSchema's $schema names a dialect bote does not support (2020-12, 2019-09, draft-07, draft-06)";
+    }
+    var pr = jsonx_get_raw(js, "properties");
+    if (pr != 0 && _vp_first_nonws(pr) != 123) { return "the inputSchema's properties must be an object"; }
+    var rq = jsonx_get_raw(js, "required");
+    if (rq != 0) {
+        if (_vp_first_nonws(rq) != 91) { return "the inputSchema's required must be an array of strings"; }
+        var el = _sch_split_array(rq);
+        var i = 0;
+        while (i < vec_len(el)) {
+            if (_sch_is_string(vec_get(el, i)) == 0) { return "the inputSchema's required must be an array of strings"; }
+            i = i + 1;
+        }
+    }
+    return 0;
 }
 
 # One ERROR line for a refused registration. The name is logged only when
@@ -601,9 +685,12 @@ fn _reg_type_known(ty) {
 }
 
 fn _reg_warn_unenforced(tool_def) {
+    var kws = _reg_words(BOTE_UNENFORCED);
+    # (3.8.3) An inputSchema given as JSON can hold any keyword at its root.
+    var js = tool_schema_json(tool_def_input_schema(tool_def));
+    if (js != 0) { _reg_warn_schema(tool_def_name(tool_def), "inputSchema", js, kws); }
     var props = schema_properties(tool_def_input_schema(tool_def));
     if (props == 0) { return 0; }
-    var kws = _reg_words(BOTE_UNENFORCED);
     var i = 0;
     while (i < vec_len(props)) {
         var pair = vec_get(props, i);
@@ -848,14 +935,28 @@ fn _reg_prepare_output(tool_def, st) {
     return 0;
 }
 
+# The inputSchema as tools/list sends it, on one line (3.8.3): its JSON as written, or the
+# ToolSchema's fields written out. A property's schema is kept as the consumer wrote it,
+# and one pretty-printed put a raw line feed in the list, which ends the message on stdio
+# and the Unix transport; through 3.8.2 the list was built from the fields every time.
+fn _reg_input_json(schema) {
+    var js = tool_schema_json(schema);
+    if (js == 0) {
+        var sb = str_builder_new();
+        _emit_schema(sb, schema);
+        js = str_data(str_builder_build(sb));
+    }
+    return _dsp_one_line(default_alloc(), js);
+}
+
 # What registration does before it touches the registry: refuses a malformed definition
 # (a BoteError), compiles its schema and reads its headers. 0 when it may be added.
-# What it makes for the definition goes in `st` (48 bytes), and _registry_add_u stores it
+# What it makes for the definition goes in `st` (56 bytes), and _registry_add_u stores it
 # under the registries' lock (3.8.2), so a list beside the registration of a definition
 # already listed reads it once: +0 the headers, +8 the outputSchema on one line, +16 its
 # compiled form, +24 its legacy form, +32 the display fragment, +40 1 when there is an
-# outputSchema. At 3.8.1 each was stored here, with nothing held, between a list's sizing
-# pass and its writing pass.
+# outputSchema, +48 the inputSchema as it is listed (3.8.3). At 3.8.1 each was stored here,
+# with nothing held, between a list's sizing pass and its writing pass.
 fn _registry_prepare(tool_def, st) {
     var why = registry_check_tool_def(tool_def);
     if (why != 0) {
@@ -867,7 +968,7 @@ fn _registry_prepare(tool_def, st) {
     if (tool_def_compiled(tool_def) == 0) {
         tool_def_with_compiled(tool_def, compiled_compile(tool_def_input_schema(tool_def)));
     }
-    memset(st, 0, 48);
+    memset(st, 0, 56);
     var headers = vec_new();
     _reg_scan_tool(tool_def, headers);
     if (vec_len(headers) > 0) { store64(st, headers); }
@@ -875,18 +976,21 @@ fn _registry_prepare(tool_def, st) {
     if (tool_def_output_schema(tool_def) != 0) { store64(st + 40, 1); }
     _reg_prepare_output(tool_def, st);
     store64(st + 32, _bote_display_json(tool_def_title(tool_def), tool_def_icons(tool_def)));
+    store64(st + 48, _reg_input_json(tool_def_input_schema(tool_def)));
     return 0;
 }
 
-# Store in `tool_def` what _registry_prepare made in `st`.
+# Store in `tool_def` what _registry_prepare made in `st`. The compiled outputSchema and its
+# 2025-11-25 form are stored whether there is one or not (3.8.3): a definition registered
+# again with its outputSchema taken away kept both through 3.8.2, and a call was refused by
+# the schema tools/list no longer showed.
 fn _registry_stage(tool_def, st) {
     if (load64(st) != 0) { store64(tool_def + 64, load64(st)); }
-    if (load64(st + 40) == 1) {
-        store64(tool_def + 80, load64(st + 8));
-        store64(tool_def + 88, load64(st + 16));
-        store64(tool_def + 96, load64(st + 24));
-    }
+    if (load64(st + 40) == 1) { store64(tool_def + 80, load64(st + 8)); }
+    store64(tool_def + 88, load64(st + 16));
+    store64(tool_def + 96, load64(st + 24));
     store64(tool_def + 120, load64(st + 32));
+    store64(tool_def + 128, load64(st + 48));
     return 0;
 }
 
@@ -916,7 +1020,7 @@ fn _registry_add_u(r, tool_def, st) {
 }
 
 fn registry_register(r, tool_def) {
-    var st[48];
+    var st[56];
     var err = _registry_prepare(tool_def, &st);
     if (err != 0) { return err; }
     bote_reg_write();

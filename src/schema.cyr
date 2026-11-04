@@ -377,12 +377,16 @@ fn _sch_unquote_a(a, v) {
 # as written, and `"x\u0000y"` written is what `"x\\u0000y"` decodes to, so an enum
 # holding the one took the other. Now such a value matches nothing, such a `required`
 # name is never met, and registration refuses a schema that holds one.
+# (3.8.3) And one that is no text a client reads as bote does, bytes that are no UTF-8 or a
+# lone surrogate, decodes to 0 too, as such a key has been refused since 3.8.2: bote writes
+# U+FFFD for either, a client keeps the surrogate, and `"\ud800"` met an enum of U+FFFD.
 fn _sch_str_dec_a(a, v) {
     var n = strlen(v);
     var at = _jx_skip_ws(v, n, 0);
     var s = _jx_str_at_a(a, v, n, at);
     if (s == 0) { return 0; }
     var sl = strlen(s);
+    if (_jx_key_text_ok(s, sl) == 0) { return 0; }
     if (_jx_has_escape(s, sl) == 0) { return s; }
     var out = alloc_via(a, sl + 1);
     if (_jx_unescape_into(s, sl, out) != strlen(out)) { return 0; }

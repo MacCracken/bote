@@ -18,7 +18,199 @@ have per release.
 
 _(empty)_
 
+## [3.8.3] — 2026-11-03 · Input schemas as JSON
+
+**A tool's inputSchema can be its own JSON, every keyword at its root kept.** `tool_schema_from_json(json)` takes a
+whole JSON Schema, as `tool_def_with_output_schema` has taken an outputSchema since 3.8.0: `$schema`, `$defs`,
+`allOf`, `if` / `then` / `else`, the `additionalProperties: false` the spec recommends for a tool with no parameters,
+and the rest are listed as written, on both revisions. A ToolSchema could say only a type, properties and required
+names. bote judges arguments by the root's `properties` and `required`, read from the JSON as they decode, and warns
+at registration of each keyword it lists and does not enforce, the root's among them. The official suite's
+`json-schema-2020-12` scenario, which it does not score, now passes on both revisions.
+
+**Every inputSchema is now listed as registration kept it, on one line.** Through 3.8.2 the list wrote a ToolSchema
+out on every request, each property's schema as the consumer gave it, so one written on several lines put a raw line
+feed in `tools/list`, which ends the message on stdio and the Unix transport.
+
+**Seven defects in 3.8.2 land ahead of it**, from an independent review of that release. The worst two were in what a
+multi round-trip request's `requestState` is bound to: a state was not bound to the request's arguments, and where
+the request's claims were not its token it was bound to no one, so it opened for any user who held it. bote's own
+binary was not open to the second, since every validator it ships returns the token. A state is now bound to the
+request, arguments included, and to its principal, which a new principal function names; the binary names a JWT's
+issuer and subject, which also settles the open decision 3.8.2 left: a client that refreshes its token between rounds
+keeps its state. See the correction notice in 3.8.2.
+
+The stated minimum cyrius (6.7.13) is unchanged. A state sealed by 3.8.2 does not open under 3.8.3, whose binding is
+spelled differently: a client mid-request when a server is upgraded starts the request again.
+
+### Added
+
+- **`tool_schema_from_json(json)`** (core, `src/registry.cyr`): a ToolSchema made from an inputSchema's JSON, with
+  `tool_schema_json(s)` to read it back. Its type, its properties' names and schemas, and its required names are
+  read from the JSON as they decode, so everything that reads a ToolSchema reads this one. Registration refuses one a
+  client's parser would not take, which the official SDK drops with the whole list: an object whose `type` is
+  `"object"`, whose `properties`, if any, is an object of schemas (an object or a boolean) with names, and whose
+  `required`, if any, is an array of names. And what it refuses in an outputSchema: a key named twice in one object,
+  a NUL in a key or a string, a key that is not text, and a `$schema` naming a dialect bote does not know.
+- `tool_def_input_json(d)`: the inputSchema as `tools/list` sends it, made at registration.
+- **`dispatcher_set_state_principal(d, fp, ctx)`** (core): who a request's claims name, for the binding of its
+  `requestState`. `fp(ctx, a, claims)` gives a string naming them, or 0. Dispatcher 216 B, +200 and +208.
+- **`jwt_state_principal(secret, a, claims)`** (full bundle, `src/jwt.cyr`): a JWT's issuer and subject, as they
+  decode, for `dispatcher_set_state_principal`. It reads the token the bearer validator accepted for the request, as
+  `jwt_scope_check` reads its scopes, and does not verify it again, which for ES256 would add a signature check of
+  about 10 ms to every round. It names no one for what is no JWT, a token with no subject, or an issuer or subject
+  that is no string, is empty or holds a NUL. The binary sets it on
+  every dispatcher when its bearer validator is the JWT one, and so does the conformance fixture.
+
+### Changed
+
+- **`tools/list` and a discovery announcement write each inputSchema as registration kept it** (`_emit_input_schema`),
+  where they built a ToolSchema's JSON every time. A definition changed after its registration is listed as it was
+  registered until it is registered again, as its title and icons have been since 3.8.1.
+- **An `x-mcp-header` is found anywhere in an inputSchema given as JSON**, and refused where the spec does not allow
+  one: at the root, or under `$defs`, `allOf` or any keyword that holds a subschema. One on a property is read into
+  its `Mcp-Param` header as in a ToolSchema.
+- **An `x-mcp-header`'s property type is read as it decodes**: `"string"` is a string, as `parse_property` has
+  read a type since 3.8.1. It was refused.
+- **A `requestState` is bound to the request and who made it** (`_dsp_state_binding_a`), each part its length and
+  then its bytes, so no part can borrow from the next: the method, the tool's or prompt's name or the resource's URI,
+  the arguments with the spacing between their tokens left out (`_dsp_compact_a`), so a client that sends them
+  again compact or pretty sends the same, and the principal the principal function names, else the token the request
+  presented, else no one for a request with no claims. A request with claims that name no one cannot be bound: its
+  handler's state is `-32603` and a state it brings `-32602`, each with a WARN. Through 3.8.2 the binding was the
+  method, the target and the token, one to a line.
+- ToolSchema is 32 B: +24 the JSON, or 0. One made by `schema_new` has it zeroed, and one made by hand must. ToolDef
+  is 136 B, +128 the inputSchema as listed.
+
+### Fixed
+
+From the review of 3.8.2:
+
+- **A `requestState` was bound to no one where the request's claims were not its token.** Only a validator that
+  returns the token itself notes it, so with any other, or a transport that hands the codec its own claims, the
+  binding held no identity: alice's state, brought by mallory, opened and its handler read alice's words. It is bound
+  to the principal now, and refused both ways where none can be named.
+- **A `requestState` was not bound to the arguments.** A state made for `t_a {"env":"staging"}` opened for
+  `t_a {"env":"prod"}`, and a handler that keeps its conclusion in the state, an approval or a quote, was given it
+  for a request it never judged.
+- **Three ways past the InputRequiredResult check**, each sending a handler's state unsealed and its requests
+  unjudged: a tool's `resultType` written in 64 bytes of escapes or more, which the shape walk took for none
+  (`_dsp_str_dec_is` compares as it decodes now, at any length); a prompt's, a resource's or a completion's
+  `resultType` named twice, where bote read the first and a client the last (`_dsp_input_result` reads every one,
+  and one named twice is refused); and an input request keyed with a NUL, which the member walk left out (each is
+  read by its key as written now, and one keyed with a NUL is refused).
+- **Shapes the official client refuses passed the check**: `"inputRequests":{}` with no state, an elicitation or a
+  sampling request with no `params`, `params` that are no object, and an elicitation `mode` that is no string,
+  which was taken for form. Each is `-32603` now.
+- **A string holding a lone surrogate met an enum of U+FFFD**, on arguments and results: bote writes U+FFFD for it,
+  and a client's validator keeps the surrogate. Such a string, and one whose bytes are no UTF-8, now matches no enum
+  and meets no `required` name, as such a key has been refused since 3.8.2 (`_sch_str_dec_a`).
+- **An outputSchema taken away kept judging.** A definition registered again with `tool_def_with_output_schema(t, 0)`
+  kept its compiled schema and its 2025-11-25 form: `tools/list` showed none, and a call was refused by it. This
+  predates 3.8.2.
+- A content block's `type` written in 64 bytes of escapes or more, `resource_link` among them at 78, was taken for no
+  type, and the block went as a text block holding its JSON.
+- The sealed state's room in its result was six times its length for every sealer. It is its length unless it holds
+  a byte the escaper rewrites.
+
+Also:
+
+- **A ToolSchema property written on several lines split `tools/list` in two.** Its raw LF went into the list as it
+  was, and stdio and the Unix transport frame a message by its newline, so a client read half a response and then a
+  line that was no JSON. The list is now made once, at registration, with every CR and LF between tokens left out.
+
+### Security
+
+- A `requestState` is bound to its principal and its request, as the spec asks: through 3.8.2 a request whose claims
+  were not its token bound it to no one, and no request bound its arguments.
+- Every InputRequiredResult a handler gives is judged and its state sealed, whatever `resultType` spelling or
+  repetition it uses and whatever its requests are keyed with.
+- A string that is no text a client reads as bote does, a lone surrogate or bytes that are no UTF-8, meets no enum.
+
+### Tests
+
+- **5,864 assertions, from 5,680**, on x86_64 and under `qemu-aarch64` 11.1.3.
+- **`tests/bote_input.tcyr`**, 146, from 102, from the review of 3.8.2: claims that are no token with no principal
+  function, the handler's state refused and one brought back refused, and a state with no claims at all still
+  working; a principal function's states, for tools, prompts and resources, opening for their principal and no
+  other, winning over the token, and told apart from a token of the same bytes; arguments bound, compact, spaced and
+  on two lines the same, a space inside a string not spacing, none the same as `{}`, a prompt's too; the binding's
+  exact bytes, a target and a token holding a line feed among them; the compactor; an 84-byte escaped `resultType`
+  judged and its state sealed; `resultType` twice from a prompt, a resource and a completion, either order; eight
+  request shapes a client takes another way or refuses; and a JWT end to end, a refreshed token of the same subject
+  keeping the state, another subject's and the same subject's from another issuer refused.
+- **`tests/bote_output.tcyr`**, 249, from 240: an outputSchema taken away judging nothing, kept nowhere; a lone
+  surrogate meeting no U+FFFD enum on a result and an argument, U+FFFD itself meeting it, a pair the wrong way round;
+  a 78-byte escaped `resource_link` lifted.
+- **`tests/bote_jwt.tcyr`**, 507, from 491: `jwt_state_principal`'s exact bytes, decoded spellings, every claim that
+  names no one, what is no JWT, a token read and not verified again (an expired one, one another key signed), the
+  hook's context not read, and no heap.
+- **`tests/bote_tool_schema.tcyr`**, 85, new: what `tool_schema_from_json` reads, escaped spellings included;
+  twenty-five refusals, each with why and nothing registered; the suite's schema, the spec's shape for no parameters,
+  draft-07 and an escaped `x-mcp-header` type taken; the list's exact bytes on both revisions, a schema on several
+  lines sent on one, a ToolSchema's property on several lines sent on one (it was split), names escaped; a definition
+  changed after registration listed as registered, until registered again; discovery; arguments judged by the
+  enum, a type and a required name read as they decode, and `additionalProperties` not judged; the root's WARNs and
+  none for what sits below a root keyword; and the heap: forty 4 KB schemas listed ten times on both revisions, and a
+  ramp of forty lists each a kilobyte larger, then the same again, keeping nothing.
+- **`tests/bote_http_era.tcyr`**, 1863, from 1833: an `x-mcp-header` in an inputSchema given as JSON judged on all
+  three HTTP transports.
+- **`fuzz/input_schema.fcyr`**, new: 30,000 random schemas, refused or taken exactly as bayan's parser says a client
+  would take them, those taken listed byte for byte with their CR and LF out, the list valid JSON, what was read from
+  each the same as bayan reads, and no heap.
+- **55 mutants, 54 killed**: 26 on inputSchema as JSON and 29 on the review's fixes. The survivor that was a gap,
+  what is read from a `required` that is no array, has a test now. One is equivalent: a ToolDef field zeroed where
+  fresh memory already is. The fuzz harness kills the four it was run against. One check was taken out before the
+  run, a `type` check the ToolSchema's own check makes on the same decoded value. Two pieces have no mutant: the
+  binary's wiring of `jwt_state_principal`, which no unit test reaches, and the sealed state's room, which only a
+  sealer that writes bytes the escaper rewrites would show.
+- **The official suite**: `json-schema-2020-12` passes on 2025-11-25 and 2026-07-28, all eight of its checks, and
+  leaves both expected lists. 164 checks pass on 2026-07-28, from 157, and 62 on 2025-11-25, from 55; every scenario
+  the suite scores for 2026-07-28 still passes, 39 of 39. **The official client** passes 525 of 525.
+
+### Performance
+
+**A list is cheaper, and a round that asks costs a little more for what its state is bound to.** Interleaved A/B
+against 3.8.2, 15 rounds pinned to one core, the working tree's benches on both sides. Minimums, in ns:
+
+| Bench | 3.8.2 | 3.8.3 | Delta |
+|---|---:|---:|---:|
+| `tools_list_props` (one tool, three properties) | 5,322 | 4,374 | −17.8% |
+| `dispatch_tools_list` (one tool, no properties) | 1,811 | 1,638 | −9.6% |
+| `input_required_sealed` | 36,051 | 37,323 | +3.5% |
+| `input_retry_open` | 22,451 | 23,648 | +5.3% |
+| `tools_list_json` (the suite's schema, as JSON) | — | 5,926 | new |
+
+- **A list writes each inputSchema as registration kept it**, where it escaped every property's name and wrote the
+  schema out on every request: −17.8% for a tool with three properties, −9.6% for one with none.
+- **A round that asks, and its retry, bind more**: the arguments, compacted, and each part's length, HMACed with the
+  rest. That is about 1.2 µs on each, and only a request that carries or gives a state pays it. A JWT principal adds
+  a Base64url decode of the token's payload, which these rows, run with no claims, do not include. It reads the
+  token the validator accepted rather than verifying it again: a first version did, and that would have added an
+  ES256 signature check, 10.4 ms on this host (`jwt_es256`), to every round.
+- `tools_list_json` has no 3.8.2 row to compare: 3.8.2 cannot list that schema, and its side of the A/B lists an
+  empty one.
+- **The rest is not the change.** `jsonx_get_str_flat` −10.1%, `cancel_lines_scan` −5.1%, `scope_check_jwt` +4.9%,
+  `schema_compile_simple` +4.1%, `http_head_nul` +4.0% and `session_validate` +3.3% run code this release does not
+  touch, or touches only for strings it never meets: code position, which moves a short bench by 5 to 12% on its own.
+
 ## [3.8.2] — 2026-11-03 · Multi round-trip requests
+
+> ⚠ **Corrected at 3.8.3.** These claims below were not true, found by an independent review of this release.
+> - "bound to the method, the tool, prompt or URI, and the token the request presented." Where the request's claims
+>   were not the token, from a validator that returns a record or a transport that passes its own claims to the
+>   codec, no token was noted, and a state was bound to no one: made for one user, it opened for another. And the
+>   arguments were never bound, so a state made for `{"env":"staging"}` opened for `{"env":"prod"}`.
+> - "Every state a handler gives" is sealed, and "anything else is the handler's mistake, `-32603`" or `-32021`. A
+>   tool's `resultType` written in escapes of 64 bytes or more, `input_required` among them at 84, a prompt's, a
+>   resource's or a completion's `resultType` named twice, and an input request keyed with a NUL each went out
+>   unjudged, the handler's state unsealed. The client refused that state when it came back.
+> - An InputRequiredResult "must hold requests or a state or both." `"inputRequests":{}` with no state passed, and so
+>   did an elicitation or a sampling request with no `params` and a `mode` that is no string, which the official
+>   client refuses.
+> - "`completion/complete` may not ask." One naming `resultType` twice did.
+> - "A schema can no longer pass a value a client reads another way." A string holding a lone surrogate met an enum of
+>   U+FFFD, which bote writes for it and a client does not.
 
 **A tool, a prompt or a resource can ask the client for input, on MCP 2026-07-28.** A handler returns an
 `InputRequiredResult`: elicitation (a form, or a URL to send the user to), sampling, or the client's roots, under keys

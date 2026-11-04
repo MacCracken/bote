@@ -1,0 +1,348 @@
+# bote_tool_schema.tcyr — an inputSchema as its own JSON (3.8.3): what tool_schema_from_json
+# reads from it, what registration refuses, the list sending it as written on one line on
+# both revisions (and a ToolSchema's property on several lines, which split the list through
+# 3.8.2), discovery, the arguments judged by it, the WARNs for its root, and the heap.
+#
+# Run: cyrius test tests/bote_tool_schema.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+fn h_tool(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+
+var _M = ",\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}";
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
+
+fn _msg(method, params, modern) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, "\",\"params\":{");
+    str_builder_add_cstr(sb, params);
+    if (modern == 1) {
+        if (strlen(params) == 0) { str_builder_add_cstr(sb, _M + 1); } else { str_builder_add_cstr(sb, _M); }
+    }
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}
+
+fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+fn _list(d, modern) { return codec_process_message(_msg("tools/list", "", modern), d, 0); }
+fn _call(d, tool, args, modern) {
+    return codec_process_message(_msg("tools/call", _cat3(_cat3("\"name\":\"", tool, "\",\"arguments\":"), args, ""), modern), d, 0);
+}
+fn _reason(e) { if (e == 0) { return 0; } return bote_err_reason(e); }
+fn _jtool(name, js) { return tool_def_new(name, "d", tool_schema_from_json(js)); }
+fn _reg(d, name, js) { return _reason(dispatcher_register_tool(d, _jtool(name, js), &h_tool)); }
+# The entry tools/list sends for a tool `name` with description "d" and nothing else.
+fn _entry(name, js) { return _cat(_cat3("{\"name\":\"", name, "\",\"description\":\"d\",\"inputSchema\":"), _cat(js, "}")); }
+fn _crlf(s) {
+    var i = 0;
+    while (load8(s + i) != 0) {
+        if (load8(s + i) == 10 || load8(s + i) == 13) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+fn _prop(k, v) { var p = vec_new(); vec_push(p, schema_prop_new(k, v)); return p; }
+fn _strs1(a) { var v = vec_new(); vec_push(v, a); return v; }
+
+# assert_streq, with nothing on either side a failure rather than a crash.
+fn _ase(got, want, name) {
+    if (got == 0 || want == 0) {
+        if (got == want) { return assert(1 == 1, name); }
+        return assert(0 == 1, name);
+    }
+    return assert_streq(got, want, name);
+}
+
+# Log capture, through sakshi's emit hook.
+var _lc_all = 0;
+fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    var b = alloc(n + 1);
+    memcpy(b, msg, n);
+    store8(b + n, 0);
+    vec_push(_lc_all, b);
+    return 0;
+}
+fn _lc_begin() { _lc_all = vec_new(); sakshi_set_emit_hook(&_lc_hook); sakshi_set_level(SK_TRACE); return 0; }
+fn _lc_end() { sakshi_clear_emit_hook(); sakshi_set_level(SK_ERROR); return 0; }
+fn _lc_find(sub) {
+    var i = 0;
+    while (i < vec_len(_lc_all)) {
+        if (_has(vec_get(_lc_all, i), sub) == 1) { return vec_get(_lc_all, i); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The conformance suite's json-schema-2020-12 schema.
+var SUITE = "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"$defs\":{\"address\":{\"$anchor\":\"addressDef\",\"type\":\"object\",\"properties\":{\"street\":{\"type\":\"string\"},\"city\":{\"type\":\"string\"}}}},\"properties\":{\"name\":{\"type\":\"string\"},\"address\":{\"$ref\":\"#/$defs/address\"},\"contactMethod\":{\"type\":\"string\",\"enum\":[\"phone\",\"email\"]},\"phone\":{\"type\":\"string\"},\"email\":{\"type\":\"string\"}},\"allOf\":[{\"anyOf\":[{\"required\":[\"phone\"]},{\"required\":[\"email\"]}]}],\"if\":{\"properties\":{\"contactMethod\":{\"const\":\"phone\"}},\"required\":[\"contactMethod\"]},\"then\":{\"required\":[\"phone\"]},\"else\":{\"required\":[\"email\"]},\"additionalProperties\":false}";
+var ESC = "{\"type\":\"obj\\u0065ct\",\"properties\":{\"p\\u005fa\":{\"type\":\"string\"}},\"required\":[\"p\\u005fa\"]}";
+var PRETTY = "{\n  \"type\": \"object\",\r\n  \"properties\": {\"a\": {\"type\": \"string\"}}\n}";
+var PRETTY_1 = "{  \"type\": \"object\",  \"properties\": {\"a\": {\"type\": \"string\"}}}";
+
+var REP = "the inputSchema names a key twice in one object, or holds a NUL or a key that is not text";
+var TYPE = "inputSchema type must be \"object\"";
+var PROPS = "the inputSchema's properties must be an object";
+var REQ = "the inputSchema's required must be an array of strings";
+var SIT = "x-mcp-header must sit on a property reached through `properties` keys alone";
+
+fn main() {
+    sakshi_set_level(SK_ERROR);
+
+    # ---- tool_schema_from_json ----
+    var ts = tool_schema_from_json(SUITE);
+    _ase(tool_schema_json(ts), SUITE, "from_json: the JSON is kept as written");
+    _ase(schema_type(ts), "object", "from_json: the type");
+    assert_eq(vec_len(schema_properties(ts)), 5, "from_json: the root's five properties, not $defs' two");
+    _ase(schema_prop_key(vec_get(schema_properties(ts), 0)), "name", "from_json: properties in order");
+    _ase(schema_prop_value(vec_get(schema_properties(ts), 1)), "{\"$ref\":\"#/$defs/address\"}", "from_json: a property's schema as written");
+    assert_eq(schema_required(ts), 0, "from_json: no root required, though if/then/else and allOf name some");
+    var te = tool_schema_from_json("{\"type\":\"obj\\u0065ct\",\"properties\":{\"p\\u005fa\":{}},\"required\":[\"p\\u005fa\",1,\"b\"]}");
+    _ase(schema_type(te), "object", "from_json: the type as it decodes");
+    _ase(schema_prop_key(vec_get(schema_properties(te), 0)), "p_a", "from_json: a key as it decodes");
+    assert_eq(vec_len(schema_required(te)), 2, "from_json: required's strings, as they decode");
+    _ase(vec_get(schema_required(te), 0), "p_a", "from_json: ...the first decoded");
+    assert_eq(schema_required(tool_schema_from_json("{\"type\":\"object\",\"required\":\"a\"}")), 0, "from_json: no required read from a string");
+    var tb = tool_schema_from_json("{");
+    assert(schema_type(tb) == 0 && schema_properties(tb) == 0 && schema_required(tb) == 0, "from_json: nothing read from JSON that is not valid");
+    _ase(tool_schema_json(tb), "{", "from_json: ...and the JSON kept for registration to refuse");
+    assert_eq(tool_schema_json(schema_new("object", 0, vec_new())), 0, "schema_new: no JSON");
+    assert_eq(tool_schema_json(tool_schema_from_json(0)), 0, "from_json: 0 is no JSON");
+
+    # ---- Registration ----
+    var d = dispatcher_new(tool_registry_new());
+    _ase(_reg(d, "r_bad1", "{\"type\":"), "the inputSchema is not valid JSON", "registration: no valid JSON");
+    _ase(_reg(d, "r_bad2", "[]"), "the inputSchema must be a JSON Schema object", "registration: an array");
+    _ase(_reg(d, "r_bad3", "true"), "the inputSchema must be a JSON Schema object", "registration: the schema true");
+    _ase(_reg(d, "r_bad4", "{\"type\":\"object\",\"type\":\"object\"}"), REP, "registration: a root key twice");
+    _ase(_reg(d, "r_bad5", "{\"type\":\"object\",\"$defs\":{\"a\":{\"x\":1,\"x\":2}}}"), REP, "registration: a key twice under $defs");
+    _ase(_reg(d, "r_bad6", "{\"type\":\"object\",\"properties\":{\"a\":{},\"\\u0061\":{}}}"), REP, "registration: a property named twice, spelled two ways");
+    _ase(_reg(d, "r_bad7", "{\"type\":\"object\",\"a\\u0000\":1}"), REP, "registration: a key holding a NUL");
+    _ase(_reg(d, "r_bad8", "{\"type\":\"object\",\"description\":\"a\\u0000b\"}"), REP, "registration: a string holding a NUL");
+    _ase(_reg(d, "r_bad9", "{\"$schema\":\"https://example.com/s\",\"type\":\"object\"}"), "the inputSchema's $schema names a dialect bote does not support (2020-12, 2019-09, draft-07, draft-06)", "registration: an unknown dialect");
+    _ase(_reg(d, "r_bad10", "{}"), TYPE, "registration: no type");
+    _ase(_reg(d, "r_bad11", "{\"type\":\"string\"}"), TYPE, "registration: a string type");
+    _ase(_reg(d, "r_bad12", "{\"type\":[\"object\"]}"), TYPE, "registration: a type array");
+    _ase(_reg(d, "r_bad13", "{\"type\":1}"), TYPE, "registration: a type that is no string");
+    _ase(_reg(d, "r_bad14", "{\"type\":\"object\",\"properties\":[]}"), PROPS, "registration: properties an array");
+    _ase(_reg(d, "r_bad15", "{\"type\":\"object\",\"properties\":\"x\"}"), PROPS, "registration: properties a string");
+    _ase(_reg(d, "r_bad16", "{\"type\":\"object\",\"required\":\"a\"}"), REQ, "registration: required a string");
+    _ase(_reg(d, "r_bad17", "{\"type\":\"object\",\"required\":[1]}"), REQ, "registration: required holding a number");
+    _ase(_reg(d, "r_bad18", "{\"type\":\"object\",\"required\":[\"a\",null]}"), REQ, "registration: required holding null after a string");
+    _ase(_reg(d, "r_bad19", "{\"type\":\"object\",\"properties\":{\"a\":1}}"), "an inputSchema property's schema is not a valid JSON Schema (an object or a boolean)", "registration: a property's schema a number");
+    _ase(_reg(d, "r_bad20", "{\"type\":\"object\",\"properties\":{\"\":{}}}"), "an inputSchema property has no name", "registration: a property with no name");
+    _ase(_reg(d, "r_bad21", "{\"type\":\"object\",\"required\":[\"\"]}"), "an inputSchema required entry is empty", "registration: an empty required name");
+    _ase(_reg(d, "r_bad22", "{\"type\":\"object\",\"x-mcp-header\":\"A\"}"), SIT, "registration: an x-mcp-header at the root");
+    _ase(_reg(d, "r_bad23", "{\"type\":\"object\",\"$defs\":{\"q\":{\"type\":\"string\",\"x-mcp-header\":\"A\"}}}"), SIT, "registration: an x-mcp-header under $defs");
+    _ase(_reg(d, "r_bad24", "{\"type\":\"object\",\"allOf\":[{\"properties\":{\"q\":{\"type\":\"string\",\"x-mcp-header\":\"A\"}}}]}"), SIT, "registration: an x-mcp-header under allOf");
+    _ase(_reg(d, "r_bad25", "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"array\",\"x-mcp-header\":\"A\"}}}"), "x-mcp-header needs a property of type string, integer or boolean", "registration: an x-mcp-header on an array");
+    assert_eq(registry_len(dispatcher_registry(d)), 0, "registration: nothing registered by a refusal");
+
+    assert_eq(_reg(d, "j_suite", SUITE), 0, "registration: the suite's schema");
+    assert_eq(_reg(d, "j_empty", "{\"type\":\"object\",\"additionalProperties\":false}"), 0, "registration: the spec's shape for no parameters");
+    assert_eq(_reg(d, "j_d7", "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\"}"), 0, "registration: draft-07, its URI ending in #");
+    assert_eq(_reg(d, "j_esc", ESC), 0, "registration: a type, a key and a required name escaped");
+    assert_eq(_reg(d, "j_pretty", PRETTY), 0, "registration: JSON on several lines");
+    var hd = dispatcher_new(tool_registry_new());
+    assert_eq(_reg(hd, "j_hdr", "{\"type\":\"object\",\"properties\":{\"region\":{\"type\":\"str\\u0069ng\",\"x-mcp-header\":\"Region\"}}}"), 0, "registration: an x-mcp-header on a string whose type is escaped");
+    var hph = tool_def_param_headers(registry_get(dispatcher_registry(hd), "j_hdr"));
+    assert(hph != 0 && vec_len(hph) == 1, "registration: ...read as a header");
+    if (hph != 0 && vec_len(hph) == 1) {
+        _ase(param_header_field(vec_get(hph, 0)), "Mcp-Param-Region", "registration: ...its field");
+        _ase(vec_get(param_header_path(vec_get(hph, 0)), 0), "region", "registration: ...its path");
+    }
+    var hs = dispatcher_new(tool_registry_new());
+    assert_eq(_reason(dispatcher_register_tool(hs, tool_def_new("s_hdr", "d", schema_new("object", _prop("region", "{\"type\":\"str\\u0069ng\",\"x-mcp-header\":\"Region\"}"), vec_new())), &h_tool)), 0, "registration: ...and from a ToolSchema");
+
+    # ---- tools/list ----
+    var l0 = _list(d, 0);
+    var l1 = _list(d, 1);
+    assert(_has(l0, _entry("j_suite", SUITE)) == 1, "list: the suite's schema as written (2025-11-25)");
+    assert(_has(l1, _entry("j_suite", SUITE)) == 1, "list: the suite's schema as written (2026-07-28)");
+    assert(_has(l0, _entry("j_empty", "{\"type\":\"object\",\"additionalProperties\":false}")) == 1, "list: additionalProperties false");
+    assert(_has(l0, _entry("j_esc", ESC)) == 1, "list: escapes as written");
+    assert(_has(l0, _entry("j_pretty", PRETTY_1)) == 1, "list: several lines as one");
+    assert(_crlf(l0) == 0 && _crlf(l1) == 0, "list: no CR or LF");
+    assert(jsonx_valid(l0, strlen(l0)) == 1 && jsonx_valid(l1, strlen(l1)) == 1, "list: valid JSON");
+
+    # A property's schema on several lines in a ToolSchema put a raw LF in the list through
+    # 3.8.2, which ended the message on stdio and the Unix transport.
+    var sd = dispatcher_new(tool_registry_new());
+    var sprops = _prop("p_x", "{\n  \"type\": \"string\"\r\n}");
+    var stool = tool_def_new("s_lf", "d", schema_new("object", sprops, _strs1("p_x")));
+    assert_eq(_reason(dispatcher_register_tool(sd, stool, &h_tool)), 0, "list: a ToolSchema whose property is on several lines");
+    var sl = _list(sd, 0);
+    assert(_crlf(sl) == 0, "list: ...sent on one line");
+    assert(_has(sl, _entry("s_lf", "{\"type\":\"object\",\"properties\":{\"p_x\":{  \"type\": \"string\"}},\"required\":[\"p_x\"]}")) == 1, "list: ...its bytes");
+    var sd2 = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(sd2, tool_def_new("s_plain", "d", schema_new("object", _prop("a\"b", "{\"type\":\"string\"}"), _strs1("a\"b"))), &h_tool);
+    assert(_has(_list(sd2, 1), _entry("s_plain", "{\"type\":\"object\",\"properties\":{\"a\\\"b\":{\"type\":\"string\"}},\"required\":[\"a\\\"b\"]}")) == 1, "list: a ToolSchema as before, its names escaped");
+
+    # What registration kept is what is listed, until the definition is registered again.
+    vec_push(sprops, schema_prop_new("p_y", "{}"));
+    assert(_has(_list(sd, 0), "p_y") == 0, "list: a property added after registration is not listed");
+    dispatcher_register_tool(sd, stool, &h_tool);
+    assert(_has(_list(sd, 0), "\"p_y\":{}") == 1, "list: ...until the definition is registered again");
+    var jt = _jtool("j_swap", "{\"type\":\"object\",\"description\":\"one\"}");
+    dispatcher_register_tool(sd, jt, &h_tool);
+    store64(tool_def_input_schema(jt) + 24, "{\"type\":\"object\",\"description\":\"two\"}");
+    assert(_has(_list(sd, 0), "\"description\":\"one\"") == 1, "list: JSON changed after registration is not listed");
+    dispatcher_register_tool(sd, jt, &h_tool);
+    assert(_has(_list(sd, 0), "\"description\":\"two\"") == 1, "list: ...until it is registered again");
+
+    # ---- Discovery ----
+    var an = announcement_to_json(announcement_new("n1", registry_list(dispatcher_registry(d))));
+    assert(_has(an, _cat3("\"name\":\"j_suite\",\"description\":\"d\",\"inputSchema\":", SUITE, "}")) == 1, "discovery: the schema as tools/list sends it");
+    var unreg = vec_new();
+    vec_push(unreg, _jtool("u_pretty", PRETTY));
+    var an2 = announcement_to_json(announcement_new("n1", unreg));
+    assert(_has(an2, _cat3("\"inputSchema\":", PRETTY_1, "}")) == 1 && _crlf(an2) == 0, "discovery: a definition never registered, on one line");
+
+    # ---- Arguments, judged by what bote enforces of the schema ----
+    assert(_has(_call(d, "j_suite", "{\"contactMethod\":\"fax\"}", 1), "value 'fax' not in enum") == 1, "call: an enum of the suite's schema");
+    assert(_has(_call(d, "j_suite", "{\"name\":1}", 0), "name: expected string") == 1, "call: a property's type");
+    assert(_has(_call(d, "j_suite", "{\"name\":\"x\",\"extra\":1}", 0), "\"isError\":true") == 0, "call: additionalProperties is not enforced");
+    assert(_has(_call(d, "j_esc", "{}", 0), "missing required field: p_a") == 1, "call: a required name as it decodes");
+    assert(_has(_call(d, "j_esc", "{\"p_a\":1}", 0), "p_a: expected string") == 1, "call: a property named as it decodes");
+    assert(_has(_call(d, "j_esc", "{\"p_a\":\"v\"}", 0), "\"isError\":true") == 0, "call: ...met");
+
+    # ---- WARNs ----
+    _lc_begin();
+    var wd = dispatcher_new(tool_registry_new());
+    _reg(wd, "w_suite", SUITE);
+    dispatcher_register_tool(wd, tool_def_new("w_struct", "d", schema_new("object", _prop("a", "{\"type\":\"string\"}"), vec_new())), &h_tool);
+    _lc_end();
+    assert(_lc_find("tool=w_suite property=inputSchema keyword=allOf") != 0, "warn: allOf at the root");
+    assert(_lc_find("tool=w_suite property=inputSchema keyword=if") != 0, "warn: if at the root");
+    assert(_lc_find("tool=w_suite property=inputSchema keyword=then") != 0, "warn: then");
+    assert(_lc_find("tool=w_suite property=inputSchema keyword=else") != 0, "warn: else");
+    assert(_lc_find("tool=w_suite property=inputSchema keyword=additionalProperties") != 0, "warn: additionalProperties at the root");
+    assert(_lc_find("tool=w_suite property=address keyword=$ref") != 0, "warn: a property's $ref");
+    assert(_lc_find("tool=w_suite property=inputSchema keyword=anyOf") == 0, "warn: not what sits below a root keyword");
+    assert(_lc_find("tool=w_struct property=inputSchema") == 0, "warn: no root for a ToolSchema");
+
+    # ---- The heap ----
+    # Forty 4 KB schemas listed on both revisions keep nothing.
+    var ld = dispatcher_new(tool_registry_new());
+    var li = 0;
+    while (li < 40) {
+        var ls = str_builder_new();
+        str_builder_add_cstr(ls, "{\"type\":\"object\",\"description\":\"");
+        var lj = 0;
+        while (lj < 4000) { str_builder_add_cstr(ls, "\\\""); lj = lj + 2; }
+        str_builder_add_cstr(ls, "\",\"$defs\":{\"x\":{\"type\":\"string\"}},\"properties\":{\"a\":{\"$ref\":\"#/$defs/x\"}},\"additionalProperties\":false}");
+        var lnb = str_builder_new();
+        str_builder_add_cstr(lnb, "j_long_");
+        str_builder_add_int(lnb, li);
+        _reg(ld, str_data(str_builder_build(lnb)), str_data(str_builder_build(ls)));
+        li = li + 1;
+    }
+    var lml = _msg("tools/list", "", 0);
+    var lmm = _msg("tools/list", "", 1);
+    codec_process_message_a(bote_req_begin(), lml, ld, 0);
+    codec_process_message_a(bote_req_begin(), lmm, ld, 0);
+    var h0 = alloc_used();
+    li = 0;
+    while (li < 10) { codec_process_message_a(bote_req_begin(), lml, ld, 0); codec_process_message_a(bote_req_begin(), lmm, ld, 0); li = li + 1; }
+    assert_eq(alloc_used() - h0, 0, "heap: a list of forty 4 KB inputSchemas, on both revisions, keeps nothing");
+    # A ramp: lists of 1 to 40 tools of 1 KB each, a little larger every time.
+    var rds = vec_new();
+    var rk = 1;
+    while (rk <= 40) {
+        var rd = dispatcher_new(tool_registry_new());
+        var rt = 0;
+        while (rt < rk) {
+            var rs = str_builder_new();
+            str_builder_add_cstr(rs, "{\"type\":\"object\",\"description\":\"");
+            var rj = 0;
+            while (rj < 1000) { str_builder_add_cstr(rs, "x"); rj = rj + 1; }
+            str_builder_add_cstr(rs, "\"}");
+            var rnb = str_builder_new();
+            str_builder_add_cstr(rnb, "j_ramp_");
+            str_builder_add_int(rnb, rt);
+            _reg(rd, str_data(str_builder_build(rnb)), str_data(str_builder_build(rs)));
+            rt = rt + 1;
+        }
+        vec_push(rds, rd);
+        rk = rk + 1;
+    }
+    var h1 = alloc_used();
+    var ri = 0;
+    while (ri < 40) { codec_process_message_a(bote_req_begin(), lml, vec_get(rds, ri), 0); ri = ri + 1; }
+    assert(alloc_used() - h1 < 1048576, "heap: forty lists, each a kilobyte larger, keep under 1 MB");
+    var h2 = alloc_used();
+    ri = 0;
+    while (ri < 40) { codec_process_message_a(bote_req_begin(), lml, vec_get(rds, ri), 0); ri = ri + 1; }
+    assert_eq(alloc_used() - h2, 0, "heap: ...and the same forty again keep nothing");
+
+    assert_summary();
+    return 0;
+}
+
+var rc = main();
+sys_exit_group(rc);

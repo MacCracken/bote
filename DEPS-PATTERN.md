@@ -283,6 +283,17 @@ binding, payload)` and `open_fp(ctx, a, binding, state)` each a cstr on `a` or 0
 request state grows to 160 bytes and the Dispatcher to 200, each appended at its end, and a
 compiled PropertyDef to 96. Code that makes them with their `_new` functions is unaffected.
 
+(3.8.3) A state is bound to who made it: the principal `dispatcher_set_state_principal(d, fp,
+ctx)` names for the request's claims (`fp(ctx, a, claims)`, a cstr or 0), else the token the
+request presented. ⚠ **A consumer whose transport hands the codec or the dispatcher claims that
+are not the presented token, or whose validator returns a record, must set a principal
+function** to use states: with none, such a request can be bound to no one, and its handler's
+state is `-32603` and a state it brings `-32602`. Through 3.8.2 such a state was bound to no one
+and opened for anyone. The full bundle's `jwt_state_principal` names a JWT's issuer and subject.
+The arguments are bound too, so a retry sends the request's arguments again. The Dispatcher is
+216 bytes, a ToolSchema 32 (its JSON at +24, from `tool_schema_from_json`, which a ToolSchema
+made by hand rather than by `schema_new` must zero), and a ToolDef 136.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`

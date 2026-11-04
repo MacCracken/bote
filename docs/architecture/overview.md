@@ -123,7 +123,7 @@ src/
 ├── error.cyr               — BoteErrTag (12 variants), rpc_code, format
 ├── protocol.cyr            — JsonRpcRequest / Response / Error data types
 ├── jsonx.cyr               — nested-aware JSON extractor + jsonx_valid (RFC 8259 syntax check) + bote_json_escape
-├── registry.cyr            — ToolDef (+profile tags), ToolSchema, ToolAnnotations, ToolRegistry
+├── registry.cyr            — ToolDef (+profile tags), ToolSchema (or its own JSON, 3.8.3), ToolAnnotations, ToolRegistry
 ├── prompts.cyr             — PromptDef / PromptArgument / PromptRegistry (prompts/list + get)
 ├── resources.cyr           — ResourceDef / ResourceRegistry (resources/list + read;
 │                             templates/list answers an empty list in dispatch)
@@ -188,16 +188,17 @@ tests/
 ├── bote_content.tcyr          — 25 (content blocks + annotations)
 ├── bote_fetch.tcyr            — 60 (a request made in a child: the record, the cap, the deadline, a real GET, no heap)
 ├── bote_fs_tools.tcyr         — 56 (fs_tools; refused-path log lines; control bytes read back as valid JSON)
-├── bote_http_era.tcyr         — 1833 (MCP 2026-07-28 on HTTP, on the real handlers over a socketpair; scopes and the 403)
+├── bote_http_era.tcyr         — 1863 (MCP 2026-07-28 on HTTP, on the real handlers over a socketpair; scopes and the 403)
 ├── bote_host.tcyr             — 207 (host registry + SSRF + resolved-address classifiers + the IPv6 parser vs cyrius's)
 ├── bote_jwks.tcyr             — 49 (a jwks_uri: what it may be, real fetches from a child)
-├── bote_jwt.tcyr              — 454 (JWT: HS256, RS256, ES256, JWK Sets, every claim, scopes, the cache, keys from a source, no heap)
+├── bote_jwt.tcyr              — 507 (JWT: HS256, RS256, ES256, JWK Sets, every claim, scopes, the cache, keys from a source, no heap)
 ├── bote_libro_tools.tcyr      — 73 (libro_tools; incl. the tampered-chain
 │                                 error decode + populated-chain proof paths)
 ├── bote_log.tcyr              — 50 (src/log.cyr: levels, line bytes, escaping, truncation)
 ├── bote_display.tcyr          — 107 (3.8.1: titles, icons, serverInfo's details and instructions)
-├── bote_output.tcyr           — 240 (3.8.0: a tool's outputSchema, registration to the heap)
-├── bote_input.tcyr            — 102 (3.8.2: multi round-trip requests, -32021, the sealed state, the heap)
+├── bote_output.tcyr           — 249 (3.8.0: a tool's outputSchema, registration to the heap)
+├── bote_input.tcyr            — 146 (3.8.2: multi round-trip requests, -32021, the sealed state and its binding, the heap)
+├── bote_tool_schema.tcyr      — 85 (3.8.3: an inputSchema as its own JSON, what registration refuses, the list, the heap)
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 53 (streamable HTTP / SSE)
@@ -205,7 +206,7 @@ tests/
 ├── bote_web_tools.tcyr        — 88 (web_tools; URL + resolved-address SSRF guard; the records their children write)
 ├── bote_ws.tcyr               — 94 (WebSocket; send-deadline drop; `-31403` per frame; what an upgrade and a connection keep)
 ├── bote_core_only_smoke.tcyr  — drift guard (includes only dist/bote-core.cyr)
-└── bote.bcyr                  — 44 hot-path benchmarks
+└── bote.bcyr                  — 46 hot-path benchmarks
 
 fuzz/
 ├── codec_parse.fcyr
@@ -218,7 +219,8 @@ fuzz/
 ├── oauth_metadata.fcyr       — what an operator configures cannot leave its header parameter, the document stays JSON, and no request reaches a scoped tool without its scope
 ├── ssrf_ipv6.fcyr            — host.cyr's IPv6 parser against cyrius's, plus ssrf_check on mutated URLs
 ├── schema_validate.fcyr
-└── output_shape.fcyr         — (3.8.0) an outputSchema's 2025-11-25 form and a result's shaping are JSON, in each revision's shape, with no heap
+├── output_shape.fcyr         — (3.8.0) an outputSchema's 2025-11-25 form and a result's shaping are JSON, in each revision's shape, with no heap
+└── input_schema.fcyr         — (3.8.3) an inputSchema given as JSON is refused or kept as bayan reads it, and listed as written, with no heap
 
 docs/
 ├── architecture/overview.md   — this file
@@ -304,6 +306,10 @@ result's `structuredContent`. 2025-11-25 allows an object in both places, so a t
 is listed there with it as an object's `result` (built at registration, `_reg_output_legacy`), and
 `structuredContent` that is no object goes as `{"result": …}` (`_dsp_tool_result_out_a`). Before that, the result
 is judged by the tool's outputSchema, and one that fails is a tool error.
+
+An inputSchema is listed as registration kept it (3.8.3): its own JSON as written (`tool_schema_from_json`), or a
+ToolSchema's fields written out once, either on one line, so `tools/list` writes each tool's schema whole and builds
+none. A ToolSchema's property written on several lines put a raw LF in the list through 3.8.2.
 
 Titles and icons (3.8.1) are checked where a definition is registered, and each keeps the JSON fragment that passed
 (`_bote_display_json`), which its list appends after the name. serverInfo is built once, when it is set, in two forms:

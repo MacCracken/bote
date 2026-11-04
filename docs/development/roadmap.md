@@ -6,7 +6,7 @@
 >
 > **Spec**: bote's default is MCP 2025-11-25. **2026-07-28** is served beside it on every transport. The
 > official client works on both, and the official suite passes every one of the 39 scenarios it scores for
-> 2026-07-28.
+> 2026-07-28, and `json-schema-2020-12`, which it does not score, on both revisions.
 > [spec-compliance.md](../spec-compliance.md) · [SECURITY.md](../../SECURITY.md) ·
 > [2026-11-01 closeout audit](../audit/2026-11-01-closeout.md)
 
@@ -33,7 +33,7 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.3 — root keywords in `inputSchema`**, the next item of 3.8.x below.
+**3.8.4 — output schemas on bote's own tools**, the next item of 3.8.x below.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
@@ -42,17 +42,14 @@ stdio's) are each one connection's, and a worker per connection would need a hom
 
 ## 3.8.x — The tool surface
 
-- **Root keywords in `inputSchema`.** `ToolSchema` is type, properties and required, so a tool cannot say
-  `$schema`, `$defs`, `allOf`, or the `additionalProperties: false` the spec recommends for a tool with no
-  parameters. The suite's unscored `json-schema-2020-12` checks exactly that. An outputSchema is kept as its
-  own JSON since 3.8.0, compiled from it and listed as written, which is the shape an inputSchema can take.
 - **Output schemas on bote's own tools.** The libro tools already send `structuredContent`; give them, and
   `fs_read`, the outputSchema that says what it holds, so a client can check it.
 - **JSON Schema coverage.** The 2026-07-28 revision allows any 2020-12 keyword. bote validates a subset and
   warns at registration about the keywords it advertises and does not enforce: `anyOf`, `oneOf`, `allOf`,
   `not`, `$ref`, `pattern`, the length and item bounds, `const`, `format` (which the official client
-  enforces), draft-07's array `items`, `additionalItems` and `dependencies`, type arrays and non-string enums.
-  Enforce them, with the resource bounds the spec asks for on `$ref` and composition. The warnings cover a
+  enforces), draft-07's array `items`, `additionalItems` and `dependencies`, type arrays and non-string enums,
+  and `additionalProperties`, the root keyword the spec recommends for a tool with no parameters, which an
+  inputSchema given as JSON can say since 3.8.3 and bote lists without judging. Enforce them, with the resource bounds the spec asks for on `$ref` and composition. The warnings cover a
   schema's root and its properties, not what is nested below them. And judge an object with one pass of the
   scanner for all of its names: each property and each required name is a scan of its own today, 2.6 µs for an object
   of three, which an outputSchema now pays on every result as an inputSchema does on every call. Name a violation's
@@ -92,10 +89,6 @@ stdio's) are each one connection's, and a worker per connection would need a hom
   default decides nothing on the wire. Since 3.8.2 bote passes every scenario the suite scores for
   2026-07-28, which was the condition this waited on; what is left to weigh is the clients that send no
   `_meta` and expect 2025-11-25.
-- **What a `requestState` is bound to.** The token the request presented, which is stricter than the
-  principal the spec asks for: a client that refreshes its token between rounds starts again. Binding to the
-  principal needs to know who it is, `iss` and `sub` for a JWT, which the 2.0 ABI's opaque claims do not say.
-  A principal hook on the dispatcher, set by the transport that verified the token, would do it.
 - **The tool set streamable and ws expose.** stdio, http, unix and bridge register the echo references
   plus the libro, fs and web tools; streamable and ws register the echo references only, kept so that
   folding the binaries into one did not widen what two network transports expose. Either every mode gets

@@ -1108,6 +1108,57 @@ fn auth_validator_jwt(token, jwt_secret) {
     return token;   # opaque claims = the validated token
 }
 
+# Who a JWT names, for the binding of a requestState (3.8.3, dispatcher_set_state_principal):
+# its issuer and its subject, as they decode, each its length and then its bytes. RFC 7519
+# 4.1.2 makes a subject unique within its issuer, so a token refreshed between the rounds of
+# a request names the same principal, and its state still opens. `claims` is the token as
+# the bearer validator accepted it for this request, which is all the dispatcher is handed:
+# like jwt_scope_check it is read, not verified again, which for ES256 would cost a
+# signature check (about 10 ms here) on every round. `s`, the hook's context, is not read.
+# 0, and the state is bound to the token instead, for what is no JWT, names no subject, or
+# names an issuer or a subject that is no string, is empty, or holds a NUL.
+fn jwt_state_principal(s, a, claims) {
+    if (claims == 0) { return 0; }
+    var tlen = strlen(claims);
+    var dot1 = _jwt_dot(claims, tlen, 0);
+    if (dot1 <= 0) { return 0; }
+    var dot2 = _jwt_dot(claims, tlen, dot1 + 1);
+    var plen[8];
+    var payload = _jwt_b64u_a(a, claims + dot1 + 1, dot2 - dot1 - 1, &plen);
+    if (payload == 0) { return 0; }
+    var n = load64(&plen);
+    var sub = _jwt_claim_str_a(a, payload, n, "sub");
+    if (sub == 0) { return 0; }
+    var iss = "";
+    if (_jx_find_value_pos(payload, n, "iss") >= 0) {
+        iss = _jwt_claim_str_a(a, payload, n, "iss");
+        if (iss == 0) { return 0; }
+    }
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, strlen(iss) + strlen(sub) + 48);
+    str_builder_add_int(sb, strlen(iss));
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_cstr(sb, iss);
+    str_builder_add_int(sb, strlen(sub));
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_cstr(sb, sub);
+    return str_data(str_builder_build_a(a, sb));
+}
+
+# The claim `key` of `payload` (n bytes) decoded onto `a`: 0 when it is absent, no string,
+# empty, or decodes to hold a NUL, which a shorter string would otherwise equal.
+fn _jwt_claim_str_a(a, payload, n, key) {
+    var pos = _jx_find_value_pos(payload, n, key);
+    if (pos < 0 || pos >= n || load8(payload + pos) != 34) { return 0; }
+    var end = _jx_skip_string(payload, n, pos);
+    if (end <= pos + 2 || load8(payload + end - 1) != 34) { return 0; }
+    var w = end - pos - 2;
+    var out = alloc_via(a, w + 1);
+    var dn = _jx_unescape_into(payload + pos + 1, w, out);
+    if (dn != strlen(out)) { return 0; }
+    return out;
+}
+
 # The name this had when HS256 was all it did.
 fn auth_validator_jwt_hs256(token, jwt_secret) { return auth_validator_jwt(token, jwt_secret); }
 

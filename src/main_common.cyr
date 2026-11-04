@@ -609,8 +609,11 @@ fn bote_main_listen(d) {
 # BOTE_STATE_KEY (3.8.2): the key the binary seals a multi round-trip request's requestState
 # with, 64 hex digits or more (32 bytes); servers behind one name share it. Unset, a random
 # key, so that a state opens in this process only. Returns -1, logged, when it is malformed
-# or no entropy can be had.
-fn bote_main_state_from_env(d) {
+# or no entropy can be had. (3.8.3) With JWT access tokens (`bearer_fp` the JWT validator,
+# `bearer_ctx` its JwtSecret), a state is bound to the token's issuer and subject, so a
+# client that refreshes its token between rounds keeps its state; otherwise to the token.
+fn bote_main_state_from_env(d, bearer_fp, bearer_ctx) {
+    if (bearer_fp == &auth_validator_jwt) { dispatcher_set_state_principal(d, &jwt_state_principal, bearer_ctx); }
     var k = getenv("BOTE_STATE_KEY");
     var h = 0;
     if (k == 0) {

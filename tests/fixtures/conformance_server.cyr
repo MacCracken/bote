@@ -173,7 +173,8 @@ fn complete(params, claims) {
 # (3.8.0) Tools with an outputSchema, whose results the official client checks against
 # what tools/list said: a record, an array, which 2025-11-25 is shown wrapped, and a result
 # its schema refuses, which bote answers with a tool error. Not called by the suite.
-var _FX_WEATHER = "{\"type\":\"object\",\"properties\":{\"temperature\":{\"type\":\"number\"},\"conditions\":{\"type\":\"string\"},\"humidity\":{\"type\":\"number\"}},\"required\":[\"temperature\",\"conditions\",\"humidity\"]}";
+var _FX_2020_12 = "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"$defs\":{\"address\":{\"$anchor\":\"addressDef\",\"type\":\"object\",\"properties\":{\"street\":{\"type\":\"string\"},\"city\":{\"type\":\"string\"}}}},\"properties\":{\"name\":{\"type\":\"string\"},\"address\":{\"$ref\":\"#/$defs/address\"},\"contactMethod\":{\"type\":\"string\",\"enum\":[\"phone\",\"email\"]},\"phone\":{\"type\":\"string\"},\"email\":{\"type\":\"string\"}},\"allOf\":[{\"anyOf\":[{\"required\":[\"phone\"]},{\"required\":[\"email\"]}]}],\"if\":{\"properties\":{\"contactMethod\":{\"const\":\"phone\"}},\"required\":[\"contactMethod\"]},\"then\":{\"required\":[\"phone\"]},\"else\":{\"required\":[\"email\"]},\"additionalProperties\":false}";
+var _FX_WEATHER ="{\"type\":\"object\",\"properties\":{\"temperature\":{\"type\":\"number\"},\"conditions\":{\"type\":\"string\"},\"humidity\":{\"type\":\"number\"}},\"required\":[\"temperature\",\"conditions\",\"humidity\"]}";
 var _FX_USERS = "{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/user\"},\"$defs\":{\"user\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"id\",\"name\"]}}}";
 fn t_structured(args, claims) { return "{\"temperature\":22.5,\"conditions\":\"Partly cloudy\",\"humidity\":65}"; }
 fn t_structured_list(args, claims) { return "[{\"id\":\"1\",\"name\":\"Alice\"},{\"id\":\"2\",\"name\":\"Bob\"}]"; }
@@ -389,6 +390,8 @@ fn fixture_dispatcher() {
     vec_push(hp, schema_prop_new("region", "{\"type\":\"string\",\"description\":\"Where to run\",\"x-mcp-header\":\"Region\"}"));
     vec_push(hp, schema_prop_new("query", "{\"type\":\"string\"}"));
     dispatcher_register_tool(d, tool_def_new("test_custom_headers", "Mirrors region in a header", schema_new("object", hp, vec_new())), &t_headers);
+    # The suite's json-schema-2020-12 schema, as its own JSON (3.8.3).
+    dispatcher_register_tool(d, tool_def_new("json_schema_2020_12_tool", "Tool with JSON Schema 2020-12 features", tool_schema_from_json(_FX_2020_12)), &t_simple);
 
     dispatcher_register_prompt(d, prompt_def_new("test_simple_prompt", "No arguments", vec_new()), &p_simple);
     var pa = vec_new();
@@ -495,6 +498,8 @@ fn main() {
         dispatcher_set_scope_check(d, &jwt_scope_check, jwt_scope_rule(jwt_scope_rules_new(), "mcp:admin", "mcp:write"));
         var acfg = http_config_new("/mcp", INADDR_LOOPBACK(), port);
         http_config_with_bearer_validator(acfg, &auth_validator_jwt, jwt);
+        # As the binary: a requestState bound to the token's issuer and subject (3.8.3).
+        dispatcher_set_state_principal(d, &jwt_state_principal, jwt);
         http_config_with_resource_metadata(acfg, bote_prm_new(resource, servers, scopes, "fixture"));
         return transport_http_run(d, acfg);
     }

@@ -325,6 +325,27 @@ dispatcher_register_tool(d, tool_def_with_output_schema(tool_def_new("svc_weathe
 Registration refuses a schema that is not a JSON object. bote judges the subset it judges an `inputSchema` by, and
 warns at registration of the keywords it lists and does not enforce.
 
+### Input schemas as JSON
+
+An `inputSchema` can be its own JSON too, which carries every keyword at its root: `$schema`, `$defs`, `allOf`, `if`,
+the `additionalProperties: false` the spec recommends for a tool with no parameters, and the rest.
+
+```cyrius
+var CONTACT = "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"$defs\":{\"address\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}},\"properties\":{\"name\":{\"type\":\"string\"},\"address\":{\"$ref\":\"#/$defs/address\"}},\"required\":[\"name\"],\"additionalProperties\":false}";
+
+dispatcher_register_tool(d, tool_def_new("svc_contact", "Adds a contact", tool_schema_from_json(CONTACT)), &h_contact);
+```
+
+- **Listed as written**, on both revisions, on one line: a CR or LF between its tokens is left out.
+- **Judged by what bote enforces of it**: the root's `properties` and `required`, read from it as they decode, as a
+  `schema_new` schema's are. A WARN names each keyword at the root, and on each property, that bote lists and does
+  not enforce.
+- **Refused at registration** unless a client's parser would take it: an object whose `type` is `"object"`, whose
+  `properties` is an object of schemas and whose `required` is an array of names, with no key twice in one object, no
+  NUL in a key or a string, and a `$schema` naming a dialect bote knows.
+
+A schema made with `schema_new` is listed as it was, now built once at registration.
+
 ### Titles, icons and instructions
 
 What a client shows people: a `title` beside the `name`, which is for programs, and `icons`. Tools, prompts, prompt
@@ -381,17 +402,26 @@ fn h_deploy(args, claims) {
 - **What the client declared:** `bote_client_has("elicitation.form")`, `"elicitation.url"`, `"sampling"`,
   `"sampling.tools"`, `"roots"` read the request's `clientCapabilities`. A result asking for one the client did not
   declare is answered `-32021` with the capabilities it needs, as the spec says.
-- **Judged before it goes:** only the three methods the spec allows, a known elicitation mode, at least one request
-  or a state, and no key twice. A handler's mistake is `-32603`. On an older revision there is no way to ask: a tool
+- **Judged before it goes:** only the three methods the spec allows, each request in the shape a client parses
+  (`params`, an object, on an elicitation and a sampling request; a mode of `form` or `url`), at least one request or
+  a state, and no key twice. A handler's mistake is `-32603`. On an older revision there is no way to ask: a tool
   that does gets a tool error, and `bote_input_possible()` is 0, so a handler can answer as it can.
 - **The state is sealed.** The spec makes it attacker-controlled. bote seals every state a handler gives and opens
   every one a client brings back, through the dispatcher's sealer, before any handler runs: a state that does not
-  open is `-32602`. The binary's sealer is HMAC-SHA256, bound to the method, the tool, prompt or URI, and the token the
-  request presented (a client that refreshes its token between rounds starts again), and good for 600 seconds; set `BOTE_STATE_KEY` (64 hex digits or more) for servers that share
-  states, or each process keys itself. A library user wires it with
+  open is `-32602`. The binary's sealer is HMAC-SHA256 and good for 600 seconds; set `BOTE_STATE_KEY` (64 hex digits
+  or more) for servers that share states, or each process keys itself. A library user wires it with
   `dispatcher_with_state_hmac(d, bote_state_hmac_new(key, len, ttl))`, or their own with
   `dispatcher_set_state_sealer`. With none, a state is refused both ways. The client can read the state: put nothing
   in it the client may not know.
+- **Bound to the request and who made it.** A state opens only for the same method, the same tool, prompt or URI,
+  the same arguments (compact, so spacing does not count), and the same principal: the one
+  `dispatcher_set_state_principal(d, fp, ctx)` names for the request's claims, else the token the request presented.
+  With JWT access tokens the binary names the token's issuer and subject (`jwt_state_principal`), so a client that
+  refreshes its token between rounds keeps its state. A request whose claims are not its token, from a validator that
+  returns a record or a transport that passes its own, can be bound to no one without a principal function, so its
+  state is refused both ways. The answers are not bound: keep in the state what the handler judged.
+- **On a server with worker threads**, a thread a handler starts has a request state of its own, empty:
+  `bote_client_has`, `bote_input_possible` and `bote_request_state` answer 0 there. Ask on the handler's thread.
 
 ### Connection deadlines
 
@@ -583,9 +613,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 5680 total across twenty-six files (+ a core-only drift smoke)
+### Tests — 5864 total across twenty-seven files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5680 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5864 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 969 — core protocol/dispatch/codec/schema/session/transports
@@ -596,16 +626,17 @@ cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fetch.tcyr         # 62 — a request made in a child: the record, the cap, the deadline, a real GET
 cyrius test tests/bote_fs_tools.tcyr      # 63 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 207 — host registry + SSRF guard (IPv4 + IPv6)
-cyrius test tests/bote_http_era.tcyr      # 1833 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
+cyrius test tests/bote_http_era.tcyr      # 1863 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
 cyrius test tests/bote_jwks.tcyr          # 49 — a jwks_uri: what it may be, and real fetches from a child
-cyrius test tests/bote_jwt.tcyr           # 491 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
+cyrius test tests/bote_jwt.tcyr           # 507 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
 cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_listen.tcyr        # 224 — subscriptions/listen: the filter, and real streams on the three HTTP handlers
 cyrius test tests/bote_listen_line.tcyr   # 192 — subscriptions/listen where the connection is the stream: stdio, unix, WebSocket
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_display.tcyr       # 107 — titles, icons, serverInfo's details and instructions: the checks, each list, the heap
-cyrius test tests/bote_output.tcyr        # 240 — outputSchema: registration, the 2025-11-25 form, tools/list, each result judged and shaped, the heap
-cyrius test tests/bote_input.tcyr         # 102 — multi round-trip requests: what a handler reads and returns, -32021, the sealed state, the heap
+cyrius test tests/bote_output.tcyr        # 249 — outputSchema: registration, the 2025-11-25 form, tools/list, each result judged and shaped, the heap
+cyrius test tests/bote_input.tcyr         # 146 — multi round-trip requests: what a handler reads and returns, -32021, the sealed state and its binding, the heap
+cyrius test tests/bote_tool_schema.tcyr   # 85 — an inputSchema as its own JSON: what registration reads and refuses, the list, the heap
 cyrius test tests/bote_progress.tcyr      # 110 — progress on a request's own stream: the writer, stdio, unix, WebSocket, HTTP's SSE response
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
@@ -674,6 +705,8 @@ cyrius fuzz fuzz/http_head.fcyr
 cyrius fuzz fuzz/req_arena.fcyr
 cyrius fuzz fuzz/listen_filter.fcyr
 cyrius fuzz fuzz/cancel_lines.fcyr
+cyrius fuzz fuzz/output_shape.fcyr
+cyrius fuzz fuzz/input_schema.fcyr
 # 1 passed, 0 failed each
 ```
 

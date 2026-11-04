@@ -100,6 +100,9 @@ var _b_era_params = "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/
 var _b_era_params_at = 0;
 var _b_result_dispatcher = 0;
 var _b_param_dispatcher = 0;
+var _b_props_dispatcher = 0;
+var _b_json_dispatcher = 0;
+var _b_list_msg = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}";
 var _b_jwt_token = 0;
 var _b_jwt_secret = 0;
 var _b_jwks_secret = 0;
@@ -189,6 +192,10 @@ fn h_confirm_b(args, claims) {
 
 fn b_input_required_sealed() { return codec_process_message_a(bote_req_begin(), _b_input_ask, _b_input_dispatcher, 0); }
 fn b_input_retry_open() { return codec_process_message_a(bote_req_begin(), _b_input_retry, _b_input_dispatcher, 0); }
+# tools/list of one tool with three properties and a required name, and of the conformance
+# suite's 2020-12 schema given as JSON (3.8.3).
+fn b_tools_list_props() { return codec_process_message_a(bote_req_begin(), _b_list_msg, _b_props_dispatcher, 0); }
+fn b_tools_list_json() { return codec_process_message_a(bote_req_begin(), _b_list_msg, _b_json_dispatcher, 0); }
 
 fn b_dispatch_tools_call_output() {
     return dispatcher_dispatch(_b_output_dispatcher, _b_call_output_req, 0);
@@ -386,6 +393,18 @@ fn _bench_setup() {
     var prg = tool_registry_new();
     registry_register(prg, tool_def_new("svc_route", "route", schema_new("object", rp, vec_new())));
     _b_param_dispatcher = dispatcher_new(prg);
+    var lp = vec_new();
+    vec_push(lp, schema_prop_new("city", "{\"type\":\"string\",\"description\":\"Where\"}"));
+    vec_push(lp, schema_prop_new("days", "{\"type\":\"integer\",\"minimum\":1,\"maximum\":14}"));
+    vec_push(lp, schema_prop_new("units", "{\"type\":\"string\",\"enum\":[\"metric\",\"imperial\"]}"));
+    var lr = vec_new();
+    vec_push(lr, "city");
+    var lreg = tool_registry_new();
+    registry_register(lreg, tool_def_new("svc_forecast", "a forecast", schema_new("object", lp, lr)));
+    _b_props_dispatcher = dispatcher_new(lreg);
+    var jreg = tool_registry_new();
+    registry_register(jreg, tool_def_new("svc_contact", "a contact", tool_schema_from_json("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"$defs\":{\"address\":{\"$anchor\":\"addressDef\",\"type\":\"object\",\"properties\":{\"street\":{\"type\":\"string\"},\"city\":{\"type\":\"string\"}}}},\"properties\":{\"name\":{\"type\":\"string\"},\"address\":{\"$ref\":\"#/$defs/address\"},\"contactMethod\":{\"type\":\"string\",\"enum\":[\"phone\",\"email\"]},\"phone\":{\"type\":\"string\"},\"email\":{\"type\":\"string\"}},\"allOf\":[{\"anyOf\":[{\"required\":[\"phone\"]},{\"required\":[\"email\"]}]}],\"additionalProperties\":false}")));
+    _b_json_dispatcher = dispatcher_new(jreg);
     _b_init_req = req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}");
     _b_list_req = req_new("2", "tools/list");
     _b_call_req = req_with_params(req_new("3", "tools/call"),
@@ -642,6 +661,12 @@ fn main() {
     var b44 = bench_new("input_retry_open");
     bench_run(b44, &b_input_retry_open, 10000);
     vec_push(benches, b44);
+    var b45 = bench_new("tools_list_props");
+    bench_run(b45, &b_tools_list_props, 10000);
+    vec_push(benches, b45);
+    var b46 = bench_new("tools_list_json");
+    bench_run(b46, &b_tools_list_json, 10000);
+    vec_push(benches, b46);
     bote_req_begin();
     bote_conn_arm();
     thread_join(thread_create(&_b_thread_nop, 0));

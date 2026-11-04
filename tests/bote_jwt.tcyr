@@ -369,6 +369,12 @@ fn _count_warm() {
     return 0;
 }
 
+# assert_streq, with 0 a failure rather than a crash.
+fn _ase_p(got, want, name) {
+    if (got == 0) { return assert(0 == 1, name); }
+    return assert_streq(got, want, name);
+}
+
 fn main() {
     alloc_init();
 
@@ -1474,6 +1480,31 @@ fn main() {
     assert_eq(alloc_used() - hp_used, 0, "source heap: ten failed ones keep nothing");
     _ks_down = 0;
     _bote_jwt_clock = 0;
+
+    # ---- jwt_state_principal (3.8.3) ----
+    var ps = jwt_secret_new(_KEY);
+    var pa = bote_req_begin();
+    _ase_p(jwt_state_principal(ps, pa, _mint_hs256(_HDR, "{\"iss\":\"https://as.example\",\"sub\":\"alice\"}", _KEY)), "18:https://as.example5:alice", "principal: issuer and subject, each its length and bytes");
+    _ase_p(jwt_state_principal(ps, pa, _mint_hs256(_HDR, "{\"sub\":\"alice\",\"jti\":\"other\"}", _KEY)), "0:5:alice", "principal: no issuer, and nothing else counts");
+    _ase_p(jwt_state_principal(ps, pa, _mint_hs256(_HDR, "{\"iss\":\"https:\\/\\/as.example\",\"sub\":\"\\u0061lice\"}", _KEY)), "18:https://as.example5:alice", "principal: read as they decode");
+    assert_eq(jwt_state_principal(ps, pa, _mint_hs256(_HDR, "{\"iss\":\"i\"}", _KEY)), 0, "principal: no subject, none");
+    assert_eq(jwt_state_principal(ps, pa, _mint_hs256(_HDR, "{\"sub\":7}", _KEY)), 0, "principal: a subject that is no string, none");
+    assert_eq(jwt_state_principal(ps, pa, _mint_hs256(_HDR, "{\"sub\":\"\"}", _KEY)), 0, "principal: an empty subject, none");
+    assert_eq(jwt_state_principal(ps, pa, _mint_hs256(_HDR, "{\"sub\":\"alice\\u0000x\"}", _KEY)), 0, "principal: a subject holding a NUL, none (it would name alice)");
+    assert_eq(jwt_state_principal(ps, pa, _mint_hs256(_HDR, "{\"iss\":5,\"sub\":\"alice\"}", _KEY)), 0, "principal: an issuer that is no string, none");
+    assert_eq(jwt_state_principal(ps, pa, _mint_hs256(_HDR, "{\"iss\":\"a\\u0000\",\"sub\":\"alice\"}", _KEY)), 0, "principal: an issuer holding a NUL, none");
+    _ase_p(jwt_state_principal(ps, pa, _mint_hs256(_HDR, "{\"sub\":\"alice\"}", "another-key-0123456789abcdefghij")), "0:5:alice", "principal: read, not verified again, as jwt_scope_check reads scopes: the validator has checked it");
+    _ase_p(jwt_state_principal(ps, pa, _mint_hs256(_HDR, "{\"sub\":\"alice\",\"exp\":1}", _KEY)), "0:5:alice", "principal: ...nor its window judged again");
+    assert_eq(jwt_state_principal(0, pa, "x"), 0, "principal: what is no JWT, none");
+    assert_eq(jwt_state_principal(0, pa, "a.b.c"), 0, "principal: ...nor one whose payload is no Base64url");
+    assert(jwt_state_principal(0, pa, _mint_hs256(_HDR, "{\"sub\":\"alice\"}", _KEY)) != 0, "principal: the hook's context is not read");
+    assert_eq(jwt_state_principal(ps, pa, 0), 0, "principal: no claims, none");
+    var ptok = _mint_hs256(_HDR, "{\"iss\":\"https://as.example\",\"sub\":\"alice\"}", _KEY);
+    jwt_state_principal(ps, bote_req_begin(), ptok);
+    var ph0 = alloc_used();
+    var pi = 0;
+    while (pi < 10) { jwt_state_principal(ps, bote_req_begin(), ptok); pi = pi + 1; }
+    assert_eq(alloc_used() - ph0, 0, "principal: ten keep nothing on the heap");
 
     return assert_summary();
 }

@@ -13,5 +13,3 @@ server:
   - resources-subscribe
   - resources-unsubscribe
   - tools-call-with-logging
-  # Not scored. inputSchema cannot carry root keywords. Roadmap 3.8.x.
-  - json-schema-2020-12

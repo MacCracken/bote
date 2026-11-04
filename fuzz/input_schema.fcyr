@@ -1,0 +1,390 @@
+# Fuzz: an inputSchema given as JSON (3.8.3) is refused or kept by registration as a client's
+# parser would have it, and listed as written.
+#
+# Schemas are drawn from a small generator: a root object whose members are drawn from the
+# keywords registration judges (type, properties, required, $schema) and some it keeps
+# without judging ($defs, allOf, additionalProperties, description), with keys spelled
+# plainly and escaped, keys named twice, NULs in keys and strings, values of the wrong
+# kind, and spacing between tokens that holds CR and LF. bayan's parser is the reference.
+# Exit codes:
+#
+#   10   registration accepts a schema exactly when the reference does: an object, no
+#        object with a key twice as they decode, no key or string holding a NUL, a known
+#        `$schema` if any, `type` "object", `properties` an object of schemas (an object or
+#        a boolean) with names, and `required` an array of names;
+#   20   what is listed is the schema with its CR and LF taken out, byte for byte;
+#   30   the list is valid JSON, and the tool's inputSchema in it parses with "object" as
+#        its type;
+#   40   what tool_schema_from_json read is what the reference reads: the properties' names
+#        in order and the required names, as they decode;
+#   50   the lists leave nothing on the heap;
+#   60   the rounds drew a thousand schemas accepted and a thousand refused.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+
+
+alloc_init();
+
+var _rng = 3141592653589793238;
+fn _rand() {
+    _rng = _rng ^ (_rng << 13);
+    _rng = _rng ^ (_rng >> 7);
+    _rng = _rng ^ (_rng << 17);
+    if (_rng < 0) { return 0 - _rng; }
+    return _rng;
+}
+
+fn _pick(v) { return vec_get(v, _rand() % vec_len(v)); }
+
+var _ROOT = 0;
+var _NAMES = 0;
+var _STRS = 0;
+var _SUBS = 0;
+fn _pools() {
+    _ROOT = vec_new();
+    vec_push(_ROOT, "type"); vec_push(_ROOT, "type"); vec_push(_ROOT, "properties");
+    vec_push(_ROOT, "properties"); vec_push(_ROOT, "required"); vec_push(_ROOT, "$schema");
+    vec_push(_ROOT, "$defs"); vec_push(_ROOT, "allOf"); vec_push(_ROOT, "additionalProperties");
+    vec_push(_ROOT, "description"); vec_push(_ROOT, "t\\u0079pe"); vec_push(_ROOT, "a\\u0000");
+    _NAMES = vec_new();
+    vec_push(_NAMES, "a"); vec_push(_NAMES, "b"); vec_push(_NAMES, "\\u0061"); vec_push(_NAMES, "c\\\"d");
+    vec_push(_NAMES, ""); vec_push(_NAMES, "e\\u0000f"); vec_push(_NAMES, "\\u00e9"); vec_push(_NAMES, "g\\/h");
+    vec_push(_NAMES, "long_name_of_a_property"); vec_push(_NAMES, "i\\\\j");
+    _STRS = vec_new();
+    vec_push(_STRS, "\"x\""); vec_push(_STRS, "\"a\\u0000b\""); vec_push(_STRS, "\"\\u00e9\\n\"");
+    vec_push(_STRS, "\"object\""); vec_push(_STRS, "\"\""); vec_push(_STRS, "\"q\\\"r\"");
+    _SUBS = vec_new();
+    vec_push(_SUBS, "{}"); vec_push(_SUBS, "true"); vec_push(_SUBS, "false");
+    vec_push(_SUBS, "{\"type\":\"string\"}"); vec_push(_SUBS, "{\"type\":\"integer\",\"minimum\":1}");
+    vec_push(_SUBS, "{\"x\":1,\"x\":2}"); vec_push(_SUBS, "{\"type\":\"object\",\"properties\":{\"n\":{}}}");
+    vec_push(_SUBS, "1"); vec_push(_SUBS, "\"s\""); vec_push(_SUBS, "{\"enum\":[\"a\\u0000\"]}");
+    return 0;
+}
+
+fn _add(a, sb, s) { str_builder_add_cstr_a(a, sb, s); return 0; }
+
+# Spacing between tokens, CR and LF among it.
+fn _ws(a, sb) {
+    var r = _rand() % 12;
+    if (r == 0) { _add(a, sb, " "); }
+    elif (r == 1) { _add(a, sb, "\n"); }
+    elif (r == 2) { _add(a, sb, "\r\n  "); }
+    elif (r == 3) { _add(a, sb, "\t"); }
+    return 0;
+}
+
+fn _key(a, sb, k) {
+    _ws(a, sb);
+    _add(a, sb, "\"");
+    _add(a, sb, k);
+    _add(a, sb, "\"");
+    _ws(a, sb);
+    _add(a, sb, ":");
+    _ws(a, sb);
+    return 0;
+}
+
+fn _value_for(a, sb, k) {
+    if (streq(k, "type") == 1 || streq(k, "t\\u0079pe") == 1) {
+        var t = _rand() % 8;
+        if (t < 5) { _add(a, sb, "\"object\""); }
+        elif (t == 5) { _add(a, sb, "\"obj\\u0065ct\""); }
+        elif (t == 6) { _add(a, sb, "\"string\""); }
+        else { _add(a, sb, "[\"object\"]"); }
+        return 0;
+    }
+    if (streq(k, "properties") == 1) {
+        if (_rand() % 10 == 0) { _add(a, sb, "[]"); return 0; }
+        _add(a, sb, "{");
+        var n = _rand() % 4;
+        var i = 0;
+        while (i < n) {
+            if (i > 0) { _add(a, sb, ","); }
+            _key(a, sb, _pick(_NAMES));
+            if (_rand() % 3 == 0) { _add(a, sb, _pick(_SUBS)); } else { _add(a, sb, vec_get(_SUBS, _rand() % 5)); }
+            _ws(a, sb);
+            i = i + 1;
+        }
+        _add(a, sb, "}");
+        return 0;
+    }
+    if (streq(k, "required") == 1) {
+        if (_rand() % 10 == 0) { _add(a, sb, "\"a\""); return 0; }
+        _add(a, sb, "[");
+        var m = _rand() % 4;
+        var j = 0;
+        while (j < m) {
+            if (j > 0) { _add(a, sb, ","); }
+            _ws(a, sb);
+            if (_rand() % 12 == 0) { _add(a, sb, "1"); } else { _add(a, sb, "\""); _add(a, sb, _pick(_NAMES)); _add(a, sb, "\""); }
+            j = j + 1;
+        }
+        _add(a, sb, "]");
+        return 0;
+    }
+    if (streq(k, "$schema") == 1) {
+        var s = _rand() % 4;
+        if (s == 0) { _add(a, sb, "\"https://json-schema.org/draft/2020-12/schema\""); }
+        elif (s == 1) { _add(a, sb, "\"http://json-schema.org/draft-07/schema#\""); }
+        elif (s == 2) { _add(a, sb, "\"https://example.com/other\""); }
+        else { _add(a, sb, "\"https://json-schema.org/draft/2020-12/sch\\u0065ma\""); }
+        return 0;
+    }
+    if (streq(k, "$defs") == 1) {
+        _add(a, sb, "{\"d\":");
+        _add(a, sb, _pick(_SUBS));
+        _add(a, sb, "}");
+        return 0;
+    }
+    if (streq(k, "allOf") == 1) {
+        _add(a, sb, "[");
+        _add(a, sb, _pick(_SUBS));
+        _add(a, sb, "]");
+        return 0;
+    }
+    if (streq(k, "additionalProperties") == 1) { _add(a, sb, vec_get(_SUBS, _rand() % 4)); return 0; }
+    _add(a, sb, _pick(_STRS));
+    return 0;
+}
+
+fn _schema(a) {
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, 4096);
+    _ws(a, sb);
+    _add(a, sb, "{");
+    # Mostly a type, so that most schemas get past it to what follows.
+    var n = 1 + _rand() % 5;
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { _add(a, sb, ","); }
+        var k = "type";
+        if (i > 0 || _rand() % 6 == 0) { k = _pick(_ROOT); }
+        _key(a, sb, k);
+        _value_for(a, sb, k);
+        _ws(a, sb);
+        i = i + 1;
+    }
+    _add(a, sb, "}");
+    _ws(a, sb);
+    return str_data(str_builder_build_a(a, sb));
+}
+
+# ---- The reference, on bayan's tree ----
+
+fn _s_has_nul(s) {
+    var n = str_len(s);
+    var p = str_data(s);
+    var i = 0;
+    while (i < n) { if (load8(p + i) == 0) { return 1; } i = i + 1; }
+    return 0;
+}
+
+fn _s_eq(x, y) {
+    if (str_len(x) != str_len(y)) { return 0; }
+    return memeq(str_data(x), str_data(y), str_len(x));
+}
+
+fn _s_is(s, lit) {
+    if (str_len(s) != strlen(lit)) { return 0; }
+    return memeq(str_data(s), lit, strlen(lit));
+}
+
+# 1 when no object in `v` names a key twice and no key or string holds a NUL.
+fn _clean(v) {
+    if (bayan_json_v_is_str(v) == 1) { return 1 - _s_has_nul(bayan_json_v_str(v)); }
+    if (bayan_json_v_is_arr(v) == 1) {
+        var i = 0;
+        while (i < bayan_json_v_arr_len(v)) {
+            if (_clean(bayan_json_v_arr_get(v, i)) == 0) { return 0; }
+            i = i + 1;
+        }
+        return 1;
+    }
+    if (bayan_json_v_is_obj(v) == 1) {
+        var n = bayan_json_v_obj_len(v);
+        var j = 0;
+        while (j < n) {
+            var kj = bayan_json_v_obj_key(v, j);
+            if (_s_has_nul(kj) == 1) { return 0; }
+            var k = j + 1;
+            while (k < n) {
+                if (_s_eq(kj, bayan_json_v_obj_key(v, k)) == 1) { return 0; }
+                k = k + 1;
+            }
+            if (_clean(bayan_json_v_obj_val(v, j)) == 0) { return 0; }
+            j = j + 1;
+        }
+    }
+    return 1;
+}
+
+fn _member(v, name) {
+    var i = 0;
+    while (i < bayan_json_v_obj_len(v)) {
+        if (_s_is(bayan_json_v_obj_key(v, i), name) == 1) { return bayan_json_v_obj_val(v, i); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _ref_ok(js) {
+    if (jsonx_valid(js, strlen(js)) == 0) { return 0; }
+    var v = bayan_json_v_parse_buf(js, strlen(js));
+    if (v == 0 || bayan_json_v_is_obj(v) == 0) { return 0; }
+    if (_clean(v) == 0) { return 0; }
+    var sc = _member(v, "$schema");
+    if (sc != 0) {
+        if (bayan_json_v_is_str(sc) == 0) { return 0; }
+        var u = bayan_json_v_str(sc);
+        if (_s_is(u, "https://json-schema.org/draft/2020-12/schema") == 0 && _s_is(u, "http://json-schema.org/draft-07/schema#") == 0) { return 0; }
+    }
+    var ty = _member(v, "type");
+    if (ty == 0 || bayan_json_v_is_str(ty) == 0 || _s_is(bayan_json_v_str(ty), "object") == 0) { return 0; }
+    var pr = _member(v, "properties");
+    if (pr != 0) {
+        if (bayan_json_v_is_obj(pr) == 0) { return 0; }
+        var i = 0;
+        while (i < bayan_json_v_obj_len(pr)) {
+            if (str_len(bayan_json_v_obj_key(pr, i)) == 0) { return 0; }
+            var pv = bayan_json_v_obj_val(pr, i);
+            if (bayan_json_v_is_obj(pv) == 0 && bayan_json_v_is_bool(pv) == 0) { return 0; }
+            i = i + 1;
+        }
+    }
+    var rq = _member(v, "required");
+    if (rq != 0) {
+        if (bayan_json_v_is_arr(rq) == 0) { return 0; }
+        var j = 0;
+        while (j < bayan_json_v_arr_len(rq)) {
+            var e = bayan_json_v_arr_get(rq, j);
+            if (bayan_json_v_is_str(e) == 0 || str_len(bayan_json_v_str(e)) == 0) { return 0; }
+            j = j + 1;
+        }
+    }
+    return 1;
+}
+
+fn _no_crlf(s) {
+    var a = default_alloc();
+    var n = strlen(s);
+    var out = alloc_via(a, n + 1);
+    var o = 0;
+    var i = 0;
+    while (i < n) {
+        if (load8(s + i) != 10 && load8(s + i) != 13) { store8(out + o, load8(s + i)); o = o + 1; }
+        i = i + 1;
+    }
+    store8(out + o, 0);
+    return out;
+}
+
+fn _cstr_is(c, s) {
+    if (c == 0 || s == 0) { return 0; }
+    if (strlen(c) != str_len(s)) { return 0; }
+    return memeq(c, str_data(s), str_len(s));
+}
+
+fn main() {
+    sakshi_set_level(SK_FATAL);
+    _pools();
+    var reg = tool_registry_new();
+    var big = bote_req_begin();
+    alloc_via(big, 8388608);
+    var heap = 0;
+    var took = 0;
+    var refused = 0;
+    var round = 0;
+    while (round < 30000) {
+        var a = bote_req_begin();
+        var js = _schema(a);
+        # Now and then cut short, which is no JSON.
+        if (_rand() % 20 == 0 && strlen(js) > 3) { store8(js + strlen(js) / 2, 0); }
+        var t = tool_def_new("t_fz", "d", tool_schema_from_json(js));
+        var why = registry_check_tool_def(t);
+        var want = _ref_ok(js);
+        var got = 0;
+        if (why == 0) { got = 1; }
+        if (got != want) { println(js); if (why != 0) { println(why); } println_int(want); return 10; }
+        if (got == 0) { refused = refused + 1; round = round + 1; continue; }
+        took = took + 1;
+        var st[56];
+        _registry_prepare(t, &st);
+        _registry_add_u(reg, t, &st);
+        var one = _no_crlf(js);
+        if (streq(tool_def_input_json(t), one) == 0) { println(js); println(tool_def_input_json(t)); return 20; }
+        var h0 = alloc_used();
+        var list = _build_tools_list_result_a(a, reg, 0, round % 2);
+        heap = heap + alloc_used() - h0;
+        if (jsonx_valid(list, strlen(list)) == 0) { println(list); return 30; }
+        var lv = bayan_json_v_parse_buf(list, strlen(list));
+        var lis = _member(bayan_json_v_arr_get(_member(lv, "tools"), 0), "inputSchema");
+        if (lis == 0 || _s_is(bayan_json_v_str(_member(lis, "type")), "object") == 0) { println(list); return 30; }
+        # What tool_schema_from_json read, against the reference.
+        var sch = tool_def_input_schema(t);
+        var pr = _member(lis, "properties");
+        var props = schema_properties(sch);
+        var np = 0;
+        if (pr != 0) { np = bayan_json_v_obj_len(pr); }
+        if (vec_len(props) != np) { println(js); return 40; }
+        var pi = 0;
+        while (pi < np) {
+            if (_cstr_is(schema_prop_key(vec_get(props, pi)), bayan_json_v_obj_key(pr, pi)) == 0) { println(js); return 40; }
+            pi = pi + 1;
+        }
+        var rq = _member(lis, "required");
+        var req = schema_required(sch);
+        if (rq == 0 && req != 0) { println(js); return 40; }
+        if (rq != 0) {
+            if (req == 0 || vec_len(req) != bayan_json_v_arr_len(rq)) { println(js); return 40; }
+            var ri = 0;
+            while (ri < vec_len(req)) {
+                if (_cstr_is(vec_get(req, ri), bayan_json_v_str(bayan_json_v_arr_get(rq, ri))) == 0) { println(js); return 40; }
+                ri = ri + 1;
+            }
+        }
+        round = round + 1;
+    }
+    if (heap != 0) { println_int(heap); return 50; }
+    if (took < 1000 || refused < 1000) { println_int(took); println_int(refused); return 60; }
+    println("input_schema: 30000 schemas judged as bayan reads them, those kept listed as written, 0 heap bytes");
+    return 0;
+}
+
+var rc = main();
+sys_exit_group(rc);

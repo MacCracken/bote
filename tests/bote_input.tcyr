@@ -194,6 +194,52 @@ fn _mk_d(sealed) {
 var EL = "{\"elicitation\":{}}";
 var Q_IR = "\"inputRequests\":{\"q\":{\"method\":\"elicitation/create\",\"params\":{\"mode\":\"form\",\"message\":\"Name?\",\"requestedSchema\":{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"string\"}}}}}}";
 
+# (3.8.3) A tools/call on a begun message with `claims`, and `token` noted when not 0.
+fn _jreq(d, p, caps, claims, token) {
+    var a = bote_req_begin();
+    if (token != 0) { bote_req_note_token(token); }
+    return codec_process_message_a(a, _mreq("tools/call", p, caps), d, claims);
+}
+# Who the test's claims name: themselves, unless they start "anon".
+fn _principal_fn(ctx, a, claims) {
+    if (memeq(claims, "anon", 4) == 1) { return 0; }
+    return claims;
+}
+# Every byte of `s` written as a \u escape.
+fn _esc_all(s) {
+    var hex = "0123456789abcdef";
+    var sb = str_builder_new();
+    var i = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        str_builder_add_cstr(sb, "\\u00");
+        var h[2];
+        store8(&h, load8(hex + (c >> 4)));
+        store8(&h + 1, 0);
+        str_builder_add_cstr(sb, &h);
+        store8(&h, load8(hex + (c & 15)));
+        str_builder_add_cstr(sb, &h);
+        i = i + 1;
+    }
+    return str_data(str_builder_build(sb));
+}
+# An HS256 JWT of `payload`, signed with `key`.
+fn _mint_hs(payload, key) {
+    var hdr = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base64url_encode(hdr, strlen(hdr)));
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_cstr(sb, base64url_encode(payload, strlen(payload)));
+    var si = str_cstr(str_builder_build(sb));
+    var mac = alloc(32);
+    hmac_sha256(key, strlen(key), si, strlen(si), mac);
+    var sb2 = str_builder_new();
+    str_builder_add_cstr(sb2, si);
+    str_builder_add_cstr(sb2, ".");
+    str_builder_add_cstr(sb2, base64url_encode(mac, 32));
+    return str_cstr(str_builder_build(sb2));
+}
+
 fn main() {
     sakshi_set_level(SK_ERROR);
     _bote_state_clock = &_clock_fn;
@@ -309,7 +355,7 @@ fn main() {
     }
     assert_eq(b603, 8, "-32603: no request and no state, a list, a state that is no string, a method not allowed, none, a mode not known, a key twice, a state twice");
     _ir_ret = vec_get(bads, 2);
-    assert(_has(_call(d, "\"name\":\"t_ask\",\"arguments\":{}", "{}"), "holds inputRequests, an object, or requestState, a string, or both") == 1, "-32603: ...a state that is no string, and why");
+    assert(_has(_call(d, "\"name\":\"t_ask\",\"arguments\":{}", "{}"), "holds inputRequests, an object of one or more, or requestState, a string, or both") == 1, "-32603: ...a state that is no string, and why");
     _ir_ret = vec_get(bads, 3);
     assert(_has(_call(d, "\"name\":\"t_ask\",\"arguments\":{}", "{}"), "an input request is elicitation/create, sampling/createMessage or roots/list") == 1, "-32603: ...a method not allowed, and why");
     _ir_ret = "{\"resultType\":\"input\\u005frequired\",\"inputRequests\":{\"q\":{\"method\":\"roots/list\"}}}";
@@ -541,6 +587,152 @@ fn main() {
     _ir_ret = 0;
     _ir_quiet = 0;
     assert(base > 0 && base <= 16, "heap: a call keeps its args and nothing more");
+
+    # ---- From the review of 3.8.2 (3.8.3) ----
+    _ir_quiet = 0;
+    var rd = _mk_d(1);
+    # A request whose claims are not the token it presented, and no principal function: a
+    # state is bound to no one, so the handler's is refused, and so is one brought back.
+    _ir_mode = 7;
+    _ir_ret = 0;
+    var c1 = _jreq(rd, "\"name\":\"t_ask\",\"arguments\":{}", EL, "{\"sub\":\"alice\"}", 0);
+    assert(_code(c1) == 0 - 32603 && _has(c1, "cannot be bound to who is asking") == 1, "review: claims that are no token, no principal: the handler's state refused, and why");
+    var anon = jsonx_get_str_dec_a(default_alloc(), _result(_jreq(rd, "\"name\":\"t_ask\",\"arguments\":{}", EL, 0, 0)), "requestState");
+    assert(anon != 0, "review: ...a state made with no claims at all is bound to no one, and sealed");
+    anon = _cat(anon, "");
+    _ir_mode = 0;
+    _ir_ret = "{\"content\":[]}";
+    var c2 = _jreq(rd, _cat3("\"name\":\"t_ask\",\"arguments\":{},\"requestState\":\"", anon, "\""), EL, "{\"sub\":\"mallory\"}", 0);
+    assert(_code(c2) == 0 - 32602 && _has(c2, "claims name no one") == 1, "review: ...and refused when a request with claims brings it");
+    assert_eq(_code(_jreq(rd, _cat3("\"name\":\"t_ask\",\"arguments\":{},\"requestState\":\"", anon, "\""), EL, 0, 0)), 0, "review: ...and opens for a request with none");
+    # With a principal function, a state is bound to whom it names.
+    var pd = _mk_d(1);
+    dispatcher_set_state_principal(pd, &_principal_fn, 0);
+    _ir_mode = 7;
+    _ir_ret = 0;
+    var ast = _cat(jsonx_get_str_dec_a(default_alloc(), _result(_jreq(pd, "\"name\":\"t_ask\",\"arguments\":{}", EL, "sub:alice", 0)), "requestState"), "");
+    _ir_mode = 0;
+    _ir_ret = "{\"content\":[]}";
+    var aretry = _cat3("\"name\":\"t_ask\",\"arguments\":{},\"requestState\":\"", ast, "\"");
+    assert_eq(_code(_jreq(pd, aretry, EL, "sub:alice", 0)), 0, "review: principal: opens for the principal it was made for");
+    assert_eq(_code(_jreq(pd, aretry, EL, "sub:mallory", 0)), 0 - 32602, "review: principal: refused for another (it opened for anyone through 3.8.2)");
+    assert_eq(_code(_jreq(pd, aretry, EL, "sub:alice", "sub:alice")), 0, "review: principal: wins over the token");
+    assert_eq(_code(_jreq(pd, aretry, EL, "anon-x", 0)), 0 - 32602, "review: principal: claims it names no one in, with no token, refused");
+    # A prompt's state and a resource's are bound to whom the claims name too.
+    _ir_ret = "{\"resultType\":\"input_required\",\"requestState\":\"p\"}";
+    var ppa = bote_req_begin();
+    var ppst = _cat(jsonx_get_str_dec_a(default_alloc(), _result(codec_process_message_a(ppa, _mreq("prompts/get", "\"name\":\"p_ask\"", EL), pd, "sub:alice")), "requestState"), "");
+    var rpa = bote_req_begin();
+    var rpst = _cat(jsonx_get_str_dec_a(default_alloc(), _result(codec_process_message_a(rpa, _mreq("resources/read", "\"uri\":\"res://ask\"", EL), pd, "sub:alice")), "requestState"), "");
+    _ir_ret = 0;
+    var ppm = _mreq("prompts/get", _cat3("\"name\":\"p_ask\",\"requestState\":\"", ppst, "\""), EL);
+    var rpm = _mreq("resources/read", _cat3("\"uri\":\"res://ask\",\"requestState\":\"", rpst, "\""), EL);
+    assert_eq(_code(codec_process_message_a(bote_req_begin(), ppm, pd, "sub:alice")), 0, "review: principal: a prompt's state opens for its principal");
+    assert_eq(_code(codec_process_message_a(bote_req_begin(), ppm, pd, "sub:mallory")), 0 - 32602, "review: principal: ...and no other");
+    assert_eq(_code(codec_process_message_a(bote_req_begin(), rpm, pd, "sub:alice")), 0, "review: principal: a resource's state opens for its principal");
+    assert_eq(_code(codec_process_message_a(bote_req_begin(), rpm, pd, "sub:mallory")), 0 - 32602, "review: principal: ...and no other");
+    # Who a principal names and a token are told apart: the same bytes as one and as the other.
+    _ir_mode = 7;
+    _ir_ret = 0;
+    var tk = _cat(jsonx_get_str_dec_a(default_alloc(), _result(_jreq(rd, "\"name\":\"t_ask\",\"arguments\":{}", EL, "sub:alice", "sub:alice")), "requestState"), "");
+    _ir_mode = 0;
+    _ir_ret = "{\"content\":[]}";
+    assert_eq(_code(_jreq(pd, _cat3("\"name\":\"t_ask\",\"arguments\":{},\"requestState\":\"", tk, "\""), EL, "sub:alice", 0)), 0 - 32602, "review: a state bound to a token does not open for a principal of the same bytes");
+    assert_eq(_code(_jreq(rd, _cat3("\"name\":\"t_ask\",\"arguments\":{},\"requestState\":\"", tk, "\""), EL, "sub:alice", "sub:alice")), 0, "review: ...and opens for that token");
+
+    # Bound to the arguments.
+    _ir_mode = 7;
+    _ir_ret = 0;
+    var gst = _cat(jsonx_get_str_dec_a(default_alloc(), _result(_call(rd, "\"name\":\"t_ask\",\"arguments\":{\"env\":\"staging\",\"n\":[1, 2]}", EL)), "requestState"), "");
+    _ir_mode = 0;
+    _ir_ret = "{\"content\":[]}";
+    assert_eq(_code(_call(rd, _cat3("\"name\":\"t_ask\",\"arguments\":{\"env\":\"prod\",\"n\":[1,2]},\"requestState\":\"", gst, "\""), EL)), 0 - 32602, "review: arguments: another value refused (it opened through 3.8.2)");
+    assert_eq(_code(_call(rd, _cat3("\"name\":\"t_ask\",\"arguments\":{\"env\":\"staging\",\"n\":[1,2]},\"requestState\":\"", gst, "\""), EL)), 0, "review: arguments: the same, compact, opens");
+    assert_eq(_code(_call(rd, _cat3("\"name\":\"t_ask\",\"arguments\":{ \"env\" : \"staging\" ,\n \"n\":[ 1 , 2 ] },\"requestState\":\"", gst, "\""), EL)), 0, "review: arguments: the same, spaced and on two lines, opens");
+    assert_eq(_code(_call(rd, _cat3("\"name\":\"t_ask\",\"arguments\":{\"env\":\"staging \",\"n\":[1,2]},\"requestState\":\"", gst, "\""), EL)), 0 - 32602, "review: arguments: a space inside a string is no spacing");
+    assert_eq(_code(_call(rd, _cat3("\"name\":\"t_ask\",\"requestState\":\"", gst, "\""), EL)), 0 - 32602, "review: arguments: none at all refused");
+    _ir_mode = 7;
+    _ir_ret = 0;
+    var est = _cat(jsonx_get_str_dec_a(default_alloc(), _result(_call(rd, "\"name\":\"t_ask\"", EL)), "requestState"), "");
+    _ir_mode = 0;
+    _ir_ret = "{\"content\":[]}";
+    assert_eq(_code(_call(rd, _cat3("\"name\":\"t_ask\",\"arguments\":{},\"requestState\":\"", est, "\""), EL)), 0, "review: arguments: none is {}");
+    _ir_ret = "{\"resultType\":\"input_required\",\"requestState\":\"p\"}";
+    var gpst = _cat(jsonx_get_str_dec_a(default_alloc(), _result(codec_process_message(_mreq("prompts/get", "\"name\":\"p_ask\",\"arguments\":{\"a\":\"1\"}", EL), rd, 0)), "requestState"), "");
+    _ir_ret = 0;
+    assert_eq(_code(codec_process_message(_mreq("prompts/get", _cat3("\"name\":\"p_ask\",\"arguments\":{\"a\":\"2\"},\"requestState\":\"", gpst, "\""), EL), rd, 0)), 0 - 32602, "review: a prompt's arguments are bound too");
+    assert_eq(_code(codec_process_message(_mreq("prompts/get", _cat3("\"name\":\"p_ask\",\"arguments\":{\"a\":\"1\"},\"requestState\":\"", gpst, "\""), EL), rd, 0)), 0, "review: ...and the same opens");
+    # The binding's parts, each its length and its bytes.
+    var ba = bote_req_begin();
+    bote_req_note_token("k\n1");
+    _ase(_dsp_state_binding_a(ba, rd, "tools/call", "{\"name\":\"a\\nb\",\"arguments\":{ \"x\" : 1 }}", "k\n1"), "10:tools/call3:a\nbt3:k\n17:{\"x\":1}", "review: the binding's bytes");
+    bote_req_begin();
+    _ase(_dsp_state_binding_a(ba, rd, "resources/read", "{\"uri\":\"res://ask\",\"arguments\":{\"x\":1}}", 0), "14:resources/read9:res://askn0:2:{}", "review: a resource's, no one and no arguments");
+    assert_eq(_dsp_state_binding_a(ba, rd, "tools/call", "{\"name\":\"a\"}", "claims"), 0, "review: claims naming no one bind nothing");
+    _ase(_dsp_compact_a(ba, "{ \"a\\\" b\" : [ 1 ,\t2 ] ,\r\n\"c\":\"\\\\\" }"), "{\"a\\\" b\":[1,2],\"c\":\"\\\\\"}", "review: compact keeps a string's spaces, an escaped quote and a backslash");
+
+    # A resultType of any length, read as it decodes, from a tool.
+    _ir_ret = _cat3("{\"content\":[],\"resultType\":\"", _esc_all("input_required"), "\",\"inputRequests\":{\"q\":{\"method\":\"roots/list\"}},\"requestState\":\"RAW-UNSEALED\"}");
+    var lr1 = _call(rd, "\"name\":\"t_ask\",\"arguments\":{}", "{}");
+    assert(_code(lr1) == 0 - 32021 && _has(lr1, "RAW-UNSEALED") == 0, "review: an 84-byte escaped resultType is judged: -32021 (it went out unjudged)");
+    var lr2 = _call(rd, "\"name\":\"t_ask\",\"arguments\":{}", "{\"roots\":{}}");
+    assert(_code(lr2) == 0 && _has(lr2, "RAW-UNSEALED") == 0 && _has(lr2, "\"requestState\":\"") == 1, "review: ...and its state sealed");
+    # resultType twice, from a prompt, a resource and a completion.
+    var twice = "{\"messages\":[],\"contents\":[],\"completion\":{\"values\":[]},\"resultType\":\"complete\",\"resultType\":\"input_required\",\"inputRequests\":{\"q\":{\"method\":\"roots/list\"}},\"requestState\":\"RAW-UNSEALED\"}";
+    _ir_ret = twice;
+    var tp = codec_process_message(_mreq("prompts/get", "\"name\":\"p_ask\"", "{\"roots\":{}}"), rd, 0);
+    assert(_code(tp) == 0 - 32603 && _has(tp, "RAW-UNSEALED") == 0, "review: a prompt's resultType twice refused (it went out with the state unsealed)");
+    var tr = codec_process_message(_mreq("resources/read", "\"uri\":\"res://ask\"", "{\"roots\":{}}"), rd, 0);
+    assert(_code(tr) == 0 - 32603 && _has(tr, "RAW-UNSEALED") == 0, "review: ...a resource's");
+    var tcomp = codec_process_message(_mreq("completion/complete", "\"ref\":{\"type\":\"ref/prompt\",\"name\":\"p_ask\"},\"argument\":{\"name\":\"a\",\"value\":\"\"}", "{\"roots\":{}}"), rd, 0);
+    assert(_code(tcomp) == 0 - 32603 && _has(tcomp, "may not ask") == 1, "review: ...a completion's, which may not ask");
+    _ir_ret = "{\"messages\":[],\"resultType\":\"input_required\",\"resultType\":\"complete\",\"requestState\":\"RAW-UNSEALED\"}";
+    var tp2 = codec_process_message(_mreq("prompts/get", "\"name\":\"p_ask\"", "{}"), rd, 0);
+    assert(_code(tp2) == 0 - 32603 && _has(tp2, "RAW-UNSEALED") == 0, "review: ...and input_required first");
+    # Requests a client would take another way, or refuse.
+    var nbads = vec_new();
+    vec_push(nbads, "{\"resultType\":\"input_required\",\"inputRequests\":{\"a\\u0000\":{\"method\":\"tools/call\",\"params\":{}}}}");
+    vec_push(nbads, "{\"resultType\":\"input_required\",\"inputRequests\":{\"a\\u0000\":{\"method\":\"sampling/createMessage\",\"params\":{}}}}");
+    vec_push(nbads, "{\"resultType\":\"input_required\",\"inputRequests\":{}}");
+    vec_push(nbads, "{\"resultType\":\"input_required\",\"inputRequests\":{\"q\":{\"method\":\"elicitation/create\"}}}");
+    vec_push(nbads, "{\"resultType\":\"input_required\",\"inputRequests\":{\"q\":{\"method\":\"sampling/createMessage\"}}}");
+    vec_push(nbads, "{\"resultType\":\"input_required\",\"inputRequests\":{\"q\":{\"method\":\"elicitation/create\",\"params\":{\"mode\":5,\"message\":\"m\"}}}}");
+    vec_push(nbads, "{\"resultType\":\"input_required\",\"inputRequests\":{\"q\":{\"method\":\"roots/list\",\"params\":[]}}}");
+    vec_push(nbads, "{\"resultType\":\"input_required\",\"inputRequests\":{\"q\":\"roots/list\"}}");
+    var nnames = vec_new();
+    vec_push(nnames, "a request keyed with a NUL (it went out unjudged)"); vec_push(nnames, "...a sampling request so keyed, with no -32021");
+    vec_push(nnames, "inputRequests with none in it, and no state"); vec_push(nnames, "an elicitation with no params");
+    vec_push(nnames, "a sampling request with no params"); vec_push(nnames, "a mode that is no string (it was form)");
+    vec_push(nnames, "roots/list with params that are no object"); vec_push(nnames, "a request that is no object");
+    var ni = 0;
+    while (ni < vec_len(nbads)) {
+        _ir_ret = vec_get(nbads, ni);
+        assert_eq(_code(_call(rd, "\"name\":\"t_ask\",\"arguments\":{}", "{}")), 0 - 32603, _cat("review: -32603: ", vec_get(nnames, ni)));
+        ni = ni + 1;
+    }
+    _ir_ret = "{\"resultType\":\"input_required\",\"inputRequests\":{\"q\":{\"method\":\"roots/list\"}}}";
+    assert_eq(_code(_call(rd, "\"name\":\"t_ask\",\"arguments\":{}", "{\"roots\":{}}")), 0, "review: roots/list with no params goes");
+    _ir_ret = 0;
+    _ir_mode = 0;
+
+    # A JWT's issuer and subject, end to end: a state survives a refreshed token, and no other
+    # subject's.
+    var jd = _mk_d(1);
+    var js = jwt_secret_new("state-test-key-0123456789abcdef");
+    dispatcher_set_state_principal(jd, &jwt_state_principal, js);
+    var tok_a1 = _mint_hs("{\"iss\":\"https://as.example\",\"sub\":\"alice\",\"jti\":\"1\"}", "state-test-key-0123456789abcdef");
+    var tok_a2 = _mint_hs("{\"iss\":\"https://as.example\",\"sub\":\"alice\",\"jti\":\"2\"}", "state-test-key-0123456789abcdef");
+    var tok_b = _mint_hs("{\"iss\":\"https://as.example\",\"sub\":\"bob\",\"jti\":\"3\"}", "state-test-key-0123456789abcdef");
+    var tok_x = _mint_hs("{\"iss\":\"https://other.example\",\"sub\":\"alice\",\"jti\":\"4\"}", "state-test-key-0123456789abcdef");
+    _ir_mode = 7;
+    var jst = _cat(jsonx_get_str_dec_a(default_alloc(), _result(_jreq(jd, "\"name\":\"t_ask\",\"arguments\":{}", EL, tok_a1, tok_a1)), "requestState"), "");
+    _ir_mode = 0;
+    _ir_ret = "{\"content\":[]}";
+    var jretry = _cat3("\"name\":\"t_ask\",\"arguments\":{},\"requestState\":\"", jst, "\"");
+    assert_eq(_code(_jreq(jd, jretry, EL, tok_a2, tok_a2)), 0, "review: jwt: a refreshed token of the same subject keeps the state");
+    assert_eq(_code(_jreq(jd, jretry, EL, tok_b, tok_b)), 0 - 32602, "review: jwt: another subject's refused");
+    assert_eq(_code(_jreq(jd, jretry, EL, tok_x, tok_x)), 0 - 32602, "review: jwt: the same subject from another issuer refused");
+    _ir_ret = 0;
 
     return assert_summary();
 }

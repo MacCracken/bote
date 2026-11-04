@@ -112,11 +112,16 @@ The primary security-relevant surface areas are:
   client brings, through the dispatcher's sealer, before any handler runs: one that does not open
   is `-32602`, and the handler never sees it. The full bundle's sealer is HMAC-SHA256 under a key
   of 32 bytes or more (`BOTE_STATE_KEY` in the binary, 64 hex digits or more, else a random key
-  per process), bound to the method, its target (the tool's or prompt's name, the resource's URI)
-  and the token the request presented, and good for `BOTE_STATE_TTL_S` (600) seconds. A state
-  made for one tool cannot be spent on another, by another token, or after it expires. The spec
-  asks for the principal; the token is stricter, and a client that refreshes its token between
-  rounds starts again. With no sealer a state is refused both ways. The state is signed, not encrypted: the client can read
+  per process), and good for `BOTE_STATE_TTL_S` (600) seconds. Since **3.8.3** it is bound to the
+  request and to who made it, as the spec asks: the method, its target (the tool's or prompt's
+  name, the resource's URI), the arguments (compact), and the principal a principal function
+  names for the request's claims (`dispatcher_set_state_principal`; with JWT access tokens the
+  binary names the token's issuer and subject), else the token the request presented. A state
+  made for one call cannot be spent on another, with other arguments, by another principal, or
+  after it expires. ⚠ Through 3.8.2 the arguments were not bound, and a request whose claims were
+  not its token (a validator returning a record, a transport passing its own claims) was bound to
+  no one, so its state opened for anyone who held it; such a request's state is now refused both
+  ways unless a principal function names someone. With no sealer a state is refused both ways. The state is signed, not encrypted: the client can read
   it, so a handler puts nothing in it the client may not know, and a state is not single-use, so
   a handler that must spend one once keeps that record itself, as the spec says. The answers a
   client brings (`inputResponses`) must be an object of objects; the handler judges what they

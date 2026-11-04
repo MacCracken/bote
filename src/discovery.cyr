@@ -21,7 +21,7 @@ fn announcement_node_id(a) { return load64(a); }
 fn announcement_tools(a) { return load64(a + 8); }
 
 # Serialize a ToolAnnouncement to JSON: {"node_id":"...","tools":[...]}
-# Reuses dispatch's _emit_schema for each tool's inputSchema.
+# Each tool's inputSchema as tools/list sends it (dispatch's _emit_input_schema).
 fn announcement_to_json(a) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"node_id\":\"");
@@ -39,7 +39,7 @@ fn announcement_to_json(a) {
             str_builder_add_cstr(sb, ",");
             _json_emit_str_field(sb, "description", tool_def_description(t));
             str_builder_add_cstr(sb, ",\"inputSchema\":");
-            _emit_schema(sb, tool_def_input_schema(t));
+            _emit_input_schema(sb, t);
             var v = tool_def_version(t);
             if (v != 0) {
                 str_builder_add_cstr(sb, ",");

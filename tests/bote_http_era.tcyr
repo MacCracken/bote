@@ -110,6 +110,8 @@ fn _mk_d() {
     vec_push(pp, schema_prop_new("flag", "{\"type\":\"boolean\",\"x-mcp-header\":\"Flag\"}"));
     vec_push(pp, schema_prop_new("a", "{\"type\":\"object\",\"properties\":{\"b\":{\"type\":\"string\",\"x-mcp-header\":\"Deep\"}}}"));
     registry_register(reg, tool_def_new("t_param", "Param", schema_new("object", pp, vec_new())));
+    # (3.8.3) An inputSchema given as JSON, its annotated property's type escaped.
+    registry_register(reg, tool_def_new("t_jparam", "Param from JSON", tool_schema_from_json("{\"type\":\"object\",\"$defs\":{\"z\":{\"type\":\"string\"}},\"properties\":{\"zone\":{\"type\":\"str\\u0069ng\",\"x-mcp-header\":\"Zone\"}},\"additionalProperties\":false}")));
     var two = vec_new();
     vec_push(two, "files:read");
     vec_push(two, "files:write");
@@ -135,6 +137,7 @@ fn _mk_d() {
     var d = dispatcher_new(reg);
     dispatcher_handle(d, "t_echo", &h_ok);
     dispatcher_handle(d, "t_param", &h_ok);
+    dispatcher_handle(d, "t_jparam", &h_ok);
     dispatcher_handle(d, "t_claims", &h_claims);
     dispatcher_handle(d, "t_int", &h_ok);
     dispatcher_handle(d, "t_scoped", &h_claims);
@@ -613,7 +616,20 @@ fn _pc(hdrs, args) {
     return _raw("POST", _cat3(_mh("tools/call", "t_param"), hdrs, ""), _mb("tools/call", str_data(str_builder_build(sb))));
 }
 
+# The same for t_jparam.
+fn _pcj(hdrs, args) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, ",\"name\":\"t_jparam\",\"arguments\":");
+    str_builder_add_cstr(sb, args);
+    return _raw("POST", _cat3(_mh("tools/call", "t_jparam"), hdrs, ""), _mb("tools/call", str_data(str_builder_build(sb))));
+}
+
 fn _params(k) {
+    # (3.8.3) A header named in an inputSchema given as JSON is judged as one in a ToolSchema.
+    _t(k, _pcj("Mcp-Param-Zone: z1\r\n", "{\"zone\":\"z1\"}"), 200, "", "JSON schema: a value and its header");
+    assert(_has(_body, "\"resultType\":\"complete\""), _nm(k, "JSON schema: ...reaches the tool"));
+    _t(k, _pcj("", "{\"zone\":\"z1\"}"), 400, "-32020", "JSON schema: a value and no header");
+    _t(k, _pcj("Mcp-Param-Zone: z2\r\n", "{\"zone\":\"z1\"}"), 400, "-32020", "JSON schema: a header holding another value");
     _t(k, _raw("POST", _mh("tools/list", 0), _mb("tools/list", "")), 200, "", "tools/list");
     assert(_has(_body, "\"x-mcp-header\":\"Region\""), _nm(k, "...carries the annotation as written"));
 

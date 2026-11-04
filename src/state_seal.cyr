@@ -5,7 +5,9 @@
 # MUST protect its integrity and MUST reject state that fails, and SHOULD bind it to the
 # principal, a short expiry and the request it was made for. The dispatcher hands a sealer
 # each state a handler gives (src/dispatch.cyr, dispatcher_set_state_sealer), with a
-# binding of the method, its target and the token the request presented; this one makes
+# binding of the request (its method, its target and its arguments) and of who made it (the
+# principal dispatcher_set_state_principal names, else the token the request presented),
+# each part its length and its bytes (3.8.3); this one makes
 #
 #     b64u(exp ‖ payload) "." b64u(HMAC-SHA256(key, "bote-state-1" 0 binding 0 exp ‖ payload))
 #

@@ -197,7 +197,7 @@ fn main() {
     vec_push(tools, tool_def_with_output_schema(tool_def_new("t_any", "d", schema_new("object", 0, vec_new())), "{}"));
     vec_push(tools, tool_def_with_output_schema(tool_def_new("t_obj", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\"}"));
     var ti = 0;
-    var st[48];
+    var st[56];
     while (ti < vec_len(tools)) { _registry_prepare(vec_get(tools, ti), &st); _registry_stage(vec_get(tools, ti), &st); ti = ti + 1; }
 
     # The schemas.
