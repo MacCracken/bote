@@ -265,6 +265,46 @@ fn main() {
     assert(_lc_find("uniqueItems that is no boolean") != 0, "warn: uniqueItems a string");
     assert(_lc_find("w_good") == 0, "warn: none for a type array, const, an integer enum, uniqueItems true and false");
 
+    # ---- (3.8.8, from the 3.8.7 review) a type array naming a string that is no text ----
+    _lc_begin();
+    var cd = dispatcher_new(tool_registry_new());
+    var cr1 = dispatcher_register_tool(cd, tool_def_with_output_schema(tool_def_new("w_lone", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":[\"\\ud800\"]}}}"), &h_ret);
+    var cr2 = dispatcher_register_tool(cd, tool_def_new("w_lone2", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":[\"string\",\"\\udc00\"]}}}")), &h_tool);
+    var cps = vec_new();
+    vec_push(cps, schema_prop_new("a", "{\"type\":[\"null\",\"\xff\"]}"));
+    var cr3 = dispatcher_register_tool(cd, tool_def_new("w_lone3", "d", schema_new("object", cps, vec_new())), &h_tool);
+    _lc_end();
+    assert(cr1 == 0 && cr2 == 0 && cr3 == 0, "crash: three type arrays with a name that is no text register (each crashed registration at 3.8.7)");
+    assert(_lc_find("tool=w_lone ") != 0 && _lc_find("a type array naming an unknown type") != 0, "crash: ...each warned of as naming an unknown type");
+    assert(_ok("{\"type\":[\"null\",\"\\ud800\"]}", "null") == 1 && _ok("{\"type\":[\"null\",\"\\ud800\"]}", "1") == 0, "crash: ...and judged by the name it knows");
+
+    # ---- (3.8.8, from the 3.8.7 review) the heap forms keep only their answer ----
+    var hc = _compile_object_body("{\"type\":\"object\",\"properties\":{\"l\":{\"uniqueItems\":true},\"c\":{\"const\":{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5,\"f\":6,\"g\":7,\"h\":8,\"i\":9}}}}");
+    var hi1 = _cat3("{\"l\":", _arr(1000, 0), "}");
+    var esb = str_builder_new();
+    str_builder_add_cstr(esb, "{\"l\":[");
+    var hq = 0;
+    while (hq < 1000) { if (hq > 0) { str_builder_add_cstr(esb, ","); } str_builder_add_cstr(esb, "\"\\u0073"); str_builder_add_int(esb, hq); str_builder_add_cstr(esb, "\""); hq = hq + 1; }
+    str_builder_add_cstr(esb, "]}");
+    var hi2 = str_data(str_builder_build(esb));
+    var hi3 = "{\"c\":{\"i\":9,\"h\":8,\"g\":7,\"f\":6,\"e\":5,\"d\":4,\"c\":3,\"b\":2,\"a\":1}}";
+    assert(vec_len(compiled_validate(hc, hi1)) == 0 && vec_len(compiled_validate(hc, hi2)) == 0 && vec_len(compiled_validate(hc, hi3)) == 0, "heap form: 1,000 integers, 1,000 escaped strings and a const object pass");
+    var hh0 = alloc_used();
+    hq = 0;
+    while (hq < 10) { compiled_validate(hc, hi1); compiled_validate(hc, hi2); compiled_validate(hc, hi3); hq = hq + 1; }
+    assert((alloc_used() - hh0) / 30 < 256, "heap form: compiled_validate keeps its answer only (32 KB, 64 KB and 1.5 KB a call at 3.8.7)");
+    var hr = tool_registry_new();
+    registry_register(hr, tool_def_new("t_hf", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"l\":{\"uniqueItems\":true}}}")));
+    assert(registry_validate_params(hr, "t_hf", hi2) == 0, "heap form: registry_validate_params passes them");
+    hh0 = alloc_used();
+    hq = 0;
+    while (hq < 10) { registry_validate_params(hr, "t_hf", hi2); hq = hq + 1; }
+    assert((alloc_used() - hh0) / 10 < 256, "heap form: ...keeping nothing (64 KB a call at 3.8.7)");
+    var hbad = registry_validate_params(hr, "t_hf", "{\"l\":[1,1]}");
+    assert(hbad != 0 && bote_err_violations(hbad) != 0 && streq(vec_get(bote_err_violations(hbad), 0), "l: items 0 and 1 are equal, against uniqueItems") == 1, "heap form: a violation copied out whole");
+    compiled_validate(hc, hi2);
+    assert(streq(vec_get(bote_err_violations(hbad), 0), "l: items 0 and 1 are equal, against uniqueItems") == 1, "heap form: ...and kept after the scratch is used again");
+
     # ---- the seed ----
     var sd = _jx_hash_seed();
     assert(sd != 0 && _jx_hash_seed() == sd, "seed: made once, and kept");

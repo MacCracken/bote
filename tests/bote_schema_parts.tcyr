@@ -1,0 +1,324 @@
+# bote_schema_parts.tcyr — the keywords that judge an array's or an object's parts (3.8.8):
+# prefixItems and items beside it, contains with minContains and maxContains, propertyNames,
+# dependentRequired and dependentSchemas; quiet judgements that keep nothing; the
+# dispatcher; the WARNs; and the heap and the arena.
+#
+# Run: cyrius test tests/bote_schema_parts.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+fn h_tool(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+var _ret = 0;
+fn h_ret(args, claims) { return _ret; }
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
+fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+fn _vs(schema, value) { return _sch_check_value_a(bote_req_begin(), parse_property(schema), "v", value); }
+fn _ok(schema, value) { if (_vs(schema, value) == 0) { return 1; } return 0; }
+fn _n(schema, value) {
+    var v = _vs(schema, value);
+    if (v == 0) { return 0; }
+    return vec_len(v);
+}
+fn _v0(schema, value) {
+    var v = _vs(schema, value);
+    if (v == 0) { return "(none)"; }
+    return _cat(vec_get(v, 0), "");
+}
+fn _v1(schema, value) {
+    var v = _vs(schema, value);
+    if (v == 0 || vec_len(v) < 2) { return "(none)"; }
+    return _cat(vec_get(v, 1), "");
+}
+fn _ase(got, want, name) {
+    if (got == 0 || want == 0) { return assert(got == want, name); }
+    return assert_streq(got, want, name);
+}
+fn _msg(method, params) {
+    return _cat3(_cat3("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"", method, "\",\"params\":{"), params, "}}");
+}
+# An array of n items, each `item`.
+fn _many(n, item) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "[");
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, item);
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]");
+    return str_data(str_builder_build(sb));
+}
+
+var _lc_all = 0;
+fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    var b = alloc(n + 1);
+    memcpy(b, msg, n);
+    store8(b + n, 0);
+    vec_push(_lc_all, b);
+    return 0;
+}
+fn _lc_begin() { _lc_all = vec_new(); sakshi_set_emit_hook(&_lc_hook); sakshi_set_level(SK_TRACE); return 0; }
+fn _lc_end() { sakshi_clear_emit_hook(); sakshi_set_level(SK_ERROR); return 0; }
+fn _lc_find(sub) {
+    var i = 0;
+    while (i < vec_len(_lc_all)) {
+        if (_has(vec_get(_lc_all, i), sub) == 1) { return vec_get(_lc_all, i); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # ---- prefixItems ----
+    var pf = "{\"prefixItems\":[{\"type\":\"integer\"},{\"type\":\"string\"}]}";
+    assert(_ok(pf, "[1,\"a\"]") == 1, "prefix: each item by its own schema");
+    _ase(_v0(pf, "[\"a\",1]"), "v[0]: expected integer", "prefix: the first refused");
+    _ase(_v1(pf, "[\"a\",1]"), "v[1]: expected string", "prefix: ...and the second");
+    assert(_ok(pf, "[1]") == 1 && _ok(pf, "[]") == 1, "prefix: fewer items are fine");
+    assert(_ok(pf, "[1,\"a\",true,{}]") == 1, "prefix: the rest unjudged with no items");
+    var pfi = "{\"prefixItems\":[{\"type\":\"integer\"}],\"items\":{\"type\":\"string\"}}";
+    assert(_ok(pfi, "[1,\"a\",\"b\"]") == 1, "prefix: items judges the rest");
+    _ase(_v0(pfi, "[1,\"a\",2]"), "v[2]: expected string", "prefix: ...naming the index");
+    _ase(_v0(pfi, "[\"x\"]"), "v[0]: expected integer", "prefix: items does not judge what the prefix covers");
+    _ase(_v0("{\"prefixItems\":[true,false]}", "[1,2]"), "v[1]: not allowed by the schema", "prefix: a schema false");
+    _ase(_v0("{\"prefixItems\":[{}],\"items\":false}", "[1,2]"), "v[1]: not allowed by the schema", "prefix: items false allows no more");
+    assert(_ok("{\"prefixItems\":[{}],\"items\":false}", "[1]") == 1, "prefix: ...and takes the prefix");
+    assert(_ok("{\"prefixItems\":{\"type\":\"integer\"}}", "[\"a\"]") == 1, "prefix: one that is no array judges nothing");
+    assert(_ok("{\"prefixItems\":[{\"type\":\"integer\"}]}", "{\"0\":\"a\"}") == 1 && _ok("{\"prefixItems\":[{\"type\":\"integer\"}]}", "5") == 1, "prefix: judges arrays only");
+
+    # ---- contains ----
+    var cn = "{\"contains\":{\"type\":\"integer\"}}";
+    assert(_ok(cn, "[\"a\",1]") == 1, "contains: one item that meets it");
+    _ase(_v0(cn, "[\"a\",\"b\"]"), "v: no item matches contains", "contains: none");
+    assert_eq(_n(cn, "[\"a\",\"b\"]"), 1, "contains: ...one violation, none of the items'");
+    _ase(_v0(cn, "[]"), "v: no item matches contains", "contains: an empty array has none");
+    var cn2 = "{\"contains\":{\"type\":\"integer\"},\"minContains\":2}";
+    assert(_ok(cn2, "[1,2,\"a\"]") == 1, "contains: minContains met");
+    _ase(_v0(cn2, "[1,\"a\"]"), "v: fewer items than minContains match contains", "contains: minContains missed");
+    assert(_ok("{\"contains\":{\"type\":\"integer\"},\"minContains\":0}", "[]") == 1 && _ok("{\"contains\":{\"type\":\"integer\"},\"minContains\":0}", "[\"a\"]") == 1, "contains: minContains 0 takes none");
+    var cn3 = "{\"contains\":{\"type\":\"integer\"},\"maxContains\":1}";
+    assert(_ok(cn3, "[1,\"a\"]") == 1, "contains: maxContains met");
+    _ase(_v0(cn3, "[1,2]"), "v: more items than maxContains match contains", "contains: maxContains passed");
+    _ase(_v0("{\"contains\":{\"type\":\"integer\"},\"minContains\":0,\"maxContains\":1}", "[1,2,3]"), "v: more items than maxContains match contains", "contains: min 0 and max 1");
+    assert(_ok("{\"minContains\":2,\"maxContains\":0}", "[1]") == 1, "contains: min and max with no contains judge nothing");
+    assert(_ok("{\"contains\":{\"type\":\"object\",\"required\":[\"id\"]}}", "[{\"x\":1},{\"id\":2}]") == 1, "contains: an object schema, met by the second");
+    _ase(_v0("{\"contains\":{\"type\":\"object\",\"required\":[\"id\"]}}", "[{\"x\":1},{\"y\":2}]"), "v: no item matches contains", "contains: ...and by none");
+    _ase(_v0("{\"contains\":false}", "[1]"), "v: no item matches contains", "contains: false meets nothing");
+    assert(_ok("{\"contains\":true}", "[1]") == 1 && _ok("{\"contains\":true}", "[]") == 0, "contains: true meets any item, and needs one");
+    assert(_ok("{\"contains\":{\"contains\":{\"const\":1}}}", "[[2],[3,1]]") == 1 && _ok("{\"contains\":{\"contains\":{\"const\":1}}}", "[[2],[3]]") == 0, "contains: nested");
+    _ase(_v0("{\"type\":\"array\",\"items\":{\"type\":\"integer\"},\"contains\":{\"minimum\":5}}", "[1,\"x\"]"), "v[1]: expected integer", "contains: with items, each judged as before");
+    assert(_ok(cn, "{\"a\":1}") == 1, "contains: judges arrays only");
+
+    # ---- propertyNames ----
+    var pn = "{\"propertyNames\":{\"maxLength\":3}}";
+    assert(_ok(pn, "{\"ab\":1,\"abc\":2}") == 1, "names: each key meets it");
+    _ase(_v0(pn, "{\"ab\":1,\"abcd\":2}"), "v.abcd: property name does not meet propertyNames", "names: one that does not, at its path");
+    var pe = "{\"propertyNames\":{\"enum\":[\"a\",\"b\"]}}";
+    assert(_ok(pe, "{\"a\":1,\"b\":2}") == 1 && _ok(pe, "{\"c\":1}") == 0, "names: an enum of them");
+    assert(_ok(pe, "{\"\\u0061\":1}") == 1, "names: a key as it decodes");
+    assert(_ok("{\"propertyNames\":false}", "{}") == 1 && _ok("{\"propertyNames\":false}", "{\"a\":1}") == 0, "names: false allows none");
+    assert(_ok("{\"propertyNames\":{\"pattern\":\"^x\"}}", "{\"a\":1}") == 1, "names: a keyword bote does not judge judges nothing");
+    assert(_ok("{\"type\":\"object\",\"properties\":{\"o\":{\"propertyNames\":{\"maxLength\":1}}}}", "{\"o\":{\"ab\":1}}") == 0, "names: nested");
+    var pn300 = str_builder_new();
+    str_builder_add_cstr(pn300, "{\"");
+    var pi = 0;
+    while (pi < 300) { str_builder_add_cstr(pn300, "k"); pi = pi + 1; }
+    str_builder_add_cstr(pn300, "\":1}");
+    assert(_ok("{\"propertyNames\":{\"maxLength\":299}}", str_data(str_builder_build(pn300))) == 0, "names: a 300-byte key counted");
+    assert(_ok(pn, "[\"abcd\"]") == 1, "names: judges objects only");
+
+    # ---- dependentRequired ----
+    var dr = "{\"dependentRequired\":{\"credit_card\":[\"billing_address\"]}}";
+    _ase(_v0(dr, "{\"credit_card\":1}"), "v: missing required field: billing_address, which credit_card requires", "depreq: a name the present one requires");
+    assert(_ok(dr, "{\"credit_card\":1,\"billing_address\":\"x\"}") == 1 && _ok(dr, "{\"billing_address\":\"x\"}") == 1 && _ok(dr, "{}") == 1, "depreq: met, or not asked");
+    assert(_ok(dr, "{\"cr\\u0065dit_card\":1}") == 0, "depreq: a key as it decodes");
+    var dr2 = "{\"dependentRequired\":{\"a\":[\"b\",\"c\"],\"b\":[\"d\"]}}";
+    assert_eq(_n(dr2, "{\"a\":1,\"b\":2}"), 2, "depreq: each name missing, and each member that asks");
+    _ase(_v0("{\"type\":\"object\",\"properties\":{\"p\":{\"dependentRequired\":{\"a\":[\"b\"]}}}}", "{\"p\":{\"a\":1}}"), "v.p: missing required field: b, which a requires", "depreq: nested, at its path");
+    _ase(_v0("{\"properties\":{\"a\":{}},\"additionalProperties\":false,\"dependentRequired\":{\"a\":[\"b\"]}}", "{\"a\":1,\"b\":2}"), "v.b: additional property not allowed", "depreq: a name it requires is no property additionalProperties takes");
+    var drm = str_builder_new();
+    str_builder_add_cstr(drm, "{\"dependentRequired\":{");
+    pi = 0;
+    while (pi < 12) {
+        if (pi > 0) { str_builder_add_cstr(drm, ","); }
+        str_builder_add_cstr(drm, "\"t");
+        str_builder_add_int(drm, pi);
+        str_builder_add_cstr(drm, "\":[\"r");
+        str_builder_add_int(drm, pi);
+        str_builder_add_cstr(drm, "\"]");
+        pi = pi + 1;
+    }
+    str_builder_add_cstr(drm, "}}");
+    var drms = str_data(str_builder_build(drm));
+    assert(_ok(drms, "{\"t3\":1,\"r3\":1,\"t11\":0,\"r11\":0}") == 1 && _ok(drms, "{\"t3\":1,\"r3\":1,\"t11\":0}") == 0, "depreq: twenty-four names, looked up past eight");
+
+    # ---- dependentSchemas ----
+    var ds = "{\"dependentSchemas\":{\"a\":{\"required\":[\"b\"]}}}";
+    _ase(_v0(ds, "{\"a\":1}"), "v: missing required field: b", "depschemas: the present member's schema judges the object");
+    assert(_ok(ds, "{\"a\":1,\"b\":2}") == 1 && _ok(ds, "{}") == 1 && _ok(ds, "{\"b\":2}") == 1, "depschemas: met, or not asked");
+    _ase(_v0("{\"dependentSchemas\":{\"a\":{\"properties\":{\"b\":{\"type\":\"integer\"}}}}}", "{\"a\":1,\"b\":\"x\"}"), "v.b: expected integer", "depschemas: a property's schema");
+    _ase(_v0("{\"dependentSchemas\":{\"a\":false}}", "{\"a\":1}"), "v: not allowed by the schema", "depschemas: false");
+    assert(_ok("{\"dependentSchemas\":{\"a\":false}}", "{\"c\":1}") == 1, "depschemas: ...only when its member is there");
+
+    # ---- a quiet judgement keeps nothing ----
+    var qa = bote_req_arena_new();
+    var cp = parse_property("{\"contains\":{\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"enum\":[\"x\"]}}}}");
+    var bad = _many(5000, "{\"id\":\"y\"}");
+    var qv = _sch_check_value_a(qa, cp, "v", bad);
+    assert(qv != 0 && vec_len(qv) == 1, "quiet: 5,000 items that do not meet contains, one violation");
+    var qb = bote_req_arena_bytes(qa);
+    pi = 0;
+    while (pi < 5) { _sch_check_value_a(qa, cp, "v", bad); pi = pi + 1; }
+    assert_eq(bote_req_arena_bytes(qa), qb, "quiet: ...and five times more take no more of the arena");
+    var cc = _compile_object_body(_cat3("{\"type\":\"object\",\"properties\":{\"list\":", "{\"contains\":{\"required\":[\"id\"],\"properties\":{\"id\":{\"enum\":[\"x\"]}}}}", "}}"));
+    var cv = _cat3("{\"list\":", bad, "}");
+    assert_eq(vec_len(compiled_validate(cc, cv)), 1, "quiet: through compiled_validate, on the heap...");
+    var h0 = alloc_used();
+    pi = 0;
+    while (pi < 5) { compiled_validate(cc, cv); pi = pi + 1; }
+    assert((alloc_used() - h0) / 5 < 4096, "quiet: ...keeping only its answer, no message per item");
+    # A quiet judgement builds nothing: a 70 KB string not in the enum is judged within the
+    # arena's first chunk, where building its message would take another.
+    var big = str_builder_new();
+    str_builder_add_cstr(big, "[\"");
+    pi = 0;
+    while (pi < 70000) { str_builder_add_cstr(big, "q"); pi = pi + 1; }
+    str_builder_add_cstr(big, "\"]");
+    var fa = bote_req_arena_new();
+    var fb = bote_req_arena_bytes(fa);
+    assert(_sch_check_value_a(fa, parse_property("{\"contains\":{\"enum\":[\"x\"]},\"minContains\":0}"), "v", str_data(str_builder_build(big))) == 0, "quiet: a 70 KB string meeting no enum, under minContains 0");
+    assert_eq(bote_req_arena_bytes(fa), fb, "quiet: ...judged in the arena's first chunk, no message built");
+    # And what one quiet judgement takes is given back before the next: a table past 512
+    # names, for each of 5,000 items.
+    var p600 = str_builder_new();
+    str_builder_add_cstr(p600, "{\"contains\":{\"required\":[\"missing\"],\"properties\":{");
+    pi = 0;
+    while (pi < 600) { if (pi > 0) { str_builder_add_cstr(p600, ","); } str_builder_add_cstr(p600, "\"n"); str_builder_add_int(p600, pi); str_builder_add_cstr(p600, "\":{}"); pi = pi + 1; }
+    str_builder_add_cstr(p600, "}},\"minContains\":0}");
+    var ga = bote_req_arena_new();
+    var gb = bote_req_arena_bytes(ga);
+    assert(_sch_check_value_a(ga, parse_property(str_data(str_builder_build(p600))), "v", _many(5000, "{}")) == 0, "quiet: 5,000 items against 600 properties");
+    assert_eq(bote_req_arena_bytes(ga), gb, "quiet: ...each judgement's table given back, the arena its first chunk");
+    # The heap forms' scratch is rewound after each call: 200 calls of 32 violations each.
+    var c32 = _compile_object_body("{\"type\":\"object\",\"additionalProperties\":false}");
+    var v40 = str_builder_new();
+    str_builder_add_cstr(v40, "{");
+    pi = 0;
+    while (pi < 40) { if (pi > 0) { str_builder_add_cstr(v40, ","); } str_builder_add_cstr(v40, "\"extra_member_"); str_builder_add_int(v40, pi); str_builder_add_cstr(v40, "\":1"); pi = pi + 1; }
+    str_builder_add_cstr(v40, "}");
+    var v40s = str_data(str_builder_build(v40));
+    assert_eq(vec_len(compiled_validate(c32, v40s)), 32, "scratch: 32 violations copied out");
+    var sb0 = bote_req_arena_bytes(_sch_scratch);
+    pi = 0;
+    while (pi < 200) { compiled_validate(c32, v40s); pi = pi + 1; }
+    assert_eq(bote_req_arena_bytes(_sch_scratch), sb0, "scratch: ...200 calls later the scratch holds no more");
+    var pnp = parse_property("{\"propertyNames\":{\"enum\":[\"a\"]}}");
+    assert(_sch_check_value_a(qa, pnp, "v", "{\"a\":1}") == 0, "quiet: a key that meets propertyNames");
+
+    # ---- the dispatcher ----
+    var d = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(d, tool_def_new("t_parts", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"pair\":{\"prefixItems\":[{\"type\":\"string\"},{\"type\":\"integer\"}]},\"ids\":{\"contains\":{\"const\":0}},\"m\":{\"propertyNames\":{\"maxLength\":2}}},\"dependentRequired\":{\"pair\":[\"ids\"]}}")), &h_tool);
+    var r = codec_process_message(_msg("tools/call", "\"name\":\"t_parts\",\"arguments\":{\"pair\":[\"a\",1],\"ids\":[3,0],\"m\":{\"ab\":1}}"), d, 0);
+    assert(_has(r, "\"text\":\"ok\"") == 1, "dispatch: arguments that meet each keyword served");
+    r = codec_process_message(_msg("tools/call", "\"name\":\"t_parts\",\"arguments\":{\"pair\":[1,\"a\"],\"m\":{\"abc\":1}}"), d, 0);
+    assert(_has(r, "pair[0]: expected string") == 1 && _has(r, "m.abc: property name does not meet propertyNames") == 1 && _has(r, "missing required field: ids, which pair requires") == 1, "dispatch: each refused, named");
+    dispatcher_register_tool(d, tool_def_with_output_schema(tool_def_new("t_parts_o", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"rows\":{\"type\":\"array\",\"contains\":{\"type\":\"integer\"},\"maxContains\":1}}}"), &h_ret);
+    _ret = "{\"content\":[],\"structuredContent\":{\"rows\":[1,\"a\"]}}";
+    assert(_has(codec_process_message(_msg("tools/call", "\"name\":\"t_parts_o\",\"arguments\":{}"), d, 0), "isError") == 0, "dispatch: a result that meets them passes");
+    _ret = "{\"content\":[],\"structuredContent\":{\"rows\":[1,2]}}";
+    assert(_has(codec_process_message(_msg("tools/call", "\"name\":\"t_parts_o\",\"arguments\":{}"), d, 0), "structuredContent.rows: more items than maxContains match contains") == 1, "dispatch: a result that does not, refused");
+
+    # ---- registration's WARNs ----
+    _lc_begin();
+    var wd = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_bad", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"prefixItems\":{}},\"b\":{\"contains\":5,\"minContains\":-1},\"c\":{\"propertyNames\":\"x\"},\"d\":{\"dependentRequired\":{\"x\":\"y\"}},\"e\":{\"dependentSchemas\":{\"x\":3}},\"f\":{\"maxContains\":\"2\"}}}"), &h_ret);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_good", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"prefixItems\":[{},true]},\"b\":{\"contains\":{},\"minContains\":0,\"maxContains\":3},\"c\":{\"propertyNames\":false},\"d\":{\"dependentRequired\":{\"x\":[\"y\"]}},\"e\":{\"dependentSchemas\":{\"x\":{}}}}}"), &h_ret);
+    _lc_end();
+    assert(_lc_find("prefixItems that is no array") != 0, "warn: prefixItems an object");
+    assert(_lc_find("contains that is no schema") != 0, "warn: contains a number");
+    assert(_lc_find("minContains that is no non-negative integer") != 0, "warn: minContains -1");
+    assert(_lc_find("maxContains that is no non-negative integer") != 0, "warn: maxContains a string");
+    assert(_lc_find("propertyNames that is no schema") != 0, "warn: propertyNames a string");
+    assert(_lc_find("dependentRequired that is no object of arrays of names") != 0, "warn: dependentRequired with a string");
+    assert(_lc_find("dependentSchemas that is no object of schemas") != 0, "warn: dependentSchemas with a number");
+    assert(_lc_find("w_good") == 0, "warn: none for each keyword well formed");
+    assert(_lc_find("keyword=prefixItems") == 0 && _lc_find("keyword=contains") == 0 && _lc_find("keyword=propertyNames") == 0 && _lc_find("keyword=dependentRequired") == 0 && _lc_find("keyword=dependentSchemas") == 0, "warn: none of the five is warned of as unenforced");
+
+    # ---- the heap ----
+    var hm = _msg("tools/call", "\"name\":\"t_parts\",\"arguments\":{\"pair\":[1,\"a\"],\"ids\":[1,2,3],\"m\":{\"abc\":1}}");
+    codec_process_message_a(bote_req_begin(), hm, d, 0);
+    var hh = alloc_used();
+    pi = 0;
+    while (pi < 50) { codec_process_message_a(bote_req_begin(), hm, d, 0); pi = pi + 1; }
+    assert_eq(alloc_used() - hh, 0, "heap: fifty refused calls keep nothing");
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit_group(rc);

@@ -683,8 +683,9 @@ fn _reg_warn_kw(tool, key, kw) {
 # WARN of its own (_reg_warn_schema).
 # (3.8.5) minLength, maxLength, minItems, maxItems, minProperties, maxProperties,
 # exclusiveMinimum, exclusiveMaximum and additionalProperties are judged, and no longer here.
-# (3.8.7) const and uniqueItems too.
-var BOTE_UNENFORCED = "anyOf oneOf allOf not $ref $dynamicRef $recursiveRef pattern multipleOf prefixItems contains if then else propertyNames patternProperties dependentRequired dependentSchemas unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
+# (3.8.7) const and uniqueItems too. (3.8.8) prefixItems, contains, propertyNames,
+# dependentRequired and dependentSchemas.
+var BOTE_UNENFORCED = "anyOf oneOf allOf not $ref $dynamicRef $recursiveRef pattern multipleOf if then else patternProperties unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
 
 # Every WARN the schema `v`, at `key` of tool `tool`, earns: each keyword in `kws` it
 # holds, a type bote does not know, alone or in a type array, and a keyword it judges with a
@@ -710,7 +711,11 @@ fn _reg_warn_schema(tool, key, v, kws) {
             var tbad = 0;
             while (tj < vec_len(tel)) {
                 var tv = vec_get(tel, tj);
-                if (_sch_is_string(tv) == 0 || _reg_type_known(_sch_str_dec_a(default_alloc(), tv)) == 0) { tbad = 1; }
+                # (3.8.8, from the 3.8.7 review) A name that is no text decodes to 0: it named no
+                # type, and was handed to streq, which crashed registration.
+                var tdn = 0;
+                if (_sch_is_string(tv) == 1) { tdn = _sch_str_dec_a(default_alloc(), tv); }
+                if (tdn == 0 || _reg_type_known(tdn) == 0) { tbad = 1; }
                 tj = tj + 1;
             }
             if (tbad == 1) { _reg_warn_kw(tool, key, "a type array naming an unknown type"); }
@@ -718,6 +723,47 @@ fn _reg_warn_schema(tool, key, v, kws) {
     }
     var en = jsonx_get_raw(v, "enum");
     if (en != 0 && _sch_first_nonws(en) != 91) { _reg_warn_kw(tool, key, "enum that is no array"); }
+    # (3.8.8) The array and object keywords judged since, each with a value it can judge by.
+    var pre = jsonx_get_raw(v, "prefixItems");
+    if (pre != 0 && _sch_first_nonws(pre) != 91) { _reg_warn_kw(tool, key, "prefixItems that is no array"); }
+    var sk = _reg_words("contains propertyNames ");
+    var ski = 0;
+    while (ski < vec_len(sk)) {
+        var sr = jsonx_get_raw(v, vec_get(sk, ski));
+        if (sr != 0 && _sch_is_schema_text(sr) == 0) { _reg_warn_kw(tool, key, _dsp_named_msg(vec_get(sk, ski), " that is no schema", 0)); }
+        ski = ski + 1;
+    }
+    var drq = jsonx_get_raw(v, "dependentRequired");
+    if (drq != 0) {
+        var drok = 0;
+        if (_sch_first_nonws(drq) == 123) {
+            drok = 1;
+            var drm = _jx_members(drq);
+            var dri = 0;
+            while (dri < vec_len(drm)) {
+                var drv = vec_get(drm, dri + 1);
+                if (_sch_first_nonws(drv) != 91) { drok = 0; }
+                else {
+                    var drl = _sch_split_array(drv);
+                    var drj = 0;
+                    while (drj < vec_len(drl)) { if (_sch_is_string(vec_get(drl, drj)) == 0) { drok = 0; } drj = drj + 1; }
+                }
+                dri = dri + 2;
+            }
+        }
+        if (drok == 0) { _reg_warn_kw(tool, key, "dependentRequired that is no object of arrays of names"); }
+    }
+    var dsc = jsonx_get_raw(v, "dependentSchemas");
+    if (dsc != 0) {
+        var dsok = 0;
+        if (_sch_first_nonws(dsc) == 123) {
+            dsok = 1;
+            var dsm = _jx_members(dsc);
+            var dsi = 0;
+            while (dsi < vec_len(dsm)) { if (_sch_is_schema_text(vec_get(dsm, dsi + 1)) == 0) { dsok = 0; } dsi = dsi + 2; }
+        }
+        if (dsok == 0) { _reg_warn_kw(tool, key, "dependentSchemas that is no object of schemas"); }
+    }
     var uq = jsonx_get_raw(v, "uniqueItems");
     if (uq != 0 && streq(uq, "true") == 0 && streq(uq, "false") == 0) {
         _reg_warn_kw(tool, key, "uniqueItems that is no boolean");
@@ -732,7 +778,7 @@ fn _reg_warn_schema(tool, key, v, kws) {
     # (3.8.6, from the 3.8.5 review) A keyword bote judges, with a value it cannot judge by,
     # judges nothing, where a client's validator refuses the schema: said, as 3.8.4 said of
     # each before bote judged them.
-    var counts = _reg_words("minLength maxLength minItems maxItems minProperties maxProperties ");
+    var counts = _reg_words("minLength maxLength minItems maxItems minProperties maxProperties minContains maxContains ");
     var ci = 0;
     while (ci < vec_len(counts)) {
         var ck = vec_get(counts, ci);
@@ -761,6 +807,7 @@ fn _reg_warn_schema(tool, key, v, kws) {
 }
 
 fn _reg_type_known(ty) {
+    if (ty == 0) { return 0; }
     var known = "string number integer boolean array object null ";
     var ws = _reg_words(known);
     var i = 0;
@@ -1274,7 +1321,22 @@ fn _vp_first_nonws(s) {
 }
 
 fn registry_validate_params(r, name, params_cstr) {
-    return registry_validate_params_a(default_alloc(), r, name, params_cstr);
+    # (3.8.8, from the 3.8.7 review) Judged on the heap forms' scratch, and only the answer
+    # copied out: on the heap itself every table and copy a walk makes was kept.
+    var m[16];
+    var a = _sch_scratch_take(&m);
+    var e = registry_validate_params_a(a, r, name, params_cstr);
+    var out = 0;
+    if (e != 0) {
+        out = alloc(32);
+        store64(out, bote_err_tag(e));
+        store64(out + 8, _sch_heap_str(bote_err_tool(e)));
+        store64(out + 16, _sch_heap_str(bote_err_reason(e)));
+        store64(out + 24, 0);
+        if (bote_err_violations(e) != 0) { store64(out + 24, _sch_heap_strs(bote_err_violations(e))); }
+    }
+    _sch_scratch_give(&m);
+    return out;
 }
 
 # registry_validate_params with the error and its text on `a`.

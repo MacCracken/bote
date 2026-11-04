@@ -24,7 +24,7 @@ enum SchemaTypeTag {
 }
 
 # ================================================================
-# PropertyDef (176 bytes):
+# PropertyDef (208 bytes):
 #   +0  type_tag         i64
 #   +8  description      cstr or 0
 #   +16 enum_values      vec of cstrs (string only) or 0
@@ -49,6 +49,10 @@ enum SchemaTypeTag {
 #   +160 enum_raw       vec of each `enum` value as written, or 0; +16 holds its strings,
 #                       decoded at registration
 #   +168 unique_items   1 for `uniqueItems: true`, else 0
+#   +176 prefix_items   (3.8.8) vec of a PropertyDef for each `prefixItems` schema, or 0
+#   +184 contains       the `contains` schema's PropertyDef, or 0
+#   +192 min_contains   how few items must meet it, or -1 (one)
+#   +200 max_contains   how many may, or -1
 #
 # (3.8.5) Each keyword applies to a value of its kind whatever the schema's `type`, as in
 # JSON Schema: `{"maxLength":3}` judges a string and passes a number. The type is a check of
@@ -56,12 +60,14 @@ enum SchemaTypeTag {
 # ================================================================
 
 fn prop_new(tag) {
-    var p = alloc(176);
+    var p = alloc(208);
     store64(p, tag);
     var k = 8;
     while (k < 96) { store64(p + k, 0); k = k + 8; }
     while (k < 128) { store64(p + k, 0 - 1); k = k + 8; }
-    while (k < 176) { store64(p + k, 0); k = k + 8; }
+    while (k < 192) { store64(p + k, 0); k = k + 8; }
+    store64(p + 192, 0 - 1);
+    store64(p + 200, 0 - 1);
     return p;
 }
 
@@ -87,9 +93,13 @@ fn prop_type_mask(p) { return load64(p + 144); }
 fn prop_const_raw(p) { return load64(p + 152); }
 fn prop_enum_raw(p) { return load64(p + 160); }
 fn prop_unique_items(p) { return load64(p + 168); }
+fn prop_prefix_items(p) { return load64(p + 176); }
+fn prop_contains(p) { return load64(p + 184); }
+fn prop_min_contains(p) { return load64(p + 192); }
+fn prop_max_contains(p) { return load64(p + 200); }
 
 # ================================================================
-# CompiledSchema (80 bytes):
+# CompiledSchema (104 bytes):
 #   +0  properties  hashmap: name_cstr -> PropertyDef ptr
 #   +8  required    vec of name_cstrs
 #   +16 names       vec of name_cstrs (insertion order)
@@ -106,13 +116,18 @@ fn prop_unique_items(p) { return load64(p + 168); }
 #   +72 required_w  vec of each required name and its Watch (0 for a name holding a NUL),
 #                   two words each; a name in `required` that is not the one here, pushed
 #                   after compiled_set_required, is looked for in the object instead
+#   +80 property_names  (3.8.8) the `propertyNames` schema's PropertyDef, or 0
+#   +88 dep_required    vec of three for each `dependentRequired` member: its name, its Watch,
+#                       and a vec of each name it requires and that name's Watch; or 0
+#   +96 dep_schemas     vec of three for each `dependentSchemas` member: its name, its Watch
+#                       and its schema's PropertyDef; or 0
 #
 # An object is judged in one walk of its members (_sv_object): each is looked up in `watch`
 # once, for its property and its slot, and a required name is met when its slot was seen.
 # ================================================================
 
 fn compiled_new() {
-    var c = alloc(80);
+    var c = alloc(104);
     store64(c, map_new());
     store64(c + 8, vec_new());
     store64(c + 16, vec_new());
@@ -123,6 +138,9 @@ fn compiled_new() {
     store64(c + 56, 0 - 1);
     store64(c + 64, vec_new());
     store64(c + 72, vec_new());
+    store64(c + 80, 0);
+    store64(c + 88, 0);
+    store64(c + 96, 0);
     return c;
 }
 
@@ -582,10 +600,32 @@ fn parse_property(raw_json) {
     store64(p + 120, _sch_count_kw(raw_json, "maxItems"));
     var items_raw = jsonx_get_raw(raw_json, "items");
     if (items_raw != 0 && _vp_first_nonws(items_raw) != 91) { store64(p + 64, parse_property(items_raw)); }
+    # (3.8.8) `prefixItems`, a schema for each item from the first, `items` then judging the
+    # rest; `contains`, with how few and how many items must meet it.
+    var pre_raw = jsonx_get_raw(raw_json, "prefixItems");
+    if (pre_raw != 0 && _vp_first_nonws(pre_raw) == 91) {
+        var pel = _sch_split_array(pre_raw);
+        var pv = vec_new();
+        var pi = 0;
+        while (pi < vec_len(pel)) { vec_push(pv, parse_property(vec_get(pel, pi))); pi = pi + 1; }
+        store64(p + 176, pv);
+    }
+    var cn_raw = jsonx_get_raw(raw_json, "contains");
+    if (cn_raw != 0 && _sch_is_schema_text(cn_raw) == 1) { store64(p + 184, parse_property(cn_raw)); }
+    store64(p + 192, _sch_count_kw(raw_json, "minContains"));
+    store64(p + 200, _sch_count_kw(raw_json, "maxContains"));
     if (tag == SCH_OBJECT || _sch_has_object_kw(raw_json) == 1) {
         store64(p + 72, _compile_object_body(raw_json));
     }
     return p;
+}
+
+# 1 when the raw JSON value `v` may be a schema: an object, true or false.
+fn _sch_is_schema_text(v) {
+    var c = _vp_first_nonws(v);
+    if (c == 123) { return 1; }
+    if (streq(v, "true") == 1 || streq(v, "false") == 1) { return 1; }
+    return 0;
 }
 
 # The SchemaTypeTag a `type` name decodes to, or SCH_ANY for none or one bote does not know.
@@ -622,6 +662,8 @@ fn _sch_has_object_kw(raw_json) {
     if (jsonx_has(raw_json, "properties") == 1 || jsonx_has(raw_json, "required") == 1) { return 1; }
     if (jsonx_has(raw_json, "additionalProperties") == 1) { return 1; }
     if (jsonx_has(raw_json, "minProperties") == 1 || jsonx_has(raw_json, "maxProperties") == 1) { return 1; }
+    if (jsonx_has(raw_json, "propertyNames") == 1 || jsonx_has(raw_json, "dependentRequired") == 1) { return 1; }
+    if (jsonx_has(raw_json, "dependentSchemas") == 1) { return 1; }
     return 0;
 }
 
@@ -659,6 +701,52 @@ fn _compile_object_body(raw_json) {
     }
     store64(c + 48, _sch_count_kw(raw_json, "minProperties"));
     store64(c + 56, _sch_count_kw(raw_json, "maxProperties"));
+    # (3.8.8) `propertyNames`, `dependentRequired` and `dependentSchemas`. Each name they key
+    # on, or require, is watched, so its presence is its slot's bit.
+    var pn = jsonx_get_raw(raw_json, "propertyNames");
+    if (pn != 0 && _sch_is_schema_text(pn) == 1) { store64(c + 80, parse_property(pn)); }
+    var dr = jsonx_get_raw(raw_json, "dependentRequired");
+    if (dr != 0 && _vp_first_nonws(dr) == 123) {
+        var drm = _jx_members(dr);
+        var drv = vec_new();
+        var di = 0;
+        while (di < vec_len(drm)) {
+            var dv = vec_get(drm, di + 1);
+            if (_vp_first_nonws(dv) == 91) {
+                var names = vec_new();
+                var del = _sch_split_array(dv);
+                var dj = 0;
+                while (dj < vec_len(del)) {
+                    var de = vec_get(del, dj);
+                    if (_sch_is_string(de) == 1) {
+                        var dn = _sch_str_dec_a(default_alloc(), de);
+                        if (dn != 0) { vec_push(names, dn); vec_push(names, _sch_watch(c, dn)); }
+                    }
+                    dj = dj + 1;
+                }
+                vec_push(drv, vec_get(drm, di));
+                vec_push(drv, _sch_watch(c, vec_get(drm, di)));
+                vec_push(drv, names);
+            }
+            di = di + 2;
+        }
+        store64(c + 88, drv);
+    }
+    var ds = jsonx_get_raw(raw_json, "dependentSchemas");
+    if (ds != 0 && _vp_first_nonws(ds) == 123) {
+        var dsm = _jx_members(ds);
+        var dsv = vec_new();
+        var si = 0;
+        while (si < vec_len(dsm)) {
+            if (_sch_is_schema_text(vec_get(dsm, si + 1)) == 1) {
+                vec_push(dsv, vec_get(dsm, si));
+                vec_push(dsv, _sch_watch(c, vec_get(dsm, si)));
+                vec_push(dsv, parse_property(vec_get(dsm, si + 1)));
+            }
+            si = si + 2;
+        }
+        store64(c + 96, dsv);
+    }
     return c;
 }
 
@@ -700,19 +788,29 @@ fn compiled_compile(schema) {
 #
 # Returns vec of violation cstrs. Empty vec == ok.
 
-# `slot` is {vec, allocator, count, output}. The vec is created by the first violation,
-# so a request that passes validation allocates none. Collection stops at
+# `slot` is {vec, allocator, count, output, quiet}, 40 bytes. The vec is created by the first
+# violation, so a request that passes validation allocates none. Collection stops at
 # BOTE_SCH_MAX_VIOLATIONS: a message can hold far more, and a client learns
-# nothing from the thousandth that it did not from the thirty-second.
+# nothing from the thousandth that it did not from the thirty-second. A quiet slot (3.8.8,
+# _sv_matches) asks only whether a value passes: its first violation counts, fills it, and
+# builds nothing, no path and no message, so a quiet judgement leaves nothing even where a
+# mark and a release do nothing.
 var BOTE_SCH_MAX_VIOLATIONS = 32;
 fn _vs_alloc(slot) { return load64(slot + 8); }
 fn _vs_full(slot) {
     if (load64(slot + 16) >= BOTE_SCH_MAX_VIOLATIONS) { return 1; }
     return 0;
 }
+fn _vs_quiet(slot) { return load64(slot + 32); }
+# A quiet slot's violation: counted, and nothing made.
+fn _vs_hit(slot) {
+    store64(slot + 16, load64(slot + 16) + 1);
+    return 0;
+}
 
 fn _violation_push(slot, msg) {
     if (_vs_full(slot) == 1) { return 0; }
+    if (_vs_quiet(slot) == 1) { return _vs_hit(slot); }
     var a = _vs_alloc(slot);
     var v = load64(slot);
     if (v == 0) { v = vec_new_a(a); store64(slot, v); }
@@ -723,6 +821,7 @@ fn _violation_push(slot, msg) {
 
 fn _violation(slot, path, msg) {
     if (_vs_full(slot) == 1) { return 0; }
+    if (_vs_quiet(slot) == 1) { return _vs_hit(slot); }
     var a = _vs_alloc(slot);
     var sb = str_builder_new_a(a);
     str_builder_add_cstr_a(a, sb, path);
@@ -812,6 +911,7 @@ fn _sv_path_a(a, f) {
 
 fn _sv_violation(slot, f, msg) {
     if (_vs_full(slot) == 1) { return 0; }
+    if (_vs_quiet(slot) == 1) { return _vs_hit(slot); }
     if (f == 0) { return _violation(slot, "", msg); }
     return _violation(slot, _sv_path_a(_vs_alloc(slot), f), msg);
 }
@@ -911,7 +1011,8 @@ fn _sv_str_is(p, bl, w) {
 # values are equal when both are null, the same boolean, numbers of the same value, strings
 # of the same characters, arrays of equal items in order, or objects with the same keys and
 # an equal value for each. Numbers are compared exactly, as decimals (_sch_num_cmp): a client
-# that holds a number as a double may find two equal that differ past its precision.
+# that holds a number as a double may find two equal that differ past its precision or its
+# range (1e400 and 2e400 are both Infinity to it).
 # ================================================================
 
 # The kind of the value at buf[i]: 1 a string, 2 a number, 3 true, 4 false, 5 null, 6 an
@@ -1250,6 +1351,7 @@ fn _sv_unique(slot, f, buf, n, vs, ve, count) {
         j = j + 1;
     }
     bote_arena_release(a, &mk);
+    if (d1 >= 0 && _vs_quiet(slot) == 1) { return _vs_hit(slot); }
     if (d1 >= 0) {
         var sb = str_builder_new_a(a);
         str_builder_add_cstr_a(a, sb, "items ");
@@ -1284,6 +1386,7 @@ fn _sv_types_ok(slot, f, buf, vs, c, isnum, tm) {
         }
     }
     if (_vs_full(slot) == 1) { return 0; }
+    if (_vs_quiet(slot) == 1) { _vs_hit(slot); return 0; }
     var a = _vs_alloc(slot);
     var sb = str_builder_new_a(a);
     str_builder_add_cstr_a(a, sb, "expected ");
@@ -1330,7 +1433,8 @@ fn _sv_enum(slot, f, buf, n, vs, ve, prop) {
                 i = i + 1;
             }
         }
-        if (found == 0 && _vs_full(slot) == 0) {
+        if (found == 0 && _vs_quiet(slot) == 1) { _sv_violation(slot, f, 0); }
+        elif (found == 0 && _vs_full(slot) == 0) {
             var sb = str_builder_new_a(a);
             _sb_grow_a(a, sb, bl + 32);
             str_builder_add_cstr_a(a, sb, "value '");
@@ -1352,6 +1456,27 @@ fn _sv_enum(slot, f, buf, n, vs, ve, prop) {
     }
     if (found == 0) { _sv_violation(slot, f, "value not in enum"); }
     return 0;
+}
+
+# 1 when the value [s, e) of `buf` meets `prop` (3.8.8): judged on a quiet slot, which stops
+# at the first violation and builds nothing, so `contains` and `propertyNames` ask of every
+# item and key what they need and keep nothing of it. The slot judges as `slot` does, a
+# result's integers as a result's; what the judgement takes of the arena is given back.
+fn _sv_matches(slot, buf, n, s, e, prop) {
+    var a = _vs_alloc(slot);
+    var mk[16];
+    bote_arena_mark(a, &mk);
+    var qs[40];
+    store64(&qs, 0);
+    store64(&qs + 8, a);
+    store64(&qs + 16, BOTE_SCH_MAX_VIOLATIONS - 1);
+    store64(&qs + 24, load64(slot + 24));
+    store64(&qs + 32, 1);
+    _sv_value(&qs, 0, buf, n, s, e, prop);
+    var ok = 0;
+    if (load64(&qs + 16) == BOTE_SCH_MAX_VIOLATIONS - 1) { ok = 1; }
+    bote_arena_release(a, &mk);
+    return ok;
 }
 
 # The value [vs, ve) of `buf` against `prop`, its violations into `slot`, named from `f`.
@@ -1449,16 +1574,25 @@ fn _sv_array(slot, f, buf, n, vs, ve, prop) {
     var mn = prop_min_items(prop);
     var mx = prop_max_items(prop);
     var uq = prop_unique_items(prop);
-    if (items == 0 && mn < 0 && mx < 0 && uq == 0) { return 0; }
+    var pre = prop_prefix_items(prop);
+    var np = 0;
+    if (pre != 0) { np = vec_len(pre); }
+    var cn = prop_contains(prop);
+    if (items == 0 && np == 0 && cn == 0 && mn < 0 && mx < 0 && uq == 0) { return 0; }
+    var matched = 0;
     var fr[32];
     var count = 0;
     var i = _jx_skip_ws(buf, n, vs + 1);
     while (i < ve && load8(buf + i) != 93) {
         var es = i;
         var ee = _jx_skip_value(buf, n, es);
-        if (items != 0 && _vs_full(slot) == 0) {
-            _sv_value(slot, _sv_frame(&fr, f, 3, 0, count), buf, n, es, ee, items);
+        # (3.8.8) An item a `prefixItems` schema covers is judged by it, and `items` judges the rest.
+        var ip = items;
+        if (count < np) { ip = vec_get(pre, count); }
+        if (ip != 0 && _vs_full(slot) == 0) {
+            _sv_value(slot, _sv_frame(&fr, f, 3, 0, count), buf, n, es, ee, ip);
         }
+        if (cn != 0 && _sv_matches(slot, buf, n, es, ee, cn) == 1) { matched = matched + 1; }
         count = count + 1;
         i = _jx_skip_ws(buf, n, ee);
         if (i < ve && load8(buf + i) == 44) { i = _jx_skip_ws(buf, n, i + 1); }
@@ -1466,6 +1600,21 @@ fn _sv_array(slot, f, buf, n, vs, ve, prop) {
     if (mn >= 0 && count < mn) { _sv_violation(slot, f, "fewer items than minItems"); }
     if (mx >= 0 && count > mx) { _sv_violation(slot, f, "more items than maxItems"); }
     if (uq == 1 && count > 1 && _vs_full(slot) == 0) { _sv_unique(slot, f, buf, n, vs, ve, count); }
+    if (cn != 0) {
+        var minc = prop_min_contains(prop);
+        if (minc < 0 && matched == 0) { _sv_violation(slot, f, "no item matches contains"); }
+        if (minc >= 0 && matched < minc) { _sv_violation(slot, f, "fewer items than minContains match contains"); }
+        var maxc = prop_max_contains(prop);
+        if (maxc >= 0 && matched > maxc) { _sv_violation(slot, f, "more items than maxContains match contains"); }
+    }
+    return 0;
+}
+
+# 1 when the slot of Watch `w` is set in the bitset `seen`.
+fn _sv_seen(seen, w) {
+    if (w == 0) { return 0; }
+    var b = load64(w) - 1;
+    if ((load8(seen + b / 8) & (1 << (b % 8))) != 0) { return 1; }
     return 0;
 }
 
@@ -1481,7 +1630,8 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
     var mx = compiled_max_properties(comp);
     # A schema that judges no member, requires none and counts none has nothing to walk for.
     var req0 = compiled_required(comp);
-    if (nw == 0 && additional == 0 && mn < 0 && mx < 0 && (req0 == 0 || vec_len(req0) == 0)) { return 0; }
+    var pnames = load64(comp + 80);
+    if (nw == 0 && additional == 0 && mn < 0 && mx < 0 && (req0 == 0 || vec_len(req0) == 0) && pnames == 0 && load64(comp + 96) == 0) { return 0; }
     # A bit for each slot (3.8.7, from the 3.8.6 review): 512 of them on the stack, so a
     # schema of that many names takes nothing of the arena or, through the heap forms
     # (compiled_validate, registry_validate_params), of the heap, where a mark and a release
@@ -1549,6 +1699,10 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
             kind = 2;
             if (dl == strlen(key)) { w = map_get(watch, key); }
         }
+        # (3.8.8) Every key, each time it is written, a string `propertyNames` judges.
+        if (pnames != 0 && _vs_full(slot) == 0 && _sv_matches(slot, buf, n, kp - buf - 1, ke, pnames) == 0) {
+            _sv_violation(slot, _sv_frame(&fr, f, kind, key, dl), "property name does not meet propertyNames");
+        }
         var first = 1;
         if (w != 0) {
             var sb0 = load64(w) - 1;
@@ -1591,7 +1745,8 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
                     met = 1;
                 }
             }
-            if (met == 0 && _vs_full(slot) == 0) {
+            if (met == 0 && _vs_quiet(slot) == 1) { _sv_violation(slot, f, 0); }
+            elif (met == 0 && _vs_full(slot) == 0) {
                 var sb = str_builder_new_a(a);
                 str_builder_add_cstr_a(a, sb, "missing required field: ");
                 if (rkey != 0) { str_builder_add_cstr_a(a, sb, rkey); }
@@ -1604,18 +1759,103 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
             ri = ri + 1;
         }
     }
+    # (3.8.8) A member `dependentRequired` keys on, present, requires its names; one
+    # `dependentSchemas` keys on holds the whole object to its schema.
+    var dreq = load64(comp + 88);
+    if (dreq != 0) {
+        var dq = 0;
+        while (dq < vec_len(dreq)) {
+            if (_sv_seen(seen, vec_get(dreq, dq + 1)) == 1) {
+                var dnames = vec_get(dreq, dq + 2);
+                var dk = 0;
+                while (dk < vec_len(dnames)) {
+                    if (_sv_seen(seen, vec_get(dnames, dk + 1)) == 0) {
+                        if (_vs_quiet(slot) == 1) { _sv_violation(slot, f, 0); }
+                        elif (_vs_full(slot) == 0) {
+                            var dsb = str_builder_new_a(a);
+                            str_builder_add_cstr_a(a, dsb, "missing required field: ");
+                            str_builder_add_cstr_a(a, dsb, vec_get(dnames, dk));
+                            str_builder_add_cstr_a(a, dsb, ", which ");
+                            str_builder_add_cstr_a(a, dsb, vec_get(dreq, dq));
+                            str_builder_add_cstr_a(a, dsb, " requires");
+                            if (f != 0) {
+                                _violation(slot, _sv_path_a(a, f), str_data(str_builder_build_a(a, dsb)));
+                            } else {
+                                _violation_push(slot, str_data(str_builder_build_a(a, dsb)));
+                            }
+                        }
+                    }
+                    dk = dk + 2;
+                }
+            }
+            dq = dq + 3;
+        }
+    }
+    var dsch = load64(comp + 96);
+    if (dsch != 0) {
+        var dz = 0;
+        while (dz < vec_len(dsch)) {
+            if (_vs_full(slot) == 0 && _sv_seen(seen, vec_get(dsch, dz + 1)) == 1) {
+                _sv_value(slot, f, buf, n, vs, ve, vec_get(dsch, dz + 2));
+            }
+            dz = dz + 3;
+        }
+    }
     if (mn >= 0 && count < mn) { _sv_violation(slot, f, "fewer properties than minProperties"); }
     if (mx >= 0 && count > mx) { _sv_violation(slot, f, "more properties than maxProperties"); }
     if (nb > 64 && load64(slot + 16) == sv0) { bote_arena_release(a, &smk); }
     return 0;
 }
 
+# The heap forms' scratch (3.8.8, from the 3.8.7 review): one bote arena, taken under a lock
+# of its own, that compiled_validate and registry_validate_params judge on, copying out only
+# their answer and rewinding it. On the heap a mark and a release do nothing, so every table,
+# copy and decoding a walk makes was kept: 32 KB a call for `uniqueItems` over 1,000 integers,
+# 64 KB for 1,000 escaped strings. bote's own path judges on the request arena and never
+# takes it.
+var _sch_scratch = 0;
+var _sch_scratch_lock = 0;
+
+fn _sch_scratch_take(m) {
+    var sp = 0;
+    while (atomic_cas(&_sch_scratch_lock, 0, 1) == 0) { sp = _bote_reg_wait(sp); }
+    if (_sch_scratch == 0) { _sch_scratch = bote_req_arena_new(); }
+    bote_arena_mark(_sch_scratch, m);
+    return _sch_scratch;
+}
+
+fn _sch_scratch_give(m) {
+    bote_arena_release(_sch_scratch, m);
+    atomic_store(&_sch_scratch_lock, 0);
+    return 0;
+}
+
+# A heap copy of the cstr `s`, or 0.
+fn _sch_heap_str(s) {
+    if (s == 0) { return 0; }
+    var n = strlen(s);
+    var c = alloc(n + 1);
+    memcpy(c, s, n + 1);
+    return c;
+}
+
+# A heap vec of heap copies of each cstr in `v`.
+fn _sch_heap_strs(v) {
+    var out = vec_new();
+    if (v == 0) { return out; }
+    var i = 0;
+    while (i < vec_len(v)) { vec_push(out, _sch_heap_str(vec_get(v, i))); i = i + 1; }
+    return out;
+}
+
 # Public entry: validate `params_cstr` against `compiled`.
-# Returns vec of violation cstrs (empty vec == ok).
+# Returns vec of violation cstrs (empty vec == ok), on the heap: judged on the scratch arena.
 fn compiled_validate(compiled, params_cstr) {
-    var v = compiled_check_a(default_alloc(), compiled, params_cstr);
-    if (v == 0) { return vec_new(); }
-    return v;
+    var m[16];
+    var a = _sch_scratch_take(&m);
+    var out = _sch_heap_strs(compiled_check_a(a, compiled, params_cstr));
+    _sch_scratch_give(&m);
+    return out;
 }
 
 # The violations of `value`, any JSON value, against `prop`, a PropertyDef such as
@@ -1628,11 +1868,12 @@ fn compiled_validate(compiled, params_cstr) {
 # ": expected object" at the root, "[0].id: ..." under it in an array, a bare
 # "missing required field: x" for the root's own, and "a.b: ..." elsewhere.
 fn _sch_check_value_a(a, prop, root, value) {
-    var slot[32];
+    var slot[40];
     store64(&slot, 0);
     store64(&slot + 8, a);
     store64(&slot + 16, 0);
     store64(&slot + 24, 1);
+    store64(&slot + 32, 0);
     # Only a string needs its end found first: an object's or an array's walk stops at its own
     # close, and a number is read from where it starts. Finding it for every value was a walk
     # of the whole of it more.
@@ -1669,11 +1910,12 @@ fn _sch_starts(s, lit) {
 # compiled_validate without the empty vec: the violations, on `a`, or 0 when
 # there are none.
 fn compiled_check_a(a, compiled, params_cstr) {
-    var slot[32];
+    var slot[40];
     store64(&slot, 0);
     store64(&slot + 8, a);
     store64(&slot + 16, 0);
     store64(&slot + 24, 0);
+    store64(&slot + 32, 0);
     if (_sch_is_object(params_cstr) == 0) {
         _violation_push(&slot, "params must be an object");
         return load64(&slot);

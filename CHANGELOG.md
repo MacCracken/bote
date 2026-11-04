@@ -18,7 +18,128 @@ have per release.
 
 _(empty)_
 
+## [3.8.8] — 2026-11-04 · The parts of a value
+
+**`prefixItems`, `contains` with `minContains` and `maxContains`, `propertyNames`, `dependentRequired` and
+`dependentSchemas` are judged.** Each judges an array's items or an object's keys and members with no pattern and no
+reference, and each was warned of at registration through 3.8.7. `contains` and `propertyNames` ask whether a value
+meets a schema without keeping why it does not: a quiet judgement, which stops at its first violation and builds no
+path and no message, so 5,000 items that do not meet `contains` cost no message each and leave nothing, even through
+the heap forms.
+
+**Four defects in 3.8.7 land beside them**, from an independent review of that release. The worst: a type array
+holding a string that is no text crashed registration. See the correction notice in 3.8.7.
+
+The stated minimum cyrius (6.7.13) is unchanged.
+
+### Added
+
+- **`prefixItems`** (core, `src/schema.cyr`): item i judged by the i-th schema, and `items` judging the items past
+  them, as 2020-12 has it; `items: false` beside it allows no more. Draft-07's array `items` is still warned of and
+  not judged.
+- **`contains`**, with **`minContains`** (one by default; 0 takes an array with none) and **`maxContains`**. A
+  violation reads `no item matches contains`, `fewer items than minContains match contains` or `more items than
+  maxContains match contains`, and none of the items' own violations is kept.
+- **`propertyNames`**: every key, each time it is written, as the string it decodes to. A violation reads
+  `v.abcd: property name does not meet propertyNames`, at the member's path.
+- **`dependentRequired`**: a member present requires the names it lists, `missing required field: billing_address,
+  which credit_card requires`. A name it requires is no property, so `additionalProperties` judges it.
+- **`dependentSchemas`**: a member present holds the whole object to its schema.
+- **A quiet judgement** (`_sv_matches`): a violation slot is 40 bytes, +32 quiet; a quiet slot counts its first
+  violation and makes nothing. PropertyDef is 208 bytes (+176 `prefixItems`, +184 `contains`, +192 and +200 the
+  counts), CompiledSchema 104 (+80 `propertyNames`, +88 `dependentRequired`, +96 `dependentSchemas`), and each name
+  the object keywords key on or require is watched, so its presence is its slot's bit.
+- `prop_prefix_items`, `prop_contains`, `prop_min_contains`, `prop_max_contains`.
+
+### Changed
+
+- Registration no longer warns of the five as unenforced. It warns of a `prefixItems` that is no array, a `contains`
+  or `propertyNames` that is no schema, a `minContains` or `maxContains` that is no non-negative integer, a
+  `dependentRequired` that is no object of arrays of names and a `dependentSchemas` that is no object of schemas.
+
+### Fixed
+
+From the review of 3.8.7:
+
+- **A type array holding a string that is no text crashed registration** (MEDIUM): `{"type":["\ud800"]}`, in an
+  outputSchema, an inputSchema given as JSON or a ToolSchema property, decoded to 0 and went to `streq`. It is warned
+  of as naming an unknown type, and judged by the names it knows.
+- **The heap forms kept every table and copy `uniqueItems`, `const` and `enum` make** (MEDIUM), since a mark and a
+  release do nothing on the heap: 32 KB a call for 1,000 integers judged unique, 64 KB for 1,000 escaped strings,
+  1.5 KB for a `const` object, each for good, the item count the client's. `compiled_validate` and
+  `registry_validate_params` now judge on a scratch arena of their own, taken under a lock of its own, and copy out
+  only their answer; bote's own path judges on the request arena and never takes it.
+- **The legacy 400 rule matched an answer's prefix** (LOW): the errors of a request whose id is `null`, which the
+  codec takes, were 400s, and a batch of refused notifications, `[1]`, and a JSON-RPC response a client sends were
+  200s. The codec now says as it goes whether it took a request or a notification from the message (the request
+  state's +160, 168 bytes), and `codec_unanswerable` reads that: what it took gets 200 for its errors, and a message
+  it took nothing from gets 400, a request refused at its admission among them, as on the modern path.
+- The limit on numbers is worded to cover a value past a double's range, `1e400` or `1e-400`, as well as its
+  precision.
+
+### Tests
+
+- **`tests/bote_schema_parts.tcyr`**, 77, new: `prefixItems` alone, with `items`, with `false` and `items: false`, one
+  that is no array; `contains` met, missed, empty, `minContains` met and missed and 0, `maxContains`, both, neither
+  without `contains`, object schemas, `false` and `true`, nested, beside `items`; `propertyNames` by a length and an
+  enum, a key as it decodes, `false`, a keyword bote does not judge, nested, a 300-byte key; `dependentRequired` met,
+  missed, decoded, several, nested, beside `additionalProperties: false`, twenty-four names past eight;
+  `dependentSchemas` by `required`, a property's schema and `false`; a quiet judgement of 5,000 items keeping nothing
+  on the arena or, through `compiled_validate`, the heap, a 70 KB string judged quietly within the arena's first chunk,
+  5,000 judgements against 600 properties each giving back its table, and the heap forms' scratch rewound after 200
+  calls of 32 violations; the dispatcher on arguments and a result; the WARNs; and 0 heap bytes for refused calls.
+- **`tests/bote_schema_eq.tcyr`**, 92, from 83: three type arrays naming a string that is no text registering, warned
+  of and judged by the names they know; `compiled_validate` and `registry_validate_params` keeping only their answer,
+  and an answer that outlives the scratch's next use.
+- **`tests/bote_http_era.tcyr`**, 1988, from 1938: the legacy status by what the codec took, on `http` and
+  `streamable`: an id of `null` taken (its error and its result 200s), a batch of refused notifications, `[1]` and a
+  JSON-RPC response 400s, a request refused at its admission a 400 with its id, a batch with a request taken a 200.
+- **`fuzz/schema_walk.fcyr`**: the five drawn, the reference judging them on bayan's trees.
+- **33 mutants, 32 killed, one equivalent**: the crash's guard beside `_reg_type_known`'s own. Four survived the first
+  run, each a gap now tested: a quiet judgement that builds its messages or keeps what it took, and a scratch that is
+  not rewound, which nothing had seen because what they built was given back or fitted in the first chunk.
+
+### Performance
+
+**A call costs what it did; registration reads seven keywords more.** Interleaved A/B against 3.8.7, 15 rounds pinned
+to one core, the working tree's benches on both sides, with the machine's load at 3 to 4 throughout, so the rows are
+wider than usual. Minimums, in ns:
+
+| Bench | 3.8.7 | 3.8.8 | Delta |
+|---|---:|---:|---:|
+| `codec_process_message` | 4,499 | 4,402 | −2.2% |
+| `dispatch_tools_call` | 2,752 | 2,732 | −0.7% |
+| `dispatch_tools_call_output` | 5,874 | 5,887 | +0.2% |
+| `libro_export_100` | 1,845,000 | 1,850,000 | +0.3% |
+| `validate_compiled_simple` | 462 | 500 | +8.2% |
+| `validate_compiled_nested` | 951 | 1,021 | +7.4% |
+| `schema_compile_simple` | 9,486 | 12,093 | +27.5% |
+
+- **The two validate rows are code position, not the new work.** Timed again interleaved they held at about +7%; with
+  the new object checks taken out of the walk (`propertyNames`, both `dependent*`) in a copy of this tree, they held
+  where they were, 502 against 499 ns. A bench this short moves 5 to 12% from where its code sits, and so do
+  `jwt_cached_hs256` −13.8% and `session_validate` +6.3% here, which run nothing this release changes.
+- **Registration looks for seven keywords more** (`prefixItems`, `contains`, `minContains`, `maxContains`,
+  `propertyNames`, `dependentRequired`, `dependentSchemas`), about 350 ns each: paid once a definition, never for a
+  call. Reading a property's keywords in one walk of its members, on the roadmap, would take this back.
+- **A quiet judgement makes nothing**: 5,000 items that do not meet `contains` build no message and no path, and a
+  70 KB string judged quietly stays within the arena's first chunk.
+
 ## [3.8.7] — 2026-11-04 · Values by value
+
+> ⚠ **Corrected at 3.8.8.** These claims below were not true, found by an independent review of this release.
+> - "It warns of a type array naming a type it does not know". A type array holding a string that is no text (a lone
+>   surrogate, bytes that are no UTF-8) crashed registration with SIGSEGV: the name decoded to 0 and went to `streq`.
+> - "so those forms keep only their answer up to 512 names". Through `compiled_validate` and `registry_validate_params`
+>   every table, copy and decoding `uniqueItems`, `const` and `enum` make stayed on the heap: 32 KB a call for 1,000
+>   integers judged unique, 64 KB for 1,000 escaped strings.
+> - "now answer any input the codec could not take as a request, the answer an error with a null id, with 400 ... An
+>   error for a request with an id stays a 200." The rule matched the answer's prefix: the errors of a request whose
+>   id is `null`, which the codec takes, were 400s, and a batch of refused notifications, `[1]`, and a JSON-RPC
+>   response a client sends were 200s.
+> - "A client that holds numbers as doubles may find two equal that bote does not, past 15 significant digits or
+>   2^53". Also a number past a double's range: `[1e400,2e400]` and `[1e-400,0]` are unique here and not to a client,
+>   which reads them as Infinity and 0.
 
 **`const`, `enum` of any value, `uniqueItems` and type arrays are judged, by JSON Schema's equality.** Two values are
 equal when both are null, the same boolean, numbers of the same value (`1`, `1.0`, `1e0`), strings of the same

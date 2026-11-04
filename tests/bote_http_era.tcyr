@@ -848,7 +848,10 @@ fn _clauses(k) {
     assert(_has(_body, "resultType") == 0, _nm(k, "...is legacy"));
     _t(k, _raw("POST", "", _lb("tools/list")), 404, "", "the session gate still holds for legacy traffic");
     _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"), 202, "", "a legacy notification is 202");
-    _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"cursor\":\"a\",\"cursor\":\"b\"}}"), 200, "-32600", "a legacy request naming a key twice (3.8.6)");
+    # (3.8.8) A request the codec refuses at its admission was not taken: a 400, as on the
+    # modern path, its id in the error.
+    _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"cursor\":\"a\",\"cursor\":\"b\"}}"), 400, "-32600", "a legacy request naming a key twice, refused before it was taken");
+    assert(_has(_body, "\"id\":7"), _nm(k, "...its id in the error"));
     # (3.8.7, from the 3.8.6 review) Input bote cannot take as a request is an HTTP error on
     # the legacy path too, as Streamable HTTP has it (a 200 with the error through 3.8.6).
     _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{\"a\":1,\"a\":2}}"), 400, "-32600", "a legacy notification naming a key twice is a 400");
@@ -856,6 +859,19 @@ fn _clauses(k) {
     _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"1.0\",\"method\":\"notifications/x\"}"), 400, "-32600", "a legacy notification the codec refuses otherwise is a 400");
     _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":7,\"id\":8,\"method\":\"tools/list\"}"), 400, "-32600", "an id named twice, answered with no id, is a 400");
     _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"no/such\"}"), 200, "-32601", "control: an error for a request with an id stays a 200");
+    # (3.8.8, from the 3.8.7 review) What the codec took, not the shape of its answer: a request
+    # whose id is null is taken and its errors are 200s; a batch of nothing taken, and a
+    # JSON-RPC response a client sends, are 400s.
+    _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"no/such\"}"), 200, "-32601", "an id of null, taken: its error a 200 (a 400 at 3.8.7)");
+    _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"tools/list\"}"), 200, "", "...and its result a 200");
+    _t(k, _raw("POST", withsid, "[{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":5}]"), 400, "", "a batch of one refused notification is a 400 (a 200 at 3.8.7)");
+    assert(_has(_body, "\"code\":-32600"), _nm(k, "...its error in the batch's answer"));
+    _t(k, _raw("POST", withsid, "[{\"jsonrpc\":\"2.0\",\"method\":\"notifications/x\",\"params\":{\"a\":1,\"a\":2}}]"), 400, "", "...naming a key twice");
+    assert(_has(_body, "a key named twice"), _nm(k, "...saying so"));
+    _t(k, _raw("POST", withsid, "[1]"), 400, "", "...or holding no object");
+    _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{}}"), 400, "-32600", "a JSON-RPC response a client sends is a 400 (a 200 at 3.8.7)");
+    _t(k, _raw("POST", withsid, "[{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"no/such\"},{\"jsonrpc\":\"2.0\",\"method\":\"notifications/x\",\"params\":5}]"), 200, "", "a batch with a request taken is a 200");
+    assert(_has(_body, "\"code\":-32601"), _nm(k, "...its error in the answer"));
     _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"progressToken\":1}}}"), 200, "", "legacy _meta with no version");
     assert(_has(_body, "resultType") == 0, _nm(k, "...is legacy"));
     _t(k, _raw("POST", _cat3("MCP-Protocol-Version: 2025-11-25\r\n", withsid, ""), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2025-11-25\"}}}"), 200, "", "an older revision in both the header and _meta");

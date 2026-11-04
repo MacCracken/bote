@@ -330,6 +330,12 @@ allows (1 to 128 of `A-Z a-z 0-9 _ - .`), where it also required an underscore a
 and `.`; `validate_tool_name` is that rule. On `http` and `streamable`, legacy input the codec
 cannot take as a request (its answer an error with a null id) is a 400, where it was a 200.
 
+(3.8.8) `prefixItems`, `contains` with `minContains` and `maxContains`, `propertyNames`,
+`dependentRequired` and `dependentSchemas` are judged, so a schema that names them refuses what
+it was listed with and passed through 3.8.7. A PropertyDef is 208 bytes and a CompiledSchema 104;
+`prop_new` and `compiled_new` set the new words, and one a consumer allocates itself must be that
+size, with them zeroed (and +192, +200 of a PropertyDef -1).
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`

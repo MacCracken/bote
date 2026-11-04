@@ -33,12 +33,12 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.8 — JSON Schema coverage, its third bite**: the keywords that judge an array's or an object's
-parts with no pattern and no reference: `prefixItems` (and `items` beside it), `contains` with
-`minContains` and `maxContains`, `propertyNames`, `dependentRequired` and `dependentSchemas`. Then
-composition (`allOf`, `anyOf`, `oneOf`, `not`), which needs a subschema judged without its violations
-kept, and `$ref` with the resource bounds the spec asks for; `pattern` and `format` last, each an engine
-of its own.
+**3.8.9 — JSON Schema coverage, its fourth bite: composition.** `allOf`, `anyOf`, `oneOf`, `not` and
+`if` / `then` / `else`, on the quiet judgement 3.8.8 made for `contains` (a subschema asked whether a value
+meets it, keeping nothing): `allOf` judged as the schema itself is, `anyOf` and `oneOf` by how many
+subschemas a value meets, `not` by none, `if` choosing which of `then` and `else` judges. Bound the work a
+client can make of nested composition. Then `$ref` with the resource bounds the spec asks for; `pattern`
+and `format` last, each an engine of its own.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
@@ -51,13 +51,14 @@ stdio's) are each one connection's, and a worker per connection would need a hom
   in one walk, each object's members looked up once, nothing copied out, and a path written only for a violation;
   and it judges the counting keywords that walk makes cheap: `minLength` / `maxLength`, `minItems` / `maxItems`,
   `minProperties` / `maxProperties`, the exclusive bounds and `additionalProperties`; since 3.8.7, by JSON
-  Schema's equality, `const`, `enum` of any value and `uniqueItems`, and type arrays. It still warns at
-  registration of what it lists and does not judge: `anyOf`, `oneOf`, `allOf`, `not`, `$ref`, `pattern`,
-  `multipleOf`, `format` (which the official client enforces), `prefixItems`, `contains`,
-  `if` / `then` / `else`, `propertyNames`, `patternProperties` (and `additionalProperties` beside it), the
-  `dependent*` and `unevaluated*` keywords, draft-07's array `items`, `additionalItems` and `dependencies`. Numbers
+  Schema's equality, `const`, `enum` of any value and `uniqueItems`, and type arrays; since 3.8.8
+  `prefixItems`, `contains` with its counts, `propertyNames`, `dependentRequired` and `dependentSchemas`. It
+  still warns at registration of what it lists and does not judge: `anyOf`, `oneOf`, `allOf`, `not`, `$ref`,
+  `pattern`, `multipleOf`, `format` (which the official client enforces), `if` / `then` / `else`,
+  `patternProperties` (and `additionalProperties` beside it), the `unevaluated*` keywords, draft-07's array
+  `items`, `additionalItems` and `dependencies`. Numbers
   are compared exactly, where a client holding them as doubles may find two equal that bote does not: past 15
-  significant digits, a result's `uniqueItems` array could be refused by a client and passed here. Enforce the
+  significant digits or a double's range (`1e400`, `1e-400`), a result's `uniqueItems` array could be refused by a client and passed here. Enforce the
   rest in bites, with the resource bounds the spec asks for on `$ref` and
   composition. The warnings cover a schema's root and its properties, not what is nested below them. And the
   repeated-key check over a result's `structuredContent` (3.8.1) is a walk of its own, 240 µs of `libro_export`'s
