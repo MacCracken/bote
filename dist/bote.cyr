@@ -9381,9 +9381,14 @@ fn _sch_check_value_a(a, prop, root, value) {
     store64(&slot + 8, a);
     store64(&slot + 16, 0);
     store64(&slot + 24, 1);
+    # Only a string needs its end found first: an object's or an array's walk stops at its own
+    # close, and a number is read from where it starts. Finding it for every value was a walk
+    # of the whole of it more.
     var vn = strlen(value);
     var v0 = _jx_skip_ws(value, vn, 0);
-    _sv_value(&slot, 0, value, vn, v0, _jx_skip_value(value, vn, v0), prop);
+    var v1 = vn;
+    if (v0 < vn && load8(value + v0) == 34) { v1 = _jx_skip_string(value, vn, v0); }
+    _sv_value(&slot, 0, value, vn, v0, v1, prop);
     var vs = load64(&slot);
     if (vs == 0) { return 0; }
     var i = 0;
@@ -9422,8 +9427,7 @@ fn compiled_check_a(a, compiled, params_cstr) {
         return load64(&slot);
     }
     var pn = strlen(params_cstr);
-    var ps = _jx_skip_ws(params_cstr, pn, 0);
-    _sv_object(&slot, 0, params_cstr, pn, ps, _jx_skip_value(params_cstr, pn, ps), compiled);
+    _sv_object(&slot, 0, params_cstr, pn, _jx_skip_ws(params_cstr, pn, 0), pn, compiled);
     return load64(&slot);
 }
 

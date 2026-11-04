@@ -55,6 +55,10 @@ stdio's) are each one connection's, and a worker per connection would need a hom
   composition. The warnings cover a schema's root and its properties, not what is nested below them. And the
   repeated-key check over a result's `structuredContent` (3.8.1) is a walk of its own, 240 µs of `libro_export`'s
   100 entries beside the validator's 280: fold it into the one walk where the schema covers the value.
+  Registration's compile is still a scan per keyword: `parse_property` looks for each of about twenty keywords in a
+  property's JSON, 350 ns each on a short one, so a schema compiles in about three times what it did before 3.8.5
+  (8.3 µs for one integer property). It is paid once per registration, never per call; read the keywords in one
+  walk of the property's members when a bite adds more of them.
 - **What a valid tool call still leaves on the heap.** A request costs bote nothing that outlives it, except
   `args` and whatever a handler allocates, because the 2.0 ABI lets a handler keep both. bote's own
   libro, fs and web handlers need not: give them the request arena, and bound the binary. `fs_read` of a

@@ -100,11 +100,42 @@ From the review of 3.8.4:
 - **`tests/bote_fs_tools.tcyr`**, 78, from 76: a cut through bytes that are no UTF-8, and a four-byte character across
   the cap.
 - **`fuzz/schema_walk.fcyr`**, new: 20,000 schemas drawn over the keywords bote judges and six values for each, about
-  110,000 judged as a reference on bayan's parse judges them (29,167 passed, 80,324 refused), with no heap. A value naming
-  a key twice is skipped, since bayan refuses one.
+  110,000 judged as a reference on bayan's parse judges them (29,167 passed, 80,324 refused), with no heap. A value
+  naming a key twice is skipped, since bayan refuses one.
 - **32 mutants, 32 killed.** Three survived the first run and showed gaps, now tested: a path of two keys on the
   looked-up way, a count exactly at `minProperties`, and an escape counted as one character against a tight bound. The
   fuzz harness kills the three of four it was run against that it can reach; the fourth, a repeated key, it skips.
+
+### Performance
+
+**Judging a result costs a quarter less, a nested value half, and registration's compile three times as much.**
+Interleaved A/B against 3.8.4, 15 rounds pinned to one core, the working tree's benches on both sides. Minimums, in ns:
+
+| Bench | 3.8.4 | 3.8.5 | Delta |
+|---|---:|---:|---:|
+| `validate_compiled_simple` | 478 | 451 | −5.6% |
+| `validate_compiled_nested` | 1,841 | 925 | −49.8% |
+| `dispatch_tools_call_output` | 7,319 | 5,508 | −24.7% |
+| `libro_export_100` | 2,667,000 | 1,903,000 | −28.6% |
+| `fs_read_64k` | 4,443,000 | 3,734,000 | −16.0% |
+| `dispatch_tools_call` | 2,360 | 2,362 | +0.1% |
+| `codec_process_message` | 4,278 | 4,238 | −0.9% |
+| `schema_compile_simple` | 2,842 | 8,358 | +194.1% |
+| `schema_compile_nested` | 6,508 | 19,200 | +195.0% |
+
+- **`libro_export_100` loses 7.6 µs an entry** of the 13 µs 3.8.4 measured: each entry's six properties and six
+  required names are one walk of its members, and no path is built. What is left of judging it is mostly the
+  repeated-key check over the result, a walk of its own (the roadmap's coverage item).
+- **`fs_read_64k` loses 0.7 ms**: its 64 KB string is judged where it lies, where it was copied out and walked seven
+  times. Its text still goes out twice, in its block and its `structuredContent`.
+- **`validate_compiled_nested`** halves: a nested object's members were a scan per property, with a path built for
+  each level.
+- **A schema compiles in about three times what it did**, because `parse_property` now looks for each keyword it
+  judges, about twenty, in a property's JSON: 350 ns a keyword on a short one, about 6.3 of `schema_compile_simple`'s
+  8.4 µs. It runs at registration only, never for a call. Reading a property's keywords in one walk of its members is
+  on the roadmap, for the bite that adds more of them.
+- **The rest is code position.** `scope_check_jwt` +3.8% and `codec_serialize_response` −5.2% run no code this release
+  changes.
 
 ## [3.8.4] — 2026-11-03 · Output schemas on bote's own tools
 
