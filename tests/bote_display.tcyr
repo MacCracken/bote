@@ -186,7 +186,7 @@ fn main() {
     bote_icon_with_mime_type(m, "image/svg+xml");
     assert_eq(_icons_why(m), 0, "mimeType: type/subtype with a plus");
     var mb = vec_new();
-    vec_push(mb, "image"); vec_push(mb, "/png"); vec_push(mb, "image/"); vec_push(mb, "image/png; q=1"); vec_push(mb, "a/b/c"); vec_push(mb, "");
+    vec_push(mb, "image"); vec_push(mb, "/png"); vec_push(mb, "image/"); vec_push(mb, "image/png;"); vec_push(mb, "a/b/c"); vec_push(mb, "");
     var mi = 0;
     var mbad = 0;
     while (mi < vec_len(mb)) {
@@ -196,6 +196,56 @@ fn main() {
         mi = mi + 1;
     }
     assert_eq(mbad, 6, "mimeType: six that are no type/subtype, each refused");
+    # (3.8.2) Parameters, RFC 9110 8.3.1.
+    var mp = vec_new();
+    vec_push(mp, "image/svg+xml; charset=utf-8"); vec_push(mp, "image/png;q=1"); vec_push(mp, "text/plain ; a=b ;c=\"d e\""); vec_push(mp, "a/b;x=\"q\\\"\"");
+    var mpb = vec_new();
+    vec_push(mpb, "image/png; =1"); vec_push(mpb, "image/png; a"); vec_push(mpb, "image/png; a="); vec_push(mpb, "image/png; a=\"b"); vec_push(mpb, "image/png a=b"); vec_push(mpb, "image/png; a=b c"); vec_push(mpb, "image /png"); vec_push(mpb, "image/png xa=b");
+    var mpi = 0;
+    var mpok = 0;
+    while (mpi < vec_len(mp)) {
+        if (_icons_why(bote_icon_with_mime_type(_icon(ICON_SRC), vec_get(mp, mpi))) == 0) { mpok = mpok + 1; }
+        mpi = mpi + 1;
+    }
+    assert_eq(mpok, 4, "mimeType: four with parameters, each taken (3.8.2)");
+    mpi = 0;
+    mpok = 0;
+    while (mpi < vec_len(mpb)) {
+        if (_icons_why(bote_icon_with_mime_type(_icon(ICON_SRC), vec_get(mpb, mpi))) != 0) { mpok = mpok + 1; }
+        mpi = mpi + 1;
+    }
+    assert_eq(mpok, 8, "mimeType: eight parameters that are none, each refused");
+    # (3.8.2, from the review of 3.8.1) A host, an optional port, and nothing else.
+    var ug = vec_new();
+    vec_push(ug, "https://example.com"); vec_push(ug, "https://example.com/"); vec_push(ug, "http://a.b-c_d.example:8080/x?y#z");
+    vec_push(ug, "https://example.com./i.png"); vec_push(ug, "http://127.0.0.1/i.png"); vec_push(ug, "http://[::1]/i.png");
+    vec_push(ug, "http://[2001:db8::7]:443/i"); vec_push(ug, "http://[::ffff:192.0.2.1]/"); vec_push(ug, "http://[1:2:3:4:5:6:7:8]/");
+    vec_push(ug, "https://example.com:/"); vec_push(ug, "https://example.com:65535/"); vec_push(ug, "HTTPS://Example.COM/a%20b");
+    vec_push(ug, "https://1a.example/"); vec_push(ug, "https://x.0xfg/");
+    var ub = vec_new();
+    vec_push(ub, "http://:80/x"); vec_push(ub, "http://@/"); vec_push(ub, "http://@"); vec_push(ub, "https://[/");
+    vec_push(ub, "https://a:b:c/"); vec_push(ub, "https://example.com:99999/"); vec_push(ub, "http://%00/"); vec_push(ub, "https://user:pass@example.com/i.png");
+    vec_push(ub, "https://u@example.com/"); vec_push(ub, "https://exa%6dple.com/"); vec_push(ub, "https://a..b/"); vec_push(ub, "https://.a/");
+    vec_push(ub, "https://1.2.3.256/"); vec_push(ub, "https://1.2.3/"); vec_push(ub, "https://01.2.3.4/"); vec_push(ub, "https://a.0x1/");
+    vec_push(ub, "http://[::1/"); vec_push(ub, "http://[::1]x/"); vec_push(ub, "http://[1:2:3:4:5:6:7:8:9]/"); vec_push(ub, "http://[1::2::3]/");
+    vec_push(ub, "http://[12345::]/"); vec_push(ub, "http://[1:2:3:4:5:6:7]/"); vec_push(ub, "http://[fe80::1%25eth0]/"); vec_push(ub, "http://[1:2:3:4:5:6:7::]x");
+    vec_push(ub, "http://[:1]/"); vec_push(ub, "http://[1:]/"); vec_push(ub, "https://exa mple.com/"); vec_push(ub, "https://example.com:8a/");
+    vec_push(ub, "https://example.com/ a"); vec_push(ub, "http://"); vec_push(ub, "https://*.example/");
+    vec_push(ub, "http://[1:2:3:4:5:6:7::8]/"); vec_push(ub, "http://[1:2:3:4:5:6:7:8:]/"); vec_push(ub, "http://[1:2:3:4:5:6::7:8]/");
+    var ui = 0;
+    var uok = 0;
+    while (ui < vec_len(ug)) {
+        if (bote_web_url_ok(vec_get(ug, ui)) == 1) { uok = uok + 1; } else { println(vec_get(ug, ui)); }
+        ui = ui + 1;
+    }
+    assert_eq(uok, vec_len(ug), "url: each that a URL parser takes, taken");
+    ui = 0;
+    uok = 0;
+    while (ui < vec_len(ub)) {
+        if (bote_web_url_ok(vec_get(ub, ui)) == 0) { uok = uok + 1; } else { println(vec_get(ub, ui)); }
+        ui = ui + 1;
+    }
+    assert_eq(uok, vec_len(ub), "url: no host, a userinfo, a bad port, a bad address, each refused");
     _ase(_icons_why(bote_icon_with_mime_type(_icon(ICON_SRC), "image")), "an icon's mimeType must be type/subtype", "mimeType: why");
     var sg = vec_new();
     vec_push(sg, "48x48"); vec_push(sg, "any"); vec_push(sg, "1x1"); vec_push(sg, "99999x99999");
@@ -221,7 +271,7 @@ fn main() {
     _ase(bote_icons_check(withnull), "an icon is missing", "icons: a missing one in a list");
     assert_eq(bote_icons_check(vec_new()), 0, "icons: an empty list");
     assert_eq(bote_icons_check(0), 0, "icons: none");
-    _ase(bote_display_check("", 0), "a title must not be empty", "title: empty");
+    assert_eq(bote_display_check("", 0), 0, "title: empty, which the spec allows (3.8.2)");
     assert_eq(bote_display_check("T", 0), 0, "title: any other");
     assert_eq(bote_web_url_ok("https://example.com"), 1, "website: an https URL");
     assert_eq(bote_web_url_ok("example.com"), 0, "website: no scheme");
@@ -231,22 +281,27 @@ fn main() {
     var bt = tool_def_with_icons(_tool("t_bad"), _one(bote_icon_with_theme(_icon(ICON_SRC), "auto")));
     _ase(_reason(dispatcher_register_tool(d, bt, &h_tool)), "an icon's theme must be \"light\" or \"dark\"", "register: a tool with a bad icon, and why");
     assert_eq(registry_contains(dispatcher_registry(d), "t_bad"), 0, "register: ...and it is not registered");
-    _ase(_reason(dispatcher_register_tool(d, tool_def_with_title(_tool("t_empty"), ""), &h_tool)), "a title must not be empty", "register: a tool with an empty title");
     _ase(registry_check_tool_def(tool_def_with_icons(_tool("t_c"), _one(_icon("ftp://x/y")))), "an icon's src must be an http:// or https:// URL, or a data: URI of Base64 data", "register: registry_check_tool_def says why");
     var bp = prompt_def_with_icons(prompt_def_new("p_bad", "d", 0), _one(_icon("javascript:x")));
     assert_eq(_reason(dispatcher_register_prompt(d, bp, &h_prompt)) != 0, 1, "register: a prompt with a bad icon");
-    var pargs = vec_new();
-    vec_push(pargs, prompt_arg_with_title(prompt_arg_new("a", "d", 1), ""));
-    _ase(_reason(dispatcher_register_prompt(d, prompt_def_new("p_arg", "d", pargs), &h_prompt)), "a title must not be empty", "register: a prompt argument with an empty title");
     assert_eq(dispatcher_prompts(d), 0, "register: ...and no prompt registry was made for them");
     var preg = prompt_registry_new();
     assert_eq(prompt_registry_register(preg, bp, &h_prompt), 0 - 1, "register: prompt_registry_register refuses it too");
-    assert_eq(_reason(dispatcher_register_resource(d, resource_def_with_title(resource_def_new("res://a", "a", "d", 0), ""), &h_res)) != 0, 1, "register: a resource with an empty title");
+    assert_eq(_reason(dispatcher_register_resource(d, resource_def_with_icons(resource_def_new("res://a", "a", "d", 0), _one(_icon("https://@/i.png"))), &h_res)) != 0, 1, "register: a resource with a bad icon");
     assert_eq(_reason(dispatcher_register_resource_template(d, resource_template_with_icons(resource_template_new("res://t/{id}", "t", "d", 0), _one(_icon("https://"))), &h_res)) != 0, 1, "register: a template with a bad icon");
     assert_eq(dispatcher_resources(d), 0, "register: ...and no resource registry was made for them");
     var rreg = resource_registry_new();
-    assert_eq(resource_registry_register(rreg, resource_def_with_title(resource_def_new("res://a", "a", "d", 0), ""), &h_res), 0 - 1, "register: resource_registry_register refuses it too");
-    assert_eq(resource_registry_register_template(rreg, resource_template_with_title(resource_template_new("res://t/{id}", "t", "d", 0), ""), &h_res), 0 - 1, "register: ...and resource_registry_register_template");
+    assert_eq(resource_registry_register(rreg, resource_def_with_icons(resource_def_new("res://a", "a", "d", 0), _one(_icon("http://:80/x"))), &h_res), 0 - 1, "register: resource_registry_register refuses it too");
+    assert_eq(resource_registry_register_template(rreg, resource_template_with_icons(resource_template_new("res://t/{id}", "t", "d", 0), _one(_icon("https://a:b:c/"))), &h_res), 0 - 1, "register: ...and resource_registry_register_template");
+    # (3.8.2) An empty title is a title: the spec's `title?: string`.
+    var ed = dispatcher_new(tool_registry_new());
+    assert_eq(dispatcher_register_tool(ed, tool_def_with_title(_tool("t_empty"), ""), &h_tool), 0, "register: a tool with an empty title (3.8.2)");
+    var epargs = vec_new();
+    vec_push(epargs, prompt_arg_with_title(prompt_arg_new("a", "d", 1), ""));
+    assert_eq(dispatcher_register_prompt(ed, prompt_def_with_title(prompt_def_new("p_arg", "d", epargs), ""), &h_prompt), 0, "register: a prompt and an argument with an empty title");
+    assert_eq(dispatcher_register_resource(ed, resource_def_with_title(resource_def_new("res://a", "a", "d", 0), ""), &h_res), 0, "register: a resource with an empty title");
+    assert_eq(dispatcher_register_resource_template(ed, resource_template_with_title(resource_template_new("res://t/{id}", "t", "d", 0), ""), &h_res), 0, "register: a template with an empty title");
+    assert(_has(codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", ed, 0), "{\"name\":\"t_empty\",\"title\":\"\",") == 1, "list: an empty title is sent as one");
 
     # ---- What each list sends ----
     var t = tool_def_with_icons(tool_def_with_title(_tool("t_weather"), "Weather \"now\"\u0001"), _two_icons());
@@ -292,7 +347,7 @@ fn main() {
     assert(_ends(codec_process_message(init, sd, 0), _cat(plain_info, "}")) == 1, "serverInfo: by default, as it was");
     assert(_has(codec_process_message(disc, sd, 0), "instructions") == 0, "instructions: none by default");
     _ase(_reason(dispatcher_set_server_details(sd, "T", 0, "ftp://e.org", 0)), "the website must be an http:// or https:// URL", "details: a website that is no web URL, and why");
-    assert_eq(_reason(dispatcher_set_server_details(sd, "", 0, 0, 0)) != 0, 1, "details: an empty title");
+    assert_eq(_reason(dispatcher_set_server_details(sd, 0, 0, "https://user:pw@e.org/", 0)) != 0, 1, "details: a website carrying a password (3.8.2)");
     assert_eq(_reason(dispatcher_set_server_details(sd, 0, 0, 0, _one(_icon("https://")))) != 0, 1, "details: a bad icon");
     assert(_ends(codec_process_message(init, sd, 0), _cat(plain_info, "}")) == 1, "details: ...and a refusal sets nothing");
     dispatcher_set_server_info(sd, "acme", "2.0");

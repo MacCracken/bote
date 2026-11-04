@@ -107,16 +107,22 @@ fn resp_success(id, result) {
 #   +112 sent   how many progress notifications have gone for it
 #   +120 owner  (3.7.7) the thread that set the check or the writer: bote_cancelled and
 #               bote_progress answer any other with nothing, before they touch the arena
+#   +128 caps   (3.8.2) the raw `clientCapabilities` a 2026-07-28 request declared, or 0
+#   +136 input  1 when this request may be answered with an InputRequiredResult: a
+#               2026-07-28 tools/call, prompts/get or resources/read
+#   +144 state  the `requestState` it brought, opened by the dispatcher's sealer, or 0
+#   +152 answers the `inputResponses` it brought, as the dispatcher judged them, or 0
 # A transport that serves one message at a time uses the process's block. A server
 # that serves on worker threads (3.7.0, src/conn.cyr) sets _bote_req_state_fp to a
 # function returning the calling thread's block, before its first worker starts.
-var BOTE_REQ_STATE_BYTES = 128;
+var BOTE_REQ_STATE_BYTES = 160;
 var BOTE_REQ_STATE_WHY = 24;
 var BOTE_REQ_STATE_STREAM = 32;
 var BOTE_REQ_STATE_CANCEL = 40;
 var BOTE_REQ_STATE_PROGRESS = 80;
 var BOTE_REQ_STATE_OWNER = 120;
-var _bote_req_g[16];
+var BOTE_REQ_STATE_INPUT = 128;
+var _bote_req_g[20];
 var _bote_req_state_fp = 0;
 
 fn bote_req_state() {
@@ -365,8 +371,58 @@ fn bote_req_begin() {
     store64(s + BOTE_REQ_STATE_PROGRESS + 24, 0);
     store64(s + BOTE_REQ_STATE_PROGRESS + 32, 0);
     store64(s + BOTE_REQ_STATE_OWNER, 0);
+    store64(s + BOTE_REQ_STATE_INPUT, 0);
+    store64(s + BOTE_REQ_STATE_INPUT + 8, 0);
+    store64(s + BOTE_REQ_STATE_INPUT + 16, 0);
+    store64(s + BOTE_REQ_STATE_INPUT + 24, 0);
     return al;
 }
+
+# ---- multi round-trip requests (3.8.2) -----------------------------------------------
+#
+# MCP 2026-07-28 lets a tools/call, prompts/get or resources/read be answered with an
+# InputRequiredResult: input the server needs from the client (an elicitation, a sampling
+# or the roots), and state to carry to the client's retry. The client sends the same
+# request again, under a new id, with `inputResponses` and the state. A handler keeps the
+# 2.0 ABI and asks the request state, as it asks bote_cancelled, through the functions
+# below; it answers with a result built by bote_input_required_new_a (src/dispatch.cyr).
+
+# The dispatcher's, for each request: what its client declared, whether it may be asked
+# for input, the state it brought back, opened, and the answers it brought, judged.
+fn bote_req_set_input(caps, ok, state, answers) {
+    var s = bote_req_state();
+    store64(s + BOTE_REQ_STATE_INPUT, caps);
+    store64(s + BOTE_REQ_STATE_INPUT + 8, ok);
+    store64(s + BOTE_REQ_STATE_INPUT + 16, state);
+    store64(s + BOTE_REQ_STATE_INPUT + 24, answers);
+    return 0;
+}
+
+# 1 when the request being served may be answered with an InputRequiredResult: a 2026-07-28
+# tools/call, prompts/get or resources/read. An older revision has no way to ask, so a
+# handler there answers as it can without the input.
+fn bote_input_possible() { return load64(bote_req_state() + BOTE_REQ_STATE_INPUT + 8); }
+
+# bote_client_has, bote_caps_have, bote_input_response_a and bote_input_accepted_a read
+# JSON, and are at the end of src/jsonx.cyr: fuzz/req_arena.fcyr includes this module
+# without it, and the agnos gate fails a unit with an undefined function even unreached.
+
+# The client's answers on a retry, `inputResponses`, as raw JSON, or 0: the whole object,
+# as the dispatcher judged it before the handler ran (on the request arena, until the next
+# message), or (bote_input_response_a, at the end of src/jsonx.cyr) the one named `key`
+# (the key of the input request it answers), on `a`. The
+# dispatcher keeps them, so a handler reads them however its message came: at the first
+# build they were read again from the params the codec noted, which a consumer calling
+# dispatcher_dispatch itself never notes.
+fn bote_input_responses_a(a) {
+    if (bote_input_possible() == 0) { return 0; }
+    return load64(bote_req_state() + BOTE_REQ_STATE_INPUT + 24);
+}
+
+# The state this server put in its last InputRequiredResult for this request, as it was
+# given to bote_input_state, once the dispatcher's sealer has opened it: 0 when the client
+# brought none. A state that does not open is refused before the handler runs.
+fn bote_request_state() { return load64(bote_req_state() + BOTE_REQ_STATE_INPUT + 16); }
 
 # ---- progress (3.7.6) --------------------------------------------------------------
 #

@@ -5,7 +5,8 @@
 > and test and benchmark counts are in [`CLAUDE.md`](../../CLAUDE.md)'s testing table.
 >
 > **Spec**: bote's default is MCP 2025-11-25. **2026-07-28** is served beside it on every transport. The
-> official client works on both, and the official suite passes 26 of the 37 scenarios 2026-07-28 requires.
+> official client works on both, and the official suite passes every one of the 39 scenarios it scores for
+> 2026-07-28.
 > [spec-compliance.md](../spec-compliance.md) · [SECURITY.md](../../SECURITY.md) ·
 > [2026-11-01 closeout audit](../audit/2026-11-01-closeout.md)
 
@@ -25,7 +26,6 @@ from the authorization server's `jwks_uri`.
 
 | Scenarios | Revision | Needs | Where |
 |---|---|---|---|
-| 10 `input-required-*`, and 3 checks of `server-stateless` | 2026-07-28 | `InputRequiredResult`, and `-32021` | 3.8.x |
 | `logging-set-level`, `tools-call-with-logging`, `resources-subscribe`, `resources-unsubscribe` | 2025-11-25 | optional, and removed from 2026-07-28 | not planned |
 | `tools-call-sampling`, `tools-call-elicitation`, 2 `elicitation-*` | 2025-11-25 | a server-to-client request, which 2026-07-28 replaces | not planned |
 
@@ -33,7 +33,7 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.2 — multi round-trip requests**, the next item of 3.8.x below.
+**3.8.3 — root keywords in `inputSchema`**, the next item of 3.8.x below.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
@@ -42,11 +42,6 @@ stdio's) are each one connection's, and a worker per connection would need a hom
 
 ## 3.8.x — The tool surface
 
-- **Multi round-trip requests.** `InputRequiredResult` is how a server now asks a client for input. It
-  needs an additive handler entry beside the 2.0 ABI, which sees `arguments` and not `inputResponses`.
-  It is also the first feature that needs a capability the client declares, so it adds `-32021` for a
-  request that needs one the client did not: bote requires the client-capabilities object today and reads
-  nothing from it. This is 10 of the 12 scenarios bote fails on the 2026-07-28 list.
 - **Root keywords in `inputSchema`.** `ToolSchema` is type, properties and required, so a tool cannot say
   `$schema`, `$defs`, `allOf`, or the `additionalProperties: false` the spec recommends for a tool with no
   parameters. The suite's unscored `json-schema-2020-12` checks exactly that. An outputSchema is kept as its
@@ -55,8 +50,10 @@ stdio's) are each one connection's, and a worker per connection would need a hom
   `fs_read`, the outputSchema that says what it holds, so a client can check it.
 - **JSON Schema coverage.** The 2026-07-28 revision allows any 2020-12 keyword. bote validates a subset and
   warns at registration about the keywords it advertises and does not enforce: `anyOf`, `oneOf`, `allOf`,
-  `not`, `$ref`, `pattern`, the length and item bounds, `const`, type arrays and non-string enums. Enforce
-  them, with the resource bounds the spec asks for on `$ref` and composition. And judge an object with one pass of the
+  `not`, `$ref`, `pattern`, the length and item bounds, `const`, `format` (which the official client
+  enforces), draft-07's array `items`, `additionalItems` and `dependencies`, type arrays and non-string enums.
+  Enforce them, with the resource bounds the spec asks for on `$ref` and composition. The warnings cover a
+  schema's root and its properties, not what is nested below them. And judge an object with one pass of the
   scanner for all of its names: each property and each required name is a scan of its own today, 2.6 µs for an object
   of three, which an outputSchema now pays on every result as an inputSchema does on every call. Name a violation's
   path only once there is one, below the root too: a path is built today for every array element and every property
@@ -92,8 +89,13 @@ stdio's) are each one connection's, and a worker per connection would need a hom
 ## Open decisions (no version)
 
 - **The default revision.** It stays 2025-11-25: a client that wants 2026-07-28 already gets it, so the
-  default decides nothing on the wire, and bote should not name a revision whose required list it does not
-  pass. Decide again when `InputRequiredResult` lands.
+  default decides nothing on the wire. Since 3.8.2 bote passes every scenario the suite scores for
+  2026-07-28, which was the condition this waited on; what is left to weigh is the clients that send no
+  `_meta` and expect 2025-11-25.
+- **What a `requestState` is bound to.** The token the request presented, which is stricter than the
+  principal the spec asks for: a client that refreshes its token between rounds starts again. Binding to the
+  principal needs to know who it is, `iss` and `sub` for a JWT, which the 2.0 ABI's opaque claims do not say.
+  A principal hook on the dispatcher, set by the transport that verified the token, would do it.
 - **The tool set streamable and ws expose.** stdio, http, unix and bridge register the echo references
   plus the libro, fs and web tools; streamable and ws register the echo references only, kept so that
   folding the binaries into one did not widen what two network transports expose. Either every mode gets

@@ -1,0 +1,168 @@
+# bote::state_seal — a sealer for the requestState of an InputRequiredResult (3.8.2).
+#
+# MCP 2026-07-28 has a server carry state through the client between the rounds of a
+# multi round-trip request, and makes it attacker-controlled: where it can matter, a server
+# MUST protect its integrity and MUST reject state that fails, and SHOULD bind it to the
+# principal, a short expiry and the request it was made for. The dispatcher hands a sealer
+# each state a handler gives (src/dispatch.cyr, dispatcher_set_state_sealer), with a
+# binding of the method, its target and the token the request presented; this one makes
+#
+#     b64u(exp ‖ payload) "." b64u(HMAC-SHA256(key, "bote-state-1" 0 binding 0 exp ‖ payload))
+#
+# where exp is the second it stops opening, 8 bytes, big-endian. The payload is the
+# handler's own words, which the client can read: put nothing in it a client may not know.
+# The binding is not sent, only MACed. A state opens only under the same key, for the
+# same binding, before its expiry; it is not single-use, and a handler that must spend
+# one once keeps that record itself, as the spec says.
+#
+# Uses sigil's hmac_sha256, lib/ct.cyr's ct_eq_bytes, random_bytes, and jwt.cyr's strict
+# Base64url decoder. After jwt.cyr in [lib]; not in core.
+
+# BoteStateHmac (24 bytes): +0 the key (heap), +8 its length, +16 how long a state opens,
+# in seconds.
+var BOTE_STATE_TTL_S = 600;
+var _bote_state_clock = 0;
+
+fn _bss_now() {
+    if (_bote_state_clock != 0) { return fncall0(_bote_state_clock); }
+    return clock_epoch_secs();
+}
+
+# A sealer keyed with the `klen` bytes at `key` (32 at least: below that, 0), whose states
+# open for `ttl_s` seconds (BOTE_STATE_TTL_S when 0 or less). The key is copied.
+fn bote_state_hmac_new(key, klen, ttl_s) {
+    if (key == 0 || klen < 32) { return 0; }
+    var h = alloc(24);
+    var k = alloc(klen);
+    memcpy(k, key, klen);
+    store64(h, k);
+    store64(h + 8, klen);
+    if (ttl_s <= 0) { ttl_s = BOTE_STATE_TTL_S; }
+    store64(h + 16, ttl_s);
+    return h;
+}
+
+# One with a random key of 32 bytes: its states open in this process only, which is enough
+# for one server; servers behind one name share a key through bote_state_hmac_new. 0 when
+# no entropy can be had.
+fn bote_state_hmac_random(ttl_s) {
+    var k[32];
+    if (random_bytes(&k, 32) != 32) { return 0; }
+    return bote_state_hmac_new(&k, 32, ttl_s);
+}
+
+# Wire `h` into dispatcher `d` as its sealer.
+fn dispatcher_with_state_hmac(d, h) {
+    return dispatcher_set_state_sealer(d, &bote_state_hmac_seal, &bote_state_hmac_open, h);
+}
+
+var _BSS_B64U = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+# The `n` bytes at `p`, Base64url with no padding, as a cstr on `a`.
+fn _bss_b64u_a(a, p, n) {
+    var out = alloc_via(a, (n * 4) / 3 + 4);
+    var o = 0;
+    var i = 0;
+    while (i + 2 < n) {
+        var v = (load8(p + i) << 16) | (load8(p + i + 1) << 8) | load8(p + i + 2);
+        store8(out + o, load8(_BSS_B64U + ((v >> 18) & 63)));
+        store8(out + o + 1, load8(_BSS_B64U + ((v >> 12) & 63)));
+        store8(out + o + 2, load8(_BSS_B64U + ((v >> 6) & 63)));
+        store8(out + o + 3, load8(_BSS_B64U + (v & 63)));
+        o = o + 4;
+        i = i + 3;
+    }
+    if (n - i == 1) {
+        var v1 = load8(p + i) << 16;
+        store8(out + o, load8(_BSS_B64U + ((v1 >> 18) & 63)));
+        store8(out + o + 1, load8(_BSS_B64U + ((v1 >> 12) & 63)));
+        o = o + 2;
+    } elif (n - i == 2) {
+        var v2 = (load8(p + i) << 16) | (load8(p + i + 1) << 8);
+        store8(out + o, load8(_BSS_B64U + ((v2 >> 18) & 63)));
+        store8(out + o + 1, load8(_BSS_B64U + ((v2 >> 12) & 63)));
+        store8(out + o + 2, load8(_BSS_B64U + ((v2 >> 6) & 63)));
+        o = o + 3;
+    }
+    store8(out + o, 0);
+    return out;
+}
+
+# The MAC of `body` (`blen` bytes: exp ‖ payload) for `binding`, into the 32 bytes at `mac`.
+fn _bss_mac(h, a, binding, body, blen, mac) {
+    var tag = "bote-state-1";
+    var tl = strlen(tag);
+    var bl = strlen(binding);
+    var n = tl + 1 + bl + 1 + blen;
+    var m = alloc_via(a, n);
+    memcpy(m, tag, tl);
+    store8(m + tl, 0);
+    memcpy(m + tl + 1, binding, bl);
+    store8(m + tl + 1 + bl, 0);
+    memcpy(m + tl + 2 + bl, body, blen);
+    hmac_sha256(load64(h), load64(h + 8), m, n, mac);
+    return 0;
+}
+
+# The sealer's half that seals: `payload` for `binding`, as a cstr on `a`.
+fn bote_state_hmac_seal(h, a, binding, payload) {
+    if (h == 0 || binding == 0 || payload == 0) { return 0; }
+    var pl = strlen(payload);
+    var body = alloc_via(a, 8 + pl);
+    var exp = _bss_now() + load64(h + 16);
+    var k = 0;
+    while (k < 8) {
+        store8(body + k, (exp >> (56 - 8 * k)) & 255);
+        k = k + 1;
+    }
+    memcpy(body + 8, payload, pl);
+    var mac[32];
+    _bss_mac(h, a, binding, body, 8 + pl, &mac);
+    var b1 = _bss_b64u_a(a, body, 8 + pl);
+    var b2 = _bss_b64u_a(a, &mac, 32);
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, strlen(b1) + strlen(b2) + 2);
+    str_builder_add_cstr(sb, b1);
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_cstr(sb, b2);
+    return str_data(str_builder_build_a(a, sb));
+}
+
+# The sealer's half that opens: the payload `state` carries, on `a`, or 0 when it was not
+# made with this key for `binding`, or has expired, or is not one at all.
+fn bote_state_hmac_open(h, a, binding, state) {
+    if (h == 0 || binding == 0 || state == 0) { return 0; }
+    var n = strlen(state);
+    var dot = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        if (load8(state + i) == 46) {
+            if (dot >= 0) { return 0; }
+            dot = i;
+        }
+        i = i + 1;
+    }
+    if (dot <= 0 || dot == n - 1) { return 0; }
+    var bl[8];
+    var ml[8];
+    var body = _jwt_b64u_a(a, state, dot, &bl);
+    var got = _jwt_b64u_a(a, state + dot + 1, n - dot - 1, &ml);
+    if (body == 0 || got == 0 || load64(&ml) != 32 || load64(&bl) < 8) { return 0; }
+    var mac[32];
+    _bss_mac(h, a, binding, body, load64(&bl), &mac);
+    if (ct_eq_bytes(&mac, got, 32) == 0) { return 0; }
+    var exp = 0;
+    var k = 0;
+    while (k < 8) {
+        exp = (exp << 8) | load8(body + k);
+        k = k + 1;
+    }
+    if (_bss_now() > exp) { return 0; }
+    var pl = load64(&bl) - 8;
+    var out = alloc_via(a, pl + 1);
+    memcpy(out, body + 8, pl);
+    store8(out + pl, 0);
+    # A payload sealed here is a cstr: one holding a NUL is not one of these.
+    if (strlen(out) != pl) { return 0; }
+    return out;
+}

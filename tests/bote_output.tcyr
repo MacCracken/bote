@@ -95,6 +95,23 @@ fn _call_msg(tool, modern) { return _msg("tools/call", _cat3("\"name\":\"", tool
 fn _call(d, tool, modern) { return codec_process_message(_call_msg(tool, modern), d, 0); }
 fn _list(d, modern) { return codec_process_message(_msg("tools/list", "", modern), d, 0); }
 fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+fn _words(s) {
+    var v = vec_new();
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) {
+        while (i < n && load8(s + i) == 32) { i = i + 1; }
+        var st = i;
+        while (i < n && load8(s + i) != 32) { i = i + 1; }
+        if (i > st) {
+            var w = alloc(i - st + 1);
+            memcpy(w, s + st, i - st);
+            store8(w + i - st, 0);
+            vec_push(v, w);
+        }
+    }
+    return v;
+}
 
 # The legacy response for result `r`, and the modern one's text after its _meta.
 fn _legacy(r) { return _cat3("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":", r, "}"); }
@@ -142,7 +159,9 @@ fn _refused(d, name, os) {
 # The 2025-11-25 form registration keeps for schema `os`.
 fn _legacy_form(os) {
     var t = _tool("t_form", os);
-    _registry_prepare(t);
+    var st[48];
+    _registry_prepare(t, &st);
+    _registry_stage(t, &st);
     return tool_def_output_legacy(t);
 }
 
@@ -204,7 +223,7 @@ fn main() {
     assert_eq(dispatcher_register_tool(d, _tool("t_weather", WEATHER), &h_ret), 0, "registration: an object root");
     assert_eq(dispatcher_register_tool(d, _tool("t_users", USERS), &h_ret), 0, "registration: an array root");
     assert_eq(dispatcher_register_tool(d, tool_def_new("t_plain", "d", schema_new("object", 0, vec_new())), &h_ret), 0, "registration: no outputSchema");
-    _ase(_reason(dispatcher_register_tool(d, _tool("t_nul", "{\"type\":\"object\",\"properties\":{\"n\\u0000\":{\"type\":\"string\"}}}"), &h_ret)), "the outputSchema names a key twice in one object, or one that holds a NUL", "registration: a property whose name holds a NUL, refused (3.8.1)");
+    _ase(_reason(dispatcher_register_tool(d, _tool("t_nul", "{\"type\":\"object\",\"properties\":{\"n\\u0000\":{\"type\":\"string\"}}}"), &h_ret)), "the outputSchema names a key twice in one object, or holds a NUL or a key that is not text", "registration: a property whose name holds a NUL, refused (3.8.1)");
     assert_eq(_reason(dispatcher_register_tool(d, _tool("t_rep", "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"type\":\"number\"}}}"), &h_ret)) != 0, 1, "registration: a key twice in a nested object, refused (3.8.1)");
     assert_eq(_reason(dispatcher_register_tool(d, _tool("t_rep2", "{\"type\":\"object\",\"typ\\u0065\":\"array\"}"), &h_ret)) != 0, 1, "registration: a key twice, spelled two ways");
     _ase(_reason(dispatcher_register_tool(d, _tool("t_d4", "{\"$schema\":\"http://json-schema.org/draft-04/schema#\",\"type\":\"object\"}"), &h_ret)), "the outputSchema's $schema names a dialect bote does not support (2020-12, 2019-09, draft-07, draft-06)", "registration: a dialect bote does not know, refused (3.8.1)");
@@ -381,12 +400,12 @@ fn main() {
 
     # ---- From the review of 3.8.0 ----
     # A key twice inside structuredContent: bote would judge the first, a client reads the last.
-    var rep = _err_result("t_weather", "the result's structuredContent names a member twice in one object");
+    var rep = _err_result("t_weather", "the result's structuredContent names a member twice in one object, or one a client would read another way");
     _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2,\"temperature\":\"hot\"}}", rep, rep, "review: a key twice in structuredContent is refused");
     _expect(d, "t_weather", "{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2,\"conditions\":[]}", rep, rep, "review: ...in a bare record");
     _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2,\"extra\":{\"a\":1,\"a\":2}}}", rep, rep, "review: ...in an object no property names");
     _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2,\"temper\\u0061ture\":\"hot\"}}", rep, rep, "review: ...spelled two ways");
-    var urep = _err_result("t_users", "the result's structuredContent names a member twice in one object");
+    var urep = _err_result("t_users", "the result's structuredContent names a member twice in one object, or one a client would read another way");
     _expect(d, "t_users", "[{\"id\":\"1\",\"name\":\"A\",\"id\":2}]", urep, urep, "review: ...in an array's item");
     # A key of 256 bytes or more, written with an escape, is judged as it decodes.
     var la = _rep_s("a", 300);
@@ -425,11 +444,15 @@ fn main() {
     # The same on the input side: a string enum's escaped value is met.
     var ip = vec_new();
     vec_push(ip, schema_prop_new("x", "{\"type\":\"string\",\"enum\":[\"caf\\u00e9\"]}"));
-    vec_push(ip, schema_prop_new("o", "{\"type\":\"object\",\"properties\":{\"n\\u0000\":{\"type\":\"string\"}}}"));
     dispatcher_register_tool(rod, tool_def_new("t_in", "d", schema_new("object", ip, vec_new())), &h_ret);
     _ret = "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}";
-    var in1 = codec_process_message(_msg("tools/call", "\"name\":\"t_in\",\"arguments\":{\"x\":\"caf\xc3\xa9\",\"o\":{\"n\":5,\"n\\\\u0000\":6}}", 0), rod, 0);
-    assert(_has(in1, "\"isError\"") == 0 && _has(in1, "\"text\":\"ok\"") == 1, "review: an argument meets an escaped enum value, and a property named with a NUL judges nothing");
+    var in1 = codec_process_message(_msg("tools/call", "\"name\":\"t_in\",\"arguments\":{\"x\":\"caf\xc3\xa9\"}", 0), rod, 0);
+    assert(_has(in1, "\"isError\"") == 0 && _has(in1, "\"text\":\"ok\"") == 1, "review: an argument meets an escaped enum value");
+    # (3.8.2) A nested property named with a NUL judged nothing at 3.8.1; it is refused now,
+    # as an outputSchema's is.
+    var ipn = vec_new();
+    vec_push(ipn, schema_prop_new("o", "{\"type\":\"object\",\"properties\":{\"n\\u0000\":{\"type\":\"string\"}}}"));
+    assert(dispatcher_register_tool(rod, tool_def_new("t_inn", "d", schema_new("object", ipn, vec_new())), &h_ret) != 0, "review: an inputSchema property named with a NUL is refused (3.8.2)");
     # A repeated member from a tool with no outputSchema.
     var prep = _err_result("t_plain", "the result names structuredContent more than once");
     _expect(d, "t_plain", "{\"content\":[],\"structuredContent\":{\"a\":1},\"structuredContent\":[1]}", prep, prep, "review: a repeated member from a tool with no outputSchema is refused");
@@ -588,6 +611,208 @@ fn main() {
     assert_eq(alloc_used() - h6, 0, "heap: a list of forty 4 KB outputSchemas with object roots, on both revisions, keeps nothing");
     var lr = codec_process_message(lml, ld, 0);
     assert(_has(lr, "\"items\":{\"$ref\":\"#/properties/result/$defs/x\"}") == 1, "list: the 2025-11-25 form of a long schema");
+
+    # ---- From the review of 3.8.1 (3.8.2) ----
+    var r2 = dispatcher_new(tool_registry_new());
+    # A required name or an enum value that holds a NUL is refused where it is registered, and
+    # a value holding one matches nothing.
+    var nulwhy = "the outputSchema names a key twice in one object, or holds a NUL or a key that is not text";
+    _ase(_reason(dispatcher_register_tool(r2, _tool("t_rn", "{\"type\":\"object\",\"required\":[\"a\\u0000b\"]}"), &h_ret)), nulwhy, "review 3.8.1: a required name holding a NUL, refused");
+    _ase(_reason(dispatcher_register_tool(r2, _tool("t_en", "{\"type\":\"object\",\"properties\":{\"e\":{\"type\":\"string\",\"enum\":[\"x\\u0000y\"]}}}"), &h_ret)), nulwhy, "review 3.8.1: an enum value holding a NUL, refused");
+    var inul = vec_new();
+    vec_push(inul, schema_prop_new("e", "{\"type\":\"string\",\"enum\":[\"x\\u0000y\"]}"));
+    _ase(_reason(dispatcher_register_tool(r2, tool_def_new("t_ien", "d", schema_new("object", inul, vec_new())), &h_ret)), "an inputSchema property's schema names a key twice in one object, or holds a NUL or a key that is not text", "review 3.8.1: ...in an inputSchema too");
+    assert_eq(_sch_str_dec_a(default_alloc(), "\"x\\u0000y\""), 0, "review 3.8.1: a string holding a NUL decodes to none");
+    # A schema compiled without registration's check: such a required name is never met.
+    var nprop = parse_property("{\"type\":\"object\",\"required\":[\"a\\u0000b\"]}");
+    var nvs = _sch_check_value_a(default_alloc(), nprop, "v", "{\"a\\u0000b\":1,\"a\":2}");
+    assert(nvs != 0 && vec_len(nvs) == 1 && _has(vec_get(nvs, 0), "missing required field") == 1, "review 3.8.1: ...and a required name holding one, compiled directly, is never met");
+    _ase(_sch_str_dec_a(default_alloc(), "\"x\\\\u0000y\""), "x\\u0000y", "review 3.8.1: ...and one holding a backslash to its backslash");
+    assert_eq(dispatcher_register_tool(r2, _tool("t_bs", "{\"type\":\"object\",\"properties\":{\"e\":{\"type\":\"string\",\"enum\":[\"x\\\\u0000y\"]}},\"required\":[\"a\\\\u0000b\"]}"), &h_ret), 0, "review 3.8.1: an enum value and a required name holding a backslash register");
+    var bs_miss = _err_result("t_bs", "the result's structuredContent does not match the outputSchema: structuredContent: missing required field: a\\\\u0000b");
+    _expect(r2, "t_bs", "{\"content\":[],\"structuredContent\":{\"a\\u0000b\":1}}", bs_miss, bs_miss, "review 3.8.1: a key holding a NUL does not meet a name holding a backslash");
+    var bs_ok = "{\"content\":[],\"structuredContent\":{\"a\\\\u0000b\":1,\"e\":\"x\\\\u0000y\"}}";
+    _expect(r2, "t_bs", bs_ok, bs_ok, bs_ok, "review 3.8.1: ...as the name and value written with the backslash do");
+    var bs_en = _err_result("t_bs", "the result's structuredContent does not match the outputSchema: structuredContent.e: value '' not in enum");
+    _expect(r2, "t_bs", "{\"content\":[],\"structuredContent\":{\"a\\\\u0000b\":1,\"e\":\"x\\u0000y\"}}", bs_en, bs_en, "review 3.8.1: a value holding a NUL is in no enum");
+    var ibs = vec_new();
+    vec_push(ibs, schema_prop_new("e", "{\"type\":\"string\",\"enum\":[\"x\\\\u0000y\"]}"));
+    dispatcher_register_tool(r2, tool_def_new("t_ibs", "d", schema_new("object", ibs, vec_new())), &h_ret);
+    _ret = "{\"content\":[]}";
+    assert(_has(codec_process_message(_msg("tools/call", "\"name\":\"t_ibs\",\"arguments\":{\"e\":\"x\\u0000y\"}", 0), r2, 0), "not in enum") == 1, "review 3.8.1: an argument holding a NUL is in no enum");
+    assert(_has(codec_process_message(_msg("tools/call", "\"name\":\"t_ibs\",\"arguments\":{\"e\":\"x\\\\u0000y\"}", 0), r2, 0), "not in enum") == 0, "review 3.8.1: ...and the one written with the backslash is");
+
+    # Bounds compared exactly, past 2^62 and between integers.
+    dispatcher_register_tool(r2, _tool("t_big", "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"integer\",\"maximum\":5000000000000000000,\"minimum\":-5000000000000000000},\"f\":{\"type\":\"number\",\"maximum\":1e30,\"minimum\":4.5}}}"), &h_ret);
+    var big_max = _err_result("t_big", "the result's structuredContent does not match the outputSchema: structuredContent.n: greater than maximum");
+    var big_min = _err_result("t_big", "the result's structuredContent does not match the outputSchema: structuredContent.n: less than minimum");
+    _expect(r2, "t_big", "{\"content\":[],\"structuredContent\":{\"n\":6000000000000000000}}", big_max, big_max, "review 3.8.1: a result integer past 2^62 over its maximum");
+    _expect(r2, "t_big", "{\"content\":[],\"structuredContent\":{\"n\":-6000000000000000000}}", big_min, big_min, "review 3.8.1: ...and under its minimum");
+    var big_ok = "{\"content\":[],\"structuredContent\":{\"n\":4999999999999999999,\"f\":1e29}}";
+    _expect(r2, "t_big", big_ok, big_ok, big_ok, "review 3.8.1: ...and inside both, past 2^62, passes");
+    var big_eq = "{\"content\":[],\"structuredContent\":{\"n\":5000000000000000000,\"f\":1e30}}";
+    _expect(r2, "t_big", big_eq, big_eq, big_eq, "review 3.8.1: ...as each bound itself does");
+    var f_max = _err_result("t_big", "the result's structuredContent does not match the outputSchema: structuredContent.f: greater than maximum");
+    _expect(r2, "t_big", "{\"content\":[],\"structuredContent\":{\"f\":1.0000000000000000000000001e30}}", f_max, f_max, "review 3.8.1: a number over its maximum by one part in 10^25");
+    var f_min = _err_result("t_big", "the result's structuredContent does not match the outputSchema: structuredContent.f: less than minimum");
+    _expect(r2, "t_big", "{\"content\":[],\"structuredContent\":{\"f\":4.1}}", f_min, f_min, "review 3.8.1: minimum 4.5 refuses 4.1, which truncation took");
+    var ifr = vec_new();
+    vec_push(ifr, schema_prop_new("i", "{\"type\":\"integer\",\"minimum\":2.5,\"maximum\":7.5}"));
+    dispatcher_register_tool(r2, tool_def_new("t_ifr", "d", schema_new("object", ifr, vec_new())), &h_ret);
+    var ifrc = 0;
+    var ifr_in = vec_new();
+    vec_push(ifr_in, "2"); vec_push(ifr_in, "3"); vec_push(ifr_in, "7"); vec_push(ifr_in, "8"); vec_push(ifr_in, "-0"); vec_push(ifr_in, "3e0");
+    var ifr_want = vec_new();
+    vec_push(ifr_want, 1); vec_push(ifr_want, 0); vec_push(ifr_want, 0); vec_push(ifr_want, 1); vec_push(ifr_want, 1); vec_push(ifr_want, 0);
+    var ifi = 0;
+    while (ifi < vec_len(ifr_in)) {
+        var ifm = codec_process_message(_msg("tools/call", _cat3("\"name\":\"t_ifr\",\"arguments\":{\"i\":", vec_get(ifr_in, ifi), "}"), 0), r2, 0);
+        var refused = 0;
+        if (_has(ifm, "schema violation") == 1) { refused = 1; }
+        if (refused == vec_get(ifr_want, ifi)) { ifrc = ifrc + 1; } else { println(ifm); }
+        ifi = ifi + 1;
+    }
+    assert_eq(ifrc, 6, "review 3.8.1: an integer argument against fractional bounds, each judged exactly");
+    # _sch_num_cmp, against what each pair is.
+    var cmp_a = "0 -0 1e2 100.0 0.05 -1 -2 123456789012345678901234567890 1.5 1.50 2 1e-5 0.00001 -1e100 1e100 7 7.000001 -0.0001 0e5 1E+2";
+    var cmp_b = "0 0 100 1e2 5e-2 -2 -1 123456789012345678901234567891 1.50 1.5 10 0.00001 1e-5 1e100 -1e100 7.000001 7 0 0 99.9";
+    var cmp_w = "0 0 0 0 0 1 -1 -1 0 0 -1 0 0 -1 1 -1 1 -1 0 1";
+    var ca = _words(cmp_a);
+    var cb = _words(cmp_b);
+    var cw = _words(cmp_w);
+    var ci = 0;
+    var cok = 0;
+    while (ci < vec_len(ca)) {
+        var want = _sch_parse_int(vec_get(cw, ci));
+        if (_sch_num_cmp(vec_get(ca, ci), vec_get(cb, ci)) == want) { cok = cok + 1; } else { println(vec_get(ca, ci)); }
+        ci = ci + 1;
+    }
+    assert_eq(cok, vec_len(ca), "review 3.8.1: twenty pairs compared exactly as decimals");
+    assert_eq(_sch_num_cmp("x", "1"), 2, "review 3.8.1: ...and a text that is no number, said so");
+
+    # The key scanner allocates nothing: a helper thread's lookup cannot give back its
+    # handler's arena bytes.
+    var lk = _cat3("{\"x\":1,\"", _rep_s("q", 299), "\\u0071\":2}");
+    var lq300 = _rep_s("q", 300);
+    var lq301 = _rep_s("q", 301);
+    var lq299 = _rep_s("q", 299);
+    var lkm0[16];
+    var lkm1[16];
+    bote_req_mark(&lkm0);
+    var lh0 = alloc_used();
+    var lfound = jsonx_has(lk, lq300);
+    var lmiss = jsonx_has(lk, lq301);
+    var lmiss2 = jsonx_has(lk, lq299);
+    bote_req_mark(&lkm1);
+    assert(lfound == 1 && lmiss == 0 && lmiss2 == 0, "review 3.8.1: a 300-byte key with an escape is found by what it decodes to, and only that");
+    assert(load64(&lkm0) == load64(&lkm1) && load64(&lkm0 + 8) == load64(&lkm1 + 8) && alloc_used() == lh0, "review 3.8.1: ...with nothing taken from the arena or the heap");
+    assert_eq(_jx_dec_eq("a\\u00e9\\ud83d\\ude00\\n", 21, "a\xc3\xa9\xf0\x9f\x98\x80\n", 8), 1, "review 3.8.1: decoding as it compares, each kind of escape");
+    assert_eq(_jx_dec_eq("a\\u00e9", 7, "a\xc3\xa9x", 4), 0, "review 3.8.1: ...a key shorter than the name");
+    # The scanner reads a key of 256 bytes or more as it reads a short one: 2,000 keys of
+    # random escapes, short and long, each found by what _jx_unescape_into makes of it,
+    # and not by that name one byte changed.
+    var frags = vec_new();
+    vec_push(frags, "a"); vec_push(frags, "\\n"); vec_push(frags, "\\u00e9"); vec_push(frags, "\\ud83d\\ude00");
+    vec_push(frags, "\\ud800"); vec_push(frags, "\\udc00"); vec_push(frags, "\\u12"); vec_push(frags, "\\x");
+    vec_push(frags, "\\\\"); vec_push(frags, "\\\""); vec_push(frags, "\xc3\xa9"); vec_push(frags, "\\u0041"); vec_push(frags, "\\/");
+    var seed = 12345;
+    var round = 0;
+    var agree = 0;
+    var tried = 0;
+    while (round < 2000) {
+        var kb = str_builder_new();
+        if ((round & 1) == 1) { str_builder_add_cstr(kb, _rep_s("z", 256)); }
+        seed = (seed * 1103515245 + 12345) & 2147483647;
+        var nf = seed % 40;
+        var fi = 0;
+        while (fi < nf) {
+            seed = (seed * 1103515245 + 12345) & 2147483647;
+            str_builder_add_cstr(kb, vec_get(frags, seed % vec_len(frags)));
+            fi = fi + 1;
+        }
+        var key = str_data(str_builder_build(kb));
+        var kl = strlen(key);
+        var dec = alloc(kl + 1);
+        var dn = _jx_unescape_into(key, kl, dec);
+        if (dn > 0 && strlen(dec) == dn) {
+            tried = tried + 1;
+            var obj = _cat3("{\"pre\":0,\"", key, "\":1}");
+            var ok = 0;
+            if (_jx_find_value_pos(obj, strlen(obj), dec) > 0) { ok = 1; }
+            var off = _cat(dec, "");
+            store8(off + dn - 1, load8(off + dn - 1) ^ 1);
+            if (load8(off + dn - 1) != 0 && _jx_find_value_pos(obj, strlen(obj), off) > 0) { ok = 0; }
+            if (_jx_dec_eq(key, kl, dec, dn) != 1) { ok = 0; }
+            agree = agree + ok;
+        }
+        round = round + 1;
+    }
+    assert(tried > 1500 && agree == tried, "review 3.8.1: 2,000 random keys, short and long, found by what they decode to and only that");
+    assert_eq(_jx_dec_eq("a\\u00e9x", 8, "a\xc3\xa9", 3), 0, "review 3.8.1: ...a key longer than the name");
+    assert_eq(_jx_dec_eq("a\\u00e9", 7, "a\xc3\xa8", 3), 0, "review 3.8.1: ...a key one byte off in an escape");
+
+    # Keys a client reads another way: bytes that are no UTF-8, a lone surrogate.
+    var tw2 = _err_result("t_weather", "the result's structuredContent names a member twice in one object, or one a client would read another way");
+    _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2,\"a\xff\":5}}", tw2, tw2, "review 3.8.1: a key that is no UTF-8 is refused");
+    _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2,\"a\\ud800\":5}}", tw2, tw2, "review 3.8.1: ...and one with a lone surrogate");
+    _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2,\"x\":{\"\\udc00\":5}}}", tw2, tw2, "review 3.8.1: ...a lone low one, deeper");
+    var pair_ok = "{\"content\":[],\"structuredContent\":{\"temperature\":1,\"conditions\":\"c\",\"humidity\":2,\"\\ud83d\\ude00\":5,\"\xc3\xa9\":6,\"\\\\ud800\":7}}";
+    _expect(d, "t_weather", pair_ok, pair_ok, pair_ok, "review 3.8.1: ...a pair, UTF-8 and an escaped backslash pass");
+    assert_eq(_jx_repeats_a(default_alloc(), "{\"\xe0\x80\x80\":1}", 0), 1, "review 3.8.1: an overlong form is no UTF-8");
+    assert_eq(_jx_repeats_a(default_alloc(), "{\"\xc3\":1}", 0), 1, "review 3.8.1: ...nor a sequence cut short");
+
+    # The repeats walk keeps the keys only, and a large object costs a look per key.
+    var deep = str_builder_new();
+    var dk = 0;
+    while (dk < 62) { str_builder_add_cstr(deep, "{\"k\":"); dk = dk + 1; }
+    str_builder_add_cstr(deep, "\"");
+    str_builder_add_cstr(deep, _rep_s("v", 60000));
+    str_builder_add_cstr(deep, "\"");
+    dk = 0;
+    while (dk < 62) { str_builder_add_cstr(deep, "}"); dk = dk + 1; }
+    var deep_s = str_data(str_builder_build(deep));
+    var da = bote_req_arena_new();
+    var db0 = bote_req_arena_bytes(da);
+    assert_eq(_jx_repeats_a(da, deep_s, 0), 0, "review 3.8.1: 60 KB nested 62 deep repeats nothing");
+    assert_eq(bote_req_arena_bytes(da), db0, "review 3.8.1: ...and takes no chunk past the first (it took 4 MB at 3.8.1)");
+    var wide = str_builder_new();
+    str_builder_add_cstr(wide, "{");
+    dk = 0;
+    while (dk < 8000) {
+        if (dk > 0) { str_builder_add_cstr(wide, ","); }
+        str_builder_add_cstr(wide, "\"k");
+        str_builder_add_int(wide, dk);
+        str_builder_add_cstr(wide, "\":1");
+        dk = dk + 1;
+    }
+    var wide_one = str_data(str_builder_build(wide));
+    assert_eq(_jx_repeats_a(da, _cat(wide_one, "}"), 0), 0, "review 3.8.1: eight thousand keys, none twice");
+    assert_eq(_jx_repeats_a(da, _cat(wide_one, ",\"k\\u0037999\":2}"), 0), 1, "review 3.8.1: ...and the last spelled again, found");
+    assert_eq(_jx_repeats_a(da, "[{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5,\"f\":6,\"g\":7,\"h\":8,\"i\":9,\"a\":0}]", 0), 1, "review 3.8.1: ...past eight keys, through the table");
+    assert_eq(_jx_repeats_a(da, "{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5,\"f\":6,\"g\":7,\"a\":0}", 0), 1, "review 3.8.1: ...at eight, pair by pair");
+    assert_eq(_jx_repeats_a(da, "{\"\":1,\"\":2}", 0), 1, "review 3.8.1: ...two empty keys");
+
+    # What registration warns of: what the official client judges and bote does not.
+    _lc_begin();
+    dispatcher_register_tool(r2, _tool("t_w7", "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"m\":{\"type\":\"string\",\"format\":\"email\"},\"a\":{\"type\":\"array\",\"items\":[{\"type\":\"string\"}],\"additionalItems\":false},\"o\":{\"type\":\"object\",\"dependencies\":{\"x\":[\"y\"]}}}}"), &h_ret);
+    _lc_end();
+    assert(_lc_find("property=outputSchema.m keyword=format") != 0, "review 3.8.1: warn: format");
+    assert(_lc_find("property=outputSchema.a keyword=\"items as an array\"") != 0, "review 3.8.1: warn: an array items");
+    assert(_lc_find("property=outputSchema.a keyword=additionalItems") != 0, "review 3.8.1: warn: additionalItems");
+    assert(_lc_find("property=outputSchema.o keyword=dependencies") != 0, "review 3.8.1: warn: dependencies");
+
+    # A list beside a registration reads each display fragment once: they are stored under
+    # the registries' lock, so this definition, registered again, keeps its first one
+    # until the write.
+    var rt = tool_def_with_title(_tool("t_rt", "{\"type\":\"object\"}"), "One");
+    dispatcher_register_tool(r2, rt, &h_ret);
+    var rt_f0 = tool_def_display(rt);
+    var stg[48];
+    tool_def_with_title(rt, "Two");
+    _registry_prepare(rt, &stg);
+    assert(tool_def_display(rt) == rt_f0, "review 3.8.1: preparing a registration leaves the listed fragment be");
+    dispatcher_register_tool(r2, rt, &h_ret);
+    assert(_has(tool_def_display(rt), "Two") == 1, "review 3.8.1: ...and the registration stores the new one");
 
     return assert_summary();
 }

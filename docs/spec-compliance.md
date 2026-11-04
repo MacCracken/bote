@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.8.1 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.8.2 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
 > ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not. Every other table here is against 2025-11-25.
 
@@ -75,9 +75,12 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | `Mcp-Param-{Name}`, for a tool that declares `x-mcp-header` | ✅ (3.5.2) a value in the body needs its header, decoded and equal, integers compared by value and booleans as `true` / `false`. Missing, malformed, mismatched or undecodable is `400` + `-32020`. A header with no value in the body is refused too, which the spec's table does not ask for and no conforming client meets. A header the tool does not declare is ignored |
 | An `x-mcp-header` that breaks the rules makes the tool invalid | ✅ (3.5.2) registration refuses it, since a client would drop the tool: an empty or non-token name, a type other than string, integer or boolean, a repeat ignoring case, or anywhere but a chain of `properties` keys |
 | Integers mirrored in a header stay in the safe range | ✅ (3.5.2) a value past ±(2^53 − 1) is refused with `-32020`, even with its header |
-| `-32021` for a missing client capability | ⏳ no request bote serves needs one yet; capabilities are required and not otherwise read |
+| `-32021` for a missing client capability | ✅ (3.8.2) a handler's InputRequiredResult that needs a capability the request's `clientCapabilities` does not declare is answered `-32021`, with `data.requiredCapabilities` in the ClientCapabilities shape, every missing one merged: `elicitation.form` (a bare `elicitation: {}` declares it), `elicitation.url`, `sampling`, `sampling.tools`, `roots`. HTTP `400` |
+| Multi round-trip requests: `InputRequiredResult` on `tools/call`, `prompts/get` and `resources/read` | ✅ (3.8.2) `resultType: "input_required"`, `inputRequests` keyed by the server, `requestState`, or both, the retry a new request with `inputResponses` and `requestState` beside the same params. Each request is `elicitation/create` (form or url), `sampling/createMessage` or `roots/list`, and anything else, an unknown mode, none of either, a key twice, is `-32603`. Never a cache hint on one. On an older revision there is no way to ask: a tool asking is a tool error, a prompt or resource `-32603`. `completion/complete` may not ask (`-32603`). `inputResponses` and `requestState` mean nothing on any other method |
+| `requestState` is attacker-controlled: integrity-protected, refused when it fails, bound to the principal, the request and a short expiry | ✅ (3.8.2) every state a handler gives is sealed and every one a client brings is opened, by the dispatcher's sealer, before any handler runs; one that does not open is `-32602`. The full bundle's sealer (`src/state_seal.cyr`) is HMAC-SHA256 over a domain tag, the method, its target (the tool's or prompt's name, the resource's URI), the token the request presented, an expiry (600 s by default) and the payload. With no sealer a state is refused both ways. A state is not single-use, as the spec allows: a handler that must spend one once keeps that record |
+| `inputResponses` the client sends | ✅ (3.8.2) an object of objects, else `-32602` before any handler; a handler reads them with `bote_input_response_a` / `bote_input_accepted_a`, by the keys it asked under |
 | A third-party client | ✅ (3.5.3) `@modelcontextprotocol/client` 2.4.0 connects and uses every capability bote has, 410 checks on `http`, `streamable` and stdio in both eras and `bridge` in the modern one, and (3.6.0 to 3.6.3) its whole OAuth flow, with HS256, RS256 and ES256 tokens from a mock authorization server, and a step-up from a 403 it makes on its own. `./scripts/conformance.sh` repeats it |
-| `@modelcontextprotocol/conformance`, by its frozen requirement list | ⏳ (3.5.3) **26 of 37** on 2026-07-28, **22 of 30** on 2025-11-25 (`tools-call-with-progress` since 3.7.6), the same on `http` and `streamable`. What fails is a feature bote lacks: `InputRequiredResult`, sampling and elicitation, logging, subscriptions. `tests/fixtures/conformance-expected-<revision>.yaml` lists each, and why |
+| `@modelcontextprotocol/conformance`, by its frozen requirement list | ✅ on 2026-07-28: (3.8.2) **all 39 scenarios it scores**, the 14 `input-required-*` and every check of `server-stateless` among them; the list was given here as 26 of 37 from 3.5.3, and holds 39. Unscored, and failing: the optional tasks extension and `json-schema-2020-12`. ⏳ **22 of 30** on 2025-11-25 (`tools-call-with-progress` since 3.7.6), the same on `http` and `streamable`. What fails there is a feature bote lacks: sampling and elicitation as server-to-client requests, logging, subscriptions. `tests/fixtures/conformance-expected-<revision>.yaml` lists each, and why |
 | `subscriptions/listen`: each kind opt-in, never one not asked for, the honored subset acknowledged first in `notifications/subscriptions/acknowledged`, every message stamped with `io.modelcontextprotocol/subscriptionId`, keepalives | ✅ (3.7.2) on `http`, `bridge` and `streamable`, for `toolsListChanged`, `promptsListChanged` and `resourcesListChanged`, each honored only where that list exists. A filter that is not one is `-32602`; past `BOTE_LISTEN_MAX` streams, `-32603` "Subscription limit reached", the TypeScript SDK's words. With nothing honored the stream ends at once with its result, as the SDK does. A client that closes, sends anything, or stops reading loses its stream. `: keepalive` every `BOTE_LISTEN_KEEPALIVE_MS` (15 s, the SDK's) |
 | `resourceSubscriptions` and `notifications/resources/updated` | ✅ (3.7.4) on every transport, where the dispatcher has resources: the acknowledgement lists the URIs honored, decoded and escaped again, once each, at most 32 in 4 KB, none empty or holding a NUL or past 1 KB. An embedder says a resource changed with `dispatcher_resource_updated(d, uri)`, from any thread, and every subscription to that URI, or to one it falls under (followed by `/`, `?` or `#`, or anything after a trailing `/`), is told, naming the URI that changed, as the spec allows. `server/discover` advertises `resources.subscribe` where listen is carried. (3.7.5) A resource's required scopes hold, as the Resources page asks ("Resource permissions SHOULD be checked before operations"): a listen made with a token is honored no URI the token may not read, judged by what would serve it as `resources/read` judges it, and told of an update to a URI that requires a scope only when it holds that URI exactly; a stream keeps no token, so not through a prefix |
 | `subscriptions/listen` on stdio, unix and WebSocket | ✅ (3.7.3) the connection is the stream: the acknowledgement is the listen's first message on it, the changes go out between the replies to other requests, from whatever thread made them, and `notifications/cancelled` naming the listen's id ends it, matched byte for byte. An id already open is `-32600`; past `BOTE_LISTEN_MAX` a connection's listens get `-32603`. With nothing honored, the acknowledgement and then the result. A listen in a batch is `-32601`: 2026-07-28 has no batches. On WebSocket the token is judged again before a change goes out, as before a frame is served |
@@ -294,7 +297,7 @@ registered by default in the binaries.
 
 ---
 
-## Test Coverage (bote 3.8.0)
+## Test Coverage (bote 3.8.2)
 
 | Scope | Count | Source |
 |---|---|---|
@@ -312,9 +315,10 @@ registered by default in the binaries.
 | `libro_tools` incl. tampered-chain decode + populated-chain proof + CallToolResults, the retention guard, RFC 3339 timestamps, schemas, integers as validated, audit identity | **73** | `tests/bote_libro_tools.tcyr` |
 | `subscriptions/listen`: the filter, and real streams on the three HTTP handlers | **224** | `tests/bote_listen.tcyr` (3.7.2) |
 | `subscriptions/listen` where the connection is the stream: stdio, unix, WebSocket | **192** | `tests/bote_listen_line.tcyr` (3.7.3) |
-| Titles, icons, serverInfo's details and instructions: the checks, every list's bytes, the heap | **100** | `tests/bote_display.tcyr` (3.8.1) |
+| Titles, icons, serverInfo's details and instructions: the checks, every list's bytes, the heap | **107** | `tests/bote_display.tcyr` (3.8.1) |
 | Operational logging over sakshi | **50** | `tests/bote_log.tcyr` |
-| A tool's outputSchema: registration, the 2025-11-25 form, `tools/list`, each result judged and shaped on both revisions, the audit, the heap | **179** | `tests/bote_output.tcyr` (3.8.0) |
+| A tool's outputSchema: registration, the 2025-11-25 form, `tools/list`, each result judged and shaped on both revisions, the audit, the heap | **240** | `tests/bote_output.tcyr` (3.8.0) |
+| Multi round-trip requests: what a handler reads and returns, `-32021`, each refusal, the sealed state and its sealer, every method and revision, the heap | **102** | `tests/bote_input.tcyr` (3.8.2) |
 | RFC 7636 PKCE-S256 | **17** | `tests/bote_pkce.tcyr` |
 | Progress on a request's own stream: the writer, stdio, unix, WebSocket, HTTP's SSE response | **110** | `tests/bote_progress.tcyr` (3.7.6) |
 | Sandbox runner adapter | **13** | `tests/bote_sandbox.tcyr` |
@@ -323,8 +327,8 @@ registered by default in the binaries.
 | Unix transport — sockaddr, accept-error policy, backoff, deadlines, closed-peer write, overlong lines, socket-path refusals | **76** | `tests/bote_transport_unix.tcyr` |
 | `web_tools` — scheme guard, SSRF guard (URL and resolved address), HTML stripper, entities, schemas and annotations, outbound deadline, a request in a child | **88** | `tests/bote_web_tools.tcyr` |
 | WebSocket config + wire-up + the send-deadline drop + the upgrade's version check + scopes per frame + the token judged again | **94** | `tests/bote_ws.tcyr` |
-| **Total assertions** | **5510** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
-| Hot-path benchmarks | **42** | `tests/bote.bcyr` |
+| **Total assertions** | **5680** | + `bote_core_only_smoke.tcyr` (drift guard over `dist/bote-core.cyr`, exit-code driven); all of them also run under `qemu-aarch64` |
+| Hot-path benchmarks | **44** | `tests/bote.bcyr` |
 | Fuzz harnesses | **15** | `fuzz/*.fcyr` (in CI since 3.3.8) |
 | End-to-end transport round trips | 6 (stdio, HTTP, Unix, bridge, streamable, WS) | CI's "Transport smoke" step plus a per-release stdio probe on the built binary |
 

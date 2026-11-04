@@ -49,6 +49,7 @@ modules = [
     "src/conn.cyr",
     "src/fetch.cyr",
     "src/jwks.cyr",
+    "src/state_seal.cyr",
     "src/http_era.cyr",
     "src/oauth_metadata.cyr",
     "src/listen.cyr",

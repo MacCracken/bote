@@ -259,10 +259,12 @@ fn resource_registry_templates(r) { return load64(r + 24); }
 fn resource_registry_register(r, resource_def, handler_fp) {
     if (bote_scope_list_ok(resource_def_required_scopes(resource_def)) == 0) { return 0 - 1; }
     if (bote_display_check(resource_def_title(resource_def), resource_def_icons(resource_def)) != 0) { return 0 - 1; }
-    store64(resource_def + 56, _bote_display_json(resource_def_title(resource_def), resource_def_icons(resource_def)));
+    var disp = _bote_display_json(resource_def_title(resource_def), resource_def_icons(resource_def));
     var uri = resource_def_uri(resource_def);
-    # Under the registries' lock (3.7.1, src/protocol.cyr), as every function below.
+    # Under the registries' lock (3.7.1, src/protocol.cyr), as every function below; the
+    # fragment too (3.8.2), which a list reads in two passes.
     bote_reg_write();
+    store64(resource_def + 56, disp);
     var entries = resource_registry_entries(r);
     if (map_has(entries, uri) == 0) {
         vec_push(resource_registry_uris(r), uri);
@@ -304,8 +306,9 @@ fn resource_registry_handler(r, uri) {
 fn resource_registry_register_template(r, template, handler_fp) {
     if (bote_scope_list_ok(resource_template_required_scopes(template)) == 0) { return 0 - 1; }
     if (bote_display_check(resource_template_title(template), resource_template_icons(template)) != 0) { return 0 - 1; }
-    store64(template + 64, _bote_display_json(resource_template_title(template), resource_template_icons(template)));
+    var disp = _bote_display_json(resource_template_title(template), resource_template_icons(template));
     bote_reg_write();
+    store64(template + 64, disp);
     store64(template + 32, handler_fp);
     var ts = resource_registry_templates(r);
     var i = 0;

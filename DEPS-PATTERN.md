@@ -269,6 +269,20 @@ that makes them with their `_new` functions and reads them through their getters
 unaffected. Set a definition's title and icons before registering it: what is sent is what
 passed the check then.
 
+Multi round-trip requests (3.8.2) are the core's: the builders (`bote_input_required_new_a`,
+`bote_input_elicit`, `_elicit_url`, `_sample`, `_roots`, `_state`, `bote_input_required_json`),
+what a handler reads (`bote_input_possible`, `bote_client_has`, `bote_caps_have`,
+`bote_input_responses_a`, `bote_input_response_a`, `bote_input_accepted_a`,
+`bote_request_state`) and `dispatcher_set_state_sealer(d, seal_fp, open_fp, ctx)`. The
+dispatcher reads a request's client capabilities and opens its state itself, so a transport
+has nothing to wire. A consumer whose handlers return state must set a sealer: with none, a
+state is refused both ways. The HMAC sealer, `bote_state_hmac_new` /
+`dispatcher_with_state_hmac`, is in the full bundle (`src/state_seal.cyr`, sigil's HMAC);
+a core consumer can wire it from the full bundle's source or bring its own, `seal_fp(ctx, a,
+binding, payload)` and `open_fp(ctx, a, binding, state)` each a cstr on `a` or 0. The
+request state grows to 160 bytes and the Dispatcher to 200, each appended at its end, and a
+compiled PropertyDef to 96. Code that makes them with their `_new` functions is unaffected.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`

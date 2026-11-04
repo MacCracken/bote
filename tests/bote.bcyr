@@ -34,6 +34,7 @@ include "src/stream.cyr"
 include "src/session.cyr"
 include "src/auth.cyr"
 include "src/jwt.cyr"
+include "src/state_seal.cyr"
 include "tests/fixtures/jwt_vectors.cyr"
 include "src/http_era.cyr"
 include "src/oauth_metadata.cyr"
@@ -87,6 +88,10 @@ fn h_structured_b(args, claims) { return "{\"content\":[{\"type\":\"text\",\"tex
 var _b_output_dispatcher = 0;
 var _b_call_structured_req = 0;
 var _b_call_output_req = 0;
+# 3.8.2: a round that asks, its state sealed, and the retry that brings the answer.
+var _b_input_dispatcher = 0;
+var _b_input_ask = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{\"elicitation\":{}}},\"name\":\"svc_confirm\",\"arguments\":{}}}";
+var _b_input_retry = 0;
 var _b_era_legacy = "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2025-11-25\r\nMCP-Session-Id: abc\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}}";
 var _b_era_legacy_at = 0;
 var _b_era_modern = "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: svc_echo\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}},\"name\":\"svc_echo\",\"arguments\":{\"msg\":\"hi\"}}}";
@@ -172,6 +177,18 @@ fn b_dispatch_tools_call_result() {
 fn b_dispatch_tools_call_structured() {
     return dispatcher_dispatch(_b_output_dispatcher, _b_call_structured_req, 0);
 }
+
+fn h_confirm_b(args, claims) {
+    var a = bote_req_alloc();
+    if (bote_input_accepted_a(a, "confirm") != 0) { return "{\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}"; }
+    var ir = bote_input_required_new_a(a);
+    bote_input_elicit(ir, "confirm", "Deploy?", "{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\"}}}");
+    bote_input_state(ir, "step=confirm");
+    return bote_input_required_json(ir);
+}
+
+fn b_input_required_sealed() { return codec_process_message_a(bote_req_begin(), _b_input_ask, _b_input_dispatcher, 0); }
+fn b_input_retry_open() { return codec_process_message_a(bote_req_begin(), _b_input_retry, _b_input_dispatcher, 0); }
 
 fn b_dispatch_tools_call_output() {
     return dispatcher_dispatch(_b_output_dispatcher, _b_call_output_req, 0);
@@ -345,6 +362,19 @@ fn _bench_setup() {
     dispatcher_handle(_b_output_dispatcher, "svc_weather", &h_structured_b);
     _b_call_structured_req = req_with_params(req_new("3", "tools/call"), "{\"name\":\"svc_structured\",\"arguments\":{}}");
     _b_call_output_req = req_with_params(req_new("3", "tools/call"), "{\"name\":\"svc_weather\",\"arguments\":{}}");
+    _b_input_dispatcher = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(_b_input_dispatcher, tool_def_new("svc_confirm", "asks first", schema_new("object", 0, vec_new())), &h_confirm_b);
+    var bkey[32];
+    var bk = 0;
+    while (bk < 32) { store8(&bkey + bk, bk + 1); bk = bk + 1; }
+    dispatcher_with_state_hmac(_b_input_dispatcher, bote_state_hmac_new(&bkey, 32, 600));
+    var bask = codec_process_message(_b_input_ask, _b_input_dispatcher, 0);
+    var bst = jsonx_get_str_dec_a(default_alloc(), jsonx_get_raw(bask, "result"), "requestState");
+    var brb = str_builder_new();
+    str_builder_add_cstr(brb, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{\"elicitation\":{}}},\"name\":\"svc_confirm\",\"arguments\":{},\"inputResponses\":{\"confirm\":{\"action\":\"accept\",\"content\":{\"ok\":true}}},\"requestState\":\"");
+    str_builder_add_cstr(brb, bst);
+    str_builder_add_cstr(brb, "\"}}");
+    _b_input_retry = str_data(str_builder_build(brb));
 
     _b_era_legacy_at = strstr(_b_era_legacy, "\r\n\r\n") + 4;
     _b_era_modern_at = strstr(_b_era_modern, "\r\n\r\n") + 4;
@@ -606,6 +636,12 @@ fn main() {
     var b42 = bench_new("dispatch_tools_call_output");
     bench_run(b42, &b_dispatch_tools_call_output, 10000);
     vec_push(benches, b42);
+    var b43 = bench_new("input_required_sealed");
+    bench_run(b43, &b_input_required_sealed, 10000);
+    vec_push(benches, b43);
+    var b44 = bench_new("input_retry_open");
+    bench_run(b44, &b_input_retry_open, 10000);
+    vec_push(benches, b44);
     bote_req_begin();
     bote_conn_arm();
     thread_join(thread_create(&_b_thread_nop, 0));

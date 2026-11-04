@@ -2,24 +2,8 @@
 # @modelcontextprotocol/conformance. scripts/conformance.sh fails on anything else that
 # fails, and on anything here that passes. Each entry is a feature bote lacks.
 server:
-  # Multi round-trip requests: InputRequiredResult needs a handler entry beside the 2.0
-  # ABI, which sees `arguments` and not `inputResponses`. Roadmap 3.8.x.
-  - input-required-result-basic-elicitation
-  - input-required-result-basic-list-roots
-  - input-required-result-basic-sampling
-  - input-required-result-capability-check
-  - input-required-result-ignore-extra-params
-  - input-required-result-missing-input-response
-  - input-required-result-multi-round
-  - input-required-result-multiple-input-requests
-  - input-required-result-non-tool-request
-  - input-required-result-request-state
-  - input-required-result-result-type
-  - input-required-result-tampered-state
-  # Its stateless checks pass. Three need diagnostic tools bote cannot back:
-  # test_missing_capability needs -32021 and test_streaming_elicitation needs the above.
-  - server-stateless
-  # Not scored from here down.
+  # Every scenario the suite scores passes (3.8.2, with multi round-trip requests). Not
+  # scored from here down.
   # inputSchema cannot carry root keywords such as $schema, $defs or
   # additionalProperties, because ToolSchema is type, properties and required. Roadmap 3.8.x.
   - json-schema-2020-12

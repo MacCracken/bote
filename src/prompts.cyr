@@ -79,33 +79,36 @@ fn prompt_def_title(p) { return load64(p + 32); }
 fn prompt_def_icons(p) { return load64(p + 40); }
 fn prompt_def_display(p) { return load64(p + 48); }
 
-# Why the prompt's titles and icons, its own and its arguments', cannot be sent, or 0.
+# Why the prompt's title and icons cannot be sent, or 0. An argument has a title only,
+# which any string may be (3.8.2).
 fn prompt_display_check(p) {
-    var why = bote_display_check(prompt_def_title(p), prompt_def_icons(p));
-    if (why != 0) { return why; }
-    var args = prompt_def_arguments(p);
-    if (args != 0) {
-        var i = 0;
-        while (i < vec_len(args)) {
-            var t = prompt_arg_title(vec_get(args, i));
-            if (t != 0 && strlen(t) == 0) { return "a title must not be empty"; }
-            i = i + 1;
-        }
-    }
-    return 0;
+    return bote_display_check(prompt_def_title(p), prompt_def_icons(p));
 }
 
 # The prompt's and its arguments' title and icons as prompts/list sends them, kept.
 fn _prompt_display_build(p) {
-    store64(p + 48, _bote_display_json(prompt_def_title(p), prompt_def_icons(p)));
+    var frags = vec_new();
+    vec_push(frags, _bote_display_json(prompt_def_title(p), prompt_def_icons(p)));
     var args = prompt_def_arguments(p);
     if (args != 0) {
         var i = 0;
         while (i < vec_len(args)) {
-            var a = vec_get(args, i);
-            store64(a + 32, _bote_display_json(prompt_arg_title(a), 0));
+            vec_push(frags, _bote_display_json(prompt_arg_title(vec_get(args, i)), 0));
             i = i + 1;
         }
+    }
+    return frags;
+}
+
+# The fragments _prompt_display_build made, stored, with the registries' lock held to
+# write (3.8.2).
+fn _prompt_display_store(p, frags) {
+    store64(p + 48, vec_get(frags, 0));
+    var args = prompt_def_arguments(p);
+    var i = 0;
+    while (args != 0 && i < vec_len(args) && i + 1 < vec_len(frags)) {
+        store64(vec_get(args, i) + 32, vec_get(frags, i + 1));
+        i = i + 1;
     }
     return 0;
 }
@@ -146,10 +149,12 @@ fn prompt_registry_handlers(r) { return load64(r + 16); }
 fn prompt_registry_register(r, prompt_def, handler_fp) {
     if (bote_scope_list_ok(prompt_def_required_scopes(prompt_def)) == 0) { return 0 - 1; }
     if (prompt_display_check(prompt_def) != 0) { return 0 - 1; }
-    _prompt_display_build(prompt_def);
+    var frags = _prompt_display_build(prompt_def);
     var name = prompt_def_name(prompt_def);
-    # Under the registries' lock (3.7.1, src/protocol.cyr), as every function below.
+    # Under the registries' lock (3.7.1, src/protocol.cyr), as every function below; the
+    # fragments too (3.8.2), which a list reads in two passes.
     bote_reg_write();
+    _prompt_display_store(prompt_def, frags);
     var entries = prompt_registry_entries(r);
     if (map_has(entries, name) == 0) {
         vec_push(prompt_registry_names(r), name);

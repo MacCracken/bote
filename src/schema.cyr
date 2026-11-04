@@ -24,7 +24,7 @@ enum SchemaTypeTag {
 }
 
 # ================================================================
-# PropertyDef (80 bytes):
+# PropertyDef (96 bytes):
 #   +0  type_tag         i64
 #   +8  description      cstr or 0
 #   +16 enum_values      vec of cstrs (string only) or 0
@@ -35,10 +35,12 @@ enum SchemaTypeTag {
 #   +56 maximum          i64
 #   +64 items            PropertyDef ptr (array element type) or 0
 #   +72 nested_compiled  CompiledSchema ptr (object nested schema) or 0
+#   +80 minimum_raw      the minimum as written (a JSON number), or 0 (3.8.2)
+#   +88 maximum_raw      the maximum as written, or 0
 # ================================================================
 
 fn prop_new(tag) {
-    var p = alloc(80);
+    var p = alloc(96);
     store64(p, tag);
     store64(p + 8, 0);
     store64(p + 16, 0);
@@ -49,6 +51,8 @@ fn prop_new(tag) {
     store64(p + 56, 0);
     store64(p + 64, 0);
     store64(p + 72, 0);
+    store64(p + 80, 0);
+    store64(p + 88, 0);
     return p;
 }
 
@@ -62,6 +66,8 @@ fn prop_has_max(p) { return load64(p + 48); }
 fn prop_max(p) { return load64(p + 56); }
 fn prop_items(p) { return load64(p + 64); }
 fn prop_nested(p) { return load64(p + 72); }
+fn prop_min_raw(p) { return load64(p + 80); }
+fn prop_max_raw(p) { return load64(p + 88); }
 
 # ================================================================
 # CompiledSchema (24 bytes):
@@ -146,10 +152,9 @@ fn _sch_is_digit(c) {
 # only became reachable in production once schemas were compiled at
 # registration (3.4.8).
 #
-# Truncating toward zero never makes a valid value fail a bound, because the
-# rounding is monotonic. A fractional bound can therefore only let a value
-# slightly outside it through: `minimum` 4.5 admits 4.1. Exact decimal
-# comparison is not implemented.
+# A bound is compared exactly, from the number as written (_sch_num_cmp, 3.8.2); the
+# truncated value is what a handler reading a number gets, and what a bound built without
+# its text is compared with.
 fn _sch_num_parse(v, val_out) {
     store64(val_out, 0);
     if (v == 0) { return 0; }
@@ -221,6 +226,133 @@ fn _sch_num_parse(v, val_out) {
 }
 
 
+# The JSON number at the start of v as a sign and a significand times a power of ten, for
+# _sch_num_cmp: o+0 the sign (1, -1, or 0 for zero), o+8 the exponent E such that the
+# value is 0.d1d2... x 10^E, o+16 and o+24 where the integer digits start and how many,
+# o+32 and o+40 the fraction's, o+48 the index of the first significant digit among
+# those, o+56 one past the last. 0 when v does not begin with a number, else 1. The
+# grammar is _sch_num_parse's; an exponent past 100000 is held at 100000.
+fn _sch_num_norm(v, o) {
+    if (v == 0) { return 0; }
+    var i = 0;
+    while (load8(v + i) == 32 || load8(v + i) == 9 || load8(v + i) == 10 || load8(v + i) == 13) { i = i + 1; }
+    var sign = 1;
+    if (load8(v + i) == 45) { sign = 0 - 1; i = i + 1; }
+    if (_sch_is_digit(load8(v + i)) == 0) { return 0; }
+    var istart = i;
+    if (load8(v + i) == 48) { i = i + 1; }
+    else { while (_sch_is_digit(load8(v + i)) == 1) { i = i + 1; } }
+    var ilen = i - istart;
+    var fstart = i;
+    var flen = 0;
+    if (load8(v + i) == 46) {
+        i = i + 1;
+        if (_sch_is_digit(load8(v + i)) == 0) { return 0; }
+        fstart = i;
+        while (_sch_is_digit(load8(v + i)) == 1) { i = i + 1; }
+        flen = i - fstart;
+    }
+    var e = 0;
+    if (load8(v + i) == 101 || load8(v + i) == 69) {
+        i = i + 1;
+        var eneg = 0;
+        if (load8(v + i) == 43) { i = i + 1; }
+        elif (load8(v + i) == 45) { eneg = 1; i = i + 1; }
+        if (_sch_is_digit(load8(v + i)) == 0) { return 0; }
+        while (_sch_is_digit(load8(v + i)) == 1) {
+            if (e < 100000) { e = e * 10 + (load8(v + i) - 48); }
+            i = i + 1;
+        }
+        if (eneg == 1) { e = 0 - e; }
+    }
+    store64(o + 16, istart);
+    store64(o + 24, ilen);
+    store64(o + 32, fstart);
+    store64(o + 40, flen);
+    var first = 0 - 1;
+    var last = 0;
+    var k = 0;
+    while (k < ilen + flen) {
+        if (_sch_num_digit(v, o, k) != 48) {
+            if (first < 0) { first = k; }
+            last = k + 1;
+        }
+        k = k + 1;
+    }
+    if (first < 0) {
+        store64(o, 0);
+        return 1;
+    }
+    store64(o, sign);
+    store64(o + 8, ilen - first + e);
+    store64(o + 48, first);
+    store64(o + 56, last);
+    return 1;
+}
+
+# The k-th digit of the number _sch_num_norm read into `o`, integer digits then fraction.
+fn _sch_num_digit(v, o, k) {
+    if (k < load64(o + 24)) { return load8(v + load64(o + 16) + k); }
+    return load8(v + load64(o + 32) + k - load64(o + 24));
+}
+
+# The JSON numbers at the start of `a` and `b` compared exactly, as decimals: -1, 0 or 1,
+# or 2 when either is no number (3.8.2). Through 3.8.1 a bound was compared as its value
+# truncated toward zero and held at SCH_NUM_SAT, so `minimum` 4.5 took 4.1, and a result's
+# 6e18 met `maximum` 5e18, each held at 2^62.
+fn _sch_num_cmp(a, b) {
+    var x[64];
+    var y[64];
+    if (_sch_num_norm(a, &x) == 0 || _sch_num_norm(b, &y) == 0) { return 2; }
+    var sx = load64(&x);
+    var sy = load64(&y);
+    if (sx != sy) {
+        if (sx < sy) { return 0 - 1; }
+        return 1;
+    }
+    if (sx == 0) { return 0; }
+    # The same sign: the larger magnitude is the larger when positive.
+    var m = 0;
+    var ex = load64(&x + 8);
+    var ey = load64(&y + 8);
+    if (ex != ey) {
+        m = 0 - 1;
+        if (ex > ey) { m = 1; }
+    } else {
+        var lx = load64(&x + 56) - load64(&x + 48);
+        var ly = load64(&y + 56) - load64(&y + 48);
+        var k = 0;
+        while (m == 0 && (k < lx || k < ly)) {
+            var dx = 48;
+            var dy = 48;
+            if (k < lx) { dx = _sch_num_digit(a, &x, load64(&x + 48) + k); }
+            if (k < ly) { dy = _sch_num_digit(b, &y, load64(&y + 48) + k); }
+            if (dx < dy) { m = 0 - 1; }
+            elif (dx > dy) { m = 1; }
+            k = k + 1;
+        }
+    }
+    return m * sx;
+}
+
+# A bound's text, kept where comparing its value would not be exact: a fraction, or past
+# what _sch_num_parse holds. An integer inside that range compares exactly as a value,
+# whatever the value it is compared with, since a value held at SCH_NUM_SAT is still on
+# the right side of it, and costs no decimal compare. 0 for those.
+fn _sch_bound_text(b) {
+    var t[8];
+    if (_sch_num_parse(b, &t) == 2 && load64(&t) < SCH_NUM_SAT && load64(&t) > 0 - SCH_NUM_SAT) { return 0; }
+    return b;
+}
+
+# A value against a bound: _sch_num_cmp of what each is written as, where the bound's text
+# was kept and both are numbers, else 2, for the caller to compare the values
+# _sch_num_parse made of them.
+fn _sch_bound_cmp(vraw, braw) {
+    if (braw == 0) { return 2; }
+    return _sch_num_cmp(vraw, braw);
+}
+
 # Strip surrounding quotes from a JSON-string cstr ("hello" → hello).
 # Caller guarantees v is a string literal. Returns a cstr owned by `a`.
 fn _sch_unquote(v) { return _sch_unquote_a(default_alloc(), v); }
@@ -238,16 +370,23 @@ fn _sch_unquote_a(a, v) {
 # The value of the JSON number v, truncated toward zero (0 when v is not a
 # number). It reads fractions and exponents through _sch_num_parse, so a
 # bound or an argument written `5e2` is 500, not 5 (3.4.8).
-# The string `v` (a JSON string's raw bytes) as it decodes (3.8.1), on `a`, or as it was
-# written when it decodes to hold a NUL, which no cstr can say. `required` names and
-# string `enum` values are compared with what they mean, on both sides: through 3.8.0 a
-# schema's `"required":["\u00e9"]` was never met.
+# The string `v` (a JSON string's raw bytes) as it decodes (3.8.1), on `a`, or 0 when it
+# decodes to hold a NUL, which no cstr can say. `required` names and string `enum` values
+# are compared with what they mean, on both sides: through 3.8.0 a schema's
+# `"required":["\u00e9"]` was never met. (3.8.2) At 3.8.1 a string holding a NUL was kept
+# as written, and `"x\u0000y"` written is what `"x\\u0000y"` decodes to, so an enum
+# holding the one took the other. Now such a value matches nothing, such a `required`
+# name is never met, and registration refuses a schema that holds one.
 fn _sch_str_dec_a(a, v) {
     var n = strlen(v);
     var at = _jx_skip_ws(v, n, 0);
-    var s = _jx_str_dec_at_a(a, v, n, at);
-    if (s == 0) { return _sch_unquote_a(a, v); }
-    return s;
+    var s = _jx_str_at_a(a, v, n, at);
+    if (s == 0) { return 0; }
+    var sl = strlen(s);
+    if (_jx_has_escape(s, sl) == 0) { return s; }
+    var out = alloc_via(a, sl + 1);
+    if (_jx_unescape_into(s, sl, out) != strlen(out)) { return 0; }
+    return out;
 }
 
 fn _sch_parse_int(v) {
@@ -318,9 +457,9 @@ fn parse_property(raw_json) {
             var ei = 0;
             while (ei < ne) {
                 var ev = vec_get(elems, ei);
-                if (_sch_is_string(ev) == 1) {
-                    vec_push(vals, _sch_str_dec_a(default_alloc(), ev));
-                }
+                var dv = 0;
+                if (_sch_is_string(ev) == 1) { dv = _sch_str_dec_a(default_alloc(), ev); }
+                if (dv != 0) { vec_push(vals, dv); }
                 ei = ei + 1;
             }
             store64(p + 16, vals);
@@ -329,16 +468,16 @@ fn parse_property(raw_json) {
         if (def_s != 0) { store64(p + 24, def_s); }
     } elif (tag == SCH_NUMBER) {
         var min_s = jsonx_get_raw(raw_json, "minimum");
-        if (min_s != 0) { store64(p + 32, 1); store64(p + 40, _sch_parse_int(min_s)); }
+        if (min_s != 0) { store64(p + 32, 1); store64(p + 40, _sch_parse_int(min_s)); store64(p + 80, _sch_bound_text(min_s)); }
         var max_s = jsonx_get_raw(raw_json, "maximum");
-        if (max_s != 0) { store64(p + 48, 1); store64(p + 56, _sch_parse_int(max_s)); }
+        if (max_s != 0) { store64(p + 48, 1); store64(p + 56, _sch_parse_int(max_s)); store64(p + 88, _sch_bound_text(max_s)); }
         var def_n = jsonx_get_raw(raw_json, "default");
         if (def_n != 0) { store64(p + 24, def_n); }
     } elif (tag == SCH_INTEGER) {
         var imin = jsonx_get_raw(raw_json, "minimum");
-        if (imin != 0) { store64(p + 32, 1); store64(p + 40, _sch_parse_int(imin)); }
+        if (imin != 0) { store64(p + 32, 1); store64(p + 40, _sch_parse_int(imin)); store64(p + 80, _sch_bound_text(imin)); }
         var imax = jsonx_get_raw(raw_json, "maximum");
-        if (imax != 0) { store64(p + 48, 1); store64(p + 56, _sch_parse_int(imax)); }
+        if (imax != 0) { store64(p + 48, 1); store64(p + 56, _sch_parse_int(imax)); store64(p + 88, _sch_bound_text(imax)); }
         var def_i = jsonx_get_raw(raw_json, "default");
         if (def_i != 0) { store64(p + 24, def_i); }
     } elif (tag == SCH_BOOLEAN) {
@@ -461,7 +600,7 @@ fn _validate_value(path, value, prop, violations) {
             var n = vec_len(allowed);
             var i = 0;
             var found = 0;
-            while (i < n) {
+            while (i < n && raw_str != 0) {
                 if (streq(vec_get(allowed, i), raw_str) == 1) { found = 1; }
                 i = i + 1;
             }
@@ -469,7 +608,7 @@ fn _validate_value(path, value, prop, violations) {
                 var ea = _vs_alloc(violations);
                 var sb = str_builder_new_a(ea);
                 str_builder_add_cstr_a(ea, sb, "value '");
-                str_builder_add_cstr_a(ea, sb, raw_str);
+                if (raw_str != 0) { str_builder_add_cstr_a(ea, sb, raw_str); }
                 str_builder_add_cstr_a(ea, sb, "' not in enum");
                 _violation(violations, path, str_data(str_builder_build_a(ea, sb)));
             }
@@ -491,12 +630,16 @@ fn _validate_value(path, value, prop, violations) {
         var nneg = 0;
         if (_sch_first_nonws(value) == 45) { nneg = 1; }
         if (prop_has_min(prop) == 1) {
-            if (nv < prop_min(prop) || (nfrac == 1 && nneg == 1 && nv == prop_min(prop))) {
+            var c1 = _sch_bound_cmp(value, prop_min_raw(prop));
+            if (c1 == 2) { c1 = 0; if (nv < prop_min(prop) || (nfrac == 1 && nneg == 1 && nv == prop_min(prop))) { c1 = 0 - 1; } }
+            if (c1 < 0) {
                 _violation(violations, path, "less than minimum");
             }
         }
         if (prop_has_max(prop) == 1) {
-            if (nv > prop_max(prop) || (nfrac == 1 && nneg == 0 && nv == prop_max(prop))) {
+            var c2 = _sch_bound_cmp(value, prop_max_raw(prop));
+            if (c2 == 2) { c2 = 0; if (nv > prop_max(prop) || (nfrac == 1 && nneg == 0 && nv == prop_max(prop))) { c2 = 1; } }
+            if (c2 > 0) {
                 _violation(violations, path, "greater than maximum");
             }
         }
@@ -518,10 +661,14 @@ fn _validate_value(path, value, prop, violations) {
             return 0;
         }
         if (prop_has_min(prop) == 1) {
-            if (iv < prop_min(prop)) { _violation(violations, path, "less than minimum"); }
+            var c3 = _sch_bound_cmp(value, prop_min_raw(prop));
+            if (c3 == 2) { c3 = 0; if (iv < prop_min(prop)) { c3 = 0 - 1; } }
+            if (c3 < 0) { _violation(violations, path, "less than minimum"); }
         }
         if (prop_has_max(prop) == 1) {
-            if (iv > prop_max(prop)) { _violation(violations, path, "greater than maximum"); }
+            var c4 = _sch_bound_cmp(value, prop_max_raw(prop));
+            if (c4 == 2) { c4 = 0; if (iv > prop_max(prop)) { c4 = 1; } }
+            if (c4 > 0) { _violation(violations, path, "greater than maximum"); }
         }
         return 0;
     }
@@ -592,11 +739,12 @@ fn _validate_against(path, value_cstr, compiled, violations) {
         var ri = 0;
         while (ri < nr) {
             var rkey = vec_get(req, ri);
-            if (jsonx_has(value_cstr, rkey) == 0) {
+            # 0 is a name holding a NUL (_sch_str_dec_a), never met.
+            if (rkey == 0 || jsonx_has(value_cstr, rkey) == 0) {
                 var ra = _vs_alloc(violations);
                 var sb = str_builder_new_a(ra);
                 str_builder_add_cstr_a(ra, sb, "missing required field: ");
-                str_builder_add_cstr_a(ra, sb, rkey);
+                if (rkey != 0) { str_builder_add_cstr_a(ra, sb, rkey); }
                 if (strlen(path) > 0) {
                     _violation(violations, path, str_data(str_builder_build_a(ra, sb)));
                 } else {

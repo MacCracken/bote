@@ -18,7 +18,208 @@ have per release.
 
 _(empty)_
 
+## [3.8.2] — 2026-11-03 · Multi round-trip requests
+
+**A tool, a prompt or a resource can ask the client for input, on MCP 2026-07-28.** A handler returns an
+`InputRequiredResult`: elicitation (a form, or a URL to send the user to), sampling, or the client's roots, under keys
+of its own, and state of its own. The client gets what is asked and calls again with the answers, which the handler
+reads from the request with the state it gave. The handler ABI is unchanged. Each request is judged before it goes:
+one needing a capability the client did not declare is answered `-32021`, naming it, as the spec says. The spec makes
+the state attacker-controlled, so bote seals every state a handler gives and opens every one a client brings back,
+before any handler runs. The binary's sealer is HMAC-SHA256, bound to the method, the tool, prompt or URI, and the
+token the request presented, and good for 600 seconds. With it, **every scenario the official suite scores for
+2026-07-28 passes, 39 of 39**, the 14 `input-required-*` among them.
+
+**Seven defects in 3.8.1 land ahead of it**, from an independent review of that release. The worst let a handler's
+own thread, on a server with one loop, give back bytes its handler was using: the key scanner decoded a long escaped
+key on the calling thread's request arena. See the correction notice in 3.8.1.
+
+The stated minimum cyrius (6.7.13) is unchanged.
+
+### Added
+
+- **What a handler reads from the request** (core, `src/protocol.cyr` and the end of `src/jsonx.cyr`):
+  - `bote_input_possible()`: 1 on a 2026-07-28 `tools/call`, `prompts/get` or `resources/read`, the three that may
+    ask. On an older revision there is no way to ask, and a handler answers as it can.
+  - `bote_client_has(cap)`: the request's `clientCapabilities`, by `"elicitation"`, `"elicitation.form"`,
+    `"elicitation.url"`, `"sampling"`, `"sampling.tools"`, `"roots"`, or any other name. A bare `elicitation: {}`
+    declares form mode, as the spec has it. `bote_caps_have(caps, cap)` is the same for any object. Neither
+    allocates, so a handler's own thread may ask.
+  - `bote_input_responses_a(a)` and `bote_input_response_a(a, key)`: the client's answers, all or by key, as the
+    dispatcher judged them, whether the message came through the codec or `dispatcher_dispatch`.
+    `bote_input_accepted_a(a, key)`: the content of an elicitation the client accepted, or 0 when it declined or
+    cancelled.
+  - `bote_request_state()`: the state the handler gave last round, opened.
+- **What a handler returns** (core, `src/dispatch.cyr`): `bote_input_required_new_a(a)`, then
+  `bote_input_elicit(ir, key, message, requested_schema)`, `bote_input_elicit_url(ir, key, message, url)`,
+  `bote_input_sample(ir, key, params)`, `bote_input_roots(ir, key)` and `bote_input_state(ir, payload)`, and
+  `bote_input_required_json(ir)`. Every string is escaped once.
+- **The dispatcher judges what goes and what comes back** (core):
+  - A handler's InputRequiredResult may ask for `elicitation/create` in form or URL mode, `sampling/createMessage`
+    or `roots/list`, and must hold requests or a state or both, no key twice. Anything else is the handler's mistake,
+    `-32603`. One needing a capability the request did not declare is `-32021`, with
+    `data.requiredCapabilities` in the ClientCapabilities shape, every missing one merged.
+  - On 2025-11-25, a tool that asks gets a tool error and a prompt or resource `-32603`. `completion/complete` may not
+    ask. An InputRequiredResult carries no cache hints.
+  - A retry's `inputResponses` must be an object of objects and its `requestState` a string, else `-32602`. Both
+    mean nothing on any other method.
+  - `dispatcher_set_state_sealer(d, seal_fp, open_fp, ctx)`: every state a handler gives is sealed by it, and every
+    state a client brings is opened by it for the method, its target and the request's token, before any handler
+    runs. One that does not open is `-32602`. With no sealer a state is refused both ways. The Dispatcher is 200 B.
+- **`src/state_seal.cyr`** (full bundle, now 39 modules): `bote_state_hmac_new(key, klen, ttl_s)` (a key of 32 bytes
+  or more), `bote_state_hmac_random(ttl_s)` and `dispatcher_with_state_hmac(d, h)`. A state is the expiry and the
+  payload, Base64url, and an HMAC-SHA256 over a domain tag, the binding, the expiry and the payload. It opens under
+  its key, for its binding, until it expires (`BOTE_STATE_TTL_S`, 600 s).
+- **`BOTE_STATE_KEY`** in the binary: 64 hex digits or more, for servers that share states. Without it each process
+  keys itself at random. A key that is not hex, or is too short, is an error at startup.
+- The conformance fixture serves the suite's input-required tools and prompt, `test_missing_capability` and
+  `test_streaming_elicitation`.
+
+### Changed
+
+- **A title may be empty**, as the spec's `title?: string` allows. 3.8.1 refused one.
+- **An icon's `mimeType` may carry parameters** (RFC 9110 8.3.1), such as `image/svg+xml; charset=utf-8`.
+- **An inputSchema property's schema is refused** when it names a key twice in one object, holds a NUL, or names a
+  key that is not text, as an outputSchema has been since 3.8.1.
+- **Registration warns of `format`, `additionalItems`, `dependencies` and an array `items`.** The official client
+  enforces `format`, and draft-07's forms are not judged.
+- A compiled PropertyDef is 96 B, keeping its bounds as written. The request state is 160 B.
+
+### Fixed
+
+From the review of 3.8.1:
+
+- **A long escaped key was decoded on the calling thread's request arena.** On a server with one loop, a handler's own
+  thread shares the request state. Its lookup marked and released the arena its handler was using, and corrupted
+  about 4,000 of 80,000 blocks in the probe. On a pooled server each such thread kept a 64 KB arena. Registering
+  from another thread went the same way. `_jx_scan` allocates nothing again: a key of 256 bytes or more is compared as
+  it decodes (`_jx_dec_eq`), through the one decoder (`_jx_unescape_one`).
+- **A `required` name or a string `enum` value that holds a NUL was compared as written.** `"x\u0000y"` as written is
+  what `"x\\u0000y"` decodes to, so an enum holding one took a value holding the other, on arguments and on results.
+  Such a value now matches nothing and such a name is never met (`_sch_str_dec_a`), and registration refuses a schema
+  holding one.
+- **A result's integer past 2^62 met bounds it breaks.** 3.8.1 let such a value through, but compared it with its
+  bound after holding both at 2^62, so 6e18 met a `maximum` of 5e18. Bounds are now compared exactly, as decimals,
+  from what each is written as (`_sch_num_cmp`). That also ends the limit documented since 3.4.8: a `minimum` of 4.5
+  took 4.1, and an integer `minimum` of 2.5 took 2.
+- **`format` and draft-07's `additionalItems`, `dependencies` and array `items` got no WARN.** They do now.
+- **`bote_web_url_ok` looked at the first byte after `//` only.** `http://:80/x`, `http://@/`, `https://a:b:c/`, a port
+  of 99999 and `http://%00/` passed, which a client's URL parser refuses, and so did `https://user:pass@host/`, a
+  password sent in every list. The authority is now a host and an optional port: a domain, a dotted-quad IPv4 address
+  or an IPv6 literal, a port up to 65535, and no userinfo.
+- **A key that is not UTF-8 passed the repeated-key check.** A client reads `a<0xFF>` as `a\ufffd`, so the two were one
+  key to a client and two to bote. A key that is not UTF-8, or holds a lone surrogate, is now refused where a repeat
+  is.
+- **The repeated-key check copied every level's subtree.** One 60 KB result nested 62 deep took 4 MB of arena, kept as
+  the thread's peak. It now walks the value in place, keeps only the keys, and looks each up in a table past eight of
+  them, where it compared every pair.
+
+Also from the review:
+
+- A list's display fragments were stored with nothing held, between a list's sizing pass and its writing pass. They
+  are stored under the write lock now, with what registration makes for a tool's outputSchema.
+
+### Security
+
+- `requestState` is sealed and opened by the dispatcher, so a handler never sees a state it did not make for that
+  method, target and token, or one past its expiry. The state is signed, not encrypted: the client can read it. It is
+  bound to the token, where the spec asks for the principal: a client that refreshes its token between rounds starts
+  again.
+- The scanner no longer touches any arena, so a handler's thread cannot corrupt its handler's.
+- An icon URL or website carrying a password is refused, as is one a client's parser refuses.
+- A schema can no longer pass a value a client reads another way: a NUL in a `required` name or `enum` value, a
+  bound past 2^62, a key that is not UTF-8.
+
+### Tests
+
+- **5,680 assertions, from 5,510**, on x86_64 and under `qemu-aarch64`.
+  - **`tests/bote_input.tcyr`**, 102, new:
+    - What a handler reads: whether it may ask, each capability (a bare elicitation is form, url only is not, a
+      capability that is no object is not declared, names as they decode, a sub-capability in its own object only),
+      the answers by key, accepted or not, read through `dispatcher_dispatch` as through the codec, none on an older revision, nothing kept from the last message, and asking
+      allocating nothing.
+    - The builder's exact bytes, escaped, and the result as it goes, serverInfo added, no cache hints.
+    - `-32021` for each capability and four at once, merged, and each served where it is declared.
+    - Each handler mistake, `-32603`, and why. An escaped `resultType` read as it decodes.
+    - The state: sealed and not in plain sight; the retry served and its handler reading it as given; refused when
+      tampered, a byte changed, spent on another tool, another method, another token or none, expired, not a string,
+      not a state, or with no sealer; a prompt's and a resource's bound to their own name and URI.
+    - Each method and revision; the audit; an outputSchema not judging an InputRequiredResult.
+    - The sealer: a short key, a round trip, another binding, another key, every byte changed, seven shapes that are
+      no state, a body too short and a payload holding a NUL even with a good MAC, expiry, and its Base64url against
+      bayan's for every length to 70.
+    - The heap: a round asking and its retry with 60 KB in each field keep only `args`, and each refusal nothing.
+  - **`tests/bote_output.tcyr`**, 240, from 179: each review finding above, and 2,000 random keys, short and long,
+    found by what they decode to.
+  - **`tests/bote_display.tcyr`**, 107, from 100: forty URLs a parser takes or refuses, checked against Node's,
+    mimeType parameters, empty titles.
+- **107 mutants, 101 killed**: 56 on multi round-trip requests and the sealer, and 51 on the review's fixes. The
+  first pass stopped partway, on a line of test output that was not UTF-8, and the runner now reads any bytes.
+  Eleven survivors were gaps in the tests, now closed: among them a state's method left out of its binding, which
+  only a prompt named as a tool tells, a short body or a NUL payload under a good MAC, a `required` name compiled
+  without registration's check, and three URLs and a mimeType the parsers let through. One mutant was written wrong
+  and rewritten. Six are equivalent: two sealer checks a later one always makes, an early exit the final length
+  check repeats, the pairwise walk used for every object (slower, not wrong), a Base64 bit that is always zero, and a
+  zero check whose answer is multiplied by zero.
+- **`scripts/transport-smoke.sh`** checks `BOTE_STATE_KEY`: three keys that are none end the start with rc 2 and a
+  line saying why, a good one serves, and the key never reaches the log.
+- **The official suite**: 157 checks pass on 2026-07-28, from 134, every scored scenario among them. The fixture
+  serves what the suite's input-required scenarios call, each through a real handler. 2025-11-25 is unchanged.
+  **The official client** passes 525 of 525.
+
+### Performance
+
+**Asking costs what judging and sealing cost; every other path moves by a few percent either way.** Interleaved A/B
+against 3.8.1, 15 rounds pinned to one core. Minimums, in ns:
+
+| Bench | 3.8.1 | 3.8.2 | Delta |
+|---|---|---|---|
+| `input_required_sealed` | — | 35,968 | new |
+| `input_retry_open` | — | 22,506 | new |
+| `dispatch_tools_call` | 2,242 | 2,338 | +4.3% |
+| `dispatch_tools_call_output` | 7,392 | 7,241 | −2.0% |
+| `codec_process_message` | 4,087 | 4,189 | +2.5% |
+| `validate_compiled_simple` | 470 | 484 | +3.0% |
+| `schema_compile_simple` | 2,713 | 2,902 | +7.0% |
+| `cancel_lines_scan` | 2,948 | 3,104 | +5.3% |
+| `jsonx_get_str_flat` | 161 | 168 | +4.3% |
+| `session_validate` (untouched) | 1,694 | 1,641 | −3.1% |
+
+- **A round that asks, about 36 µs**, measured in pieces: a plain 2026-07-28 call is 10.8 µs; judging the
+  InputRequiredResult adds 11.6 (the repeated-key walk, each request's method, mode and capability); the builder
+  1.4; the state 11.7, of which the HMAC seal is 4.4 and the rest is writing the result again around the sealed
+  state. **The retry, about 22.5 µs**, opens its state in 4.5. Neither is on the path of a call that does not ask,
+  and each round waits on a person or a model.
+- **`validate_compiled_simple` was +41.6% in the first build** (667 ns), because every bounded number went through the
+  exact decimal compare. An integer bound inside 2^62 compares exactly as a value, so only a fractional or a larger
+  bound keeps its text now (`_sch_bound_text`), and the row is +3%. Registration parses each bound once more for that,
+  which is most of `schema_compile_simple`'s +7%.
+- **The rest is not the change.** A first run had `jsonx_get_str_flat` at −1.2% and `cancel_lines_scan` at +4.8% on
+  the same scanner code; `cancel_lines_scan`'s inputs hold no escape, so the new decoder never runs for them.
+  Restoring 3.8.1's shape of the scanner's inner loop moved `cancel_lines_scan` −2.2% and
+  `dispatch_tools_call_structured`, which it does not touch, +14.4%: code position, which moves a short bench by
+  5 to 12% on its own. The loop stays as measured. `jwt_cached_hs256` and `_es256` read −30% on their minimums and
+  their ranges reach 3.8.1's, so they are noise.
+
 ## [3.8.1] — 2026-11-03 · Titles, icons and instructions
+
+> ⚠ **Corrected at 3.8.2.** These claims below were not true, found by an independent review of this release.
+> - "It decodes any key now, on the request arena, and gives the bytes back once compared." The arena was the calling
+>   thread's. On a server with one loop a handler's own thread shares the request state, and its lookup of a long
+>   escaped key gave back bytes its handler was using; on a pooled server each such thread kept a 64 KB arena.
+> - "`required` names and string `enum` values … are decoded on both sides now." One holding a NUL was kept as
+>   written, `x\u0000y`, which is what `"x\\u0000y"` decodes to, so an enum took a value it does not hold.
+> - "An integer of 2^62 or more in a result … the bound does not apply there." The value was let through but still
+>   compared with its bound after both were held at 2^62, so a result's 6e18 met a `maximum` of 5e18, which 3.8.0
+>   refused.
+> - "Keywords bote does not enforce … now each get a WARN." `format`, which the official client enforces, and
+>   draft-07's `additionalItems`, `dependencies` and array `items` got none, and bote does not judge them.
+> - "`src` is an `http://` or `https://` URL with a host." Only the first byte after `//` was checked, so a URL with no
+>   host, a bad port or a password in it was registered.
+> - "`_jx_repeats_a` now finds one in any object." Keys were compared as bytes, and a client reads a byte that is not
+>   UTF-8 as U+FFFD, so a key it reads twice was not found. The walk also copied every level's subtree.
+> - "Refused when the spec would not allow it." An empty title and a mimeType with parameters were refused, and the
+>   spec allows both.
 
 **Tools, prompts, resources, templates and the server carry a `title` and `icons`, and the server its `instructions`.**
 A title is for people, where `name` is for programs. Prompt arguments carry a title too. serverInfo also gets its

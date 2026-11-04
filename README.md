@@ -352,6 +352,47 @@ dispatcher_set_instructions(d, "Prefer svc_weather for forecasts.");
 - **Instructions** go in `initialize`'s result on 2025-11-25 and in `server/discover`'s on 2026-07-28, where the spec
   moved them.
 
+### Multi round-trip requests
+
+On 2026-07-28 a handler that needs something from the client asks for it in its answer. It returns an
+`InputRequiredResult`; the client gets what is asked, from its user, its model or its roots, and calls again with the
+answers. `tools/call`, `prompts/get` and `resources/read` may ask. The handler ABI is unchanged: a handler reads the
+answers and its own state from the request.
+
+```cyrius
+fn h_deploy(args, claims) {
+    var a = bote_req_alloc();
+    if (bote_input_response_a(a, "confirm") != 0) {
+        # The client answered: accepted, or declined or cancelled.
+        if (bote_input_accepted_a(a, "confirm") != 0) { return "{\"content\":[{\"type\":\"text\",\"text\":\"deployed\"}]}"; }
+        return "{\"content\":[{\"type\":\"text\",\"text\":\"not deployed\"}]}";
+    }
+    if (bote_input_possible() == 0) { return "{\"content\":[{\"type\":\"text\",\"text\":\"confirmation needed\"}],\"isError\":true}"; }
+    var ir = bote_input_required_new_a(a);
+    bote_input_elicit(ir, "confirm", "Deploy to production?", "{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\"}}}");
+    bote_input_state(ir, "step=confirm");
+    return bote_input_required_json(ir);
+}
+```
+
+- **What a handler may ask:** `bote_input_elicit` (a form), `bote_input_elicit_url` (send the user to a URL, the spec's
+  way to ask for anything sensitive), `bote_input_sample` and `bote_input_roots`, each under a key the answer comes
+  back under. `bote_input_state` adds state of its own, which `bote_request_state()` gives back on the retry.
+- **What the client declared:** `bote_client_has("elicitation.form")`, `"elicitation.url"`, `"sampling"`,
+  `"sampling.tools"`, `"roots"` read the request's `clientCapabilities`. A result asking for one the client did not
+  declare is answered `-32021` with the capabilities it needs, as the spec says.
+- **Judged before it goes:** only the three methods the spec allows, a known elicitation mode, at least one request
+  or a state, and no key twice. A handler's mistake is `-32603`. On an older revision there is no way to ask: a tool
+  that does gets a tool error, and `bote_input_possible()` is 0, so a handler can answer as it can.
+- **The state is sealed.** The spec makes it attacker-controlled. bote seals every state a handler gives and opens
+  every one a client brings back, through the dispatcher's sealer, before any handler runs: a state that does not
+  open is `-32602`. The binary's sealer is HMAC-SHA256, bound to the method, the tool, prompt or URI, and the token the
+  request presented (a client that refreshes its token between rounds starts again), and good for 600 seconds; set `BOTE_STATE_KEY` (64 hex digits or more) for servers that share
+  states, or each process keys itself. A library user wires it with
+  `dispatcher_with_state_hmac(d, bote_state_hmac_new(key, len, ttl))`, or their own with
+  `dispatcher_set_state_sealer`. With none, a state is refused both ways. The client can read the state: put nothing
+  in it the client may not know.
+
 ### Connection deadlines
 
 Every transport but streamable serves one client at a time, so each connection gets a **send deadline**:
@@ -449,8 +490,8 @@ property in the schema; registration checks the annotation, and HTTP checks the 
 the body. Do not mark a secret that way: every intermediary sees the header.
 
 The official MCP client works against bote on `http`, `streamable`, `bridge` and stdio, and the
-official conformance suite passes 26 of the 37 scenarios 2026-07-28 requires and 22 of the 30
-2025-11-25 requires. What fails is features bote lacks, listed with the reason in
+official conformance suite passes every one of the 39 scenarios it scores for 2026-07-28 and 22 of
+the 30 2025-11-25 requires. What fails is features bote lacks, listed with the reason in
 `tests/fixtures/conformance-expected-<revision>.yaml`. `./scripts/conformance.sh` reruns it all.
 
 ### Built-in tools (registered by default)
@@ -478,8 +519,9 @@ official conformance suite passes 26 of the 37 scenarios 2026-07-28 requires and
 | -32002 | Resource not found (`resources/read`; the URI is in `error.data`) |
 | -32000 | Tool execution / sandbox error — in `bote_err_rpc_code` for an embedder's own use; bote's dispatcher reports a failed tool as a result with `isError: true` instead |
 | -32003 | Transport closed / bind failed |
-| -32603 | Internal error |
+| -32603 | Internal error, including a handler's InputRequiredResult bote cannot send |
 | -32800 | Request cancelled |
+| -32021 | Missing required client capability (2026-07-28): the request needs input the client did not declare it can give, named in `error.data.requiredCapabilities` |
 
 ---
 
@@ -541,9 +583,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 5510 total across twenty-five files (+ a core-only drift smoke)
+### Tests — 5680 total across twenty-six files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5510 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5680 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 969 — core protocol/dispatch/codec/schema/session/transports
@@ -561,8 +603,9 @@ cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
 cyrius test tests/bote_listen.tcyr        # 224 — subscriptions/listen: the filter, and real streams on the three HTTP handlers
 cyrius test tests/bote_listen_line.tcyr   # 192 — subscriptions/listen where the connection is the stream: stdio, unix, WebSocket
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
-cyrius test tests/bote_display.tcyr       # 100 — titles, icons, serverInfo's details and instructions: the checks, each list, the heap
-cyrius test tests/bote_output.tcyr        # 179 — outputSchema: registration, the 2025-11-25 form, tools/list, each result judged and shaped, the heap
+cyrius test tests/bote_display.tcyr       # 107 — titles, icons, serverInfo's details and instructions: the checks, each list, the heap
+cyrius test tests/bote_output.tcyr        # 240 — outputSchema: registration, the 2025-11-25 form, tools/list, each result judged and shaped, the heap
+cyrius test tests/bote_input.tcyr         # 102 — multi round-trip requests: what a handler reads and returns, -32021, the sealed state, the heap
 cyrius test tests/bote_progress.tcyr      # 110 — progress on a request's own stream: the writer, stdio, unix, WebSocket, HTTP's SSE response
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter

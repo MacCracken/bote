@@ -149,6 +149,7 @@ src/
 ├── web_tools.cyr           — web_fetch / web_search MCP tools (sandhi HTTP client, in a child since 3.6.5)
 ├── fetch.cyr               — an outbound request made in a child process, with a deadline, its reply read onto the arena (3.6.5)
 ├── jwks.cyr                — a JWK Set fetched from a jwks_uri, through fetch.cyr, refreshed by jwt.cyr (3.6.6)
+├── state_seal.cyr          — the HMAC-SHA256 sealer for a multi round-trip request's requestState (3.8.2)
 ├── http_era.cyr            — which era a POST is; 2026-07-28's headers, `Mcp-Param` included, and status codes (3.5.1)
 ├── oauth_metadata.cyr      — RFC 9728 Protected Resource Metadata, the challenge a 401 carries (3.6.0), and the 403 for a missing scope (3.6.3)
 ├── listen.cyr              — `subscriptions/listen`: streams on the HTTP transports, held by one hub thread off the serving ones (3.7.2), and a ListenLine where the connection is the stream, stdio's, a Unix socket's, a WebSocket's (3.7.3)
@@ -194,8 +195,9 @@ tests/
 ├── bote_libro_tools.tcyr      — 73 (libro_tools; incl. the tampered-chain
 │                                 error decode + populated-chain proof paths)
 ├── bote_log.tcyr              — 50 (src/log.cyr: levels, line bytes, escaping, truncation)
-├── bote_display.tcyr          — 100 (3.8.1: titles, icons, serverInfo's details and instructions)
-├── bote_output.tcyr           — 179 (3.8.0: a tool's outputSchema, registration to the heap)
+├── bote_display.tcyr          — 107 (3.8.1: titles, icons, serverInfo's details and instructions)
+├── bote_output.tcyr           — 240 (3.8.0: a tool's outputSchema, registration to the heap)
+├── bote_input.tcyr            — 102 (3.8.2: multi round-trip requests, -32021, the sealed state, the heap)
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 53 (streamable HTTP / SSE)
@@ -203,7 +205,7 @@ tests/
 ├── bote_web_tools.tcyr        — 88 (web_tools; URL + resolved-address SSRF guard; the records their children write)
 ├── bote_ws.tcyr               — 94 (WebSocket; send-deadline drop; `-31403` per frame; what an upgrade and a connection keep)
 ├── bote_core_only_smoke.tcyr  — drift guard (includes only dist/bote-core.cyr)
-└── bote.bcyr                  — 42 hot-path benchmarks
+└── bote.bcyr                  — 44 hot-path benchmarks
 
 fuzz/
 ├── codec_parse.fcyr
@@ -309,6 +311,18 @@ every field for `initialize` and `server/discover`, and the name, title and vers
 2026-07-28 result, so an icon is not repeated in each reply. `instructions` goes in `initialize`'s result and in
 `server/discover`'s, the place each revision gives it.
 
+Multi round-trip requests (3.8.2) run through the modern router only. Before a `tools/call`, `prompts/get` or
+`resources/read` is served, `_dsp_input_admit_a` judges what the retry brings: `inputResponses` must be an object of
+objects, and a `requestState` must open under the dispatcher's sealer for the method, its target and the token the
+request presented, or the request is `-32602` and no handler runs. The request state then holds the client's
+capabilities, whether input may be asked, and the opened state, which a handler reads through `bote_client_has`,
+`bote_input_response_a` and `bote_request_state`. A handler that returns an InputRequiredResult (`resultType:
+"input_required"`, found by the result-shape walk) has it judged by `_dsp_input_out_a`: the methods and modes the spec
+allows, each capability the client declared (`-32021` naming what it lacks), at least one request or a state, no key
+twice; its state is sealed in place of the handler's words. On the legacy path, and on any other method, there is
+no way to ask, and the result is a tool error or `-32603`. The full bundle's sealer is `src/state_seal.cyr`; the core
+has the hook and refuses any state without one.
+
 ---
 
 ## Error Codes
@@ -323,8 +337,9 @@ every field for `initialize` and `server/discover`, and the name, title and vers
 | -32022 | Unsupported protocol version, on the 2026-07-28 path (`data.supported`, `data.requested`) |
 | -32000 | Tool execution / sandbox error — in `bote_err_rpc_code` for an embedder's own use; bote's dispatcher reports a failed tool as a result with `isError: true` instead |
 | -32003 | Transport closed / bind failed |
-| -32603 | Internal error |
+| -32603 | Internal error, including (3.8.2) an InputRequiredResult bote cannot send |
 | -32800 | Request cancelled |
+| -32021 | (3.8.2) Missing required client capability, on the 2026-07-28 path: an InputRequiredResult needs input the request's `clientCapabilities` does not declare (`data.requiredCapabilities`) |
 
 A `tools/call` whose arguments fail the tool's `inputSchema` is **not** an error code: it is a
 result with `isError: true`, so the model can read what it got wrong (MCP 2025-11-25, SEP-1303).
@@ -463,10 +478,10 @@ standing rules are in CLAUDE.md under Key Principles.
 |---|---|---|
 | Core unit tests | 969 | `tests/bote.tcyr` |
 | Protocol conformance | 218 | `tests/conformance.tcyr` — by spec clause, through `codec_process_message` (3.4.5) |
-| Module tests | 4323 | the other twenty-three `tests/bote_*.tcyr` files; each is listed with its count in CLAUDE.md's testing table |
-| **Total assertions** | **5510** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
-| Benchmarks | 42 | `tests/bote.bcyr` |
-| Third-party conformance | 26 of 37, 22 of 30 | `scripts/conformance.sh`: the official suite's required lists for 2026-07-28 and 2025-11-25, and the official client on all four of its transports, its OAuth flow included |
+| Module tests | 4493 | the other twenty-four `tests/bote_*.tcyr` files; each is listed with its count in CLAUDE.md's testing table |
+| **Total assertions** | **5680** | plus the `bote_core_only_smoke.tcyr` drift guard; all of them also pass under `qemu-aarch64` (`cyrius test --aarch64`), as they have since 3.3.11 |
+| Benchmarks | 44 | `tests/bote.bcyr` |
+| Third-party conformance | 39 of 39, 22 of 30 | `scripts/conformance.sh`: the official suite's required lists for 2026-07-28 and 2025-11-25, and the official client on all four of its transports, its OAuth flow included |
 | Fuzz harnesses | 15 | `fuzz/*.fcyr` |
 
 All hot paths sub-10 µs on x86_64 (`AMD Ryzen 7 5800H`). Side-by-side

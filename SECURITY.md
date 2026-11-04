@@ -100,10 +100,34 @@ The primary security-relevant surface areas are:
   repeated `temperature` passed a number property with a string and a long escaped key went
   unjudged. A result naming one of the three twice is refused from any tool, with a schema or
   not. An outputSchema whose `type` is written with an escape is judged by that type, where it
-  judged nothing.
+  judged nothing. Since **3.8.2** a key a client reads another way is refused too: bytes that are
+  not UTF-8, which a client reads as U+FFFD, and a lone surrogate. A `required` name or an
+  `enum` value holding a NUL is refused at registration, in an inputSchema as in an
+  outputSchema, where through 3.8.1 it was kept as written and matched a value written with a
+  backslash. Bounds are compared exactly, as decimals: through 3.8.1 a result's 6e18 met a
+  maximum of 5e18, both held at 2^62.
+- **Multi round-trip state** — since **3.8.2** a handler can ask the client for input with an
+  InputRequiredResult and carry state of its own through the client to the retry, which the spec
+  makes attacker-controlled. bote seals every `requestState` a handler gives and opens every one a
+  client brings, through the dispatcher's sealer, before any handler runs: one that does not open
+  is `-32602`, and the handler never sees it. The full bundle's sealer is HMAC-SHA256 under a key
+  of 32 bytes or more (`BOTE_STATE_KEY` in the binary, 64 hex digits or more, else a random key
+  per process), bound to the method, its target (the tool's or prompt's name, the resource's URI)
+  and the token the request presented, and good for `BOTE_STATE_TTL_S` (600) seconds. A state
+  made for one tool cannot be spent on another, by another token, or after it expires. The spec
+  asks for the principal; the token is stricter, and a client that refreshes its token between
+  rounds starts again. With no sealer a state is refused both ways. The state is signed, not encrypted: the client can read
+  it, so a handler puts nothing in it the client may not know, and a state is not single-use, so
+  a handler that must spend one once keeps that record itself, as the spec says. The answers a
+  client brings (`inputResponses`) must be an object of objects; the handler judges what they
+  hold. A result asking for a capability the client did not declare is `-32021`, and one asking
+  for anything but elicitation, sampling or roots is refused.
 - **Icons and titles** — since **3.8.1** an icon's `src` is an `http://` or `https://` URL
   with a host, or a `data:` URI of Base64 data, every byte one a URI may hold; nothing else is
-  registered, a `javascript:` or `file:` source included. bote fetches no icon. The spec asks
+  registered, a `javascript:` or `file:` source included. Since **3.8.2** the host is checked
+  whole, a domain, a dotted-quad IPv4 address or an IPv6 literal, with a port up to 65535, and a
+  URL carrying userinfo is refused: through 3.8.1 only the first byte after `//` was looked at,
+  so `https://user:password@host/` was registered and sent in every list. bote fetches no icon. The spec asks
   a client to take care with an SVG and with an icon from another domain, and that care is the
   client's. serverInfo's icons and description go in `initialize` and `server/discover` only,
   so a large `data:` icon is not repeated in every reply.
@@ -280,9 +304,9 @@ The primary security-relevant surface areas are:
 
 | Version | Supported |
 | ------- | --------- |
-| 3.7.x   | Yes (current minor) |
-| 3.6.x   | Yes (prior minor) |
-| < 3.6   | No        |
+| 3.8.x   | Yes (current minor) |
+| 3.7.x   | Yes (prior minor) |
+| < 3.7   | No        |
 
 ## Reporting a Vulnerability
 

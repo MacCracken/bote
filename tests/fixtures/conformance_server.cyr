@@ -38,6 +38,7 @@ include "src/pkce.cyr"
 include "src/conn.cyr"
 include "src/fetch.cyr"
 include "src/jwks.cyr"
+include "src/state_seal.cyr"
 include "src/http_era.cyr"
 include "src/oauth_metadata.cyr"
 include "src/listen.cyr"
@@ -199,6 +200,141 @@ fn _fx_icons() {
 fn p_titled(args, claims) { return "{\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"titled\"}}]}"; }
 fn r_titled(uri, claims) { return "{\"contents\":[{\"uri\":\"test://bote-titled\",\"mimeType\":\"text/plain\",\"text\":\"titled\"}]}"; }
 
+# (3.8.2) Multi round-trip requests, as the suite's input-required scenarios name them: each
+# a real flow through bote_input_* and the sealer the fixture wires.
+var _IR_NAME = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"}},\"required\":[\"name\"]}";
+fn _ir_cat3(a, b, c) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    str_builder_add_cstr(sb, c);
+    return str_data(str_builder_build(sb));
+}
+fn _ir_field(key, field) {
+    var a = bote_req_alloc();
+    var c = bote_input_accepted_a(a, key);
+    if (c == 0) { return 0; }
+    return jsonx_get_str_dec_a(a, c, field);
+}
+fn t_ir_elicitation(args, claims) {
+    var name = _ir_field("user_name", "name");
+    if (name != 0) { return content_text_response(_ir_cat3("Hello, ", name, "!")); }
+    var ir = bote_input_required_new_a(bote_req_alloc());
+    bote_input_elicit(ir, "user_name", "What is your name?", _IR_NAME);
+    return bote_input_required_json(ir);
+}
+fn t_ir_sampling(args, claims) {
+    var a = bote_req_alloc();
+    var r = bote_input_response_a(a, "capital_question");
+    if (r != 0) {
+        var t = jsonx_get_str_dec_a(a, jsonx_get_raw_a(a, r, "content"), "text");
+        if (t == 0) { t = "(no text)"; }
+        return content_text_response(_ir_cat3("The model said: ", t, ""));
+    }
+    var ir = bote_input_required_new_a(a);
+    bote_input_sample(ir, "capital_question", "{\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"What is the capital of France?\"}}],\"maxTokens\":100}");
+    return bote_input_required_json(ir);
+}
+fn t_ir_roots(args, claims) {
+    var a = bote_req_alloc();
+    var r = bote_input_response_a(a, "client_roots");
+    if (r != 0) {
+        var roots = jsonx_get_raw_a(a, r, "roots");
+        if (roots == 0) { roots = "[]"; }
+        return content_text_response(_ir_cat3("Roots: ", roots, ""));
+    }
+    var ir = bote_input_required_new_a(a);
+    bote_input_roots(ir, "client_roots");
+    return bote_input_required_json(ir);
+}
+fn t_ir_multi_round(args, claims) {
+    var a = bote_req_alloc();
+    var st = bote_request_state();
+    if (st != 0 && streq(st, "round=1") == 1) {
+        var name = _ir_field("step1", "name");
+        var ir2 = bote_input_required_new_a(a);
+        if (name == 0) {
+            bote_input_elicit(ir2, "step1", "Step 1: What is your name?", _IR_NAME);
+            bote_input_state(ir2, "round=1");
+            return bote_input_required_json(ir2);
+        }
+        bote_input_elicit(ir2, "step2", "Step 2: What is your favorite color?", "{\"type\":\"object\",\"properties\":{\"color\":{\"type\":\"string\"}},\"required\":[\"color\"]}");
+        bote_input_state(ir2, _ir_cat3("round=2;name=", name, ""));
+        return bote_input_required_json(ir2);
+    }
+    if (st != 0 && strstr(st, "round=2;name=") == 0) {
+        var color = _ir_field("step2", "color");
+        if (color != 0) { return content_text_response(_ir_cat3(_ir_cat3("Done: ", st + 13, " likes "), color, "")); }
+    }
+    var ir = bote_input_required_new_a(a);
+    bote_input_elicit(ir, "step1", "Step 1: What is your name?", _IR_NAME);
+    bote_input_state(ir, "round=1");
+    return bote_input_required_json(ir);
+}
+fn t_ir_multiple(args, claims) {
+    var a = bote_req_alloc();
+    var st = bote_request_state();
+    if (st != 0 && bote_input_response_a(a, "user_name") != 0 && bote_input_response_a(a, "greeting") != 0 && bote_input_response_a(a, "client_roots") != 0) {
+        return content_text_response("All three inputs received.");
+    }
+    var ir = bote_input_required_new_a(a);
+    bote_input_elicit(ir, "user_name", "What is your name?", _IR_NAME);
+    bote_input_sample(ir, "greeting", "{\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"Generate a greeting\"}}],\"maxTokens\":50}");
+    bote_input_roots(ir, "client_roots");
+    bote_input_state(ir, "multiple");
+    return bote_input_required_json(ir);
+}
+fn t_ir_request_state(args, claims) {
+    var a = bote_req_alloc();
+    var st = bote_request_state();
+    if (st != 0 && streq(st, "confirm-pending") == 1 && bote_input_response_a(a, "confirm") != 0) {
+        return content_text_response("state-ok: the requestState came back sealed and opened");
+    }
+    var ir = bote_input_required_new_a(a);
+    bote_input_elicit(ir, "confirm", "Please confirm", "{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\"}},\"required\":[\"ok\"]}");
+    bote_input_state(ir, "confirm-pending");
+    return bote_input_required_json(ir);
+}
+# Asks only for what the request's client declared it can take (bote_client_has).
+fn t_ir_capabilities(args, claims) {
+    var a = bote_req_alloc();
+    if (bote_input_response_a(a, "answer") != 0) { return content_text_response("Thanks for the answer."); }
+    var ir = bote_input_required_new_a(a);
+    if (bote_client_has("elicitation.form") == 1) {
+        bote_input_elicit(ir, "answer", "What is your name?", _IR_NAME);
+    } elif (bote_client_has("sampling") == 1) {
+        bote_input_sample(ir, "answer", "{\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"Say hello\"}}],\"maxTokens\":20}");
+    } elif (bote_client_has("roots") == 1) {
+        bote_input_roots(ir, "answer");
+    } else {
+        return content_text_response("The client takes no input, so none was asked.");
+    }
+    return bote_input_required_json(ir);
+}
+
+# The suite's server-stateless diagnostics: one that needs sampling, which a client that
+# declared none is answered with -32021 by bote's own check, and an elicitation whose
+# response holds no request of the server's own, only the InputRequiredResult.
+fn t_ir_needs_sampling(args, claims) {
+    var ir = bote_input_required_new_a(bote_req_alloc());
+    bote_input_sample(ir, "q", "{\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"Say hello\"}}],\"maxTokens\":20}");
+    return bote_input_required_json(ir);
+}
+
+fn p_ir_prompt(args, claims) {
+    var ctx = _ir_field("user_context", "context");
+    if (ctx != 0) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "{\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"Context: ");
+        bote_json_escape(sb, ctx);
+        str_builder_add_cstr(sb, "\"}}]}");
+        return str_data(str_builder_build(sb));
+    }
+    var ir = bote_input_required_new_a(bote_req_alloc());
+    bote_input_elicit(ir, "user_context", "What context should the prompt use?", "{\"type\":\"object\",\"properties\":{\"context\":{\"type\":\"string\"}},\"required\":[\"context\"]}");
+    return bote_input_required_json(ir);
+}
+
 # ---- the server ----
 
 fn _tool(d, name, desc, fp) {
@@ -283,6 +419,18 @@ fn fixture_dispatcher() {
     dispatcher_register_resource_template(d, resource_template_with_icons(resource_template_with_title(resource_template_new("test://bote-titled/{id}", "bote-titled-template", "A template with a title", "text/plain"), "Titled template"), _fx_icons()), &r_titled);
     dispatcher_set_server_details(d, "bote conformance fixture", "The servers the official suite and client are run against", "https://github.com/MacCracken/bote", _fx_icons());
     dispatcher_set_instructions(d, "Call bote_structured for the weather.\nIt has an outputSchema.");
+    _tool(d, "test_input_required_result_elicitation", "Asks the user's name", &t_ir_elicitation);
+    _tool(d, "test_input_required_result_sampling", "Asks the client's model", &t_ir_sampling);
+    _tool(d, "test_input_required_result_list_roots", "Asks the client's roots", &t_ir_roots);
+    _tool(d, "test_input_required_result_multi_round", "Asks twice, with state", &t_ir_multi_round);
+    _tool(d, "test_input_required_result_multiple_inputs", "Asks three things at once", &t_ir_multiple);
+    _tool(d, "test_input_required_result_request_state", "Asks with state", &t_ir_request_state);
+    _tool(d, "test_input_required_result_tampered_state", "Asks with state, which must come back whole", &t_ir_request_state);
+    _tool(d, "test_input_required_result_capabilities", "Asks only for what the client declared", &t_ir_capabilities);
+    _tool(d, "test_missing_capability", "Needs sampling", &t_ir_needs_sampling);
+    _tool(d, "test_streaming_elicitation", "Asks the user's name, on its own response", &t_ir_elicitation);
+    dispatcher_register_prompt(d, prompt_def_new("test_input_required_result_prompt", "A prompt that asks for its context", vec_new()), &p_ir_prompt);
+    dispatcher_with_state_hmac(d, bote_state_hmac_random(0));
     _otool(d, "bote_structured_list", "Users, an array", _FX_USERS, &t_structured_list);
     _otool(d, "bote_structured_bad", "A result its schema refuses", _FX_WEATHER, &t_structured_bad);
     _fx_d = d;

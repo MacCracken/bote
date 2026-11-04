@@ -76,6 +76,8 @@ include "src/conn.cyr"
 include "src/fetch.cyr"
 # jwks.cyr — a JWK Set fetched from a jwks_uri, through fetch.cyr (3.6.6).
 include "src/jwks.cyr"
+# state_seal.cyr — the HMAC sealer for a multi round-trip request's requestState (3.8.2).
+include "src/state_seal.cyr"
 include "src/http_era.cyr"
 include "src/oauth_metadata.cyr"
 include "src/listen.cyr"
@@ -149,6 +151,7 @@ fn main() {
     # open roadmap decision, not something a consolidation changes.)
     if (streq(mode, "streamable") == 1) {
         var sdisp = bote_dispatcher_with_echo();
+        if (bote_main_state_from_env(sdisp) < 0) { return 2; }
         if (bote_main_scopes_from_env(sdisp, mode, bearer_fp == &auth_validator_jwt) < 0) { return 2; }
         # Server→client notification wiring. A SessionStore gives each
         # client a per-session outbound buffer; the client-notification
@@ -179,6 +182,7 @@ fn main() {
     }
     if (streq(mode, "ws") == 1) {
         var wdisp = bote_dispatcher_with_echo();
+        if (bote_main_state_from_env(wdisp) < 0) { return 2; }
         if (bote_main_scopes_from_env(wdisp, mode, bearer_fp == &auth_validator_jwt) < 0) { return 2; }
         var wport = 8393;
         if (arg != 0) { wport = bote_main_port(arg, 8393); }
@@ -193,6 +197,7 @@ fn main() {
     }
 
     var dispatcher = bote_dispatcher_with_echo();
+    if (bote_main_state_from_env(dispatcher) < 0) { return 2; }
 
     # libro audit tools (2.7.5): stand up an in-memory libro chain and
     # register libro_query / verify / export / proof / retention on the

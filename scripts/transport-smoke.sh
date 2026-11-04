@@ -614,6 +614,20 @@ while len(b)<o+n: b+=s.recv(4096)
 print(b[o:o+n].decode())' "$LB")
 echo "$r" | grep -qF "$LACK" || err "listen over ws: no acknowledgement: $r"
 
+# BOTE_STATE_KEY (3.8.2): a key that is no key ends the start with a line, and never the
+# key itself; a good one serves.
+REQ='{"jsonrpc":"2.0","id":1,"method":"ping"}'
+for bad in zz 0123 "$(printf '%063d' 0)"; do
+  rc=0; printf '%s\n' "$REQ" | BOTE_STATE_KEY="$bad" "$B" > "$L/key.out" 2> "$L/key.err" || rc=$?
+  [ "$rc" -eq 2 ] || err "BOTE_STATE_KEY=$bad: rc=$rc, not 2"
+  grep -q 'BOTE_STATE_KEY: 64 hex digits or more' "$L/key.err" || err "BOTE_STATE_KEY=$bad: no line saying why"
+  [ -s "$L/key.out" ] && err "BOTE_STATE_KEY=$bad: answered anyway"
+done
+good=$(printf '%064x' 7)
+printf '%s\n' "$REQ" | BOTE_STATE_KEY="$good" "$B" > "$L/key.out" 2> "$L/key.err" || true
+grep -q '"id":1,"result":{}' "$L/key.out" || err "BOTE_STATE_KEY with a good key: no answer: $(cat "$L/key.out" "$L/key.err")"
+grep -q "$good" "$L/key.err" && err "BOTE_STATE_KEY: the key reached the log"
+
 for f in "$L"/*.err; do grep -q 'transport failed' "$f" && err "$(basename "$f"): $(grep 'transport failed' "$f")"; done
 [ $fail -eq 0 ] || exit 1
-echo "transport smoke: http bridge streamable ws unix + both argv[0] aliases answer; streamable keeps its tool set; a held port names its step"
+echo "transport smoke: http bridge streamable ws unix + both argv[0] aliases answer; streamable keeps its tool set; a held port names its step; BOTE_STATE_KEY refused aloud or taken"

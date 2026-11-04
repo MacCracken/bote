@@ -117,64 +117,102 @@ fn _jx_hexval(c) {
 fn _jx_unescape_into(src, n, out) {
     var i = 0;
     var o = 0;
+    var w[8];
     while (i < n) {
         var c = load8(src + i);
-        if ((c == 92) && ((i + 1) < n)) {    # backslash
-            var d = load8(src + i + 1);
-            if (d == 110)      { store8(out + o, 10); o = o + 1; i = i + 2; }   # \n
-            elif (d == 116)    { store8(out + o, 9);  o = o + 1; i = i + 2; }   # \t
-            elif (d == 114)    { store8(out + o, 13); o = o + 1; i = i + 2; }   # \r
-            elif (d == 34)     { store8(out + o, 34); o = o + 1; i = i + 2; }   # \"
-            elif (d == 92)     { store8(out + o, 92); o = o + 1; i = i + 2; }   # \\
-            elif (d == 47)     { store8(out + o, 47); o = o + 1; i = i + 2; }   # \/
-            elif (d == 98)     { store8(out + o, 8);  o = o + 1; i = i + 2; }   # \b
-            elif (d == 102)    { store8(out + o, 12); o = o + 1; i = i + 2; }   # \f
-            elif ((d == 117) && ((i + 5) < n)) {                                # \uXXXX
-                var h1 = _jx_hexval(load8(src + i + 2));
-                var h2 = _jx_hexval(load8(src + i + 3));
-                var h3 = _jx_hexval(load8(src + i + 4));
-                var h4 = _jx_hexval(load8(src + i + 5));
-                if ((h1 < 0) || (h2 < 0) || (h3 < 0) || (h4 < 0)) {
-                    store8(out + o, d); o = o + 1; i = i + 2;    # malformed -> keep 'u'
-                } else {
-                    var cp = ((h1 * 4096) + (h2 * 256)) + ((h3 * 16) + h4);
-                    var low = _jx_low_surrogate(src, i + 6, n);
-                    if (cp >= 55296 && cp <= 56319 && low >= 0) {
-                        # A surrogate pair is one code point, four UTF-8 bytes.
-                        cp = 65536 + ((cp - 55296) * 1024) + (low - 56320);
-                        store8(out + o, 240 + (cp / 262144)); o = o + 1;
-                        store8(out + o, 128 + ((cp / 4096) % 64)); o = o + 1;
-                        store8(out + o, 128 + ((cp / 64) % 64)); o = o + 1;
-                        store8(out + o, 128 + (cp % 64)); o = o + 1;
-                        i = i + 6;
-                    } elif (cp >= 55296 && cp <= 57343) {
-                        # A lone surrogate is not text: U+FFFD.
-                        store8(out + o, 239); o = o + 1;
-                        store8(out + o, 191); o = o + 1;
-                        store8(out + o, 189); o = o + 1;
-                    } elif (cp < 128) {
-                        store8(out + o, cp); o = o + 1;
-                    } elif (cp < 2048) {
-                        store8(out + o, 192 + (cp / 64)); o = o + 1;
-                        store8(out + o, 128 + (cp - ((cp / 64) * 64))); o = o + 1;
-                    } else {
-                        var hi = cp / 4096;
-                        var mid = (cp / 64) - (hi * 64);
-                        var lo = cp - ((cp / 64) * 64);
-                        store8(out + o, 224 + hi); o = o + 1;
-                        store8(out + o, 128 + mid); o = o + 1;
-                        store8(out + o, 128 + lo); o = o + 1;
-                    }
-                    i = i + 6;
-                }
-            }
-            else { store8(out + o, d); o = o + 1; i = i + 2; }  # unknown escape -> keep char
+        if ((c == 92) && ((i + 1) < n)) {
+            i = _jx_unescape_one(src, n, i, out + o, &w);
+            o = o + load64(&w);
         } else {
             store8(out + o, c); o = o + 1; i = i + 1;
         }
     }
     store8(out + o, 0);
     return o;
+}
+
+# The escape at src[i] (a backslash with a byte after it, in a body of n bytes): what it
+# decodes to, 1 to 4 bytes, written at out, their count at wp, and the index past it. It
+# reads all it needs before it writes, so out may be at or behind src + i. The one
+# decoder: _jx_unescape_into and _jx_dec_eq both step through it.
+fn _jx_unescape_one(src, n, i, out, wp) {
+    store64(wp, 1);
+    var d = load8(src + i + 1);
+    if (d == 110)      { store8(out, 10); return i + 2; }   # \n
+    elif (d == 116)    { store8(out, 9);  return i + 2; }   # \t
+    elif (d == 114)    { store8(out, 13); return i + 2; }   # \r
+    elif (d == 34)     { store8(out, 34); return i + 2; }   # \"
+    elif (d == 92)     { store8(out, 92); return i + 2; }   # \\
+    elif (d == 47)     { store8(out, 47); return i + 2; }   # \/
+    elif (d == 98)     { store8(out, 8);  return i + 2; }   # \b
+    elif (d == 102)    { store8(out, 12); return i + 2; }   # \f
+    if ((d != 117) || ((i + 5) >= n)) { store8(out, d); return i + 2; }   # unknown -> keep char
+    var h1 = _jx_hexval(load8(src + i + 2));
+    var h2 = _jx_hexval(load8(src + i + 3));
+    var h3 = _jx_hexval(load8(src + i + 4));
+    var h4 = _jx_hexval(load8(src + i + 5));
+    if ((h1 < 0) || (h2 < 0) || (h3 < 0) || (h4 < 0)) {
+        store8(out, d); return i + 2;    # malformed -> keep 'u'
+    }
+    var cp = ((h1 * 4096) + (h2 * 256)) + ((h3 * 16) + h4);
+    var low = _jx_low_surrogate(src, i + 6, n);
+    if (cp >= 55296 && cp <= 56319 && low >= 0) {
+        # A surrogate pair is one code point, four UTF-8 bytes.
+        cp = 65536 + ((cp - 55296) * 1024) + (low - 56320);
+        store8(out, 240 + (cp / 262144));
+        store8(out + 1, 128 + ((cp / 4096) % 64));
+        store8(out + 2, 128 + ((cp / 64) % 64));
+        store8(out + 3, 128 + (cp % 64));
+        store64(wp, 4);
+        return i + 12;
+    }
+    if (cp >= 55296 && cp <= 57343) {
+        # A lone surrogate is not text: U+FFFD.
+        store8(out, 239);
+        store8(out + 1, 191);
+        store8(out + 2, 189);
+        store64(wp, 3);
+    } elif (cp < 128) {
+        store8(out, cp);
+    } elif (cp < 2048) {
+        store8(out, 192 + (cp / 64));
+        store8(out + 1, 128 + (cp - ((cp / 64) * 64)));
+        store64(wp, 2);
+    } else {
+        var hi = cp / 4096;
+        var mid = (cp / 64) - (hi * 64);
+        var lo = cp - ((cp / 64) * 64);
+        store8(out, 224 + hi);
+        store8(out + 1, 128 + mid);
+        store8(out + 2, 128 + lo);
+        store64(wp, 3);
+    }
+    return i + 6;
+}
+
+# 1 when the JSON string body at p (n bytes, its escapes unread) decodes to the wl bytes at
+# want. It decodes as it compares and allocates nothing (3.8.2).
+fn _jx_dec_eq(p, n, want, wl) {
+    var i = 0;
+    var o = 0;
+    var u[8];
+    var w[8];
+    while (i < n) {
+        var c = load8(p + i);
+        if ((c == 92) && ((i + 1) < n)) {
+            i = _jx_unescape_one(p, n, i, &u, &w);
+            var k = load64(&w);
+            if (o + k > wl) { return 0; }
+            if (memeq(&u, want + o, k) == 0) { return 0; }
+            o = o + k;
+        } else {
+            if (o >= wl || load8(want + o) != c) { return 0; }
+            o = o + 1;
+            i = i + 1;
+        }
+    }
+    if (o == wl) { return 1; }
+    return 0;
 }
 
 # 1 when the n bytes at p hold a backslash.
@@ -192,21 +230,11 @@ fn _jx_has_escape(p, n) {
 # -1. This is the one key scanner: _jx_find_value_pos is its one-key form, so
 # the codec, the dispatcher and the validator cannot read a message differently.
 # A key is matched as what it decodes to: `"c\u006et"` is the key `cnt`, here for
-# the validator and for a handler alike. (3.8.1) Whatever its length: a key of 256 bytes
-# or more is decoded on the request arena, given back once it is compared. Through 3.8.0
-# such a key was compared as written, where a client decodes it, so a result's member
-# spelled with an escape was never judged by the outputSchema property it names.
+# the validator and for a handler alike, whatever its length. It allocates nothing: a key
+# of 256 bytes or more is decoded as it is compared (3.8.2). At 3.8.1 that key was decoded
+# on the request arena, the calling thread's, and a helper thread's scan on a one-loop
+# server gave back the bytes its handler was using.
 fn _jx_scan(buf, len, keys, n, pos) {
-    var mk[16];
-    store64(&mk, 0);
-    _jx_scan_in(buf, len, keys, n, pos, &mk);
-    if (load64(&mk) != 0) { bote_req_release(&mk); }
-    return 0;
-}
-
-# _jx_scan's walk. `mk` is marked the first time a long key is decoded, and _jx_scan gives
-# the arena back once, after the walk: a key costs nothing more for the rare long one.
-fn _jx_scan_in(buf, len, keys, n, pos, mk) {
     var k = 0;
     while (k < n) { store64(pos + k * 8, 0 - 1); k = k + 1; }
     var i = _jx_skip_ws(buf, len, 0);
@@ -222,15 +250,14 @@ fn _jx_scan_in(buf, len, keys, n, pos, mk) {
         var ke = _jx_skip_string(buf, len, i);
         var kl = ke - ks - 1;
         var kp = buf + ks;
+        # 0 compares the bytes, 1 the decoded ones, 2 decodes as it compares.
+        var how = 0;
         if (kl > 0 && _jx_has_escape(kp, kl) == 1) {
+            how = 2;
             if (kl < 256) {
                 kl = _jx_unescape_into(kp, kl, &dec);
                 kp = &dec;
-            } else {
-                if (load64(mk) == 0) { bote_req_mark(mk); }
-                var big = alloc_via(bote_req_alloc(), kl + 1);
-                kl = _jx_unescape_into(kp, kl, big);
-                kp = big;
+                how = 1;
             }
         }
         i = _jx_skip_ws(buf, len, ke);
@@ -238,8 +265,12 @@ fn _jx_scan_in(buf, len, keys, n, pos, mk) {
         i = _jx_skip_ws(buf, len, i + 1);
         k = 0;
         while (k < n) {
-            if (kl == load64(keys + k * 16 + 8) && load64(pos + k * 8) < 0) {
-                if (memeq(kp, load64(keys + k * 16), kl) == 1) {
+            if (load64(pos + k * 8) < 0) {
+                var wl = load64(keys + k * 16 + 8);
+                var hit = 0;
+                if (how == 2) { hit = _jx_dec_eq(kp, kl, load64(keys + k * 16), wl); }
+                elif (kl == wl) { hit = memeq(kp, load64(keys + k * 16), kl); }
+                if (hit == 1) {
                     store64(pos + k * 8, i);
                     left = left - 1;
                     if (left == 0) { return 0; }
@@ -314,59 +345,166 @@ fn _jx_members_x(a, obj, raw) {
 }
 
 # 1 when an object anywhere in the JSON value `v` names a key twice, keys compared as
-# they decode (3.8.1), or, with `nul` 1, names one that decodes to hold a NUL. bote reads
-# the first of a repeated key and a client may read the last, so what bote judged and
-# what a client reads would differ. What it reads is given back to `a` once it is done.
+# they decode (3.8.1), or names one a client may read another way: bytes that are not
+# UTF-8, or a surrogate escape that is not one of a pair (3.8.2), or, with `nul` 1, when
+# a key or (3.8.2) any string decodes to hold a NUL: a schema's `required` name or `enum`
+# value bote cannot hold. bote reads the first of a repeated key and a client may read
+# the last, so what bote judged and what a client reads would differ; a client decoding
+# UTF-8 reads `a<0xFF>` as `a\ufffd`, which bote's bytes do not match. What it reads is
+# given back to `a` once it is done. It walks `v` where it lies and keeps only the keys
+# (3.8.2): at 3.8.1 each level copied its whole subtree, 4 MB of arena for 60 KB nested
+# 62 deep, and compared every pair of keys in an object.
 fn _jx_repeats_a(a, v, nul) {
+    if (v == 0) { return 0; }
     var mk[16];
     bote_arena_mark(a, &mk);
-    var r = _jx_repeats_in(a, v, nul);
+    var n = strlen(v);
+    var r = 0;
+    var i = _jx_skip_ws(v, n, 0);
+    if (i < n) { r = _jx_rep_value(a, v, n, i, nul); }
     bote_arena_release(a, &mk);
     return r;
 }
 
-fn _jx_repeats_in(a, v, nul) {
-    var n = strlen(v);
-    var i = _jx_skip_ws(v, n, 0);
-    if (i >= n) { return 0; }
+# _jx_repeats_a for the value at v[i], in the n bytes at v.
+fn _jx_rep_value(a, v, n, i, nul) {
     var c = load8(v + i);
+    if (c == 34) {
+        if (nul == 0) { return 0; }
+        var sl = _jx_skip_string(v, n, i) - i - 2;
+        if (sl <= 0 || _jx_has_escape(v + i + 1, sl) == 0) { return 0; }
+        var ds = alloc_via(a, sl + 1);
+        return _jx_has_nul(ds, _jx_unescape_into(v + i + 1, sl, ds));
+    }
     if (c == 91) {
         i = _jx_skip_ws(v, n, i + 1);
         while (i < n && load8(v + i) != 93) {
-            # Only an object or an array can hold a key: a scalar is passed over uncopied.
+            # Only an object or an array can hold a key, and a string a NUL.
             var ec = load8(v + i);
-            if (ec == 123 || ec == 91) {
-                var e = _jx_skip_value(v, n, i);
-                var el = alloc_via(a, e - i + 1);
-                memcpy(el, v + i, e - i);
-                store8(el + e - i, 0);
-                if (_jx_repeats_in(a, el, nul) == 1) { return 1; }
-            }
+            if ((ec == 123 || ec == 91 || (nul == 1 && ec == 34)) && _jx_rep_value(a, v, n, i, nul) == 1) { return 1; }
             i = _jx_array_next(v, n, i);
         }
         return 0;
     }
     if (c != 123) { return 0; }
-    var m = _jx_members_raw_a(a, v);
-    var k = 0;
-    while (k < vec_len(m)) {
-        var key = vec_get(m, k);
-        if (key == 0) {
-            if (nul == 1) { return 1; }
-        } else {
-            var j = 0;
-            while (j < k) {
-                var other = vec_get(m, j);
-                if (other != 0 && streq(other, key) == 1) { return 1; }
-                j = j + 3;
-            }
+    # Each key as it decodes, a pointer and a length: into `v` where it has no escape.
+    var ks = vec_new_a(a);
+    i = _jx_skip_ws(v, n, i + 1);
+    while (i < n && load8(v + i) == 34) {
+        var ke = _jx_skip_string(v, n, i);
+        var kp = v + i + 1;
+        var kl = ke - i - 2;
+        if (_jx_key_text_ok(kp, kl) == 0) { return 1; }
+        if (kl > 0 && _jx_has_escape(kp, kl) == 1) {
+            var dk = alloc_via(a, kl + 1);
+            kl = _jx_unescape_into(kp, kl, dk);
+            kp = dk;
+            if (nul == 1 && _jx_has_nul(kp, kl) == 1) { return 1; }
         }
-        var mv = vec_get(m, k + 2);
-        var mc = load8(mv);
-        if ((mc == 123 || mc == 91) && _jx_repeats_in(a, mv, nul) == 1) { return 1; }
-        k = k + 3;
+        vec_push_a(a, ks, kp);
+        vec_push_a(a, ks, kl);
+        i = _jx_skip_ws(v, n, ke);
+        if (i >= n || load8(v + i) != 58) { return _jx_rep_keys(a, ks); }
+        i = _jx_skip_ws(v, n, i + 1);
+        var vc = load8(v + i);
+        if ((vc == 123 || vc == 91 || (nul == 1 && vc == 34)) && _jx_rep_value(a, v, n, i, nul) == 1) { return 1; }
+        i = _jx_skip_ws(v, n, _jx_skip_value(v, n, i));
+        if (i < n && load8(v + i) == 44) { i = _jx_skip_ws(v, n, i + 1); }
+    }
+    return _jx_rep_keys(a, ks);
+}
+
+# 1 when two of the keys in `ks` (pointer, length, pointer, length, ...) are the same.
+# A table on `a` past eight of them, so a large object costs one look per key.
+fn _jx_rep_keys(a, ks) {
+    var cnt = vec_len(ks) / 2;
+    if (cnt < 2) { return 0; }
+    var j = 0;
+    if (cnt <= 8) {
+        while (j < cnt) {
+            var o = 0;
+            while (o < j) {
+                var ol = vec_get(ks, o * 2 + 1);
+                if (ol == vec_get(ks, j * 2 + 1) && memeq(vec_get(ks, o * 2), vec_get(ks, j * 2), ol) == 1) { return 1; }
+                o = o + 1;
+            }
+            j = j + 1;
+        }
+        return 0;
+    }
+    var size = 16;
+    while (size < cnt * 2) { size = size * 2; }
+    var t = alloc_via(a, size * 8);
+    memset(t, 0, size * 8);
+    while (j < cnt) {
+        var kp = vec_get(ks, j * 2);
+        var kl = vec_get(ks, j * 2 + 1);
+        var h = 0 - 3750763034362895579;
+        var b = 0;
+        while (b < kl) {
+            h = (h ^ load8(kp + b)) * 1099511628211;
+            b = b + 1;
+        }
+        h = h & (size - 1);
+        while (load64(t + h * 8) != 0) {
+            var e = load64(t + h * 8) - 1;
+            if (vec_get(ks, e * 2 + 1) == kl && memeq(vec_get(ks, e * 2), kp, kl) == 1) { return 1; }
+            h = (h + 1) & (size - 1);
+        }
+        store64(t + h * 8, j + 1);
+        j = j + 1;
     }
     return 0;
+}
+
+# 1 when the n bytes at p hold a NUL.
+fn _jx_has_nul(p, n) {
+    var i = 0;
+    while (i < n) {
+        if (load8(p + i) == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 when the key body at p (n bytes, escapes unread) is text a client reads as bote does:
+# its bytes UTF-8 (RFC 8259 8.1), and each surrogate escape one of a pair, as
+# _jx_unescape_one pairs them. A client decodes a byte that is no UTF-8 to U+FFFD, and
+# keeps a lone surrogate, where bote keeps the byte and writes U+FFFD.
+fn _jx_key_text_ok(p, n) {
+    var j = 0;
+    while (j < n) {
+        var c = load8(p + j);
+        if (c == 92 && j + 1 < n) {
+            var cu = 0 - 1;
+            if (load8(p + j + 1) == 117 && j + 5 < n) {
+                var h1 = _jx_hexval(load8(p + j + 2));
+                var h2 = _jx_hexval(load8(p + j + 3));
+                var h3 = _jx_hexval(load8(p + j + 4));
+                var h4 = _jx_hexval(load8(p + j + 5));
+                if (h1 >= 0 && h2 >= 0 && h3 >= 0 && h4 >= 0) {
+                    cu = ((h1 * 4096) + (h2 * 256)) + ((h3 * 16) + h4);
+                }
+            }
+            if (cu >= 55296 && cu <= 56319) {
+                if (_jx_low_surrogate(p, j + 6, n) < 0) { return 0; }
+                j = j + 12;
+            } elif (cu >= 56320 && cu <= 57343) {
+                return 0;
+            } elif (cu >= 0) {
+                j = j + 6;
+            } else {
+                j = j + 2;
+            }
+        } elif (c < 128) {
+            j = j + 1;
+        } else {
+            var l = _jx_utf8_len(p + j);
+            if (l == 0 || j + l > n) { return 0; }
+            j = j + l;
+        }
+    }
+    return 1;
 }
 
 # Past the array element at buf[i]: the next element, its closing `]`, or len when
@@ -883,16 +1021,159 @@ fn _bote_uri_rest_ok(s, i) {
 }
 
 # 1 when `url` is an absolute http:// or https:// URL with a host: what an icon's `src`
-# may be beside a data: URI, and what `websiteUrl` must be.
+# may be beside a data: URI, and what `websiteUrl` must be. The authority is a host and
+# an optional port, and nothing else (3.8.2): a domain of letters, digits, `-` and `_` in
+# labels, a dotted-quad IPv4 address, or an IPv6 literal in brackets, then up to 65535.
+# No userinfo, which would put a credential in every list. At 3.8.1 only the first byte
+# after `//` was looked at, so `http://:80/x`, `http://@/` and `https://user:pass@h/`
+# passed, which a client's URL parser refuses or which carries a password.
 fn bote_web_url_ok(url) {
     if (url == 0) { return 0; }
     var at = 0;
     if (_bote_starts_ci(url, "https://") == 1) { at = 8; }
     elif (_bote_starts_ci(url, "http://") == 1) { at = 7; }
     else { return 0; }
-    var h = load8(url + at);
-    if (h == 0 || h == 47 || h == 63 || h == 35) { return 0; }
-    return _bote_uri_rest_ok(url, at);
+    var n = strlen(url);
+    var e = at;
+    while (e < n && _bote_in("/?#", load8(url + e)) == 0) { e = e + 1; }
+    if (_bote_authority_ok(url + at, e - at) == 0) { return 0; }
+    if (e == n) { return 1; }
+    return _bote_uri_rest_ok(url, e);
+}
+
+# 1 when the n bytes at p are host [":" port], as bote_web_url_ok takes them.
+fn _bote_authority_ok(p, n) {
+    if (n == 0) { return 0; }
+    var hn = n;
+    if (load8(p) == 91) {
+        var close = 1;
+        while (close < n && load8(p + close) != 93) { close = close + 1; }
+        if (close >= n || _bote_ipv6_ok(p + 1, close - 1) == 0) { return 0; }
+        hn = close + 1;
+        if (hn < n && load8(p + hn) != 58) { return 0; }
+    } else {
+        hn = 0;
+        while (hn < n && load8(p + hn) != 58) { hn = hn + 1; }
+        if (_bote_host_name_ok(p, hn) == 0) { return 0; }
+    }
+    if (hn == n) { return 1; }
+    # The port: digits, perhaps none, at most 65535.
+    var v = 0;
+    var i = hn + 1;
+    while (i < n) {
+        var c = load8(p + i);
+        if (c < 48 || c > 57) { return 0; }
+        v = v * 10 + (c - 48);
+        if (v > 65535) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# 1 when the n bytes at p are a domain or a dotted-quad IPv4 address. Labels are letters,
+# digits, `-` and `_`, none empty but a last one after a trailing dot. A host whose last
+# label is a number is an IPv4 address to a URL parser, and must be one here.
+fn _bote_host_name_ok(p, n) {
+    if (n == 0) { return 0; }
+    var end = n;
+    if (n > 1 && load8(p + n - 1) == 46) { end = n - 1; }
+    var ls = 0;
+    var i = 0;
+    while (i <= end) {
+        if (i == end || load8(p + i) == 46) {
+            if (i == ls) { return 0; }
+            ls = i + 1;
+        } else {
+            var c = load8(p + i);
+            if (_bote_alnum(c) == 0 && c != 45 && c != 95) { return 0; }
+        }
+        i = i + 1;
+    }
+    # The last label: all digits, or 0x and hex, is a number.
+    var last = end;
+    while (last > 0 && load8(p + last - 1) != 46) { last = last - 1; }
+    var num = 1;
+    var j = last;
+    if (end - last >= 2 && load8(p + last) == 48 && (load8(p + last + 1) == 120 || load8(p + last + 1) == 88)) {
+        j = last + 2;
+        while (j < end) { if (_bote_hex(load8(p + j)) == 0) { num = 0; } j = j + 1; }
+    } else {
+        while (j < end) { if (load8(p + j) < 48 || load8(p + j) > 57) { num = 0; } j = j + 1; }
+    }
+    if (num == 1) { return _bote_ipv4_ok(p, n); }
+    return 1;
+}
+
+# 1 when the n bytes at p are four decimal parts, 0 to 255, with no leading zero.
+fn _bote_ipv4_ok(p, n) {
+    var parts = 0;
+    var i = 0;
+    while (parts < 4) {
+        var v = 0;
+        var d = 0;
+        while (i < n && load8(p + i) >= 48 && load8(p + i) <= 57) {
+            if (d > 0 && v == 0) { return 0; }
+            v = v * 10 + (load8(p + i) - 48);
+            d = d + 1;
+            i = i + 1;
+            if (v > 255) { return 0; }
+        }
+        if (d == 0) { return 0; }
+        parts = parts + 1;
+        if (parts < 4) {
+            if (i >= n || load8(p + i) != 46) { return 0; }
+            i = i + 1;
+        }
+    }
+    if (i != n) { return 0; }
+    return 1;
+}
+
+# 1 when the n bytes at p are an IPv6 address (RFC 4291 2.2): eight groups of one to four
+# hex digits, or fewer around one `::`, the last two perhaps a dotted quad. No zone.
+fn _bote_ipv6_ok(p, n) {
+    if (n < 2) { return 0; }
+    var groups = 0;
+    var compress = 0;
+    var i = 0;
+    if (load8(p) == 58) {
+        if (load8(p + 1) != 58) { return 0; }
+        compress = 1;
+        i = 2;
+        if (i == n) { return 1; }
+    }
+    while (i < n) {
+        # A dotted quad, as the last 32 bits.
+        var k = i;
+        while (k < n && load8(p + k) != 58 && load8(p + k) != 46) { k = k + 1; }
+        if (k < n && load8(p + k) == 46) {
+            if (_bote_ipv4_ok(p + i, n - i) == 0) { return 0; }
+            groups = groups + 2;
+            i = n;
+        } else {
+            var h = 0;
+            while (i < n && _bote_hex(load8(p + i)) == 1) { h = h + 1; i = i + 1; }
+            if (h == 0 || h > 4) { return 0; }
+            groups = groups + 1;
+            if (i < n) {
+                if (load8(p + i) != 58) { return 0; }
+                i = i + 1;
+                if (i < n && load8(p + i) == 58) {
+                    if (compress == 1) { return 0; }
+                    compress = 1;
+                    i = i + 1;
+                } elif (i == n) {
+                    return 0;
+                }
+            }
+        }
+    }
+    if (compress == 1) {
+        if (groups > 7) { return 0; }
+        return 1;
+    }
+    if (groups != 8) { return 0; }
+    return 1;
 }
 
 # 1 when `uri` is data: with a media type, `;base64`, and Base64 after the comma, as the
@@ -920,12 +1201,14 @@ fn _bote_data_uri_ok(uri) {
     return 1;
 }
 
-# 1 when `m` is type/subtype, each of RFC 6838's restricted-name characters.
+# 1 when `m` is type/subtype, each of RFC 6838's restricted-name characters, then any
+# parameters (3.8.2), RFC 9110 8.3.1: `; name=value`, the value a token or a quoted
+# string. At 3.8.1 a parameter was refused, which the spec's `mimeType?: string` allows.
 fn _bote_mime_ok(m) {
     var n = strlen(m);
     var slash = 0 - 1;
     var i = 0;
-    while (i < n) {
+    while (i < n && load8(m + i) != 59 && load8(m + i) != 32 && load8(m + i) != 9) {
         var c = load8(m + i);
         if (c == 47) {
             if (slash >= 0 || i == 0) { return 0; }
@@ -935,8 +1218,42 @@ fn _bote_mime_ok(m) {
         }
         i = i + 1;
     }
-    if (slash < 0 || slash == n - 1) { return 0; }
+    if (slash < 0 || slash == i - 1) { return 0; }
+    while (i < n) {
+        while (i < n && (load8(m + i) == 32 || load8(m + i) == 9)) { i = i + 1; }
+        if (i >= n || load8(m + i) != 59) { return 0; }
+        i = i + 1;
+        while (i < n && (load8(m + i) == 32 || load8(m + i) == 9)) { i = i + 1; }
+        var t = i;
+        while (i < n && _bote_tchar(load8(m + i)) == 1) { i = i + 1; }
+        if (i == t || i >= n || load8(m + i) != 61) { return 0; }
+        i = i + 1;
+        if (i < n && load8(m + i) == 34) {
+            i = i + 1;
+            var closed = 0;
+            while (i < n && closed == 0) {
+                var q = load8(m + i);
+                if (q == 34) { closed = 1; }
+                elif (q == 92) {
+                    i = i + 1;
+                    if (i >= n || load8(m + i) < 32 || load8(m + i) == 127) { return 0; }
+                } elif ((q < 32 && q != 9) || q == 127) { return 0; }
+                i = i + 1;
+            }
+            if (closed == 0) { return 0; }
+        } else {
+            var v = i;
+            while (i < n && _bote_tchar(load8(m + i)) == 1) { i = i + 1; }
+            if (i == v) { return 0; }
+        }
+    }
     return 1;
+}
+
+# 1 when `c` is an RFC 9110 tchar.
+fn _bote_tchar(c) {
+    if (_bote_alnum(c) == 1) { return 1; }
+    return _bote_in("!#$%&'*+-.^_`|~", c);
 }
 
 # 1 when `s` is "any" or WxH, each side 1 to 5 digits.
@@ -987,7 +1304,6 @@ fn bote_icons_check(icons) {
 
 # Why `title` and `icons` cannot be sent beside a name, or 0 when they can.
 fn bote_display_check(title, icons) {
-    if (title != 0 && strlen(title) == 0) { return "a title must not be empty"; }
     return bote_icons_check(icons);
 }
 
@@ -1041,3 +1357,64 @@ fn _bote_display_json(title, icons) {
     return str_data(str_builder_build(sb));
 }
 
+# ---- multi round-trip requests: what a handler reads (3.8.2) --------------------------
+#
+# The rest is in src/protocol.cyr, beside the request state these read.
+
+# 1 when the request's client declared capability `cap`: "elicitation", "elicitation.form",
+# "elicitation.url", "sampling", "sampling.tools" or "roots" (any name a client may declare,
+# a dot before a sub-capability). A bare `elicitation: {}` declares form mode, as the spec
+# has it. 0 on an older revision, where nothing is declared per request.
+fn bote_client_has(cap) {
+    var caps = load64(bote_req_state() + BOTE_REQ_STATE_INPUT);
+    if (caps == 0 || cap == 0) { return 0; }
+    return bote_caps_have(caps, cap);
+}
+
+# The same for any `clientCapabilities` object `caps`. It allocates nothing, so a handler's
+# own thread may ask: on a server with one loop, that thread shares the request state,
+# and a mark and release of the request arena there would give back what its handler holds.
+fn bote_caps_have(caps, cap) {
+    if (caps == 0 || cap == 0) { return 0; }
+    var n = strlen(cap);
+    var dot = 0;
+    while (dot < n && load8(cap + dot) != 46) { dot = dot + 1; }
+    var cl = strlen(caps);
+    var k[16];
+    var p[8];
+    store64(&k, cap);
+    store64(&k + 8, dot);
+    _jx_scan(caps, cl, &k, 1, &p);
+    var tp = load64(&p);
+    if (tp < 0 || load8(caps + tp) != 123) { return 0; }
+    if (dot == n) { return 1; }
+    store64(&k, cap + dot + 1);
+    store64(&k + 8, n - dot - 1);
+    _jx_scan(caps + tp, cl - tp, &k, 1, &p);
+    var sp = load64(&p);
+    if (sp >= 0 && load8(caps + tp + sp) == 123) { return 1; }
+    # `elicitation: {}`, with no mode named, is form mode.
+    if (dot == 11 && memeq(cap, "elicitation", 11) == 1 && streq(cap + 12, "form") == 1) {
+        var i = _jx_skip_ws(caps, cl, tp + 1);
+        if (i < cl && load8(caps + i) == 125) { return 1; }
+    }
+    return 0;
+}
+
+fn bote_input_response_a(a, key) {
+    var all = bote_input_responses_a(a);
+    if (all == 0) { return 0; }
+    return jsonx_get_raw_a(a, all, key);
+}
+
+# What an elicitation the client accepted gave, its `content` object, as raw JSON on `a`;
+# 0 when there is no answer under `key`, or it declined or cancelled.
+fn bote_input_accepted_a(a, key) {
+    var r = bote_input_response_a(a, key);
+    if (r == 0) { return 0; }
+    var act = jsonx_get_str_dec_a(a, r, "action");
+    if (act == 0 || streq(act, "accept") == 0) { return 0; }
+    var c = jsonx_get_raw_a(a, r, "content");
+    if (c == 0) { return "{}"; }
+    return c;
+}

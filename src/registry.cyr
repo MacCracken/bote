@@ -461,7 +461,8 @@ fn _reg_scan_tool(tool_def, out) {
 #   property and each required entry has a name.
 # - Each `x-mcp-header` keeps the rules of MCP 2026-07-28.
 # - (3.8.0) An outputSchema is valid JSON and an object.
-# - (3.8.1) A title is not empty, and each icon is what the spec says (bote_icons_check).
+# - (3.8.1) Each icon is what the spec says (bote_icons_check). (3.8.2) A title may be
+#   empty, as the spec's `title?: string` allows; 3.8.1 refused one.
 # - Each required scope is a scope-token.
 #
 # Public, so a consumer can check a definition before it registers one.
@@ -485,6 +486,11 @@ fn registry_check_tool_def(tool_def) {
             if (_reg_subschema_ok(schema_prop_value(pair)) == 0) {
                 return "an inputSchema property's schema is not a valid JSON Schema (an object or a boolean)";
             }
+            # (3.8.2) As an outputSchema's: a `required` name or an `enum` value holding a
+            # NUL could not be judged, and a key named twice would be read two ways.
+            if (_jx_repeats_a(default_alloc(), schema_prop_value(pair), 1) == 1) {
+                return "an inputSchema property's schema names a key twice in one object, or holds a NUL or a key that is not text";
+            }
             i = i + 1;
         }
     }
@@ -505,7 +511,7 @@ fn registry_check_tool_def(tool_def) {
         # (3.8.1) A key named twice in one object, or one that decodes to hold a NUL, is
         # read one way here and another by a client, or cannot be judged at all.
         if (_jx_repeats_a(default_alloc(), os, 1) == 1) {
-            return "the outputSchema names a key twice in one object, or one that holds a NUL";
+            return "the outputSchema names a key twice in one object, or holds a NUL or a key that is not text";
         }
         if (_reg_dialect_known(os) == 0) {
             return "the outputSchema's $schema names a dialect bote does not support (2020-12, 2019-09, draft-07, draft-06)";
@@ -558,8 +564,10 @@ fn _reg_warn_kw(tool, key, kw) {
 
 # The keywords bote lists and does not enforce, each a WARN (3.8.1 adds those through
 # 3.8.0 passed over in silence: additionalProperties among them, which a schema for a tool
-# with no parameters is told to say).
-var BOTE_UNENFORCED = "anyOf oneOf allOf not $ref $dynamicRef $recursiveRef pattern minLength maxLength minItems maxItems const additionalProperties exclusiveMinimum exclusiveMaximum multipleOf uniqueItems minProperties maxProperties prefixItems contains if then else propertyNames patternProperties dependentRequired dependentSchemas unevaluatedProperties unevaluatedItems ";
+# with no parameters is told to say). (3.8.2) `format`, which the official client
+# enforces, and draft-07's `additionalItems` and `dependencies`; an array `items` is a
+# WARN of its own (_reg_warn_schema).
+var BOTE_UNENFORCED = "anyOf oneOf allOf not $ref $dynamicRef $recursiveRef pattern minLength maxLength minItems maxItems const additionalProperties exclusiveMinimum exclusiveMaximum multipleOf uniqueItems minProperties maxProperties prefixItems contains if then else propertyNames patternProperties dependentRequired dependentSchemas unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
 
 # Every WARN the schema `v`, at `key` of tool `tool`, earns: each keyword in `kws` it
 # holds, a type array, a type bote does not know, and an `enum` on a type other than a
@@ -576,6 +584,8 @@ fn _reg_warn_schema(tool, key, v, kws) {
     if (jsonx_has(v, "enum") == 1 && (ty == 0 || streq(ty, "string") == 0)) {
         _reg_warn_kw(tool, key, "enum on a type other than string");
     }
+    var it = jsonx_get_raw_a(default_alloc(), v, "items");
+    if (it != 0 && load8(it) == 91) { _reg_warn_kw(tool, key, "items as an array"); }
     return 0;
 }
 
@@ -618,8 +628,9 @@ fn _reg_warn_output(tool_def) {
 }
 
 # 1 when an outputSchema's `$schema`, if it has one, names a dialect bote knows: 2020-12,
-# which it judges by, and 2019-09, draft-07 and draft-06, whose keywords bote judges the
-# same way. The official SDK knows these four. "Clients and servers MUST handle
+# which it judges by, and 2019-09, draft-07 and draft-06, whose keywords bote reads as
+# 2020-12's, with a WARN for each it does not judge, draft-07's array `items`,
+# `additionalItems` and `dependencies` among them (3.8.2). The official SDK knows these four. "Clients and servers MUST handle
 # unsupported dialects gracefully by returning an appropriate error" (the spec's JSON
 # Schema usage), so registration refuses another (3.8.1).
 fn _reg_dialect_known(os) {
@@ -826,21 +837,26 @@ fn _reg_output_legacy(os) {
 # An outputSchema as registration keeps it (3.8.0): on one line, as everything bote
 # sends must be, compiled, and with its 2025-11-25 form when its root is no object.
 # Outside JSON's strings, which cannot hold either, a CR or LF is only spacing.
-fn _reg_prepare_output(tool_def) {
+fn _reg_prepare_output(tool_def, st) {
     var os = tool_def_output_schema(tool_def);
     if (os == 0) { return 0; }
     os = _dsp_one_line(default_alloc(), os);
-    store64(tool_def + 80, os);
-    store64(tool_def + 88, parse_property(os));
-    store64(tool_def + 96, 0);
-    if (_reg_output_root_object(os) == 0) { store64(tool_def + 96, _reg_output_legacy(os)); }
+    store64(st + 8, os);
+    store64(st + 16, parse_property(os));
+    if (_reg_output_root_object(os) == 0) { store64(st + 24, _reg_output_legacy(os)); }
     _reg_warn_output(tool_def);
     return 0;
 }
 
 # What registration does before it touches the registry: refuses a malformed definition
 # (a BoteError), compiles its schema and reads its headers. 0 when it may be added.
-fn _registry_prepare(tool_def) {
+# What it makes for the definition goes in `st` (48 bytes), and _registry_add_u stores it
+# under the registries' lock (3.8.2), so a list beside the registration of a definition
+# already listed reads it once: +0 the headers, +8 the outputSchema on one line, +16 its
+# compiled form, +24 its legacy form, +32 the display fragment, +40 1 when there is an
+# outputSchema. At 3.8.1 each was stored here, with nothing held, between a list's sizing
+# pass and its writing pass.
+fn _registry_prepare(tool_def, st) {
     var why = registry_check_tool_def(tool_def);
     if (why != 0) {
         _reg_log_refused(tool_def, why);
@@ -851,17 +867,33 @@ fn _registry_prepare(tool_def) {
     if (tool_def_compiled(tool_def) == 0) {
         tool_def_with_compiled(tool_def, compiled_compile(tool_def_input_schema(tool_def)));
     }
+    memset(st, 0, 48);
     var headers = vec_new();
     _reg_scan_tool(tool_def, headers);
-    if (vec_len(headers) > 0) { store64(tool_def + 64, headers); }
+    if (vec_len(headers) > 0) { store64(st, headers); }
     _reg_warn_unenforced(tool_def);
-    _reg_prepare_output(tool_def);
-    store64(tool_def + 120, _bote_display_json(tool_def_title(tool_def), tool_def_icons(tool_def)));
+    if (tool_def_output_schema(tool_def) != 0) { store64(st + 40, 1); }
+    _reg_prepare_output(tool_def, st);
+    store64(st + 32, _bote_display_json(tool_def_title(tool_def), tool_def_icons(tool_def)));
     return 0;
 }
 
-# Add a prepared definition, with the registries' lock held to write (3.7.1).
-fn _registry_add_u(r, tool_def) {
+# Store in `tool_def` what _registry_prepare made in `st`.
+fn _registry_stage(tool_def, st) {
+    if (load64(st) != 0) { store64(tool_def + 64, load64(st)); }
+    if (load64(st + 40) == 1) {
+        store64(tool_def + 80, load64(st + 8));
+        store64(tool_def + 88, load64(st + 16));
+        store64(tool_def + 96, load64(st + 24));
+    }
+    store64(tool_def + 120, load64(st + 32));
+    return 0;
+}
+
+# Add a definition _registry_prepare made `st` for, with the registries' lock held to
+# write (3.7.1).
+fn _registry_add_u(r, tool_def, st) {
+    _registry_stage(tool_def, st);
     var name = tool_def_name(tool_def);
     var entries = registry_entries(r);
     var names = registry_names(r);
@@ -884,10 +916,11 @@ fn _registry_add_u(r, tool_def) {
 }
 
 fn registry_register(r, tool_def) {
-    var err = _registry_prepare(tool_def);
+    var st[48];
+    var err = _registry_prepare(tool_def, &st);
     if (err != 0) { return err; }
     bote_reg_write();
-    _registry_add_u(r, tool_def);
+    _registry_add_u(r, tool_def, &st);
     bote_reg_write_end();
     return 0;
 }
