@@ -33,12 +33,14 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.10 — JSON Schema coverage, its fifth bite: `$ref`.** References within the document (`#`, a JSON
-Pointer into `$defs` or anywhere, an `$anchor`), resolved at registration; a reference outside it refused
-there, as bote fetches nothing on a schema's word. A reference that leads back to itself is what makes a
-schema a graph and its work exponential: 3.8.9's budget bounds it, and registration should refuse a cycle
-that consumes no input (a `$ref` to itself through only `allOf`). Then `pattern` and `format`, each an
-engine of its own, `multipleOf`, `patternProperties` and the `unevaluated*` keywords.
+**3.8.11 — JSON Schema coverage, its sixth bite: `multipleOf` and `pattern`.** `multipleOf` is exact
+arithmetic on the decimals bote already compares (`_sch_num_cmp`); `pattern` is an engine of its own, the
+ECMA-262 subset JSON Schema names, matched in time linear in the string, never by backtracking a client's
+input can make exponential, and charged to the budget per byte it reads as 3.8.10's keywords are. A pattern
+the engine does not take is warned of and judges nothing, as now. Then `patternProperties` (and
+`additionalProperties` beside it, which turns on it), `format` (the official client enforces it through
+ajv-formats, so its list is the one to match), `$recursiveRef` / `$dynamicRef`, and the `unevaluated*`
+keywords, which need to know what every other keyword judged.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
@@ -53,14 +55,17 @@ stdio's) are each one connection's, and a worker per connection would need a hom
   `minProperties` / `maxProperties`, the exclusive bounds and `additionalProperties`; since 3.8.7, by JSON
   Schema's equality, `const`, `enum` of any value and `uniqueItems`, and type arrays; since 3.8.8
   `prefixItems`, `contains` with its counts, `propertyNames`, `dependentRequired` and `dependentSchemas`; since
-  3.8.9 composition, `allOf`, `anyOf`, `oneOf`, `not`, `if` / `then` / `else`, under a budget of work. It still
-  warns at registration of what it lists and does not judge: `$ref`, `pattern`, `multipleOf`, `format` (which the
+  3.8.9 composition, `allOf`, `anyOf`, `oneOf`, `not`, `if` / `then` / `else`, under a budget of work; since
+  3.8.10 `$ref` within its document, under a depth. It still
+  warns at registration of what it lists and does not judge: `$dynamicRef`, `$recursiveRef`, `pattern`, `multipleOf`, `format` (which the
   official client enforces), `patternProperties` (and `additionalProperties` beside it), the `unevaluated*`
   keywords, draft-07's array `items`, `additionalItems` and `dependencies`. Numbers
   are compared exactly, where a client holding them as doubles may find two equal that bote does not: past 15
   significant digits or a double's range (`1e400`, `1e-400`), a result's `uniqueItems` array could be refused by a client and passed here. Enforce the
-  rest in bites, with the resource bounds the spec asks for on `$ref` and
-  composition. The warnings cover a schema's root and its properties, not what is nested below them. And the
+  rest in bites. The budget charges a value one and each byte a keyword reads one more (3.8.10); a refusal for
+  work can turn on the order of a value's members, as a quiet judgement stops at its first violation. A
+  reference into another document is refused at registration, as bote fetches nothing on a schema's word; inline
+  it. The warnings cover a schema's root and its properties, not what is nested below them. And the
   repeated-key check over a result's `structuredContent` (3.8.1) is a walk of its own, 240 µs of `libro_export`'s
   100 entries beside the validator's 280: fold it into the one walk where the schema covers the value.
   Registration's compile is still a scan per keyword: `parse_property` looks for each of about twenty keywords in a

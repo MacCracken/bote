@@ -129,6 +129,34 @@ fn _lc_find(sub) {
     return 0;
 }
 
+# (3.8.10) The fewest nanoseconds of three judgements of `value` by `prop`, and of three calls
+# of `tool`: a bound on a judgement's time is a multiple of one of these, measured in the same
+# process, so it holds under emulation as on the host.
+fn _ns3(prop, value) {
+    var best = 0;
+    var i = 0;
+    while (i < 3) {
+        var t = clock_now_ns();
+        _sch_check_value_a(bote_req_begin(), prop, "v", value);
+        var dt = clock_now_ns() - t;
+        if (i == 0 || dt < best) { best = dt; }
+        i = i + 1;
+    }
+    return best;
+}
+fn _call_ns3(d, msg) {
+    var best = 0;
+    var i = 0;
+    while (i < 3) {
+        var t = clock_now_ns();
+        codec_process_message_a(bote_req_begin(), msg, d, 0);
+        var dt = clock_now_ns() - t;
+        if (i == 0 || dt < best) { best = dt; }
+        i = i + 1;
+    }
+    return best;
+}
+
 var SUITE = "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"$defs\":{\"address\":{\"$anchor\":\"addressDef\",\"type\":\"object\",\"properties\":{\"street\":{\"type\":\"string\"},\"city\":{\"type\":\"string\"}}}},\"properties\":{\"name\":{\"type\":\"string\"},\"address\":{\"$ref\":\"#/$defs/address\"},\"contactMethod\":{\"type\":\"string\",\"enum\":[\"phone\",\"email\"]},\"phone\":{\"type\":\"string\"},\"email\":{\"type\":\"string\"}},\"allOf\":[{\"anyOf\":[{\"required\":[\"phone\"]},{\"required\":[\"email\"]}]}],\"if\":{\"properties\":{\"contactMethod\":{\"const\":\"phone\"}},\"required\":[\"contactMethod\"]},\"then\":{\"required\":[\"phone\"]},\"else\":{\"required\":[\"email\"]},\"additionalProperties\":false}";
 
 fn main() {
@@ -242,6 +270,145 @@ fn main() {
     dispatcher_register_tool(bd, tool_def_new("t_wide", "d", tool_schema_from_json(_cat3("{\"type\":\"object\",\"properties\":{\"l\":", ws, "}}"))), &h_tool);
     assert(_has(_call(bd, "t_wide", _cat3("{\"l\":", _many(20000, "1"), "}")), "more work to judge than its size allows") == 1, "budget: an argument refused through the dispatcher");
 
+    # ---- (3.8.10, from the 3.8.9 review) an inputSchema root's composition, alone ----
+    var rr = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(rr, tool_def_new("r_one", "d", tool_schema_from_json("{\"type\":\"object\",\"oneOf\":[{\"required\":[\"a\"]},{\"required\":[\"b\"]}]}")), &h_tool);
+    var r1 = _call(rr, "r_one", "{}");
+    assert(_has(r1, "matches no schema in oneOf") == 1, "root alone: oneOf with no property beside it judged (it ran the handler)");
+    assert(_has(r1, "': matches no schema in oneOf") == 1 && _has(r1, ": : ") == 0, "root alone: ...named from the empty path once, not ': : '");
+    assert(_has(_call(rr, "r_one", "{\"a\":1}"), "\"text\":\"ok\"") == 1, "root alone: ...and met");
+    var du = "{\"type\":\"object\",\"oneOf\":[{\"properties\":{\"kind\":{\"const\":\"a\"},\"n\":{\"type\":\"integer\"}},\"required\":[\"kind\",\"n\"]},{\"properties\":{\"kind\":{\"const\":\"b\"}},\"required\":[\"kind\"]}]}";
+    dispatcher_register_tool(rr, tool_def_new("r_union", "d", tool_schema_from_json(du)), &h_tool);
+    assert(_has(_call(rr, "r_union", "{\"kind\":\"a\",\"n\":\"not a number\"}"), "matches no schema in oneOf") == 1, "root alone: a discriminated union refusing a member of the wrong type");
+    assert(_has(_call(rr, "r_union", "{\"kind\":\"a\",\"n\":1}"), "\"text\":\"ok\"") == 1 && _has(_call(rr, "r_union", "{\"kind\":\"b\"}"), "\"text\":\"ok\"") == 1, "root alone: ...and each kind met");
+    dispatcher_register_tool(rr, tool_def_new("r_ep", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{},\"anyOf\":[{\"required\":[\"a\"]}]}")), &h_tool);
+    dispatcher_register_tool(rr, tool_def_new("r_er", "d", tool_schema_from_json("{\"type\":\"object\",\"required\":[],\"anyOf\":[{\"required\":[\"a\"]}]}")), &h_tool);
+    dispatcher_register_tool(rr, tool_def_new("r_af", "d", tool_schema_from_json("{\"allOf\":[false],\"type\":\"object\"}")), &h_tool);
+    assert(_has(_call(rr, "r_ep", "{}"), "matches no schema in anyOf") == 1 && _has(_call(rr, "r_er", "{}"), "matches no schema in anyOf") == 1, "root alone: beside an empty properties or required");
+    assert(_has(_call(rr, "r_af", "{}"), "not allowed by the schema") == 1, "root alone: allOf of false");
+    var rve = registry_validate_params(dispatcher_registry(rr), "r_one", "{}");
+    assert(rve != 0 && bote_err_violations(rve) != 0 && _has(vec_get(bote_err_violations(rve), 0), "matches no schema in oneOf") == 1, "root alone: ...through registry_validate_params");
+    assert(vec_len(compiled_validate(compiled_compile(tool_schema_from_json("{\"type\":\"object\",\"not\":{}}")), "{}")) == 1, "root alone: ...and compiled_validate");
+
+    # ---- (3.8.10, from the 3.8.9 review) the budget counts the bytes a keyword reads ----
+    var uq = str_builder_new();
+    str_builder_add_cstr(uq, "{\"type\":\"object\",\"properties\":{\"l\":{\"anyOf\":[");
+    wi = 1;
+    while (wi <= 256) { if (wi > 1) { str_builder_add_cstr(uq, ","); } str_builder_add_cstr(uq, "{\"uniqueItems\":true,\"not\":{\"minItems\":"); str_builder_add_int(uq, wi); str_builder_add_cstr(uq, "}}"); wi = wi + 1; }
+    str_builder_add_cstr(uq, "]}}}");
+    dispatcher_register_tool(bd, tool_def_new("t_uq", "d", tool_schema_from_json(str_data(str_builder_build(uq)))), &h_tool);
+    var uqa = str_builder_new();
+    str_builder_add_cstr(uqa, "{\"l\":[");
+    wi = 0;
+    while (wi < 11000) { if (wi > 0) { str_builder_add_cstr(uqa, ","); } str_builder_add_int(uqa, 10000 + wi); wi = wi + 1; }
+    str_builder_add_cstr(uqa, "]}");
+    var uqs = str_data(str_builder_build(uqa));
+    assert(strlen(uqs) > 60000 && strlen(uqs) < 70000, "bytes: (an argument of about 64 KB)");
+    var uqr = _call(bd, "t_uq", uqs);
+    assert(_has(uqr, "more work to judge than its size allows") == 1, "bytes: uniqueItems over 64 KB under 256 alternatives refused as too much to judge");
+    # Stopped by what it read: about 33 alternatives' work, where through 3.8.9 all 256 ran
+    # (977 ms on the host). The control is one alternative over the same argument.
+    dispatcher_register_tool(bd, tool_def_new("t_uq1", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"l\":{\"anyOf\":[{\"uniqueItems\":true,\"not\":{\"minItems\":1}}]}}}")), &h_tool);
+    var uqm = _msg("tools/call", _cat3("\"name\":\"t_uq\",\"arguments\":", uqs, ""));
+    var uqm1 = _msg("tools/call", _cat3("\"name\":\"t_uq1\",\"arguments\":", uqs, ""));
+    assert(_call_ns3(bd, uqm) < 64 * _call_ns3(bd, uqm1), "bytes: ...in under 64 times one alternative's time (256 through 3.8.9)");
+    var big = str_builder_new();
+    str_builder_add_cstr(big, "\"");
+    wi = 0;
+    while (wi < 1000000) { str_builder_add_cstr(big, "aaaaaaaaaa"); wi = wi + 10; }
+    str_builder_add_cstr(big, "\"");
+    var ml = str_builder_new();
+    str_builder_add_cstr(ml, "{\"anyOf\":[");
+    wi = 0;
+    while (wi < 256) { if (wi > 0) { str_builder_add_cstr(ml, ","); } str_builder_add_cstr(ml, "{\"maxLength\":"); str_builder_add_int(ml, wi); str_builder_add_cstr(ml, "}"); wi = wi + 1; }
+    str_builder_add_cstr(ml, "]}");
+    var mlp = parse_property(str_data(str_builder_build(ml)));
+    var mlv = _sch_check_value_a(bote_req_begin(), mlp, "v", str_data(str_builder_build(big)));
+    assert(mlv != 0 && streq(vec_get(mlv, vec_len(mlv) - 1), "v: more work to judge than its size allows") == 1, "bytes: a megabyte string under 256 maxLength alternatives refused");
+    assert(_ns3(mlp, str_data(str_builder_build(big))) < 64 * _ns3(parse_property("{\"anyOf\":[{\"maxLength\":0}]}"), str_data(str_builder_build(big))), "bytes: ...in under 64 times one alternative's time (751 ms through 3.8.9)");
+    assert(_ok("{\"maxLength\":2000000}", str_data(str_builder_build(big))) == 1, "bytes: one maxLength over a megabyte, well within");
+    # Each keyword that reads a value's bytes, under 256 alternatives the value fails: a
+    # megabyte string for const and enum, a number of 200,000 digits for integer, type
+    # arrays and bounds. Each refused as too much to judge, by what it read.
+    var dig = str_builder_new();
+    str_builder_add_cstr(dig, "1");
+    wi = 0;
+    while (wi < 200000) { str_builder_add_cstr(dig, "0000000000"); wi = wi + 10; }
+    var digs = str_data(str_builder_build(dig));
+    var bigs = str_data(str_builder_build(big));
+    var kws = vec_new();
+    vec_push(kws, "{\"const\":\"x\"}");
+    vec_push(kws, "{\"enum\":[\"x\",\"y\"]}");
+    vec_push(kws, "{\"enum\":[[1],{\"a\":1}]}");
+    vec_push(kws, "{\"type\":\"integer\",\"not\":{}}");
+    vec_push(kws, "{\"type\":[\"integer\",\"null\"],\"not\":{}}");
+    vec_push(kws, "{\"minimum\":0,\"maximum\":1}");
+    vec_push(kws, "{\"enum\":[1,2]}");
+    var kvals = vec_new();
+    vec_push(kvals, bigs);
+    vec_push(kvals, bigs);
+    vec_push(kvals, _cat3("[", bigs, "]"));
+    vec_push(kvals, digs);
+    vec_push(kvals, digs);
+    vec_push(kvals, digs);
+    vec_push(kvals, digs);
+    var kn = 0;
+    while (kn < vec_len(kws)) {
+        var alt = str_builder_new();
+        str_builder_add_cstr(alt, "{\"anyOf\":[");
+        wi = 0;
+        while (wi < 256) { if (wi > 0) { str_builder_add_cstr(alt, ","); } str_builder_add_cstr(alt, vec_get(kws, kn)); wi = wi + 1; }
+        str_builder_add_cstr(alt, "]}");
+        var kp = parse_property(str_data(str_builder_build(alt)));
+        var kv = _sch_check_value_a(bote_req_begin(), kp, "v", vec_get(kvals, kn));
+        assert(kv != 0 && streq(vec_get(kv, vec_len(kv) - 1), "v: more work to judge than its size allows") == 1, _cat("bytes: refused as too much to judge under ", vec_get(kws, kn)));
+        var kp1 = parse_property(_cat3("{\"anyOf\":[", vec_get(kws, kn), "]}"));
+        assert(_ns3(kp, vec_get(kvals, kn)) < 64 * _ns3(kp1, vec_get(kvals, kn)), _cat("bytes: ...in under 64 times one alternative's time, ", vec_get(kws, kn)));
+        kn = kn + 1;
+    }
+    assert(_ok("{\"enum\":[\"a\",\"b\"],\"anyOf\":[{\"maxLength\":1},{\"minLength\":0}]}", str_data(str_builder_build(big))) == 0, "bytes: (an enum it is not in)");
+
+    # ---- (3.8.10, from the 3.8.9 review) a batch shares one base ----
+    var one = _msg("tools/call", _cat3("\"name\":\"t_wide\",\"arguments\":", _cat3("{\"l\":", _many(200, "1"), "}"), ""));
+    assert(_has(codec_process_message(one, bd, 0), "\"text\":\"ok\"") == 1, "batch: one call of 200 items through 257 alternatives, met");
+    var bat = str_builder_new();
+    str_builder_add_cstr(bat, "[");
+    wi = 0;
+    while (wi < 80) { if (wi > 0) { str_builder_add_cstr(bat, ","); } str_builder_add_cstr(bat, one); wi = wi + 1; }
+    str_builder_add_cstr(bat, "]");
+    var bats = str_data(str_builder_build(bat));
+    var bar = codec_process_message(bats, bd, 0);
+    var nok = 0;
+    var nmore = 0;
+    var bpos = 0;
+    while (strstr(bar + bpos, "\"text\":\"ok\"") >= 0) { nok = nok + 1; bpos = bpos + strstr(bar + bpos, "\"text\":\"ok\"") + 1; }
+    bpos = 0;
+    while (strstr(bar + bpos, "more work to judge") >= 0) { nmore = nmore + 1; bpos = bpos + strstr(bar + bpos, "more work to judge") + 1; }
+    assert(nok >= 1 && nok < 10, "batch: of 80 such calls, the first met and few after it");
+    assert_eq(nok + nmore, 80, "batch: ...the rest refused as too much to judge");
+    # About one call's work and the rest's own bytes: some twenty calls' time, where through
+    # 3.8.9 the batch did eighty calls' work (521 ms on the host).
+    assert(_call_ns3(bd, bats) < 40 * _call_ns3(bd, one), "batch: ...in under 40 times one call's time");
+    assert(_has(codec_process_message(one, bd, 0), "\"text\":\"ok\"") == 1, "batch: a call after it has a base of its own again");
+    assert_eq(load64(bote_req_state() + BOTE_REQ_STATE_POOL), 0, "batch: the shared base closed with the batch");
+
+    # ---- (3.8.10, from the 3.8.9 review) an argument's integer past what a handler holds ----
+    var oi = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(oi, tool_def_new("t_oi", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"n\":{\"anyOf\":[{\"type\":\"integer\"},{\"type\":\"null\"}]},\"m\":{\"oneOf\":[{\"type\":\"integer\"},{\"type\":\"string\"}]}}}")), &h_tool);
+    assert(_has(_call(oi, "t_oi", "{\"n\":1e30}"), "integer out of range") == 1, "range: 1e30 through anyOf, refused (it reached the handler)");
+    assert(_has(_call(oi, "t_oi", "{\"n\":99999999999999999999}"), "integer out of range") == 1, "range: ...twenty nines");
+    assert(_has(_call(oi, "t_oi", "{\"m\":-1e30}"), "integer out of range") == 1, "range: ...through oneOf");
+    assert(_has(_call(oi, "t_oi", "{\"n\":5,\"m\":\"s\"}"), "\"text\":\"ok\"") == 1 && _has(_call(oi, "t_oi", "{\"n\":null}"), "\"text\":\"ok\"") == 1, "range: ...and what a handler holds met");
+    assert(_has(_call(oi, "t_oi", "{\"n\":1.5}"), "matches no schema in anyOf") == 1, "range: a fraction meets neither, as ever");
+    dispatcher_register_tool(oi, tool_def_with_output_schema(tool_def_new("t_oo", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"n\":{\"anyOf\":[{\"type\":\"integer\"},{\"type\":\"null\"}]}}}"), &h_ret);
+    _ret = "{\"content\":[],\"structuredContent\":{\"n\":1e30}}";
+    assert(_has(_call(oi, "t_oo", "{}"), "isError") == 0, "range: a result's is a client's to read whole, as ever");
+
+    # ---- (3.8.10, from the 3.8.9 review) an empty anyOf or oneOf ----
+    assert(_ok("{\"anyOf\":[]}", "1") == 0 && _ok("{\"oneOf\":[]}", "1") == 0, "empty: anyOf and oneOf of none refuse every value, as the official client does");
+    assert(_ok("{\"allOf\":[]}", "1") == 1, "empty: allOf of none takes every value");
+    _ase(_v0("{\"properties\":{\"v\":{\"anyOf\":[]}}}", "{\"v\":1}"), "v.v: matches no schema in anyOf", "empty: ...at its path");
+
     # ---- (3.8.9, from the 3.8.8 review) each keyword by the schema's dialect ----
     var d07 = "\"$schema\":\"http://json-schema.org/draft-07/schema#\",";
     var d19 = "\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",";
@@ -254,7 +421,9 @@ fn main() {
     assert(_ok(_cat3("{", d07, "\"dependentRequired\":{\"a\":[\"b\"]}}"), "{\"a\":1}") == 1, "dialect: draft-07 has no dependentRequired");
     assert(_ok(_cat3("{", d07, "\"dependentSchemas\":{\"a\":false}}"), "{\"a\":1}") == 1, "dialect: ...nor dependentSchemas");
     assert(_ok(_cat3("{", d19, "\"dependentRequired\":{\"a\":[\"b\"]}}"), "{\"a\":1}") == 0, "dialect: 2019-09 has them");
-    assert(_ok(_cat3("{", d06, "\"if\":{\"type\":\"string\"},\"then\":{\"maxLength\":1}}"), "\"ab\"") == 1, "dialect: draft-06 has no if");
+    # (3.8.10, from the 3.8.9 review) Judged, as the official client's draft-07 engine for
+    # draft-06 judges it: through 3.8.9 the client refused a result that passed here.
+    assert(_ok(_cat3("{", d06, "\"if\":{\"type\":\"string\"},\"then\":{\"maxLength\":1}}"), "\"ab\"") == 0, "dialect: draft-06's if judged, as the official client judges it (3.8.10)");
     assert(_ok(_cat3("{", d07, "\"if\":{\"type\":\"string\"},\"then\":{\"maxLength\":1}}"), "\"ab\"") == 0, "dialect: draft-07 has it");
     assert(_ok(_cat3("{", d06, "\"anyOf\":[{\"type\":\"string\"}]}"), "1") == 0 && _ok(_cat3("{", d06, "\"propertyNames\":{\"maxLength\":1}}"), "{\"ab\":1}") == 0, "dialect: draft-06 has anyOf and propertyNames");
     assert(_ok(_cat3("{", d07, "\"type\":\"object\",\"properties\":{\"p\":{\"prefixItems\":[{\"type\":\"string\"}]}}}"), "{\"p\":[1]}") == 1, "dialect: a property's schema is its root's dialect");
@@ -310,7 +479,8 @@ fn main() {
     assert(_lc_find("prefixItems, which this schema's dialect does not have") != 0, "warn: draft-07's prefixItems");
     assert(_lc_find("minContains, which this schema's dialect does not have") != 0, "warn: ...minContains");
     assert(_lc_find("dependentRequired, which this schema's dialect does not have") != 0, "warn: ...dependentRequired");
-    assert(_lc_find("if, which this schema's dialect does not have") != 0, "warn: draft-06's if");
+    assert(_lc_find("if, which draft-06 does not have and bote judges, as the official client does") != 0, "warn: draft-06's if, judged (3.8.10)");
+    assert(_lc_find("if, which this schema's dialect does not have") == 0, "warn: ...and no longer said to judge nothing");
     assert(_lc_find("then or else without if") == 0, "warn: ...and no word of then without if there");
 
     # ---- the heap and the arena ----

@@ -342,6 +342,15 @@ judgement has a budget, 100,000 values and 32 for each byte, past which the valu
 `more work to judge than its size allows`. A PropertyDef is 272 bytes and a CompiledSchema 112;
 `prop_new` and `compiled_new` set the new words, zeroed.
 
+(3.8.10) `$ref` is judged within its document, so a schema that names one refuses what it passed
+through 3.8.9, and registration refuses a reference that names nothing there, points into another
+document, or leads back to itself with no part of the value judged in between: inline what another
+document holds. A judgement is refused as `nested too deep to judge` past 512 steps. An inputSchema
+root's composition is judged with no property beside it, `anyOf: []` and `oneOf: []` refuse every
+value, draft-06's `if` / `then` / `else` are judged, and an argument's integer past what a handler
+holds is refused through `anyOf` and `oneOf` too: each refuses what 3.8.9 passed. A PropertyDef is
+280 bytes; `prop_new` sets the new word, zeroed. The request state is 176 bytes.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`

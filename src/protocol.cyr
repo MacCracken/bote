@@ -115,10 +115,13 @@ fn resp_success(id, result) {
 #   +160 taken  (3.8.8) 1 once the codec has taken a request with an id from this message,
 #               past its admission (3.8.9: not a notification); 0 when nothing in it was one
 #               (codec_unanswerable). Cleared by bote_req_begin and by each codec call
+#   +168 pool   (3.8.10) the schema budget's base a batch's judgements share, plus one, or 0
+#               for none: each judgement has its own (_sch_root_budget). Set by the codec
+#               around a batch's requests, cleared by bote_req_begin
 # A transport that serves one message at a time uses the process's block. A server
 # that serves on worker threads (3.7.0, src/conn.cyr) sets _bote_req_state_fp to a
 # function returning the calling thread's block, before its first worker starts.
-var BOTE_REQ_STATE_BYTES = 168;
+var BOTE_REQ_STATE_BYTES = 176;
 var BOTE_REQ_STATE_WHY = 24;
 var BOTE_REQ_STATE_STREAM = 32;
 var BOTE_REQ_STATE_CANCEL = 40;
@@ -126,7 +129,8 @@ var BOTE_REQ_STATE_PROGRESS = 80;
 var BOTE_REQ_STATE_OWNER = 120;
 var BOTE_REQ_STATE_INPUT = 128;
 var BOTE_REQ_STATE_TAKEN = 160;
-var _bote_req_g[21];
+var BOTE_REQ_STATE_POOL = 168;
+var _bote_req_g[22];
 var _bote_req_state_fp = 0;
 
 fn bote_req_state() {
@@ -380,6 +384,7 @@ fn bote_req_begin() {
     store64(s + BOTE_REQ_STATE_INPUT + 16, 0);
     store64(s + BOTE_REQ_STATE_INPUT + 24, 0);
     store64(s + BOTE_REQ_STATE_TAKEN, 0);
+    store64(s + BOTE_REQ_STATE_POOL, 0);
     return al;
 }
 

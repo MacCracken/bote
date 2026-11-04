@@ -293,7 +293,7 @@ fn main() {
     assert(_lc_find("tool=w_suite property=inputSchema keyword=then") == 0, "warn: then, judged");
     assert(_lc_find("tool=w_suite property=inputSchema keyword=else") == 0, "warn: else, judged");
     assert(_lc_find("tool=w_suite property=inputSchema keyword=additionalProperties") == 0, "warn: additionalProperties at the root is judged, and warned of no longer (3.8.5)");
-    assert(_lc_find("tool=w_suite property=address keyword=$ref") != 0, "warn: a property's $ref");
+    assert(_lc_find("tool=w_suite property=address keyword=$ref") == 0, "warn: a property's $ref, judged since 3.8.10, and warned of no longer");
     assert(_lc_find("tool=w_suite property=inputSchema keyword=anyOf") == 0, "warn: not what sits below a root keyword");
     assert(_lc_find("tool=w_struct property=inputSchema") == 0, "warn: no root for a ToolSchema");
 

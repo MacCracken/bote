@@ -18,7 +18,193 @@ have per release.
 
 _(empty)_
 
+## [3.8.10] — 2026-11-04 · References
+
+**`$ref` is judged, within its document**: `#`, a JSON Pointer into `$defs` or anywhere else (`#/$defs/node`,
+`#/properties/a`, `#/allOf/0`), an anchor (`#node`, from `$anchor`, `$dynamicAnchor` or draft-07's `$id: "#node"`),
+and any of these behind the root's own `$id`. Each is resolved at registration, as the official client's Ajv resolves
+it, and compiled once, so a schema that refers to itself, a tree or a linked list, compiles to a cycle and judges a
+value as deep as the value goes. A reference is judged beside the keywords next to it in every dialect. draft-07
+ignores those keywords, and the official client's draft-07 engine judges them, as bote does; registration warns
+when a draft-07 or draft-06 schema has any. The conformance suite's schema has a `"$ref": "#/$defs/address"`, and
+its address is judged now. Through 3.8.9 every `$ref` was warned of and judged nothing.
+
+**Registration refuses a reference it cannot judge**:
+- one that names nothing in its document, or names no schema there;
+- one into another document, which is the operator's to inline;
+- a `$ref` that is no string;
+- an anchor that is no anchor name, or one name used for two schemas;
+- a schema below the root that names a resource of its own with `$id`, against which a reference would resolve
+  otherwise;
+- a reference that leads back to itself without judging any part of the value, such as `{"$ref":"#"}` or
+  `{"anyOf":[{"$ref":"#"}]}`. That would judge a value forever, here and in the client.
+
+A judgement also has a depth now, 512 steps (a value's nesting and the references between). A chain of 5,000
+references, which registration takes, is refused as `nested too deep to judge`, where it would have overflowed a
+worker's stack.
+
+**Six defects in 3.8.9 land beside it**, from an independent review of that release, which drew random schemas and
+values against the official client's validator. The worst: an inputSchema root's composition was never judged
+unless the root held a property or another object keyword, so a discriminated union at the root took any member of
+the wrong type. See the correction notice in 3.8.9.
+
+The stated minimum cyrius (6.7.13) is unchanged.
+
+### Added
+
+- **`$ref`** (core, `src/schema.cyr`): PropertyDef is 280 bytes, +272 the schema a reference names, judged as an
+  `allOf` of one, first. A compile carries a context (`_sch_cx_new`, 64 bytes) through every subschema: the dialect,
+  the document's text, a map from each target's canonical JSON Pointer to its PropertyDef (`_sch_ref_ptr`: each part
+  percent-decoded after the split, as Ajv splits, then `~1` and `~0`; `#` and `#/` the root), the anchors, read when
+  first named (`_sch_cx_anchors`), and the targets still to compile. A target is compiled once the schema naming it
+  is (`_sch_cx_drain`), not where it is named: a chain of 5,000 references recursed once a link, and overflowed a
+  worker's stack at registration.
+- **A ToolSchema's references** resolve in the inputSchema tools/list sends: `{"$ref":"#/properties/b"}` judges as
+  `b` does, and `#` is the listed root. The listed document is written out only for a property that may hold a
+  reference.
+- **`_sch_refs_why(doc)`**, registration's check, for an outputSchema, an inputSchema given as JSON and a ToolSchema's
+  listed form. It walks every schema in the document as json-schema-traverse walks one (`_sch_positions`), with a
+  stack of its own. It searches the keywords that judge the value itself (`$ref`, `allOf`, `anyOf`, `oneOf`, `not`,
+  `if`, `then`, `else`, `dependentSchemas`, draft-07's `dependencies`) from every reference's target, iteratively,
+  for a cycle (`_sch_ref_cycle`). A reference to a broken one nothing names is refused too.
+- **The depth** (`BOTE_SCH_MAX_DEPTH`, 512): the budget block is 48 bytes, +8 the depth and +16 whether it was
+  passed. Passing it stops the walk, and the root refuses the value as `nested too deep to judge`. 512 is eight steps
+  for each level of a value the codec admits. Judging that deep was measured at between 256 KB and 512 KB of stack
+  for the deepest shape, a chain of references through `anyOf`, against a worker's 2 MB.
+
+### Changed
+
+- Registration no longer warns of `$ref` as unenforced. It warns of a keyword beside a `$ref` in draft-07 or draft-06,
+  `keywords beside $ref, which this schema's dialect ignores and bote judges`.
+- A violation of the arguments as a whole is named once: `for tool 't': matches no schema in oneOf`, where it read
+  `': : '`.
+
+### Fixed
+
+From the review of 3.8.9:
+
+- **An inputSchema root's composition was never judged when the root held nothing else for the object walk** (HIGH).
+  `_sv_object` returned before it with no property, required name, count, `propertyNames` or `dependentSchemas` to
+  judge. A root `oneOf` of two `required` lists ran its handler for `{}`, and `{"allOf":[false],"type":"object"}`
+  took anything.
+- **The budget counted values, not what a keyword reads of one** (MEDIUM). A keyword that reads a value's bytes
+  (`uniqueItems`, `minLength` and `maxLength`, `enum` for each value it compares, `const`, an integer's type, a type
+  array's, the numeric bounds) spends one more for each byte it reads (`_sv_charge`). `uniqueItems` over 64 KB under
+  256 alternatives is refused as too much to judge, and so is a megabyte string under 256 `maxLength` alternatives,
+  each well under a second.
+- **Each request of a batch had a budget base of its own** (MEDIUM). A batch's judgements share one
+  (`BOTE_REQ_STATE_POOL`, the request state's +168, 176 bytes; `_sch_pool_open` around a batch's requests), and each
+  root keeps its own bytes' allowance. Of 80 calls that each spend most of a base, the first is met and the rest are
+  refused as too much to judge, in well under 400 ms.
+- **An argument's integer past what a handler holds reached it through `anyOf` or `oneOf`** (MEDIUM). A quiet
+  judgement still takes it as JSON Schema does, and under a root that judges arguments it marks the block, and the
+  root refuses the arguments as `integer out of range` (`_sv_int_ok`). A result's integer is a client's to read
+  whole, as before.
+- **`if`, `then` and `else` judged nothing in draft-06** (LOW). The official client judges a draft-06 schema with its
+  draft-07 engine, which has them, and bote judges them as it does. Registration says so, `if, which draft-06 does
+  not have and bote judges, as the official client does`.
+- **`anyOf: []` and `oneOf: []` judged nothing** (LOW). Each refuses every value, as the client's does, and
+  `allOf: []` takes every value. Registration still warns of each.
+
+Not fixed, and stated here: **whether a value is refused as too much to judge can turn on the order of its
+members**. A quiet judgement stops at its first violation, in member order, so one spelling may stop early and
+another spend the budget. That follows from having a budget at all, and only a value refused for its work is
+affected.
+
+### Tests
+
+- **`tests/bote_schema_ref.tcyr`**, 120, new:
+  - Resolution and judging: pointers into `$defs` and `definitions`, one definition compiled once whatever its
+    spelling, the root and `#/`, a tree, two definitions in turn, sixty levels; `~0`, `~1`, `%2F` within a name,
+    `%25`, an array's item, another property, `allOf`'s first, a reference written with JSON escapes and under an
+    escaped key, `false` and `true`, an index with a leading zero (not the second item); `$anchor`, `$dynamicAnchor`, draft-07's `$id`
+    fragment, one schema by anchor and pointer; the root's `$id` with and without a pointer, and with an empty
+    fragment; siblings in 2020-12 and draft-07; references under `anyOf`, `not` and `contains`; the conformance
+    suite's address.
+  - Registration: every refusal, a broken reference nothing names among them, a percent sign with one hex digit or cut
+    short, an `$anchor` that is no string ignored as Ajv ignores it and one that is no text refused; twelve cycles (through each keyword
+    that judges the value itself, an anchor, an inputSchema's root, the 3,000th of a chain), and five shapes that are
+    no cycle.
+  - A ToolSchema's references in the listed inputSchema, an escaped one refused, and `#`; a JSON root's reference
+    judging the arguments; a result through a definition on both revisions.
+  - The depth: a cycle compiled outside registration refused, a branching one in under two seconds, chains of 200,
+    600 and 5,000 on a worker's stack, through `anyOf` too, a value as deep as allowed and one deeper, an inputSchema
+    of 600 through the dispatcher and of 100 met.
+  - The WARNs; 0 heap bytes for fifty refused calls sixty levels deep; the arena's first chunk for 5,000 quiet
+    judgements through references.
+- **`tests/bote_schema_comp.tcyr`**, 135, from 89, the review of 3.8.9:
+  - A root's composition alone, the reviewer's shapes, through the dispatcher, `registry_validate_params` and
+    `compiled_validate`.
+  - What a keyword reads, under 256 alternatives each refused, and in under 64 times one alternative's time measured
+    in the same process, so the bound holds under emulation as on the host: `uniqueItems` over 64 KB, a megabyte string
+    for `maxLength`, `const` and `enum`, an array for an `enum` of arrays and objects, a 200,000-digit number for an
+    integer, a type array, the bounds and an `enum` of numbers.
+  - A batch of 80 sharing one base, in under 40 times one call's time; the next call with its own; the pool closed.
+    Wall-clock bounds in the first draft failed under `qemu-aarch64` while every verdict held; each bound is a
+    ratio now, and a mutant of each fix fails it.
+  - `1e30`, twenty nines and `-1e30` through `anyOf` and `oneOf` refused as out of range, and a result's taken; empty
+    `anyOf`, `oneOf` and `allOf`; draft-06's `if` judged.
+- **`tests/bote_output.tcyr`**, 264, from 256: the 2025-11-25 form's conversion of eight schemas registration now
+  refuses, each judged on the converter alone and each refusal asserted; the long list's schema resolves, with no
+  cycle.
+- **`tests/bote_tool_schema.tcyr`**: a property's `$ref` warned of no longer.
+- **`fuzz/schema_walk.fcyr`**: up to three definitions and references to them, written plainly, percent-encoded and
+  under an escaped key, the reference judging a `$ref` by its definition. It found a generator that wrote no comma
+  after a reference, before release.
+- **67 mutants, 67 killed.** Four survived the first run, each a gap now tested: a percent sign with one good hex
+  digit; an index with a leading zero, which the test's one-item array could not tell from a missing one; and the
+  charges for an integer's type and a type array's, which the bound beside them in the test charged anyway. The last
+  two showed an `enum` of numbers reading a long number's digits once an entry, uncharged; it is charged.
+
+### Performance
+
+**A call costs about what it did; the heap form of validation pays a few nanoseconds for the depth and the
+charges.** Interleaved A/B against 3.8.9, 15 rounds pinned to one core, the working tree's benches on both sides.
+Minimums, in ns:
+
+| Bench | 3.8.9 | 3.8.10 | Delta |
+|---|---:|---:|---:|
+| `codec_process_message` | 4,336 | 4,363 | +0.6% |
+| `dispatch_tools_call` | 2,690 | 2,650 | −1.5% |
+| `dispatch_tools_call_result` | 2,306 | 2,371 | +2.8% |
+| `dispatch_tools_call_output` | 5,772 | 5,892 | +2.1% |
+| `validate_compiled_simple` | 502 | 561 | +11.8% |
+| `validate_compiled_nested` | 1,015 | 1,047 | +3.2% |
+| `libro_export_100` | 1,820,000 | 1,836,000 | +0.9% |
+| `fs_read_64k` | 3,710,000 | 3,709,000 | −0.0% |
+| `schema_compile_simple` | 13,984 | 14,404 | +3.0% |
+| `schema_compile_nested` | 32,214 | 33,184 | +3.0% |
+
+- **Half of `validate_compiled_simple`'s 59 ns is where the code now sits.** A copy of this tree with the depth, the
+  charges and the shared base taken out of the walk ran it at 538–545 ns. Against that, the work costs about 30 ns
+  on this one-integer object through `compiled_validate`, and 0.1–0.2% on the dispatcher's result rows.
+  `jsonx_get_str_flat`, which nothing here touches, moved +10.4% the same way, as it did at 3.8.7.
+- **The first cut cost more:** a call to `bote_req_state()`, two to `_sv_charge`, one to `_sv_int_ok` for every
+  integer, and four bound accessors read twice. With each made only where it is needed, an integer in range costs a
+  load and a store. That brought the cost against the control from 33 ns to 30.
+- **Registration reads `$ref` once a subschema and makes a compile context**, 3% of a compile: paid once a
+  definition, never for a call.
+
 ## [3.8.9] — 2026-11-04 · Composition
+
+> ⚠ **Corrected at 3.8.10.** These claims below were not true, found by an independent review of this release.
+> - "An inputSchema root's composition ... judged after the members." Only when the root held something else for the
+>   object walk to judge: a property, a required name, a count, `propertyNames` or `dependentSchemas`. Without one,
+>   the walk returned before the composition, so `{"type":"object","oneOf":[{"required":["a"]},{"required":["b"]}]}`
+>   ran its handler for `{}`, and a discriminated union at the root took a member of the wrong type. 1,071 of 8,000
+>   random root schemas were judged otherwise than by the official client, every one of them taken.
+> - "the budget bounds what a large schema can be made to cost by a client's many items." It counted values, not
+>   what a keyword reads of one: `uniqueItems` over a 63 KB argument under 256 alternatives took 977 ms and was not
+>   refused, and a megabyte string under 256 `maxLength` alternatives 751 ms. Each request of a batch had its own
+>   base, so 80 calls in 69 KB took 521 ms.
+> - "a keyword its dialect does not have judges nothing, as it is no keyword to a client, which picks its validator
+>   by `$schema`". The official client judges a draft-06 schema with its draft-07 engine, which has `if`, `then` and
+>   `else`, so a draft-06 result it refused passed.
+> - "an `allOf`, `anyOf` or `oneOf` that is no non-empty array of schemas" judges nothing. The client refuses every
+>   value under `anyOf: []` and `oneOf: []`, and such a result passed.
+> - "where a schema judges a value directly, an integer past what a handler holds is still refused". True, and through
+>   `anyOf: [{"type":"integer"},{"type":"null"}]`, the commonest optional integer, `1e30` reached the handler as one.
+> - A violation of the arguments as a whole read `for tool 't': : matches no schema in oneOf`.
 
 **`allOf`, `anyOf`, `oneOf`, `not` and `if` / `then` / `else` are judged**, on a value and on an inputSchema's root,
 where alternatives for a tool's arguments are written. `allOf` judges a value as the schema itself does, its

@@ -157,6 +157,10 @@ fn _refused(d, name, os) {
 }
 
 # The 2025-11-25 form registration keeps for schema `os`.
+# (3.8.10) The converter alone, for a schema registration refuses for a `$ref` that does not
+# resolve within it: the rules it follows are the converter's, whatever reaches it.
+fn _legacy_conv(os) { return _reg_output_legacy(os); }
+
 fn _legacy_form(os) {
     var t = _tool("t_form", os);
     var st[72];
@@ -255,15 +259,15 @@ fn main() {
     assert_eq(_legacy_form("{\"type\":\"obj\\u0065ct\"}"), 0, "legacy form: an escaped \"object\" is an object");
     assert_eq(_legacy_form("{\"type\":\"object\",\"properties\":{}}"), 0, "legacy form: none for an object root");
     _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"array\"}"), "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\"}},\"required\":[\"result\"]}", "legacy form: $schema moves to the wrapper");
-    _ase(_legacy_form("{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"},\"$defs\":{\"u\":{\"type\":\"object\",\"properties\":{\"$ref\":{\"type\":\"string\"},\"next\":{\"$ref\":\"#\"},\"o\":{\"$ref\":\"other.json#/a\"},\"n\":{\"$ref\":\"#anchor\"}}}},\"default\":{\"$ref\":\"#/x\"},\"enum\":[{\"$ref\":\"#/y\"}],\"anyOf\":[{\"$dynamicRef\":\"#/$defs/u\"}]}"),
+    _ase(_legacy_conv("{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"},\"$defs\":{\"u\":{\"type\":\"object\",\"properties\":{\"$ref\":{\"type\":\"string\"},\"next\":{\"$ref\":\"#\"},\"o\":{\"$ref\":\"other.json#/a\"},\"n\":{\"$ref\":\"#anchor\"}}}},\"default\":{\"$ref\":\"#/x\"},\"enum\":[{\"$ref\":\"#/y\"}],\"anyOf\":[{\"$dynamicRef\":\"#/$defs/u\"}]}"),
       "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/$defs/u\"},\"$defs\":{\"u\":{\"type\":\"object\",\"properties\":{\"$ref\":{\"type\":\"string\"},\"next\":{\"$ref\":\"#/properties/result\"},\"o\":{\"$ref\":\"other.json#/a\"},\"n\":{\"$ref\":\"#anchor\"}}}},\"default\":{\"$ref\":\"#/x\"},\"enum\":[{\"$ref\":\"#/y\"}],\"anyOf\":[{\"$dynamicRef\":\"#/properties/result/$defs/u\"}]}},\"required\":[\"result\"]}",
       "legacy form: references to the document move under properties/result; names, data, anchors and other documents do not");
-    _ase(_legacy_form("{\"type\":\"array\",\"items\":{\"properties\":{\"default\":{\"$ref\":\"#/$defs/d\"},\"$id\":{\"type\":\"string\"},\"x\":{\"$ref\":\"#/$defs/x\"}}}}"),
+    _ase(_legacy_conv("{\"type\":\"array\",\"items\":{\"properties\":{\"default\":{\"$ref\":\"#/$defs/d\"},\"$id\":{\"type\":\"string\"},\"x\":{\"$ref\":\"#/$defs/x\"}}}}"),
       "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"properties\":{\"default\":{\"$ref\":\"#/properties/result/$defs/d\"},\"$id\":{\"type\":\"string\"},\"x\":{\"$ref\":\"#/properties/result/$defs/x\"}}}}},\"required\":[\"result\"]}",
       "legacy form: a property named for a keyword is a name, and its schema is read");
-    _ase(_legacy_form("{\"$id\":\"https://e.org/u\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"}}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"$id\":\"https://e.org/u\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"}}},\"required\":[\"result\"]}", "legacy form: a root with its own base is copied as it is");
-    _ase(_legacy_form("{\"type\":\"array\",\"items\":{\"$id\":\"https://e.org/i\",\"$ref\":\"#/$defs/z\"},\"prefixItems\":[{\"$id\":\"#frag\",\"$ref\":\"#/a\"}]}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$id\":\"https://e.org/i\",\"$ref\":\"#/$defs/z\"},\"prefixItems\":[{\"$id\":\"#frag\",\"$ref\":\"#/properties/result/a\"}]}},\"required\":[\"result\"]}", "legacy form: a subschema with its own base is kept; a fragment $id is no base");
-    _ase(_legacy_form("{\"type\":\"array\",\"items\":{\"$r\\u0065f\":\"\\u0023/$defs/q\",\"a\\\"b\":1}}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$r\\u0065f\":\"#/properties/result/$defs/q\",\"a\\\"b\":1}}},\"required\":[\"result\"]}", "legacy form: keys and references read as they decode, keys written as they were");
+    _ase(_legacy_conv("{\"$id\":\"https://e.org/u\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"}}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"$id\":\"https://e.org/u\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"}}},\"required\":[\"result\"]}", "legacy form: a root with its own base is copied as it is");
+    _ase(_legacy_conv("{\"type\":\"array\",\"items\":{\"$id\":\"https://e.org/i\",\"$ref\":\"#/$defs/z\"},\"prefixItems\":[{\"$id\":\"#frag\",\"$ref\":\"#/a\"}]}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$id\":\"https://e.org/i\",\"$ref\":\"#/$defs/z\"},\"prefixItems\":[{\"$id\":\"#frag\",\"$ref\":\"#/properties/result/a\"}]}},\"required\":[\"result\"]}", "legacy form: a subschema with its own base is kept; a fragment $id is no base");
+    _ase(_legacy_conv("{\"type\":\"array\",\"items\":{\"$r\\u0065f\":\"\\u0023/$defs/q\",\"a\\\"b\":1}}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$r\\u0065f\":\"#/properties/result/$defs/q\",\"a\\\"b\":1}}},\"required\":[\"result\"]}", "legacy form: keys and references read as they decode, keys written as they were");
 
     # ---- What registration warns of ----
     _lc_begin();
@@ -472,12 +476,22 @@ fn main() {
     var d19 = "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"object\",\"properties\":{\"result\":";
     _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"kids\":{\"$recursiveRef\":\"#\"}}}}"),
       _cat3(d19, "{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"kids\":{\"$ref\":\"#/properties/result\"}}}}", "},\"required\":[\"result\"]}"), "review: $recursiveRef becomes a $ref to the result");
-    _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema#\",\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\",\"$ref\":\"#/$defs/x\"}}"),
+    _ase(_legacy_conv("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema#\",\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\",\"$ref\":\"#/$defs/x\"}}"),
       "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema#\",\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/$defs/x\",\"allOf\":[{\"$ref\":\"#/properties/result\"}]}}},\"required\":[\"result\"]}", "review: ...an allOf entry beside a $ref");
-    _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$ref\":\"#/a\",\"allOf\":[{\"type\":\"string\"}],\"$recursiveRef\":\"#\"}}"),
+    _ase(_legacy_conv("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$ref\":\"#/a\",\"allOf\":[{\"type\":\"string\"}],\"$recursiveRef\":\"#\"}}"),
       _cat3(d19, "{\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/a\",\"allOf\":[{\"type\":\"string\"},{\"$ref\":\"#/properties/result\"}]}}", "},\"required\":[\"result\"]}"), "review: ...the last of an allOf it already has");
-    _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$ref\":\"#/a\",\"allOf\":[],\"$recursiveRef\":\"#\"}}"),
+    _ase(_legacy_conv("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$ref\":\"#/a\",\"allOf\":[],\"$recursiveRef\":\"#\"}}"),
       _cat3(d19, "{\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/a\",\"allOf\":[{\"$ref\":\"#/properties/result\"}]}}", "},\"required\":[\"result\"]}"), "review: ...the only one of an empty allOf");
+    # (3.8.10) Each schema the converter was handed above, refused at registration.
+    assert(registry_check_tool_def(_tool("t_conv0", "{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"},\"$defs\":{\"u\":{\"type\":\"object\",\"properties\":{\"$ref\":{\"type\":\"string\"},\"next\":{\"$ref\":\"#\"},\"o\":{\"$ref\":\"other.json#/a\"},\"n\":{\"$ref\":\"#anchor\"}}}},\"default\":{\"$ref\":\"#/x\"},\"enum\":[{\"$ref\":\"#/y\"}],\"anyOf\":[{\"$dynamicRef\":\"#/$defs/u\"}]}")) != 0, "legacy form: ...the 0th refused at registration (3.8.10)");
+    assert(registry_check_tool_def(_tool("t_conv1", "{\"type\":\"array\",\"items\":{\"properties\":{\"default\":{\"$ref\":\"#/$defs/d\"},\"$id\":{\"type\":\"string\"},\"x\":{\"$ref\":\"#/$defs/x\"}}}}")) != 0, "legacy form: ...the 1th refused at registration (3.8.10)");
+    assert(registry_check_tool_def(_tool("t_conv2", "{\"$id\":\"https://e.org/u\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"}}")) != 0, "legacy form: ...the 2th refused at registration (3.8.10)");
+    assert(registry_check_tool_def(_tool("t_conv3", "{\"type\":\"array\",\"items\":{\"$id\":\"https://e.org/i\",\"$ref\":\"#/$defs/z\"},\"prefixItems\":[{\"$id\":\"#frag\",\"$ref\":\"#/a\"}]}")) != 0, "legacy form: ...the 3th refused at registration (3.8.10)");
+    assert(registry_check_tool_def(_tool("t_conv4", "{\"type\":\"array\",\"items\":{\"$r\\u0065f\":\"\\u0023/$defs/q\",\"a\\\"b\":1}}")) != 0, "legacy form: ...the 4th refused at registration (3.8.10)");
+    assert(registry_check_tool_def(_tool("t_conv5", "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema#\",\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\",\"$ref\":\"#/$defs/x\"}}")) != 0, "legacy form: ...the 5th refused at registration (3.8.10)");
+    assert(registry_check_tool_def(_tool("t_conv6", "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$ref\":\"#/a\",\"allOf\":[{\"type\":\"string\"}],\"$recursiveRef\":\"#\"}}")) != 0, "legacy form: ...the 6th refused at registration (3.8.10)");
+    assert(registry_check_tool_def(_tool("t_conv7", "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$ref\":\"#/a\",\"allOf\":[],\"$recursiveRef\":\"#\"}}")) != 0, "legacy form: ...the 7th refused at registration (3.8.10)");
+
     _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"$recursiveAnchor\":true,\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\"}}"),
       "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"object\",\"properties\":{\"result\":{\"$recursiveAnchor\":true,\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\"}}},\"required\":[\"result\"]}", "review: ...not under a root that is a $recursiveAnchor");
     _ase(_legacy_form("{\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\"}}"),
@@ -570,9 +584,10 @@ fn main() {
         str_builder_add_cstr(ls, "{\"type\":\"array\",\"description\":\"");
         var lj = 0;
         while (lj < 4000) { str_builder_add_cstr(ls, "\\\""); lj = lj + 2; }
-        str_builder_add_cstr(ls, "\",\"items\":{\"$ref\":\"#/$defs/x\"},\"anyOf\":[{\"$ref\":\"#\"}");
+        # (3.8.10) Each reference resolves, and none leads back with no part judged between.
+        str_builder_add_cstr(ls, "\",\"$defs\":{\"x\":{}},\"items\":{\"$ref\":\"#/$defs/x\"},\"anyOf\":[{\"items\":{\"$ref\":\"#\"}}");
         var lk = 0;
-        while (lk < 200) { str_builder_add_cstr(ls, ",{\"$ref\":\"#\"}"); lk = lk + 1; }
+        while (lk < 200) { str_builder_add_cstr(ls, ",{\"items\":{\"$ref\":\"#\"}}"); lk = lk + 1; }
         str_builder_add_cstr(ls, "]}");
         var lnb = str_builder_new();
         str_builder_add_cstr(lnb, "t_long_");

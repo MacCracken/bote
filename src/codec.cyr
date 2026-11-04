@@ -636,6 +636,10 @@ fn codec_process_message_a(a, input, dispatcher, claims) {
         # cannot be one.
         bote_req_set_stream(0);
         var responses = vec_new_a(a);
+        # (3.8.10, from the 3.8.9 review) Its requests' judgements share one budget base, so
+        # a batch of a hundred calls may do the work of one and its own bytes, not of a
+        # hundred: each had its own, and 69 KB of calls took 521 ms.
+        _sch_pool_open();
         var ei = 0;
         while (ei < n) {
             var elem = vec_get(elems, ei);
@@ -650,6 +654,7 @@ fn codec_process_message_a(a, input, dispatcher, claims) {
             }
             ei = ei + 1;
         }
+        _sch_pool_close();
         var nr = vec_len(responses);
         if (nr == 0) { return 0; }
         var sb = str_builder_new_a(a);

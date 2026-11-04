@@ -569,6 +569,14 @@ fn registry_check_tool_def(tool_def) {
             j = j + 1;
         }
     }
+    # (3.8.10) A ToolSchema's references, resolved in the inputSchema tools/list sends,
+    # written out only where a property may hold one.
+    if (tool_schema_json(schema) == 0 && _reg_props_may_ref(props) == 1) {
+        var isb = str_builder_new();
+        _emit_schema(isb, schema);
+        var irw = _sch_refs_why(str_data(str_builder_build(isb)));
+        if (irw != 0) { return _dsp_named_msg("the inputSchema ", irw, 0); }
+    }
     var os = tool_def_output_schema(tool_def);
     if (os != 0) {
         if (jsonx_valid(os, strlen(os)) == 0) { return "the outputSchema is not valid JSON"; }
@@ -581,6 +589,9 @@ fn registry_check_tool_def(tool_def) {
         if (_reg_dialect_known(os) == 0) {
             return "the outputSchema's $schema names a dialect bote does not support (2020-12, 2019-09, draft-07, draft-06)";
         }
+        # (3.8.10) Its references, each resolved within it.
+        var orw = _sch_refs_why(os);
+        if (orw != 0) { return _dsp_named_msg("the outputSchema ", orw, 0); }
     }
     var dwhy = bote_display_check(tool_def_title(tool_def), tool_def_icons(tool_def));
     if (dwhy != 0) { return dwhy; }
@@ -596,6 +607,19 @@ fn registry_check_tool_def(tool_def) {
 }
 
 # 1 when the cstr `s` is UTF-8 (3.8.4).
+# 1 when a ToolSchema property's schema may hold a `$ref`, an anchor or an `$id`, written
+# plainly or with an escape (3.8.10).
+fn _reg_props_may_ref(props) {
+    if (props == 0) { return 0; }
+    var i = 0;
+    while (i < vec_len(props)) {
+        var v = schema_prop_value(vec_get(props, i));
+        if (v != 0 && (strchr(v, 36) >= 0 || strstr(v, "\\u") >= 0)) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn _reg_utf8_ok(s) {
     var i = 0;
     while (load8(s + i) != 0) {
@@ -626,6 +650,9 @@ fn _reg_check_input_json(js) {
     if (_reg_dialect_known(js) == 0) {
         return "the inputSchema's $schema names a dialect bote does not support (2020-12, 2019-09, draft-07, draft-06)";
     }
+    # (3.8.10) Its references, each resolved within it.
+    var rw = _sch_refs_why(js);
+    if (rw != 0) { return _dsp_named_msg("the inputSchema ", rw, 0); }
     var pr = jsonx_get_raw(js, "properties");
     if (pr != 0 && _vp_first_nonws(pr) != 123) { return "the inputSchema's properties must be an object"; }
     var rq = jsonx_get_raw(js, "required");
@@ -685,7 +712,8 @@ fn _reg_warn_kw(tool, key, kw) {
 # exclusiveMinimum, exclusiveMaximum and additionalProperties are judged, and no longer here.
 # (3.8.7) const and uniqueItems too. (3.8.8) prefixItems, contains, propertyNames,
 # dependentRequired and dependentSchemas. (3.8.9) allOf, anyOf, oneOf, not, if, then, else.
-var BOTE_UNENFORCED = "$ref $dynamicRef $recursiveRef pattern multipleOf patternProperties unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
+# (3.8.10) $ref, within its document.
+var BOTE_UNENFORCED = "$dynamicRef $recursiveRef pattern multipleOf patternProperties unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
 
 # Every WARN the schema `v`, at `key` of tool `tool`, earns: each keyword in `kws` it
 # holds, a type bote does not know, alone or in a type array, and a keyword it judges with a
@@ -700,7 +728,7 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
     if (d != 2020) { late = _reg_words("prefixItems "); }
     if (d == 7) { late = _reg_words("prefixItems minContains maxContains dependentRequired dependentSchemas "); }
     if (d == 2019) { late = _reg_words("prefixItems "); }
-    if (d == 6) { late = _reg_words("prefixItems minContains maxContains dependentRequired dependentSchemas if then else "); }
+    if (d == 6) { late = _reg_words("prefixItems minContains maxContains dependentRequired dependentSchemas "); }
     if (late != 0) {
         var li = 0;
         while (li < vec_len(late)) {
@@ -708,10 +736,25 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
             li = li + 1;
         }
     }
+    # (3.8.10, from the 3.8.9 review) draft-06 has no `if`, `then` or `else`, and the official
+    # client's engine for it, draft-07's, judges them, as bote does since.
+    if (d == 6) {
+        var ite = _reg_words("if then else ");
+        var ii = 0;
+        while (ii < vec_len(ite)) {
+            if (jsonx_has(v, vec_get(ite, ii)) == 1) { _reg_warn_kw(tool, key, _dsp_named_msg(vec_get(ite, ii), ", which draft-06 does not have and bote judges, as the official client does", 0)); }
+            ii = ii + 1;
+        }
+    }
     var k = 0;
     while (k < vec_len(kws)) {
         if (jsonx_has(v, vec_get(kws, k)) == 1) { _reg_warn_kw(tool, key, vec_get(kws, k)); }
         k = k + 1;
+    }
+    # (3.8.10) draft-07 and draft-06 ignore every keyword beside a `$ref`, and the official
+    # client's engine for them judges each, as bote does: clients read such a schema two ways.
+    if ((d == 6 || d == 7) && jsonx_has(v, "$ref") == 1 && _reg_ref_siblings(v) == 1) {
+        _reg_warn_kw(tool, key, "keywords beside $ref, which this schema's dialect ignores and bote judges");
     }
     var ty = jsonx_get_str_dec_a(default_alloc(), v, "type");
     if (ty != 0 && _reg_type_known(ty) == 0) { _reg_warn_kw(tool, key, "an unknown type"); }
@@ -786,7 +829,9 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
     var cki = 0;
     while (cki < vec_len(ck)) {
         var cr = jsonx_get_raw(v, vec_get(ck, cki));
-        if (cr != 0 && _sch_schemas(v, vec_get(ck, cki)) == 0) {
+        # (3.8.10) An empty one is judged, as the client judges it, and is still no schema's
+        # meaning of it: `anyOf` and `oneOf` of none refuse every value.
+        if (cr != 0 && (_sch_schemas(v, vec_get(ck, cki)) == 0 || vec_len(_sch_split_array(cr)) == 0)) {
             _reg_warn_kw(tool, key, _dsp_named_msg(vec_get(ck, cki), " that is no non-empty array of schemas", 0));
         }
         cki = cki + 1;
@@ -798,7 +843,7 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
         if (nr != 0 && _sch_is_schema_text(nr) == 0) { _reg_warn_kw(tool, key, _dsp_named_msg(vec_get(nk, nki), " that is no schema", 0)); }
         nki = nki + 1;
     }
-    if (d != 6 && jsonx_has(v, "if") == 0 && (jsonx_has(v, "then") == 1 || jsonx_has(v, "else") == 1)) {
+    if (jsonx_has(v, "if") == 0 && (jsonx_has(v, "then") == 1 || jsonx_has(v, "else") == 1)) {
         _reg_warn_kw(tool, key, "then or else without if");
     }
     var uq = jsonx_get_raw(v, "uniqueItems");
@@ -839,6 +884,22 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
         if (apc != 123 && streq(ap, "true") == 0 && streq(ap, "false") == 0) {
             _reg_warn_kw(tool, key, "additionalProperties that is no boolean or object");
         }
+    }
+    return 0;
+}
+
+# 1 when the schema `v` holds a keyword beside its `$ref` that judges a value: one that is no
+# annotation, identifier or store of definitions.
+fn _reg_ref_siblings(v) {
+    var quiet = _reg_words("$ref $schema $id $comment title description default examples definitions $defs ");
+    var mem = _jx_members(v);
+    var i = 0;
+    while (i < vec_len(mem)) {
+        var hit = 0;
+        var q = 0;
+        while (q < vec_len(quiet)) { if (streq(vec_get(mem, i), vec_get(quiet, q)) == 1) { hit = 1; } q = q + 1; }
+        if (hit == 0) { return 1; }
+        i = i + 2;
     }
     return 0;
 }

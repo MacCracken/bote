@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.8.9 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.8.10 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
 > ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not. Every other table here is against 2025-11-25.
 
@@ -146,7 +146,8 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | `propertyNames` | `schema::_sv_object`, `_sv_matches` | ✅ (3.8.8) every key, each time it is written, as the string it decodes to |
 | `dependentRequired`, `dependentSchemas` | `schema::_sv_object` | ✅ (3.8.8) a member present requires its names, or holds the object to its schema; draft-07's `dependencies` is warned of and not judged |
 | `allOf`, `anyOf`, `oneOf`, `not`, `if` / `then` / `else` | `schema::_sv_comp`, `_sv_matches` | ✅ (3.8.9) on any value and on an inputSchema's root; `allOf` and the branch `if` chooses keep their violations, the rest ask quietly. The conformance suite's 2020-12 schema is judged whole |
-| A bound on the work of judging | `schema::_sch_budget` | ✅ (3.8.9) 100,000 values and 32 a byte of the document, quiet judgements counted; past it the value is refused as `more work to judge than its size allows` |
+| A bound on the work of judging | `schema::_sch_budget`, `_sv_charge` | ✅ (3.8.9) 100,000 values and 32 a byte of the document, quiet judgements counted; past it the value is refused as `more work to judge than its size allows`. (3.8.10) Each byte a keyword reads costs one more, and a batch's requests share one base |
+| `$ref` within its document | `schema::_sch_ref_target`, `_sch_refs_why` | ✅ (3.8.10) `#`, a JSON Pointer anywhere, an anchor (`$anchor`, `$dynamicAnchor`, draft-07's `$id` fragment), behind the root's `$id` too, resolved at registration as Ajv resolves them; one into another document, to nothing, or around a cycle judging no part of the value refused there. A judgement deeper than 512 steps is refused as `nested too deep to judge` |
 | Numeric bounds (`minimum`, `maximum`) for number + integer | `prop_min` / `prop_max` | ✅ — exponents read (3.4.8); a fractional value is compared as itself (3.4.15), and a fractional bound is truncated |
 | `integer` per JSON Schema 2020-12 (a zero fractional part counts: `5.0`, `1e2`) | `schema::_sch_num_parse` | ✅ (3.4.8; any `.` was refused before) |
 | Required field check | `compiled_required` | ✅ |
@@ -158,7 +159,7 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | Permissive on extra (unknown) fields, unless `additionalProperties` says otherwise | `_sv_object` | ✅ (3.8.5) `additionalProperties` false refuses a member no property names, and a schema judges it; beside `patternProperties` it is not judged, and registration warns |
 | `minLength` / `maxLength` (code points), `minItems` / `maxItems`, `minProperties` / `maxProperties`, `exclusiveMinimum` / `exclusiveMaximum` | `schema::_sv_string`, `_sv_array`, `_sv_object`, `_sv_number` | ✅ (3.8.5); each keyword judges the values of its kind whatever `type` says, as JSON Schema has it. (3.8.6) Bytes that are no UTF-8 are counted as a client's decoder reads them, one U+FFFD for each maximal part (WHATWG Encoding, Unicode §3.9): 3.8.5 counted a byte from 0x80 to 0xBF that starts no sequence as none, so 60,000 of them met `maxLength: 4`. A value bote cannot judge by (`maxLength: "3"`, `exclusiveMinimum: true`, `additionalProperties: "no"`) judges nothing, and registration WARNs of it |
 | Schema `false` allows nothing | `SCH_NEVER` | ✅ (3.4.15; it allowed anything) |
-| Keywords outside the subset (`$ref`, `pattern`, `multipleOf`, `format`, `patternProperties`, `unevaluated*`, and the rest of `BOTE_UNENFORCED`) | `registry::_reg_warn_unenforced`, (3.8.0) `_reg_warn_output` | 🟡 advertised in `tools/list`, not enforced; a WARN at registration names each (3.4.15), on an outputSchema's root and its properties too (3.8.0). Roadmap 3.8.x |
+| Keywords outside the subset (`$dynamicRef`, `$recursiveRef`, `pattern`, `multipleOf`, `format`, `patternProperties`, `unevaluated*`, and the rest of `BOTE_UNENFORCED`) | `registry::_reg_warn_unenforced`, (3.8.0) `_reg_warn_output` | 🟡 advertised in `tools/list`, not enforced; a WARN at registration names each (3.4.15), on an outputSchema's root and its properties too (3.8.0). Roadmap 3.8.x |
 | An outputSchema judges a result's `structuredContent`, any JSON value | `schema::_sch_check_value_a` | ✅ (3.8.0) the same subset, from the schema's root: each violation named from `structuredContent` (`structuredContent.temperature: expected number`, `structuredContent[0].id: expected string`). (3.8.1) A key named twice in any object of it is refused, as bote would judge the first and a client reads the last; a key of any length is read as it decodes; an integer is not bounded as an argument is. An outputSchema that repeats a key, has one holding a NUL, or names a dialect other than 2020-12, 2019-09, draft-07 or draft-06 is refused at registration |
 
 ## Session Management

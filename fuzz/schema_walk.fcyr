@@ -14,7 +14,10 @@
 # `enum` and read as a client reads it for `uniqueItems`. (3.8.8) `prefixItems`, `contains`
 # with `minContains` and `maxContains`, `propertyNames` by a length or an enum,
 # `dependentRequired` and `dependentSchemas`. (3.8.9) `allOf`, `anyOf`, `oneOf`, `not` and
-# `if` / `then` / `else`. The reference judges bayan's parse of both. Exit codes:
+# `if` / `then` / `else`. (3.8.10) Up to three definitions in the root's `$defs`, and a `$ref`
+# to one anywhere, written plainly, percent-encoded or under an escaped key; a definition
+# names only those after it, so no reference leads back. The reference judges bayan's parse
+# of both, a `$ref` by the definition it names. Exit codes:
 #
 #   10   a value bote passes the reference refuses, or the reverse;
 #   20   the rounds drew fewer than a thousand values passed or a thousand refused;
@@ -136,9 +139,23 @@ fn _kw_int(a, sb, kw, v, sep) {
     return 1;
 }
 
+# (3.8.10) The definitions a `$ref` may name from the schema being drawn: d<_ref_lo> to
+# d<_ref_n - 1>.
+var _ref_lo = 0;
+var _ref_n = 0;
+
 fn _schema(a, sb, depth) {
     _add(a, sb, "{");
     var sep = 0;
+    if (_ref_lo < _ref_n && _r(6) == 0) {
+        var rk = _r(3);
+        if (rk == 0) { _add(a, sb, "\"\\u0024ref\":\"#/$defs/d"); }
+        elif (rk == 1) { _add(a, sb, "\"$ref\":\"#/%24defs/d"); }
+        else { _add(a, sb, "\"$ref\":\"#/$defs/d"); }
+        _addi(a, sb, _ref_lo + _r(_ref_n - _ref_lo));
+        _add(a, sb, "\"");
+        sep = 1;
+    }
     var t = _r(8);
     if (depth >= 2 && t >= 5) { t = _r(5); }
     var tn = 0;
@@ -148,6 +165,7 @@ fn _schema(a, sb, depth) {
     elif (t == 3) { tn = "null"; }
     elif (t == 5) { tn = "array"; }
     elif (t == 6) { tn = "object"; }
+    if (tn != 0 && sep == 1) { _add(a, sb, ","); }
     if (tn != 0 && _r(5) == 0) {
         # (3.8.7) A type array in place of the type.
         _add(a, sb, "\"type\":");
@@ -582,7 +600,18 @@ fn _type_is(nm, inst) {
 }
 
 # 1 when the reference finds `inst` valid against `sch`.
+var _ROOT = 0;
+
 fn _ok(sch, inst) {
+    # (3.8.10) The definition a `$ref` names.
+    var rf = _member(sch, "$ref");
+    if (rf != 0) {
+        var rs = bayan_json_v_str(rf);
+        var dig = str_data(rs) + str_len(rs) - 1;
+        var tgt = _member(_member(_ROOT, "$defs"), _cat_d(load8(dig)));
+        if (tgt == 0) { println("reference: a $ref the grammar did not draw"); return 0 - 1; }
+        if (_ok(tgt, inst) == 0) { return 0; }
+    }
     var t = _member(sch, "type");
     if (t != 0 && bayan_json_v_is_arr(t) == 1) {
         var tok = 0;
@@ -811,6 +840,15 @@ fn _ok(sch, inst) {
     return 1;
 }
 
+# "d" and the digit `c`.
+fn _cat_d(c) {
+    var o = alloc(3);
+    store8(o, 100);
+    store8(o + 1, c);
+    store8(o + 2, 0);
+    return o;
+}
+
 # 1 when the object `inst` has a member keyed `k` (a bayan Str).
 fn _has_key(inst, k) {
     var i = 0;
@@ -833,11 +871,36 @@ fn main() {
     var round = 0;
     while (round < 20000) {
         var sa = default_alloc();
+        # (3.8.10) The definitions first, each naming only those after it, then the root,
+        # naming any.
+        _ref_n = _r(4);
+        var dsb = str_builder_new();
+        var di = 0;
+        while (di < _ref_n) {
+            if (di > 0) { _add(sa, dsb, ","); }
+            _add(sa, dsb, "\"d");
+            _addi(sa, dsb, di);
+            _add(sa, dsb, "\":");
+            _ref_lo = di + 1;
+            _schema(sa, dsb, 1);
+            di = di + 1;
+        }
+        _ref_lo = 0;
         var ssb = str_builder_new();
         _schema(sa, ssb, 0);
         var sch = str_data(str_builder_build(ssb));
+        if (_ref_n > 0) {
+            var wsb = str_builder_new();
+            _add(sa, wsb, "{\"$defs\":{");
+            _add(sa, wsb, str_data(str_builder_build(dsb)));
+            _add(sa, wsb, "}");
+            if (strlen(sch) > 2) { _add(sa, wsb, ","); }
+            _add(sa, wsb, sch + 1);
+            sch = str_data(str_builder_build(wsb));
+        }
         var prop = parse_property(sch);
         var sv = bayan_json_v_parse_buf(sch, strlen(sch));
+        _ROOT = sv;
         var k = 0;
         while (k < 6) {
             var a = bote_req_begin();
@@ -850,6 +913,7 @@ fn main() {
             # bote's reading of one is its unit tests'.
             if (iv == 0) { skipped = skipped + 1; k = k + 1; continue; }
             var want = _ok(sv, iv);
+            if (want < 0) { println(sch); return 10; }
             var h0 = alloc_used();
             var got = 0;
             if (_sch_check_value_a(a, prop, "v", inst) == 0) { got = 1; }
