@@ -33,7 +33,7 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.4 — output schemas on bote's own tools**, the next item of 3.8.x below.
+**3.8.5 — JSON Schema coverage, its first bite**, the next item of 3.8.x below: it is large, and goes in pieces.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
@@ -42,8 +42,6 @@ stdio's) are each one connection's, and a worker per connection would need a hom
 
 ## 3.8.x — The tool surface
 
-- **Output schemas on bote's own tools.** The libro tools already send `structuredContent`; give them, and
-  `fs_read`, the outputSchema that says what it holds, so a client can check it.
 - **JSON Schema coverage.** The 2026-07-28 revision allows any 2020-12 keyword. bote validates a subset and
   warns at registration about the keywords it advertises and does not enforce: `anyOf`, `oneOf`, `allOf`,
   `not`, `$ref`, `pattern`, the length and item bounds, `const`, `format` (which the official client
@@ -58,7 +56,8 @@ stdio's) are each one connection's, and a worker per connection would need a hom
 - **What a valid tool call still leaves on the heap.** A request costs bote nothing that outlives it, except
   `args` and whatever a handler allocates, because the 2.0 ABI lets a handler keep both. bote's own
   libro, fs and web handlers need not: give them the request arena, and bound the binary. `fs_read` of a
-  70 KB file keeps about 140 KB, its escaped result, for good, and `web_fetch`'s results are the same shape:
+  70 KB file keeps about 131 KB, its result with the text twice (in its block and its structuredContent, 3.8.4), for
+  good, and `web_fetch`'s results are the same shape:
   build the result after the read buffer on the arena, move it down to the mark, and release past it, once
   nothing that keeps a result (a resumption buffer) is in the way. The ABI change that would bound every
   handler is a 4.0 matter.

@@ -215,7 +215,7 @@ fn main() {
     str_builder_add_cstr(big_sb, "\"}");
     fs_write_handler(str_data(str_builder_build(big_sb)), 0);
     assert(_lc_has(fs_read_handler("{\"path\":\"build/fst/big.txt\"}", 0), "[fs_read: truncated]") == 1, "read: a truncated file says it is");
-    assert_eq(_lc_has(fs_read_handler("{\"path\":\"build/fst/caf\\u00e9.txt\"}", 0), "truncated"), 0, "read: ...and a whole one does not");
+    assert_eq(_lc_has(fs_read_handler("{\"path\":\"build/fst/caf\\u00e9.txt\"}", 0), "[fs_read: truncated]"), 0, "read: ...and a whole one does not");
     # fs_mkdir reports what is there.
     assert(_lc_has(fs_mkdir_handler("{\"path\":\"build/fst/caf\\u00e9.txt\"}", 0), "\"isError\":true") == 1, "mkdir: over a file is an error");
     assert(_lc_has(fs_mkdir_handler("{\"path\":\"build/fst/caf\\u00e9.txt/sub\"}", 0), "\"isError\":true") == 1, "mkdir: under a file is an error");
@@ -248,7 +248,7 @@ fn main() {
     var batch = str_data(str_builder_build(bsb));
     bote_req_begin();
     var bres = codec_process_message_a(bote_req_alloc(), batch, disp, 0);
-    assert_eq(_occurs(bres, "\"text\":\"x\""), 50, "arena: a batch of fifty reads, each answered");
+    assert_eq(_occurs(bres, "\"structuredContent\":{\"text\":\"x\""), 50, "arena: a batch of fifty reads, each answered");
     assert(bote_req_arena_bytes(ar) <= ar_before + 262144, "arena: ...holding one read buffer, not fifty");
     var mk[16];
     bote_req_mark(&mk);
@@ -260,6 +260,45 @@ fn main() {
     alloc_via(ar, 16);
     bote_req_release(&mk);
     assert(alloc_via(ar, 16) == m2 + 16, "release: in the same chunk, from the same byte");
+
+    # ---------------- 3.8.4: fs_read's outputSchema ----------------
+    # The text in its block, as since 2.8.0, and structuredContent {text, bytes, truncated},
+    # judged by the outputSchema it lists, on both revisions.
+    sakshi_set_level(SK_ERROR);
+    var sr = fs_read_handler("{\"path\":\"build/fst/caf\\u00e9.txt\"}", 0);
+    assert(streq(sr, "{\"content\":[{\"type\":\"text\",\"text\":\"x\"}],\"structuredContent\":{\"text\":\"x\",\"bytes\":1,\"truncated\":false},\"isError\":false}") == 1, "structured: the exact bytes");
+    var sbig = fs_read_handler("{\"path\":\"build/fst/big.txt\"}", 0);
+    assert(_lc_has(sbig, "\\n[fs_read: truncated]\"}],\"structuredContent\":{\"text\":\"0123") == 1, "structured: a cut file's block ends with the note");
+    assert(_lc_has(sbig, "012345\",\"bytes\":65536,\"truncated\":true},\"isError\":false}") == 1, "structured: ...its structured text without it, 65536 bytes, truncated");
+    assert_eq(_occurs(sbig, "[fs_read: truncated]"), 1, "structured: ...the note once");
+    var smod = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fs_read\",\"arguments\":{\"path\":\"build/fst/caf\\u00e9.txt\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}";
+    var sl1 = codec_process_message(rmsg, disp, 0);
+    var sl2 = codec_process_message(smod, disp, 0);
+    assert(_lc_has(sl1, "\"structuredContent\":{\"text\":\"x\",\"bytes\":1,\"truncated\":false}") == 1 && _lc_has(sl1, "\"isError\":true") == 0, "structured: passes its schema (2025-11-25)");
+    assert(_lc_has(sl2, "\"structuredContent\":{\"text\":\"x\",\"bytes\":1,\"truncated\":false}") == 1 && _lc_has(sl2, "\"isError\":true") == 0, "structured: passes its schema (2026-07-28)");
+    var sbm = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fs_read\",\"arguments\":{\"path\":\"build/fst/big.txt\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}";
+    var sbr = codec_process_message(sbm, disp, 0);
+    assert(_lc_has(sbr, "\"truncated\":true}") == 1 && _lc_has(sbr, "\"isError\":true") == 0, "structured: a cut file passes too");
+    var scb = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fs_read\",\"arguments\":{\"path\":\"tests/fixtures/control-bytes.txt\"}}}", disp, 0);
+    assert(jsonx_valid(scb, strlen(scb)) == 1 && _lc_has(scb, "\"isError\":false") == 1, "structured: control bytes, valid JSON, passing");
+    var sref = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fs_read\",\"arguments\":{\"path\":\"../x\"}}}", disp, 0);
+    assert(_lc_has(sref, "refused unsafe path") == 1 && _lc_has(sref, "\"isError\":true") == 1 && _lc_has(sref, "structuredContent") == 0, "structured: a refusal is an error result, judged by nothing");
+    var stl = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}", disp, 0);
+    assert(_lc_has(stl, "\"outputSchema\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"") == 1 && _lc_has(stl, "\"required\":[\"text\",\"bytes\",\"truncated\"]}") == 1, "structured: fs_read lists its outputSchema");
+    assert_eq(_occurs(stl, "\"outputSchema\""), 1, "structured: ...and fs_write and fs_mkdir none");
+    # The text goes twice now, and a call still keeps no more than its result, made at its
+    # size: 131 KB for 64 KB of text, where 3.8.3's text block alone, through a growing
+    # builder, kept about 139 KB.
+    codec_process_message_a(bote_req_begin(), sbm, disp, 0);
+    var sh0 = alloc_used();
+    var shi = 0;
+    while (shi < 5) { codec_process_message_a(bote_req_begin(), sbm, disp, 0); shi = shi + 1; }
+    var sper = (alloc_used() - sh0) / 5;
+    assert(sper > 2 * 65536 && sper < 2 * 65536 + 1024, "structured: a 64 KB read keeps its result, the text twice, and nothing more");
+    _lc_begin();
+    fs_tools_register(dispatcher_new(tool_registry_new()));
+    _lc_end();
+    assert_eq(_lc_count, 0, "structured: registration warns of nothing");
 
     return assert_summary();
 }

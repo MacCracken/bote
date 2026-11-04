@@ -18,7 +18,131 @@ have per release.
 
 _(empty)_
 
+## [3.8.4] — 2026-11-03 · Output schemas on bote's own tools
+
+**The libro tools and `fs_read` say what their results hold.** Each lists an outputSchema, the dispatcher judges every
+result that is no error by it, and a client can check it: the official client, on the real binary over stdio, checks
+every one on both revisions and finds them as listed. The five libro tools have sent `structuredContent` since 3.4.10,
+and their schemas describe it. `fs_read` now sends `structuredContent` too, `{text, bytes, truncated}`, beside the text
+block it has always sent, so a client that reads either has the whole file, and one that reads the structured result
+learns whether it was cut without reading the note at the end of the text.
+
+The text goes twice now, and a call keeps no more than before: `fs_read`'s result is escaped once on the request
+arena and made on the heap at its size, 131 KB for a 64 KB file, where 3.8.3's text block alone, built through a
+growing builder, kept about 139 KB.
+
+**Six defects in 3.8.3 land ahead of it**, from an independent review of that release. The worst: a definition
+registered again was listed with its new inputSchema and judged by its first compile, so arguments the list forbade
+reached the handler. See the correction notice in 3.8.3.
+
+The stated minimum cyrius (6.7.13) is unchanged.
+
+### Added
+
+- **An outputSchema on each libro tool** (full bundle, `src/libro_tools.cyr`): `libro_query` and `libro_export` an `ok`, a
+  count (`total`, `count`) and `entries`, each entry its `timestamp` (RFC 3339, or null), `severity`, `source`, `action`,
+  `agent_id` and `hash`; `libro_verify` `ok`, and on a broken chain's error result `code`, `index` and `message`;
+  `libro_proof` `ok`, `index`, `leaf_count` and `root`; `libro_retention` `ok`, `archived` and `retained`. A failed call
+  is an error result, `{"ok":false,"error":…}`, which neither bote nor a client judges.
+- **`fs_read`'s `structuredContent`** (full bundle, `src/fs_tools.cyr`): `text`, the file's contents (at most 65,536
+  bytes, never cut inside a character), `bytes`, how many bytes of the file it holds, and `truncated`, and an
+  outputSchema saying so. The text block is the file's text as before, with the note `[fs_read: truncated]` at its end
+  when the file was cut; the structured text has no note. A refusal or a file that cannot be read is an error result
+  with no `structuredContent`, as before.
+- Every keyword the six schemas use at their root and on its properties is one bote enforces, so registration warns
+  of none. An entry's `timestamp` may be null, which only a type array can say; it sits below the root, where bote
+  neither warns nor judges, and the client judges it.
+
+### Changed
+
+- **A tool's input schema is compiled at every registration**, unless the consumer attached its own compiled schema
+  with `tool_def_with_compiled`, which is kept (ToolDef 144 B, +136: 1 when registration compiled it). A compiled
+  schema keeps its own copy of the `required` names. What registration makes is staged under the registries' lock, the
+  compile and the `x-mcp-header`s among it (`st` 72 B).
+- **A call reads its tool's definition from the look that served it**: `_dsp_tool_serving` copies it onto the request
+  arena under the read lock, 144 bytes, and the whole call is judged and shaped by that copy.
+- `fs_read`'s result is built at its size, with the text escaped once on the request arena (`_fs_read_result`).
+- `scripts/conformance.sh` builds `build/bote` and the client drives its own tools over stdio on both revisions
+  (`tests/fixtures/conformance_client.mjs`, `ownTools`).
+
+### Fixed
+
+From the review of 3.8.3:
+
+- **A definition registered again was judged by its first compile.** Registration compiled the input schema only when
+  none was attached, and the first registration attached one, so the second kept it: `tools/list` showed a new
+  property `y` of type integer, and `{"y":"not an integer"}` reached the handler. The compile is made again at each
+  registration now. This predates 3.8.3, which made the list follow the new schema.
+- **An `x-mcp-header` taken away stayed required.** Registration stored the headers only when there were some, so a
+  definition registered again without its annotation kept the old one, and HTTP refused every call that followed the
+  list. Stored whether there are any or not.
+- **A `required` name pushed after registration was judged at once**, while the list waited for the next
+  registration: the compiled schema shared the ToolSchema's vec. It has its own copy.
+- **The list wrote the consumer's buffer.** An inputSchema or an outputSchema given as JSON with no CR or LF was kept
+  as the consumer's pointer, and a byte written into it after registration went out, a raw LF among them. Registration
+  keeps its own copy (`_reg_own_line`).
+- **A `required` name that is no text was dropped at the root of a JSON inputSchema**, so the tool needed nothing. It is
+  refused at registration, and so are a ToolSchema property name and a `required` name that are no UTF-8, which a client
+  reads as U+FFFD.
+- **`jwt_state_principal` named one principal for different subjects**: `\ud800`, `\udbff` and U+FFFD each decoded to
+  U+FFFD. An issuer or subject that is no text now names no one, and the state is bound to the token.
+- **`inputResponses` keyed with a NUL passed the check that it is an object of objects**, the twin of 3.8.3's fix for
+  input requests: the member walk left the member out. Each is read by its key as written, and one keyed with a NUL is
+  `-32602`.
+- **A call could read two forms of one outputSchema**: the look that served it was released, then the dispatcher read
+  the compiled schema and its 2025-11-25 form from the definition, which a registration beside it stages in place. A
+  handler that registered its own tool again with the schema taken away had its result lifted by one and judged by
+  neither. The call reads its own copy now.
+
+### Security
+
+- Arguments are judged by the schema a tool is listed with, after any registration.
+- A requestState sealed for one JWT subject no longer opens for another subject that decodes the same.
+
+### Tests
+
+- **5,928 assertions, from 5,864**, on x86_64 and under `qemu-aarch64` 11.1.3.
+- **`tests/bote_tool_schema.tcyr`**, 103, from 85, from the review of 3.8.3: a definition registered again judged by
+  its new schema, a consumer's compiled schema kept registered again and attached after a compile, a header taken away,
+  a `required` name pushed after registration waiting for the next, the listed schemas registration's copies, names
+  that are no text or no UTF-8 refused, and a call served by the definition it was looked up with while its handler
+  registered it again.
+- **`tests/bote_input.tcyr`**, 148, from 146: `inputResponses` keyed with a NUL.
+- **`tests/bote_jwt.tcyr`**, 510, from 507: a subject and an issuer holding a lone surrogate, and a surrogate pair.
+- **`tests/bote_libro_tools.tcyr`**, 101, from 73: all five schemas listed on both revisions and the list valid JSON,
+  their required members, every tool's success on a populated chain passing its schema on both revisions, a failure
+  and a broken chain's verify going as their error results, an entry with no time as null, six results libro's layout
+  drifting would send refused by the compiled schema, and registration warning of nothing.
+- **`tests/bote_fs_tools.tcyr`**, 76, from 63: the exact bytes, a cut file's note in its block and not its structured
+  text, `bytes` and `truncated`, passing on both revisions, control bytes, a refusal judged by nothing, the list,
+  registration warning of nothing, and the heap: a 64 KB read keeping its result and nothing more.
+- **27 mutants, 26 killed**: 15 on the output schemas and fs_read's result, and 12 on the review's fixes. The survivor
+  was a mark and release inside `_fs_read_result` that `fs_read_handler`'s own repeats; it is gone.
+- **The official client** passes 547 checks, from 525: on the binary over stdio, on both revisions, the tools that
+  list an outputSchema, each libro tool's result checked against its schema, `fs_read`'s text in both places, a cut
+  file, and error results. With a schema bote does not enforce in full (a `maxLength` on `fs_read`'s text) the client
+  refuses the result, so these passes are its own checks and not bote's.
+
 ## [3.8.3] — 2026-11-03 · Input schemas as JSON
+
+> ⚠ **Corrected at 3.8.4.** These claims below were not true, found by an independent review of this release.
+> - "A definition changed after its registration is listed as it was registered until it is registered again." Registered
+>   again, it was listed with its new inputSchema and judged by its first compile; an `x-mcp-header` taken away was still
+>   required of every HTTP call; and a `required` name pushed after registration was judged at once, while the list left
+>   it out.
+> - "listed as written, on one line" and "every inputSchema is now listed as registration kept it." An inputSchema or
+>   an outputSchema given as JSON holding no CR or LF was listed from the consumer's own buffer, which a byte written into
+>   it after registration changed, a raw LF among them.
+> - A string that is no text "meets no `required` name." At the root of an inputSchema given as JSON such a name was
+>   left out, and the tool registered as needing nothing.
+> - `jwt_state_principal`'s parts are "each its length and then its bytes", so a subject unique within its issuer
+>   names one principal. The decoder writes U+FFFD for every lone surrogate, so `\ud800`, `\udbff` and U+FFFD named the
+>   same one.
+> - An `x-mcp-header` is refused "under `$defs`, `allOf` or any keyword that holds a subschema." The keywords walked are
+>   the ones the official client walks, which leaves out `additionalItems`, `dependencies` and `contentSchema`: bote and
+>   the client agree, and the claim was too broad.
+> - Registration "warns of each keyword it lists and does not enforce, the root's among them." It warns at the root and
+>   at each property's top level, not below them, as before this release.
 
 **A tool's inputSchema can be its own JSON, every keyword at its root kept.** `tool_schema_from_json(json)` takes a
 whole JSON Schema, as `tool_def_with_output_schema` has taken an outputSchema since 3.8.0: `$schema`, `$defs`,

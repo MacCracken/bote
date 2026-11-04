@@ -14,7 +14,7 @@
 # is a demo tool; the root confinement is a floor, not a full sandbox.
 
 var FS_READ_CAP = 65536;    # max bytes fs_read returns
-var FS_READ_NOTE = 32;      # room after them for the truncation note and a NUL
+var FS_READ_NOTE = 32;      # room after them for the byte that shows a file is longer, and a NUL
 var BOTE_ERRNO_ENOENT = 2;
 # agnos defines no O_NONBLOCK, and its file_open ignores flags it does not know.
 #ifdef CYRIUS_TARGET_AGNOS
@@ -277,12 +277,60 @@ fn _fs_read_into(buf, full) {
         z = z + 1;
     }
     store8(buf + got, 0);
-    if (cut == 1) {
-        # Silently short, a model writing this back would destroy the rest.
-        memcpy(buf + got, "\n[fs_read: truncated]", 22);
-    }
-    return _fs_ok(buf);
+    return _fs_read_result(buf, got, cut);
 }
+
+# fs_read's result for the `got` bytes of text at `buf` (3.8.4): the text in a text block, as
+# since 2.8.0, ending with a note when the file was cut (silently short, a model writing it
+# back would destroy the rest), and as structuredContent, {text, bytes, truncated}, which its
+# outputSchema says. The text goes in both, so a client that reads either has all of it.
+# It is escaped once, on the request arena, after the read buffer, which fs_read_handler gives
+# back with it, and the result made on the heap at its size, so a call keeps about what a text
+# block alone kept through 3.8.3: built through a growing builder, the two copies of it would
+# keep twice that.
+fn _fs_read_result(buf, got, cut) {
+    var a = bote_req_alloc();
+    var sbt = str_builder_new_a(a);
+    _sb_grow_a(a, sbt, 6 * got + 16);
+    bote_json_escape(sbt, buf);
+    var esc = str_data(str_builder_build_a(a, sbt));
+    var el = strlen(esc);
+    var head = "{\"content\":[{\"type\":\"text\",\"text\":\"";
+    var note = "";
+    if (cut == 1) { note = "\\n[fs_read: truncated]"; }
+    var mid = "\"}],\"structuredContent\":{\"text\":\"";
+    var sbn = str_builder_new_a(a);
+    _sb_grow_a(a, sbn, 96);
+    str_builder_add_cstr(sbn, "\",\"bytes\":");
+    str_builder_add_int(sbn, got);
+    if (cut == 1) { str_builder_add_cstr(sbn, ",\"truncated\":true},\"isError\":false}"); }
+    else { str_builder_add_cstr(sbn, ",\"truncated\":false},\"isError\":false}"); }
+    var tail = str_data(str_builder_build_a(a, sbn));
+    var hl = strlen(head);
+    var nl = strlen(note);
+    var ml = strlen(mid);
+    var tl = strlen(tail);
+    var out = alloc(hl + el + nl + ml + el + tl + 1);
+    var o = 0;
+    memcpy(out + o, head, hl);
+    o = o + hl;
+    memcpy(out + o, esc, el);
+    o = o + el;
+    memcpy(out + o, note, nl);
+    o = o + nl;
+    memcpy(out + o, mid, ml);
+    o = o + ml;
+    memcpy(out + o, esc, el);
+    o = o + el;
+    memcpy(out + o, tail, tl);
+    o = o + tl;
+    store8(out + o, 0);
+    return out;
+}
+
+# What fs_read's structuredContent holds (3.8.4). An error result, a path refused or a file
+# that cannot be read, holds none, and is judged by nothing.
+var BOTE_FS_READ_OS = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"The file's contents, UTF-8, at most 65536 bytes of it, never cut inside a character.\"},\"bytes\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"How many bytes of the file text holds.\"},\"truncated\":{\"type\":\"boolean\",\"description\":\"true when the file is longer than text.\"}},\"required\":[\"text\",\"bytes\",\"truncated\"]}";
 
 # fs_mkdir {path} -> creates <root>/<path> (and any missing parents).
 fn fs_mkdir_handler(args, claims) {
@@ -344,9 +392,9 @@ fn fs_tools_register(dispatcher) {
           _fs_schema(1)), wann));
     dispatcher_handle(dispatcher, "fs_write", &fs_write_handler);
 
-    registry_register(reg, tool_def_with_annotations(tool_def_new(
+    registry_register(reg, tool_def_with_output_schema(tool_def_with_annotations(tool_def_new(
           "fs_read", "Read a text file under the server root.",
-          _fs_schema(0)), ann_read_only()));
+          _fs_schema(0)), ann_read_only()), BOTE_FS_READ_OS));
     dispatcher_handle(dispatcher, "fs_read", &fs_read_handler);
 
     var mann = ann_new();

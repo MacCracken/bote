@@ -1,6 +1,7 @@
 #!/bin/bash
 # The official MCP conformance suite and TypeScript client against bote, at pinned
-# versions, for both revisions on both HTTP transports, and the client over stdio too.
+# versions, for both revisions on both HTTP transports, and the client over stdio too, on
+# the fixture and on the binary's own tools.
 #
 # Not a CI step: it installs third-party code from npm. Run it by hand at a release that
 # touches the protocol. It needs node and npm, and writes only under build/conformance.
@@ -22,6 +23,8 @@ mkdir -p "$W"
 
 cyrius build tests/fixtures/conformance_server.cyr build/conformance-server >/dev/null 2>&1 \
   || { echo "conformance: the fixture does not build" >&2; exit 1; }
+cyrius build src/main.cyr build/bote >/dev/null 2>&1 \
+  || { echo "conformance: bote does not build" >&2; exit 1; }
 
 if [ ! -d "$W/node_modules/@modelcontextprotocol/conformance" ]; then
   ( cd "$W" && npm init -y >/dev/null \
@@ -60,5 +63,6 @@ for rev in 2026-07-28 2025-11-25; do
 done
 
 cp tests/fixtures/conformance_client.mjs "$W/client.mjs"
-( cd "$W" && node client.mjs "$ROOT/build/conformance-server" ) || rc=1
+# The client against the fixture, and against bote's own tools on the binary (3.8.4).
+( cd "$W" && node client.mjs "$ROOT/build/conformance-server" "$ROOT/build/bote" ) || rc=1
 exit "$rc"

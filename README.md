@@ -534,9 +534,12 @@ the 30 2025-11-25 requires. What fails is features bote lacks, listed with the r
 | `libro_export` | Every entry as a JSON array |
 | `libro_proof` | Merkle inclusion proof for an entry by index |
 | `libro_retention` | Apply a policy (`keep_count` / `keep_duration` / `keep_after` / `pci_dss` / `hipaa` / `sox`) |
-| `fs_write` / `fs_read` / `fs_mkdir` | Filesystem ops confined to `BOTE_FS_ROOT` (default `.`) |
+| `fs_write` / `fs_read` / `fs_mkdir` | Filesystem ops confined to `BOTE_FS_ROOT` (default `.`); `fs_read` sends the text as a block and as `structuredContent`, `{text, bytes, truncated}` |
 | `web_fetch` | GET a URL (http/https only; loopback / private / link-local / metadata refused by the SSRF guard — on the URL and, since 3.4.4, on the address the name resolves to), strip HTML to readable text, size-capped |
 | `web_search` | Query a SearXNG JSON endpoint (`BOTE_SEARXNG_URL`) |
+
+The five libro tools and `fs_read` list an outputSchema (3.8.4), which the dispatcher judges each of their results by,
+and a client can check.
 
 ### Error codes
 
@@ -613,9 +616,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 5864 total across twenty-seven files (+ a core-only drift smoke)
+### Tests — 5928 total across twenty-seven files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5864 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 5928 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 969 — core protocol/dispatch/codec/schema/session/transports
@@ -624,19 +627,19 @@ cyrius test tests/bote_auth.tcyr          # 91 — bearer + allowlist + JWT + PK
 cyrius test tests/bote_cancel.tcyr        # 141 — cancelling a request in flight: the check, the codec, stdio, unix, HTTP, a fetch's child
 cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fetch.tcyr         # 62 — a request made in a child: the record, the cap, the deadline, a real GET
-cyrius test tests/bote_fs_tools.tcyr      # 63 — fs_write / fs_read / fs_mkdir
+cyrius test tests/bote_fs_tools.tcyr      # 76 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 207 — host registry + SSRF guard (IPv4 + IPv6)
 cyrius test tests/bote_http_era.tcyr      # 1863 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
 cyrius test tests/bote_jwks.tcyr          # 49 — a jwks_uri: what it may be, and real fetches from a child
-cyrius test tests/bote_jwt.tcyr           # 507 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
-cyrius test tests/bote_libro_tools.tcyr   # 73 — libro_tools wrappers
+cyrius test tests/bote_jwt.tcyr           # 510 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
+cyrius test tests/bote_libro_tools.tcyr   # 101 — libro_tools wrappers
 cyrius test tests/bote_listen.tcyr        # 224 — subscriptions/listen: the filter, and real streams on the three HTTP handlers
 cyrius test tests/bote_listen_line.tcyr   # 192 — subscriptions/listen where the connection is the stream: stdio, unix, WebSocket
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_display.tcyr       # 107 — titles, icons, serverInfo's details and instructions: the checks, each list, the heap
 cyrius test tests/bote_output.tcyr        # 249 — outputSchema: registration, the 2025-11-25 form, tools/list, each result judged and shaped, the heap
-cyrius test tests/bote_input.tcyr         # 146 — multi round-trip requests: what a handler reads and returns, -32021, the sealed state and its binding, the heap
-cyrius test tests/bote_tool_schema.tcyr   # 85 — an inputSchema as its own JSON: what registration reads and refuses, the list, the heap
+cyrius test tests/bote_input.tcyr         # 148 — multi round-trip requests: what a handler reads and returns, -32021, the sealed state and its binding, the heap
+cyrius test tests/bote_tool_schema.tcyr   # 103 — an inputSchema as its own JSON: what registration reads and refuses, the list, the heap
 cyrius test tests/bote_progress.tcyr      # 110 — progress on a request's own stream: the writer, stdio, unix, WebSocket, HTTP's SSE response
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter

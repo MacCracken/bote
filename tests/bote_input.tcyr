@@ -395,6 +395,8 @@ fn main() {
     assert_eq(_code(_call(d, "\"name\":\"t_ask\",\"arguments\":{},\"requestState\":\"not.a-state\"", EL)), 0 - 32602, "state: one that is no state, -32602");
     assert_eq(_code(_call(d, "\"name\":\"t_ask\",\"arguments\":{},\"inputResponses\":[]", EL)), 0 - 32602, "responses: a list, -32602");
     assert_eq(_code(_call(d, "\"name\":\"t_ask\",\"arguments\":{},\"inputResponses\":{\"q\":\"yes\"}", EL)), 0 - 32602, "responses: an answer that is no object, -32602");
+    assert_eq(_code(_call(d, "\"name\":\"t_ask\",\"arguments\":{},\"inputResponses\":{\"q\\u0000\":5}", EL)), 0 - 32602, "responses: one keyed with a NUL, -32602 (3.8.4: it passed unjudged)");
+    assert_eq(_code(_call(d, "\"name\":\"t_ask\",\"arguments\":{},\"inputResponses\":{\"a\":{},\"q\\u0000\":{}}", EL)), 0 - 32602, "responses: ...even an object, after a good one");
     _ir_mode = 8;
     _ir_ret = 0;
     var so = _result(_call(d, "\"name\":\"t_ask\",\"arguments\":{}", "{}"));

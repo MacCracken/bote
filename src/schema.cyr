@@ -540,9 +540,14 @@ fn compiled_compile(schema) {
             i = i + 1;
         }
     }
+    # (3.8.4) Its own copy of the names: through 3.8.3 it shared the ToolSchema's vec, so a
+    # name pushed after registration was judged at once, and listed only when registered again.
     var req = schema_required(schema);
     if (req != 0) {
-        store64(c + 8, req);
+        var rc = vec_new();
+        var ri = 0;
+        while (ri < vec_len(req)) { vec_push(rc, vec_get(req, ri)); ri = ri + 1; }
+        store64(c + 8, rc);
     }
     return c;
 }

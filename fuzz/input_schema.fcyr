@@ -343,7 +343,7 @@ fn main() {
         if (got != want) { println(js); if (why != 0) { println(why); } println_int(want); return 10; }
         if (got == 0) { refused = refused + 1; round = round + 1; continue; }
         took = took + 1;
-        var st[56];
+        var st[72];
         _registry_prepare(t, &st);
         _registry_add_u(reg, t, &st);
         var one = _no_crlf(js);

@@ -1146,13 +1146,16 @@ fn jwt_state_principal(s, a, claims) {
 }
 
 # The claim `key` of `payload` (n bytes) decoded onto `a`: 0 when it is absent, no string,
-# empty, or decodes to hold a NUL, which a shorter string would otherwise equal.
+# empty, decodes to hold a NUL, which a shorter string would otherwise equal, or (3.8.4) is no
+# text a client reads as bote does: the decoder writes U+FFFD for every lone surrogate, so
+# `\ud800`, `\udbff` and U+FFFD itself named one principal.
 fn _jwt_claim_str_a(a, payload, n, key) {
     var pos = _jx_find_value_pos(payload, n, key);
     if (pos < 0 || pos >= n || load8(payload + pos) != 34) { return 0; }
     var end = _jx_skip_string(payload, n, pos);
     if (end <= pos + 2 || load8(payload + end - 1) != 34) { return 0; }
     var w = end - pos - 2;
+    if (_jx_key_text_ok(payload + pos + 1, w) == 0) { return 0; }
     var out = alloc_via(a, w + 1);
     var dn = _jx_unescape_into(payload + pos + 1, w, out);
     if (dn != strlen(out)) { return 0; }

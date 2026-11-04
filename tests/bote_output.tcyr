@@ -159,7 +159,7 @@ fn _refused(d, name, os) {
 # The 2025-11-25 form registration keeps for schema `os`.
 fn _legacy_form(os) {
     var t = _tool("t_form", os);
-    var st[56];
+    var st[72];
     _registry_prepare(t, &st);
     _registry_stage(t, &st);
     return tool_def_output_legacy(t);
@@ -807,7 +807,7 @@ fn main() {
     var rt = tool_def_with_title(_tool("t_rt", "{\"type\":\"object\"}"), "One");
     dispatcher_register_tool(r2, rt, &h_ret);
     var rt_f0 = tool_def_display(rt);
-    var stg[56];
+    var stg[72];
     tool_def_with_title(rt, "Two");
     _registry_prepare(rt, &stg);
     assert(tool_def_display(rt) == rt_f0, "review 3.8.1: preparing a registration leaves the listed fragment be");

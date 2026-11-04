@@ -91,6 +91,47 @@ fn _lt_shape_ok(r, want_err) {
     return 1;
 }
 
+# (3.8.4) A JSON-RPC message, on 2026-07-28 when `modern` is 1.
+fn _lt_cat3(a, b, c) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    str_builder_add_cstr(sb, c);
+    return str_data(str_builder_build(sb));
+}
+fn _lt_msg(method, params, modern) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, "\",\"params\":{");
+    str_builder_add_cstr(sb, params);
+    if (modern == 1) {
+        if (strlen(params) > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}");
+    }
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}
+fn _lt_call_params(name, args) { return _lt_cat3(_lt_cat3("\"name\":\"", name, "\",\"arguments\":"), args, ""); }
+fn _lt_occurs(hay, needle) {
+    var n = 0;
+    var i = 0;
+    var nl = strlen(needle);
+    while (load8(hay + i) != 0) {
+        if (memeq(hay + i, needle, nl) == 1) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+# The WARN lines registration logs, counted through sakshi's emit hook.
+var _lt_lc_n = 0;
+fn _lt_lc_hook(ts, level, category, msg, msg_len, sixth) {
+    if (_lc_has(msg, "schema keyword not enforced") == 1) { _lt_lc_n = _lt_lc_n + 1; }
+    return 0;
+}
+fn _lt_lc_begin() { _lt_lc_n = 0; sakshi_set_emit_hook(&_lt_lc_hook); sakshi_set_level(SK_TRACE); return 0; }
+fn _lt_lc_end() { sakshi_clear_emit_hook(); sakshi_set_level(SK_ERROR); return 0; }
+
 fn main() {
     alloc_init();
 
@@ -288,6 +329,85 @@ fn main() {
       "tools/list marks the readers read-only");
     assert(_lc_has(lsr, "\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false") == 1,
       "libro_retention is destructive and not open-world");
+
+    # ---------------- 3.8.4: output schemas ----------------
+    # Each tool lists what its structuredContent holds, and the dispatcher judges each
+    # success by it, on both revisions; an error result is judged by nothing.
+    var ols = codec_process_message(_lt_msg("tools/list", "", 0), d, 0);
+    var olm = codec_process_message(_lt_msg("tools/list", "", 1), d, 0);
+    assert_eq(_lt_occurs(ols, "\"outputSchema\":{\"type\":\"object\",\"properties\":{\"ok\":"), 5, "outputSchema: all five listed (2025-11-25)");
+    assert_eq(_lt_occurs(olm, "\"outputSchema\":{\"type\":\"object\",\"properties\":{\"ok\":"), 5, "outputSchema: all five listed (2026-07-28)");
+    assert(jsonx_valid(ols, strlen(ols)) == 1 && jsonx_valid(olm, strlen(olm)) == 1, "outputSchema: the list is valid JSON");
+    assert(_lc_has(ols, "\"required\":[\"ok\",\"total\",\"entries\"]") == 1, "outputSchema: libro_query requires ok, total and entries");
+    assert(_lc_has(ols, "\"required\":[\"ok\",\"index\",\"leaf_count\",\"root\"]") == 1, "outputSchema: libro_proof requires its fields");
+    assert(_lc_has(ols, "\"required\":[\"ok\",\"archived\",\"retained\"]") == 1, "outputSchema: libro_retention requires its fields");
+    var oc = chain_new();
+    chain_append(oc, SEV_INFO, str_from("bote"), str_from("tool.completed"), str_from("{}"));
+    chain_append(oc, SEV_WARNING, str_from("bote"), str_from("tool.failed"), str_from("{}"));
+    chain_append(oc, SEV_INFO, str_from("other"), str_from("a\"b"), str_from("{}"));
+    libro_tools_init(oc);
+    var oks = vec_new();
+    vec_push(oks, "libro_query"); vec_push(oks, "{}"); vec_push(oks, "\"structuredContent\":{\"ok\":true,\"total\":3,\"entries\":[{");
+    vec_push(oks, "libro_query"); vec_push(oks, "{\"source\":\"other\"}"); vec_push(oks, "\"structuredContent\":{\"ok\":true,\"total\":1,");
+    vec_push(oks, "libro_export"); vec_push(oks, "{}"); vec_push(oks, "\"structuredContent\":{\"ok\":true,\"count\":3,\"entries\":[{");
+    vec_push(oks, "libro_verify"); vec_push(oks, "{}"); vec_push(oks, "\"structuredContent\":{\"ok\":true}");
+    vec_push(oks, "libro_proof"); vec_push(oks, "{\"index\":1}"); vec_push(oks, "\"structuredContent\":{\"ok\":true,\"index\":1,\"leaf_count\":3,\"root\":\"");
+    vec_push(oks, "libro_retention"); vec_push(oks, "{\"policy\":\"keep_count\",\"value\":10}"); vec_push(oks, "\"structuredContent\":{\"ok\":true,\"archived\":0,\"retained\":3}");
+    var oi = 0;
+    while (oi < vec_len(oks)) {
+        var oname = vec_get(oks, oi);
+        var om = 0;
+        while (om < 2) {
+            var ores = codec_process_message(_lt_msg("tools/call", _lt_call_params(oname, vec_get(oks, oi + 1)), om), d, 0);
+            var olabel = _lt_cat3("outputSchema: ", oname, " ");
+            olabel = _lt_cat3(olabel, vec_get(oks, oi + 1), " passes its schema");
+            if (om == 1) { olabel = _lt_cat3(olabel, " (2026-07-28)", ""); }
+            assert(_lc_has(ores, vec_get(oks, oi + 2)) == 1 && _lc_has(ores, "\"isError\":true") == 0, olabel);
+            om = om + 1;
+        }
+        oi = oi + 3;
+    }
+    # A failure is an error result, sent as the tool made it.
+    var ofail = codec_process_message(_lt_msg("tools/call", _lt_call_params("libro_proof", "{\"index\":99}"), 1), d, 0);
+    assert(_lc_has(ofail, "\"isError\":true") == 1 && _lc_has(ofail, "\"structuredContent\":{\"ok\":false,\"error\":\"index out of range\"}") == 1,
+      "outputSchema: a failure goes as its error result, judged by nothing");
+    var ovf = chain_new();
+    chain_append(ovf, SEV_INFO, str_from("bote"), str_from("x"), str_from("{}"));
+    chain_append(ovf, SEV_INFO, str_from("bote"), str_from("y"), str_from("{}"));
+    store64(vec_get(load64(ovf), 0) + 32, str_from("tampered"));
+    libro_tools_init(ovf);
+    var obroke = codec_process_message(_lt_msg("tools/call", _lt_call_params("libro_verify", "{}"), 0), d, 0);
+    assert(_lc_has(obroke, "\"isError\":true") == 1 && _lc_has(obroke, "\"ok\":false,\"code\":") == 1, "outputSchema: a broken chain's verify goes as its error result");
+    # An entry with no time is null, which the schema allows.
+    var onull = chain_new();
+    chain_append(onull, SEV_INFO, str_from("bote"), str_from("x"), str_from("{}"));
+    store64(vec_get(load64(onull), 0) + 16, 0);
+    libro_tools_init(onull);
+    var onr = codec_process_message(_lt_msg("tools/call", _lt_call_params("libro_export", "{}"), 1), d, 0);
+    assert(_lc_has(onr, "\"timestamp\":null") == 1 && _lc_has(onr, "\"isError\":true") == 0, "outputSchema: an entry with no time, null, passes");
+    # The schemas have teeth: what drift in libro's layout would send is refused. (A
+    # timestamp's type array, string or null, is the client's to judge: bote does not
+    # enforce a type array yet.)
+    var oa = bote_req_begin();
+    var oqp = tool_def_output_prop(registry_get(reg, "libro_query"));
+    var oent = "{\"timestamp\":\"2026-01-01T00:00:00Z\",\"severity\":1,\"source\":\"s\",\"action\":\"a\",\"agent_id\":\"\",\"hash\":\"h\"}";
+    assert(_sch_check_value_a(oa, oqp, "structuredContent", _lt_cat3("{\"ok\":true,\"total\":1,\"entries\":[", oent, "]}")) == 0, "outputSchema: a good query result has no violation");
+    var obad = vec_new();
+    vec_push(obad, "{\"ok\":true,\"total\":1}");
+    vec_push(obad, "{\"ok\":true,\"total\":-1,\"entries\":[]}");
+    vec_push(obad, "{\"ok\":true,\"total\":1,\"entries\":[{\"timestamp\":null,\"severity\":\"1\",\"source\":\"s\",\"action\":\"a\",\"agent_id\":\"\",\"hash\":\"h\"}]}");
+    vec_push(obad, "{\"ok\":true,\"total\":1,\"entries\":[{\"timestamp\":null,\"severity\":1,\"source\":\"s\",\"action\":\"a\",\"agent_id\":\"\"}]}");
+    vec_push(obad, "{\"ok\":\"true\",\"total\":1,\"entries\":[]}");
+    var obi = 0;
+    while (obi < vec_len(obad)) {
+        assert(_sch_check_value_a(oa, oqp, "structuredContent", vec_get(obad, obi)) != 0, _lt_cat3("outputSchema: refused: ", vec_get(obad, obi), ""));
+        obi = obi + 1;
+    }
+    # Registration warns of nothing: each schema holds only keywords bote judges where it warns.
+    _lt_lc_begin();
+    libro_tools_register(dispatcher_new(tool_registry_new()));
+    _lt_lc_end();
+    assert_eq(_lt_lc_n, 0, "outputSchema: registration warns of no keyword");
 
     # Restore the shared chain the earlier assertions installed.
     libro_tools_init(chain_new());

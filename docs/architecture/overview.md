@@ -187,18 +187,18 @@ tests/
 ├── bote_auth.tcyr             — 91 (bearer + allowlist + JWT + PKCE validators; 401 log lines; the 403; the head check)
 ├── bote_content.tcyr          — 25 (content blocks + annotations)
 ├── bote_fetch.tcyr            — 60 (a request made in a child: the record, the cap, the deadline, a real GET, no heap)
-├── bote_fs_tools.tcyr         — 56 (fs_tools; refused-path log lines; control bytes read back as valid JSON)
+├── bote_fs_tools.tcyr         — 76 (fs_tools; refused-path log lines; control bytes read back as valid JSON)
 ├── bote_http_era.tcyr         — 1863 (MCP 2026-07-28 on HTTP, on the real handlers over a socketpair; scopes and the 403)
 ├── bote_host.tcyr             — 207 (host registry + SSRF + resolved-address classifiers + the IPv6 parser vs cyrius's)
 ├── bote_jwks.tcyr             — 49 (a jwks_uri: what it may be, real fetches from a child)
-├── bote_jwt.tcyr              — 507 (JWT: HS256, RS256, ES256, JWK Sets, every claim, scopes, the cache, keys from a source, no heap)
-├── bote_libro_tools.tcyr      — 73 (libro_tools; incl. the tampered-chain
+├── bote_jwt.tcyr              — 510 (JWT: HS256, RS256, ES256, JWK Sets, every claim, scopes, the cache, keys from a source, no heap)
+├── bote_libro_tools.tcyr      — 101 (libro_tools; incl. the tampered-chain
 │                                 error decode + populated-chain proof paths)
 ├── bote_log.tcyr              — 50 (src/log.cyr: levels, line bytes, escaping, truncation)
 ├── bote_display.tcyr          — 107 (3.8.1: titles, icons, serverInfo's details and instructions)
 ├── bote_output.tcyr           — 249 (3.8.0: a tool's outputSchema, registration to the heap)
-├── bote_input.tcyr            — 146 (3.8.2: multi round-trip requests, -32021, the sealed state and its binding, the heap)
-├── bote_tool_schema.tcyr      — 85 (3.8.3: an inputSchema as its own JSON, what registration refuses, the list, the heap)
+├── bote_input.tcyr            — 148 (3.8.2: multi round-trip requests, -32021, the sealed state and its binding, the heap)
+├── bote_tool_schema.tcyr      — 103 (3.8.3: an inputSchema as its own JSON, what registration refuses, the list, the heap)
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 53 (streamable HTTP / SSE)
@@ -206,7 +206,7 @@ tests/
 ├── bote_web_tools.tcyr        — 88 (web_tools; URL + resolved-address SSRF guard; the records their children write)
 ├── bote_ws.tcyr               — 94 (WebSocket; send-deadline drop; `-31403` per frame; what an upgrade and a connection keep)
 ├── bote_core_only_smoke.tcyr  — drift guard (includes only dist/bote-core.cyr)
-└── bote.bcyr                  — 46 hot-path benchmarks
+└── bote.bcyr                  — 48 hot-path benchmarks
 
 fuzz/
 ├── codec_parse.fcyr

@@ -294,6 +294,12 @@ The arguments are bound too, so a retry sends the request's arguments again. The
 216 bytes, a ToolSchema 32 (its JSON at +24, from `tool_schema_from_json`, which a ToolSchema
 made by hand rather than by `schema_new` must zero), and a ToolDef 136.
 
+(3.8.4) A ToolDef is 144 bytes. Registration compiles a tool's input schema each time it is
+registered, unless the consumer attached its own with `tool_def_with_compiled`, which it keeps:
+a consumer that relied on the first compile sticking, and changed the schema after, now gets
+the schema it registered. bote's own libro tools and `fs_read` list an outputSchema, and
+`fs_read`'s result carries `structuredContent` beside its text block.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`

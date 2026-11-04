@@ -448,8 +448,64 @@ fn _lt_prop(props, name, json) {
     return 0;
 }
 
+# What each tool's structuredContent holds when it succeeds, its outputSchema (3.8.4): the
+# dispatcher judges every result that is no error by it, and a client can too. A failed
+# call is an error result, its structuredContent {"ok":false,...}, which neither judges.
+# Only keywords bote enforces at the root and on its properties, so registration warns
+# of none; a `timestamp` may be null, which only a type array says, below them.
+var BOTE_LIBRO_ENTRY_OS = "{\"type\":\"object\",\"properties\":{\"timestamp\":{\"type\":[\"string\",\"null\"],\"description\":\"When it was recorded, RFC 3339, or null when it holds no time.\"},\"severity\":{\"type\":\"integer\",\"description\":\"0 debug, 1 info, 2 warning, 3 error, 4 critical, 5 security.\"},\"source\":{\"type\":\"string\"},\"action\":{\"type\":\"string\"},\"agent_id\":{\"type\":\"string\",\"description\":\"The agent, or empty when it names none.\"},\"hash\":{\"type\":\"string\",\"description\":\"Its hash, hex.\"}},\"required\":[\"timestamp\",\"severity\",\"source\",\"action\",\"agent_id\",\"hash\"]}";
+
+# An outputSchema: `ok`, then the properties `props` (JSON members, each `"name":{...}`),
+# `required` beside `ok` (each `,"name"`), and `error`, which a failure's result holds.
+fn _lt_os(props, required) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\",\"description\":\"true. A failed call is an error result, ok false.\"},");
+    str_builder_add_cstr(sb, props);
+    str_builder_add_cstr(sb, ",\"error\":{\"type\":\"string\",\"description\":\"Why the call failed, in an error result.\"}},\"required\":[\"ok\"");
+    str_builder_add_cstr(sb, required);
+    str_builder_add_cstr(sb, "]}");
+    return str_data(str_builder_build(sb));
+}
+
+# The `entries` property, `count_name` beside it: what libro_query and libro_export send.
+fn _lt_os_entries(count_name, count_desc, entries_desc) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\"");
+    str_builder_add_cstr(sb, count_name);
+    str_builder_add_cstr(sb, "\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"");
+    str_builder_add_cstr(sb, count_desc);
+    str_builder_add_cstr(sb, "\"},\"entries\":{\"type\":\"array\",\"description\":\"");
+    str_builder_add_cstr(sb, entries_desc);
+    str_builder_add_cstr(sb, "\",\"items\":");
+    str_builder_add_cstr(sb, BOTE_LIBRO_ENTRY_OS);
+    str_builder_add_cstr(sb, "}");
+    var req = str_builder_new();
+    str_builder_add_cstr(req, ",\"");
+    str_builder_add_cstr(req, count_name);
+    str_builder_add_cstr(req, "\",\"entries\"");
+    return _lt_os(str_data(str_builder_build(sb)), str_data(str_builder_build(req)));
+}
+
+fn _lt_os_query() {
+    return _lt_os_entries("total", "How many entries match, before offset and limit.", "The page of matching entries, in chain order.");
+}
+fn _lt_os_export() {
+    return _lt_os_entries("count", "How many entries the chain holds.", "Every entry, in chain order.");
+}
+fn _lt_os_verify() {
+    return _lt_os("\"code\":{\"type\":\"integer\",\"description\":\"libro's error code, when a link is broken.\"},\"index\":{\"type\":\"integer\",\"description\":\"The first broken entry, or -1 when libro names none.\"},\"message\":{\"type\":\"string\",\"description\":\"libro's account of the break.\"}", "");
+}
+fn _lt_os_proof() {
+    return _lt_os("\"index\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"The entry the proof is for.\"},\"leaf_count\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"How many leaves the tree holds.\"},\"root\":{\"type\":\"string\",\"description\":\"The Merkle root, hex.\"}", ",\"index\",\"leaf_count\",\"root\"");
+}
+fn _lt_os_retention() {
+    return _lt_os("\"archived\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"How many entries the policy moved off the chain.\"},\"retained\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"How many it kept.\"}", ",\"archived\",\"retained\"");
+}
+
 fn libro_tools_register(dispatcher) {
     var reg = dispatcher_registry(dispatcher);
+    # Output schemas since 3.8.4: what each sends in structuredContent, judged by the
+    # dispatcher and checkable by a client.
     # Real input schemas since 3.4.10. Through 3.4.9 every tool registered
     # {"type":"object"} with no properties, so clients learned the arguments
     # from the description text and 3.4.8's compiled validation had nothing
@@ -464,28 +520,28 @@ fn libro_tools_register(dispatcher) {
     _lt_prop(qp, "before", "{\"type\":\"integer\",\"description\":\"Only entries timestamped before this Unix time (seconds, exclusive).\"}");
     _lt_prop(qp, "offset", "{\"type\":\"integer\",\"minimum\":0,\"description\":\"Skip this many matching entries (default 0).\"}");
     _lt_prop(qp, "limit", "{\"type\":\"integer\",\"minimum\":0,\"description\":\"Return at most this many entries (default: all).\"}");
-    registry_register(reg, tool_def_with_annotations(tool_def_new(
+    registry_register(reg, tool_def_with_output_schema(tool_def_with_annotations(tool_def_new(
           "libro_query", "Search the libro audit chain: filter by source, agent, action, severity and time, and paginate. Each entry carries its RFC 3339 timestamp, severity, source, action, agent and hash.",
-          schema_new("object", qp, vec_new())), ann_read_only()));
+          schema_new("object", qp, vec_new())), ann_read_only()), _lt_os_query()));
     dispatcher_handle(dispatcher, "libro_query", &libro_tool_query);
 
-    registry_register(reg, tool_def_with_annotations(tool_def_new(
+    registry_register(reg, tool_def_with_output_schema(tool_def_with_annotations(tool_def_new(
           "libro_verify", "Verify the libro chain's hash links. Reports the first broken entry's index when verification fails.",
-          schema_new("object", 0, vec_new())), ann_read_only()));
+          schema_new("object", 0, vec_new())), ann_read_only()), _lt_os_verify()));
     dispatcher_handle(dispatcher, "libro_verify", &libro_tool_verify);
 
-    registry_register(reg, tool_def_with_annotations(tool_def_new(
+    registry_register(reg, tool_def_with_output_schema(tool_def_with_annotations(tool_def_new(
           "libro_export", "Return every entry on the libro chain.",
-          schema_new("object", 0, vec_new())), ann_read_only()));
+          schema_new("object", 0, vec_new())), ann_read_only()), _lt_os_export()));
     dispatcher_handle(dispatcher, "libro_export", &libro_tool_export);
 
     var pp = vec_new();
     _lt_prop(pp, "index", "{\"type\":\"integer\",\"minimum\":0,\"description\":\"Position of the entry in the chain, from 0.\"}");
     var preq = vec_new();
     vec_push(preq, "index");
-    registry_register(reg, tool_def_with_annotations(tool_def_new(
+    registry_register(reg, tool_def_with_output_schema(tool_def_with_annotations(tool_def_new(
           "libro_proof", "Merkle inclusion proof for the entry at the given index: the tree root and its leaf count.",
-          schema_new("object", pp, preq)), ann_read_only()));
+          schema_new("object", pp, preq)), ann_read_only()), _lt_os_proof()));
     dispatcher_handle(dispatcher, "libro_proof", &libro_tool_proof);
 
     var rp = vec_new();
@@ -493,9 +549,9 @@ fn libro_tools_register(dispatcher) {
     _lt_prop(rp, "value", "{\"type\":\"integer\",\"minimum\":0,\"description\":\"keep_count: how many of the newest entries to keep. keep_duration: keep entries younger than this many seconds. keep_after: keep entries after this Unix time (seconds). Required by those three.\"}");
     var rreq = vec_new();
     vec_push(rreq, "policy");
-    registry_register(reg, tool_def_with_annotations(tool_def_new(
+    registry_register(reg, tool_def_with_output_schema(tool_def_with_annotations(tool_def_new(
           "libro_retention", "Apply a retention policy to the libro chain: entries outside it are archived off the chain. Destructive.",
-          schema_new("object", rp, rreq)), ann_set_open_world(ann_destructive(), HINT_FALSE)));
+          schema_new("object", rp, rreq)), ann_set_open_world(ann_destructive(), HINT_FALSE)), _lt_os_retention()));
     dispatcher_handle(dispatcher, "libro_retention", &libro_tool_retention);
     return 0;
 }

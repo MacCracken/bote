@@ -5,7 +5,9 @@ import { Client, ClientCredentialsProvider, StreamableHTTPClientTransport, extra
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { spawn } from 'node:child_process';
 import { createHmac, generateKeyPairSync, sign } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createServer } from 'node:http';
 
 const BIN = process.argv[2];
@@ -327,6 +329,50 @@ await exercise('stdio/auto', stdio, 'auto', NEW);
 for (const alg of ['HS256', 'RS256', 'ES256']) {
   await oauth('legacy', alg);
   await oauth('auto', alg);
+}
+
+// (3.8.4) bote's own tools, on the real binary over stdio: the client checks every structured
+// result against the outputSchema tools/list gave it, and refuses one that does not match.
+async function ownTools(mode, want) {
+  const label = `bote/${mode}`;
+  const before = fails;
+  const root = mkdtempSync(join(tmpdir(), 'bote-fs-'));
+  const c = new Client({ name: 'bote-conformance', version: '1.0.0' }, { capabilities: {}, versionNegotiation: { mode } });
+  c.onerror = () => {};
+  await attempt(`${label} connect`, () => c.connect(new StdioClientTransport({ command: BOTE, args: [], env: { ...process.env, BOTE_FS_ROOT: root, BOTE_LOG: 'off' } })));
+  ok(`${label} negotiated`, c.getNegotiatedProtocolVersion() === want, c.getNegotiatedProtocolVersion());
+  const tools = await attempt(`${label} listTools`, () => c.listTools());
+  const withOs = tools ? tools.tools.filter(t => t.outputSchema).map(t => t.name).sort() : [];
+  ok(`${label} the tools that say what they hold`, withOs.join(' ') === 'fs_read libro_export libro_proof libro_query libro_retention libro_verify', withOs);
+  for (const [name, args, check] of [
+    ['libro_verify', {}, sc => sc.ok === true],
+    ['libro_export', {}, sc => sc.ok === true && sc.count === 0 && Array.isArray(sc.entries)],
+    ['libro_query', { limit: 5 }, sc => sc.ok === true && sc.total === 0],
+    ['libro_retention', { policy: 'keep_count', value: 5 }, sc => sc.ok === true && sc.archived === 0 && sc.retained === 0],
+  ]) {
+    const r = await attempt(`${label} ${name}`, () => c.callTool({ name, arguments: args }));
+    ok(`${label} ${name} checked against its outputSchema`, r && !r.isError && r.structuredContent && check(r.structuredContent), r);
+  }
+  const proof = await attempt(`${label} libro_proof`, () => c.callTool({ name: 'libro_proof', arguments: { index: 0 } }));
+  ok(`${label} libro_proof on an empty chain is an error result`, proof && proof.isError === true, proof);
+  const text = 'caf\u00e9 "quoted"\nline two';
+  await attempt(`${label} fs_write`, () => c.callTool({ name: 'fs_write', arguments: { path: 'a.txt', content: text } }));
+  const read = await attempt(`${label} fs_read`, () => c.callTool({ name: 'fs_read', arguments: { path: 'a.txt' } }));
+  ok(`${label} fs_read checked against its outputSchema`, read && !read.isError && read.structuredContent.text === text && read.structuredContent.truncated === false && read.structuredContent.bytes === Buffer.byteLength(text), read);
+  ok(`${label} fs_read's text block is the file`, read && read.content[0].text === text, read && read.content);
+  writeFileSync(join(root, 'big.txt'), 'x'.repeat(70000));
+  const big = await attempt(`${label} fs_read big`, () => c.callTool({ name: 'fs_read', arguments: { path: 'big.txt' } }));
+  ok(`${label} a cut file says so`, big && !big.isError && big.structuredContent.truncated === true && big.structuredContent.bytes === 65536 && big.content[0].text.endsWith('[fs_read: truncated]'), big && big.structuredContent && big.structuredContent.bytes);
+  const missing = await attempt(`${label} fs_read missing`, () => c.callTool({ name: 'fs_read', arguments: { path: 'none.txt' } }));
+  ok(`${label} a file that is not there is an error result`, missing && missing.isError === true, missing);
+  await attempt(`${label} close`, () => c.close());
+  rmSync(root, { recursive: true, force: true });
+  console.log(`${fails === before ? 'ok  ' : 'FAIL'} ${label.padEnd(20)} ${want}`);
+}
+const BOTE = process.argv[3];
+if (BOTE) {
+  await ownTools('legacy', OLD);
+  await ownTools('auto', NEW);
 }
 console.log(`client: ${passes} passed, ${fails} failed`);
 process.exit(fails ? 1 : 0);

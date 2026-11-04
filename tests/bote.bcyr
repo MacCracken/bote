@@ -16,6 +16,7 @@ include "lib/tagged.cyr"
 include "lib/net.cyr"
 include "lib/tls.cyr"
 include "lib/sandhi.cyr"
+include "lib/fs.cyr"
 include "lib/bench.cyr"
 
 include "src/log.cyr"
@@ -41,6 +42,9 @@ include "src/oauth_metadata.cyr"
 include "src/listen.cyr"
 include "src/fetch.cyr"
 include "src/conn.cyr"
+include "src/audit_libro.cyr"
+include "src/libro_tools.cyr"
+include "src/fs_tools.cyr"
 
 # ================================================================
 # Globals — preallocated state shared by benchmark callbacks
@@ -101,6 +105,9 @@ var _b_era_params_at = 0;
 var _b_result_dispatcher = 0;
 var _b_param_dispatcher = 0;
 var _b_props_dispatcher = 0;
+var _b_own_dispatcher = 0;
+var _b_fs_read_msg = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fs_read\",\"arguments\":{\"path\":\"build/bench-fs-read.txt\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}";
+var _b_libro_export_msg = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"libro_export\",\"arguments\":{},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}";
 var _b_json_dispatcher = 0;
 var _b_list_msg = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}";
 var _b_jwt_token = 0;
@@ -196,6 +203,10 @@ fn b_input_retry_open() { return codec_process_message_a(bote_req_begin(), _b_in
 # suite's 2020-12 schema given as JSON (3.8.3).
 fn b_tools_list_props() { return codec_process_message_a(bote_req_begin(), _b_list_msg, _b_props_dispatcher, 0); }
 fn b_tools_list_json() { return codec_process_message_a(bote_req_begin(), _b_list_msg, _b_json_dispatcher, 0); }
+# bote's own tools, through the codec on 2026-07-28 (3.8.4): fs_read of a 64 KB file, and
+# libro_export of a chain of 100 entries, each judged by its outputSchema since 3.8.4.
+fn b_fs_read_64k() { return codec_process_message_a(bote_req_begin(), _b_fs_read_msg, _b_own_dispatcher, 0); }
+fn b_libro_export_100() { return codec_process_message_a(bote_req_begin(), _b_libro_export_msg, _b_own_dispatcher, 0); }
 
 fn b_dispatch_tools_call_output() {
     return dispatcher_dispatch(_b_output_dispatcher, _b_call_output_req, 0);
@@ -405,6 +416,19 @@ fn _bench_setup() {
     var jreg = tool_registry_new();
     registry_register(jreg, tool_def_new("svc_contact", "a contact", tool_schema_from_json("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"$defs\":{\"address\":{\"$anchor\":\"addressDef\",\"type\":\"object\",\"properties\":{\"street\":{\"type\":\"string\"},\"city\":{\"type\":\"string\"}}}},\"properties\":{\"name\":{\"type\":\"string\"},\"address\":{\"$ref\":\"#/$defs/address\"},\"contactMethod\":{\"type\":\"string\",\"enum\":[\"phone\",\"email\"]},\"phone\":{\"type\":\"string\"},\"email\":{\"type\":\"string\"}},\"allOf\":[{\"anyOf\":[{\"required\":[\"phone\"]},{\"required\":[\"email\"]}]}],\"additionalProperties\":false}")));
     _b_json_dispatcher = dispatcher_new(jreg);
+    _b_own_dispatcher = dispatcher_new(tool_registry_new());
+    fs_tools_register(_b_own_dispatcher);
+    var lc = chain_new();
+    var li = 0;
+    while (li < 100) { chain_append(lc, SEV_INFO, str_from("bote"), str_from("tool.completed"), str_from("{}")); li = li + 1; }
+    libro_tools_init(lc);
+    libro_tools_register(_b_own_dispatcher);
+    var fsb = str_builder_new();
+    str_builder_add_cstr(fsb, "{\"path\":\"build/bench-fs-read.txt\",\"content\":\"");
+    var fi = 0;
+    while (fi < 7000) { str_builder_add_cstr(fsb, "0123456789"); fi = fi + 1; }
+    str_builder_add_cstr(fsb, "\"}");
+    fs_write_handler(str_data(str_builder_build(fsb)), 0);
     _b_init_req = req_with_params(req_new("1", "initialize"), "{\"protocolVersion\":\"2025-11-25\"}");
     _b_list_req = req_new("2", "tools/list");
     _b_call_req = req_with_params(req_new("3", "tools/call"),
@@ -667,6 +691,12 @@ fn main() {
     var b46 = bench_new("tools_list_json");
     bench_run(b46, &b_tools_list_json, 10000);
     vec_push(benches, b46);
+    var b47 = bench_new("fs_read_64k");
+    bench_run(b47, &b_fs_read_64k, 1000);
+    vec_push(benches, b47);
+    var b48 = bench_new("libro_export_100");
+    bench_run(b48, &b_libro_export_100, 1000);
+    vec_push(benches, b48);
     bote_req_begin();
     bote_conn_arm();
     thread_join(thread_create(&_b_thread_nop, 0));

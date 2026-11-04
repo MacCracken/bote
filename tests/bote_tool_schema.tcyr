@@ -63,6 +63,16 @@ include "src/transport_streamable.cyr"
 include "src/transport_ws.cyr"
 
 fn h_tool(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+# (3.8.4) A handler that registers its own tool again, with the outputSchema taken away.
+var _snap_d = 0;
+var _snap_t = 0;
+fn h_snap(args, claims) {
+    if (tool_def_output_schema(_snap_t) != 0) {
+        tool_def_with_output_schema(_snap_t, 0);
+        dispatcher_register_tool(_snap_d, _snap_t, &h_snap);
+    }
+    return "{\"n\":5}";
+}
 
 var _M = ",\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}";
 
@@ -339,6 +349,71 @@ fn main() {
     ri = 0;
     while (ri < 40) { codec_process_message_a(bote_req_begin(), lml, vec_get(rds, ri), 0); ri = ri + 1; }
     assert_eq(alloc_used() - h2, 0, "heap: ...and the same forty again keep nothing");
+
+    # ---- From the review of 3.8.3 (3.8.4) ----
+    # A definition registered again is judged by the schema it is listed with.
+    var rd = dispatcher_new(tool_registry_new());
+    var rprops = _prop("x", "{\"type\":\"string\"}");
+    var rtool = tool_def_new("r_again", "d", schema_new("object", rprops, vec_new()));
+    dispatcher_register_tool(rd, rtool, &h_tool);
+    vec_push(rprops, schema_prop_new("y", "{\"type\":\"integer\"}"));
+    dispatcher_register_tool(rd, rtool, &h_tool);
+    assert(_has(_list(rd, 0), "\"y\":{\"type\":\"integer\"}") == 1, "review: registered again, the new schema listed");
+    assert(_has(_call(rd, "r_again", "{\"x\":\"a\",\"y\":\"no\"}", 0), "y: expected integer") == 1, "review: ...and judged by it (the first compile judged it)");
+    # A compiled schema of the consumer's own is kept, registered again or not.
+    var cc = compiled_compile(schema_new("object", 0, _strs1("z")));
+    var ctool = tool_def_with_compiled(tool_def_new("r_own", "d", schema_new("object", 0, vec_new())), cc);
+    dispatcher_register_tool(rd, ctool, &h_tool);
+    dispatcher_register_tool(rd, ctool, &h_tool);
+    assert(_has(_call(rd, "r_own", "{}", 0), "missing required field: z") == 1, "review: a consumer's compiled schema is kept, registered again");
+    dispatcher_register_tool(rd, rtool, &h_tool);
+    tool_def_with_compiled(rtool, cc);
+    dispatcher_register_tool(rd, rtool, &h_tool);
+    assert(_has(_call(rd, "r_again", "{\"x\":\"a\"}", 0), "missing required field: z") == 1, "review: ...and one attached after registration compiled one");
+    # A header taken away is no longer required.
+    var hd2 = dispatcher_new(tool_registry_new());
+    var htool = tool_def_new("r_hdr", "d", schema_new("object", _prop("region", "{\"type\":\"string\",\"x-mcp-header\":\"Region\"}"), vec_new()));
+    dispatcher_register_tool(hd2, htool, &h_tool);
+    assert(tool_def_param_headers(htool) != 0, "review: a header read");
+    store64(tool_def_input_schema(htool) + 8, _prop("region", "{\"type\":\"string\"}"));
+    dispatcher_register_tool(hd2, htool, &h_tool);
+    assert_eq(tool_def_param_headers(htool), 0, "review: ...taken away, no header kept (it was kept)");
+    # A required name pushed after registration waits for the next registration, as the list does.
+    var qreq = vec_new();
+    var qtool = tool_def_new("r_req", "d", schema_new("object", 0, qreq));
+    dispatcher_register_tool(rd, qtool, &h_tool);
+    vec_push(qreq, "w");
+    assert(_has(_call(rd, "r_req", "{}", 0), "\"isError\":true") == 0, "review: a required name pushed after registration is not judged (it was, unlisted)");
+    dispatcher_register_tool(rd, qtool, &h_tool);
+    assert(_has(_call(rd, "r_req", "{}", 0), "missing required field: w") == 1, "review: ...until registered again");
+    # Registration keeps its own copy of what it lists.
+    var jbuf = _cat("{\"type\":\"object\",\"description\":\"one\"}", "");
+    var obuf = _cat("{\"type\":\"object\",\"description\":\"out\"}", "");
+    var jtool = tool_def_with_output_schema(_jtool("r_copy", jbuf), obuf);
+    dispatcher_register_tool(rd, jtool, &h_tool);
+    assert(tool_def_input_json(jtool) != jbuf && tool_def_output_schema(jtool) != obuf, "review: the inputSchema and outputSchema listed are registration's copies");
+    store8(jbuf + 1, 10);
+    store8(obuf + 1, 10);
+    var cl = _list(rd, 1);
+    assert(_crlf(cl) == 0 && _has(cl, "\"description\":\"one\"") == 1 && _has(cl, "\"description\":\"out\"") == 1, "review: ...a byte written into the consumer's after registration changes nothing listed");
+    # Names that are no text a client reads as bote does are refused.
+    _ase(_reg(rd, "r_sur", "{\"type\":\"object\",\"required\":[\"\\ud800\"]}"), "an inputSchema required name is no text a client reads as bote does", "review: a required name holding a lone surrogate refused (it was dropped)");
+    _ase(_reg(rd, "r_sur2", "{\"type\":\"object\",\"required\":[\"a\",\"\\udc00\"]}"), "an inputSchema required name is no text a client reads as bote does", "review: ...after a good one");
+    var badk = _cat("a", "");
+    store8(badk, 255);
+    _ase(_reason(dispatcher_register_tool(rd, tool_def_new("r_utf", "d", schema_new("object", _prop(badk, "{}"), vec_new())), &h_tool)), "an inputSchema property's name is not UTF-8", "review: a ToolSchema property named with a byte that is no UTF-8 refused");
+    _ase(_reason(dispatcher_register_tool(rd, tool_def_new("r_utf2", "d", schema_new("object", 0, _strs1(badk))), &h_tool)), "an inputSchema required name is not UTF-8", "review: ...a required name too");
+    assert_eq(_reg(rd, "r_utf3", "{\"type\":\"object\",\"properties\":{\"caf\\u00e9\":{}},\"required\":[\"caf\\u00e9\"]}"), 0, "review: UTF-8 names taken");
+    # A call reads one definition, from the look that served it: a handler that registers its
+    # tool again with the outputSchema taken away does not change how its own result goes.
+    _snap_d = dispatcher_new(tool_registry_new());
+    _snap_t = tool_def_with_output_schema(tool_def_new("r_snap", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"integer\"}},\"required\":[\"n\"]}");
+    dispatcher_register_tool(_snap_d, _snap_t, &h_snap);
+    var sres = _call(_snap_d, "r_snap", "{}", 1);
+    assert(_has(sres, "\"structuredContent\":{\"n\":5}") == 1 && _has(sres, "\"isError\":true") == 0, "review: a call judged and lifted by the definition it was served by");
+    assert(tool_def_output_schema(_snap_t) == 0, "review: ...while the handler took the schema away");
+    var sres2 = _call(_snap_d, "r_snap", "{}", 1);
+    assert(_has(sres2, "structuredContent") == 0, "review: ...which the next call is served without");
 
     assert_summary();
     return 0;

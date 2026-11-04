@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.8.3"; }
+fn _bote_server_version() { return "3.8.4"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -375,10 +375,18 @@ fn dispatcher_is_streaming_tool(d, name) {
 # handler through *fp_out, *has_out 1 when one is set (a handler may be registered as 0),
 # and with a `ver`, *ver_out 1 when that version is registered. A call is judged by this
 # and served by it, so a tool registered or replaced while the call runs cannot lend it a
-# definition its scopes were not checked against.
-fn _dsp_tool_serving(d, name, ver, ver_out, has_out, fp_out) {
+# definition its scopes were not checked against. (3.8.4) The tool is a copy, on `a`, made in
+# the same look: a definition registered again is staged in place, and a call that read its
+# outputSchema's compiled form and its 2025-11-25 form at different moments could lift a value
+# by one and judge it by neither.
+fn _dsp_tool_serving(a, d, name, ver, ver_out, has_out, fp_out) {
     bote_reg_read();
     var t = _registry_get_u(dispatcher_registry(d), name);
+    if (t != 0) {
+        var snap = alloc_via(a, 144);
+        memcpy(snap, t, 144);
+        t = snap;
+    }
     var has = map_has(dispatcher_handlers(d), name);
     var fp = 0;
     if (has == 1) { fp = map_get(dispatcher_handlers(d), name); }
@@ -420,7 +428,7 @@ fn dispatcher_register_tool(d, tool_def, handler_fp) {
     var name = tool_def_name(tool_def);
     var verr = validate_tool_name(name);
     if (verr != 0) { return verr; }
-    var st[56];
+    var st[72];
     var rerr = _registry_prepare(tool_def, &st);
     if (rerr != 0) { return rerr; }
     # The tool and its handler in one write (3.7.1), so a call on another worker never
@@ -1855,11 +1863,13 @@ fn _dsp_input_admit_a(a, d, id, method, params, caps, claims) {
             var bad = 0;
             if (jsonx_is_object(ir) == 0) { bad = 1; }
             else {
-                var m = _jx_members_a(a, ir);
+                # (3.8.4) Each member by its key as written: the walker's pairs leave out one
+                # whose key decodes to hold a NUL, which passed unjudged.
+                var m = _jx_members_raw_a(a, ir);
                 var i = 0;
                 while (i < vec_len(m)) {
-                    if (jsonx_is_object(vec_get(m, i + 1)) == 0) { bad = 1; }
-                    i = i + 2;
+                    if (vec_get(m, i) == 0 || jsonx_is_object(vec_get(m, i + 2)) == 0) { bad = 1; }
+                    i = i + 3;
                 }
             }
             if (bad == 1) {
@@ -2502,7 +2512,7 @@ fn _dsp_serve_a(a, d, request, claims, pos, plen, modern) {
         var ver_ok[8];
         var has_fp[8];
         var fp_slot[8];
-        var t = _dsp_tool_serving(d, name, ver, &ver_ok, &has_fp, &fp_slot);
+        var t = _dsp_tool_serving(a, d, name, ver, &ver_ok, &has_fp, &fp_slot);
 
         # Ahead of everything else about the call: a token that may not run this tool
         # learns nothing about its arguments. HTTP answers this with a 403 before it
