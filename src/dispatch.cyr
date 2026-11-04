@@ -383,8 +383,11 @@ fn _dsp_tool_serving(a, d, name, ver, ver_out, has_out, fp_out) {
     bote_reg_read();
     var t = _registry_get_u(dispatcher_registry(d), name);
     if (t != 0) {
+        # A word at a time: the stdlib's memcpy goes a byte at a time, 240 ns for these 144
+        # bytes, which every call paid.
         var snap = alloc_via(a, 144);
-        memcpy(snap, t, 144);
+        var w = 0;
+        while (w < 144) { store64(snap + w, load64(t + w)); w = w + 8; }
         t = snap;
     }
     var has = map_has(dispatcher_handlers(d), name);

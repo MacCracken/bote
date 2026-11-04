@@ -50,7 +50,9 @@ stdio's) are each one connection's, and a worker per connection would need a hom
   inputSchema given as JSON can say since 3.8.3 and bote lists without judging. Enforce them, with the resource bounds the spec asks for on `$ref` and composition. The warnings cover a
   schema's root and its properties, not what is nested below them. And judge an object with one pass of the
   scanner for all of its names: each property and each required name is a scan of its own today, 2.6 µs for an object
-  of three, which an outputSchema now pays on every result as an inputSchema does on every call. Name a violation's
+  of three, which an outputSchema now pays on every result as an inputSchema does on every call: since bote's own tools
+  are judged (3.8.4), `libro_export` of 100 entries spends about 1.3 ms of its 2.7 ms on it, and `fs_read` of 64 KB
+  1.25 ms of 4.5, seven passes over the text and a copy of it (`libro_export_100`, `fs_read_64k` in the benches). Name a violation's
   path only once there is one, below the root too: a path is built today for every array element and every property
   under the root, violation or not.
 - **What a valid tool call still leaves on the heap.** A request costs bote nothing that outlives it, except

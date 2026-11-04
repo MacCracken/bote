@@ -314,18 +314,27 @@ fn _fs_read_result(buf, got, cut) {
     var o = 0;
     memcpy(out + o, head, hl);
     o = o + hl;
-    memcpy(out + o, esc, el);
+    _fs_copy(out + o, esc, el);
     o = o + el;
     memcpy(out + o, note, nl);
     o = o + nl;
     memcpy(out + o, mid, ml);
     o = o + ml;
-    memcpy(out + o, esc, el);
+    _fs_copy(out + o, esc, el);
     o = o + el;
     memcpy(out + o, tail, tl);
     o = o + tl;
     store8(out + o, 0);
     return out;
+}
+
+# The `n` bytes at `src` to `dst`, a word at a time and then byte by byte: the stdlib's memcpy
+# goes a byte at a time, which for 64 KB of text, twice, is most of a quarter millisecond.
+fn _fs_copy(dst, src, n) {
+    var i = 0;
+    while (i + 8 <= n) { store64(dst + i, load64(src + i)); i = i + 8; }
+    while (i < n) { store8(dst + i, load8(src + i)); i = i + 1; }
+    return dst;
 }
 
 # What fs_read's structuredContent holds (3.8.4). An error result, a path refused or a file
@@ -393,8 +402,8 @@ fn fs_tools_register(dispatcher) {
     dispatcher_handle(dispatcher, "fs_write", &fs_write_handler);
 
     registry_register(reg, tool_def_with_output_schema(tool_def_with_annotations(tool_def_new(
-          "fs_read", "Read a text file under the server root.",
-          _fs_schema(0)), ann_read_only()), BOTE_FS_READ_OS));
+            "fs_read", "Read a text file under the server root.",
+            _fs_schema(0)), ann_read_only()), BOTE_FS_READ_OS));
     dispatcher_handle(dispatcher, "fs_read", &fs_read_handler);
 
     var mann = ann_new();

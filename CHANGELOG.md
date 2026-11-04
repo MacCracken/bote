@@ -123,6 +123,34 @@ From the review of 3.8.3:
   file, and error results. With a schema bote does not enforce in full (a `maxLength` on `fs_read`'s text) the client
   refuses the result, so these passes are its own checks and not bote's.
 
+### Performance
+
+**A result that is judged costs what judging it costs, and `fs_read`'s carries its text twice.** Interleaved A/B
+against 3.8.3, 15 rounds pinned to one core, the working tree's benches on both sides. Minimums, in ns:
+
+| Bench | 3.8.3 | 3.8.4 | Delta |
+|---|---:|---:|---:|
+| `fs_read_64k` (new) | 1,857,000 | 4,514,000 | +143% |
+| `libro_export_100` (new) | 1,369,000 | 2,659,000 | +94% |
+| `dispatch_tools_call` | 2,335 | 2,361 | +1.1% |
+| `codec_process_message` | 4,196 | 4,252 | +1.3% |
+| `codec_process_message_arena` | 4,132 | 4,164 | +0.8% |
+
+- **`libro_export_100`, about 13 µs an entry, is judging.** Each entry's six properties and six required names are a
+  scan of their own, and a path is built for every element whether a violation is found or not: the cost the
+  roadmap's next item, JSON Schema coverage, names, and its first bite in 3.8.5 takes on.
+- **`fs_read_64k` pays twice.** Its result carries 64 KB of text in two places, and every pass the dispatcher makes over
+  a result (the shape walk, the repeated-key check, the response) goes over twice the bytes: about 1.5 ms. Judging the
+  text adds about 1.25 ms more, seven passes over a 64 KB string and a copy of it, which the same work cuts. Measured
+  apart, with fs_read's new result on a tool with no outputSchema: 3.4 ms, judged 4.6 ms.
+- **The snapshot each call now takes of its definition** first cost every `tools/call` 5 to 19%: 144 bytes through the
+  stdlib's `memcpy`, which goes a byte at a time, 243 ns against 31 ns a word at a time. It copies words now, and so
+  does `fs_read` for its text. The stdlib copy is filed in cyrius
+  (`docs/development/issues/2026-11-02-memcpy-memset-byte-loops-dominate-frame-copies.md`).
+- **The rest is code position.** `dispatch_tools_call_result` +8.4% and `dispatch_tools_call_structured` +4.1% run no
+  code this release changes, and neither do `jsonx_get_str_flat` +9.6% and `codec_serialize_response` +8.5%: a short
+  bench moves 5 to 12% from where its code sits.
+
 ## [3.8.3] — 2026-11-03 · Input schemas as JSON
 
 > ⚠ **Corrected at 3.8.4.** These claims below were not true, found by an independent review of this release.

@@ -521,18 +521,18 @@ fn libro_tools_register(dispatcher) {
     _lt_prop(qp, "offset", "{\"type\":\"integer\",\"minimum\":0,\"description\":\"Skip this many matching entries (default 0).\"}");
     _lt_prop(qp, "limit", "{\"type\":\"integer\",\"minimum\":0,\"description\":\"Return at most this many entries (default: all).\"}");
     registry_register(reg, tool_def_with_output_schema(tool_def_with_annotations(tool_def_new(
-          "libro_query", "Search the libro audit chain: filter by source, agent, action, severity and time, and paginate. Each entry carries its RFC 3339 timestamp, severity, source, action, agent and hash.",
-          schema_new("object", qp, vec_new())), ann_read_only()), _lt_os_query()));
+            "libro_query", "Search the libro audit chain: filter by source, agent, action, severity and time, and paginate. Each entry carries its RFC 3339 timestamp, severity, source, action, agent and hash.",
+            schema_new("object", qp, vec_new())), ann_read_only()), _lt_os_query()));
     dispatcher_handle(dispatcher, "libro_query", &libro_tool_query);
 
     registry_register(reg, tool_def_with_output_schema(tool_def_with_annotations(tool_def_new(
-          "libro_verify", "Verify the libro chain's hash links. Reports the first broken entry's index when verification fails.",
-          schema_new("object", 0, vec_new())), ann_read_only()), _lt_os_verify()));
+            "libro_verify", "Verify the libro chain's hash links. Reports the first broken entry's index when verification fails.",
+            schema_new("object", 0, vec_new())), ann_read_only()), _lt_os_verify()));
     dispatcher_handle(dispatcher, "libro_verify", &libro_tool_verify);
 
     registry_register(reg, tool_def_with_output_schema(tool_def_with_annotations(tool_def_new(
-          "libro_export", "Return every entry on the libro chain.",
-          schema_new("object", 0, vec_new())), ann_read_only()), _lt_os_export()));
+            "libro_export", "Return every entry on the libro chain.",
+            schema_new("object", 0, vec_new())), ann_read_only()), _lt_os_export()));
     dispatcher_handle(dispatcher, "libro_export", &libro_tool_export);
 
     var pp = vec_new();
@@ -540,8 +540,8 @@ fn libro_tools_register(dispatcher) {
     var preq = vec_new();
     vec_push(preq, "index");
     registry_register(reg, tool_def_with_output_schema(tool_def_with_annotations(tool_def_new(
-          "libro_proof", "Merkle inclusion proof for the entry at the given index: the tree root and its leaf count.",
-          schema_new("object", pp, preq)), ann_read_only()), _lt_os_proof()));
+            "libro_proof", "Merkle inclusion proof for the entry at the given index: the tree root and its leaf count.",
+            schema_new("object", pp, preq)), ann_read_only()), _lt_os_proof()));
     dispatcher_handle(dispatcher, "libro_proof", &libro_tool_proof);
 
     var rp = vec_new();
@@ -550,8 +550,8 @@ fn libro_tools_register(dispatcher) {
     var rreq = vec_new();
     vec_push(rreq, "policy");
     registry_register(reg, tool_def_with_output_schema(tool_def_with_annotations(tool_def_new(
-          "libro_retention", "Apply a retention policy to the libro chain: entries outside it are archived off the chain. Destructive.",
-          schema_new("object", rp, rreq)), ann_set_open_world(ann_destructive(), HINT_FALSE)), _lt_os_retention()));
+            "libro_retention", "Apply a retention policy to the libro chain: entries outside it are archived off the chain. Destructive.",
+            schema_new("object", rp, rreq)), ann_set_open_world(ann_destructive(), HINT_FALSE)), _lt_os_retention()));
     dispatcher_handle(dispatcher, "libro_retention", &libro_tool_retention);
     return 0;
 }
