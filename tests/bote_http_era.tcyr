@@ -869,6 +869,8 @@ fn _clauses(k) {
     _t(k, _raw("POST", withsid, "[{\"jsonrpc\":\"2.0\",\"method\":\"notifications/x\",\"params\":{\"a\":1,\"a\":2}}]"), 400, "", "...naming a key twice");
     assert(_has(_body, "a key named twice"), _nm(k, "...saying so"));
     _t(k, _raw("POST", withsid, "[1]"), 400, "", "...or holding no object");
+    _t(k, _raw("POST", withsid, "[{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"},{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{}}]"), 400, "", "a batch of a notification and a response is a 400 (a 200 at 3.8.8)");
+    _t(k, _raw("POST", withsid, "[{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"},1]"), 400, "", "...and of a notification and no object");
     _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{}}"), 400, "-32600", "a JSON-RPC response a client sends is a 400 (a 200 at 3.8.7)");
     _t(k, _raw("POST", withsid, "[{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"no/such\"},{\"jsonrpc\":\"2.0\",\"method\":\"notifications/x\",\"params\":5}]"), 200, "", "a batch with a request taken is a 200");
     assert(_has(_body, "\"code\":-32601"), _nm(k, "...its error in the answer"));

@@ -112,8 +112,9 @@ fn resp_success(id, result) {
 #               2026-07-28 tools/call, prompts/get or resources/read
 #   +144 state  the `requestState` it brought, opened by the dispatcher's sealer, or 0
 #   +152 answers the `inputResponses` it brought, as the dispatcher judged them, or 0
-#   +160 taken  (3.8.8) 1 once the codec has taken a request or a notification of this
-#               message, past its admission; 0 when nothing in it was one (codec_unanswerable)
+#   +160 taken  (3.8.8) 1 once the codec has taken a request with an id from this message,
+#               past its admission (3.8.9: not a notification); 0 when nothing in it was one
+#               (codec_unanswerable). Cleared by bote_req_begin and by each codec call
 # A transport that serves one message at a time uses the process's block. A server
 # that serves on worker threads (3.7.0, src/conn.cyr) sets _bote_req_state_fp to a
 # function returning the calling thread's block, before its first worker starts.

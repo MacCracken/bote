@@ -76,6 +76,29 @@ fn _wait_go() {
     return 0;
 }
 
+
+# (3.8.9) The heap forms' scratch on several threads: each thread judges its own values
+# through compiled_validate, and every answer must be its own, whole, the lock holding.
+var _sc_comp = 0;
+var _sc_bad = 0;
+fn _sc_worker(i) {
+    while (atomic_load(&_go) == 0) { }
+    var k = 0;
+    while (k < 300) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "{\"n\":\"t");
+        str_builder_add_int(sb, i);
+        str_builder_add_cstr(sb, "_");
+        str_builder_add_int(sb, k);
+        str_builder_add_cstr(sb, "\",\"l\":[1,1]}");
+        var v = compiled_validate(_sc_comp, str_data(str_builder_build(sb)));
+        if (vec_len(v) != 2) { atomic_fetch_add(&_sc_bad, 1); }
+        elif (streq(vec_get(v, 0), "n: expected integer") == 0 || streq(vec_get(v, 1), "l: items 0 and 1 are equal, against uniqueItems") == 0) { atomic_fetch_add(&_sc_bad, 1); }
+        k = k + 1;
+    }
+    return 0;
+}
+
 # Run `fp(i)` on `n` threads, i from 0, started together, and wait for them all.
 fn _on_threads(fp, n) {
     _go = 0;
@@ -1262,6 +1285,10 @@ fn main() {
     _on_threads(&_hd_writer, 4);
     assert_eq(map_count(dispatcher_handlers(_hd_d)), 1200, "register: four threads setting handlers at once lose none");
 
+    # ---------------- (3.8.9) the heap forms' scratch, on six threads ----------------
+    _sc_comp = _compile_object_body("{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"integer\"},\"l\":{\"uniqueItems\":true}}}");
+    _on_threads(&_sc_worker, 6);
+    assert_eq(_sc_bad, 0, "scratch: 1,800 judgements through compiled_validate on six threads, each answer its own and whole");
     # ---------------- a failure that ends the process, from a worker ----------------
     assert_eq(_ex_status(), 90, "exit: no entropy on a worker ends the process with 90, not the thread");
     #endif

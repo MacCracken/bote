@@ -287,10 +287,11 @@ fn main() {
     _reg(wd, "w_suite", SUITE);
     dispatcher_register_tool(wd, tool_def_new("w_struct", "d", schema_new("object", _prop("a", "{\"type\":\"string\"}"), vec_new())), &h_tool);
     _lc_end();
-    assert(_lc_find("tool=w_suite property=inputSchema keyword=allOf") != 0, "warn: allOf at the root");
-    assert(_lc_find("tool=w_suite property=inputSchema keyword=if") != 0, "warn: if at the root");
-    assert(_lc_find("tool=w_suite property=inputSchema keyword=then") != 0, "warn: then");
-    assert(_lc_find("tool=w_suite property=inputSchema keyword=else") != 0, "warn: else");
+    # (3.8.9) Composition at the root is judged, and warned of no longer.
+    assert(_lc_find("tool=w_suite property=inputSchema keyword=allOf") == 0, "warn: allOf at the root, judged (3.8.9)");
+    assert(_lc_find("tool=w_suite property=inputSchema keyword=if") == 0, "warn: if at the root, judged");
+    assert(_lc_find("tool=w_suite property=inputSchema keyword=then") == 0, "warn: then, judged");
+    assert(_lc_find("tool=w_suite property=inputSchema keyword=else") == 0, "warn: else, judged");
     assert(_lc_find("tool=w_suite property=inputSchema keyword=additionalProperties") == 0, "warn: additionalProperties at the root is judged, and warned of no longer (3.8.5)");
     assert(_lc_find("tool=w_suite property=address keyword=$ref") != 0, "warn: a property's $ref");
     assert(_lc_find("tool=w_suite property=inputSchema keyword=anyOf") == 0, "warn: not what sits below a root keyword");

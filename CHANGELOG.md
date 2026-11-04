@@ -18,7 +18,133 @@ have per release.
 
 _(empty)_
 
+## [3.8.9] — 2026-11-04 · Composition
+
+**`allOf`, `anyOf`, `oneOf`, `not` and `if` / `then` / `else` are judged**, on a value and on an inputSchema's root,
+where alternatives for a tool's arguments are written. `allOf` judges a value as the schema itself does, its
+violations kept; `anyOf`, `oneOf`, `not` and `if` ask quietly, as 3.8.8's `contains` does, so an alternative that
+fails costs no message. The conformance suite's own 2020-12 schema, an `allOf` of an `anyOf` beside an `if`, is now
+judged whole: `{"name":"x"}` is refused for naming neither a phone nor an email. Each was warned of at registration
+through 3.8.8.
+
+**A judgement has a budget**: 100,000 values and 32 for each byte of the document, every quiet judgement inside it
+counted. A value judged once costs one; a schema whose alternatives each judge every item a client sends, 257 of them
+for 50,000 items, stops at the budget and is refused as `more work to judge than its size allows`, in under a second,
+where it would have judged 12.9 million values.
+
+**Six defects in 3.8.8 land beside it**, from an independent review of that release. The worst: the keywords 3.8.8
+judged were judged whatever `$schema` named, so a draft-07 result a client takes could be refused, and one it refuses
+passed. See the correction notice in 3.8.8.
+
+The stated minimum cyrius (6.7.13) is unchanged.
+
+### Added
+
+- **`allOf`, `anyOf`, `oneOf`, `not`, `if`, `then`, `else`** (core, `src/schema.cyr`, `_sv_comp`): a violation reads
+  `matches no schema in anyOf`, `matches no schema in oneOf`, `matches more than one schema in oneOf`, `matches the
+  schema in not`; `allOf` and the branch `if` chooses report their own. `then` and `else` with no `if` judge nothing.
+  PropertyDef is 272 bytes (+208 to +256 the keywords, +264 whether it composes, so a value with none pays one load).
+- **An inputSchema root's composition** (CompiledSchema +104, 112 bytes): compiled by `compiled_compile` from the
+  JSON, judged after the members.
+- **The budget** (`BOTE_SCH_BUDGET_BASE`, `BOTE_SCH_BUDGET_PER_BYTE`, `_sch_budget`): the violation slot is 48 bytes,
+  +40 pointing at the root's budget, which every quiet judgement inside it shares. Once spent, no value is judged
+  further, and the root records the refusal past the cap of 32 (`_violation_force`), so a value already full of
+  violations says why it stopped too. Without `$ref` a schema is a tree, so the work is bounded by the schema's size
+  times the value's; the budget bounds what a large schema can be made to cost by a client's many items.
+
+### Changed
+
+- Registration no longer warns of composition as unenforced. It warns of an `allOf`, `anyOf` or `oneOf` that is no
+  non-empty array of schemas, a `not`, `if`, `then` or `else` that is no schema, and a `then` or `else` with no `if`.
+
+### Fixed
+
+From the review of 3.8.8:
+
+- **A keyword was judged whatever its schema's dialect** (MEDIUM). The compile reads the dialect from a root's
+  `$schema` (`_sch_dialect`: 2020-12 by default, 2019-09, draft-07, draft-06) and passes it to every subschema; a
+  keyword its dialect does not have judges nothing, as it is no keyword to a client, which picks its validator by
+  `$schema`: `prefixItems` is 2020-12's, `minContains`, `maxContains` and the `dependent*` keywords 2019-09's on,
+  `if` / `then` / `else` draft-07's on. Registration warns of each, `prefixItems, which this schema's dialect does not
+  have`.
+- **A `dependentRequired` name that is no text was dropped**; it is kept, as one no member meets, so its member's
+  presence is refused, as a client refuses it.
+- **A quiet judgement judged an argument as an argument**, its integers held to what a handler can read, so a value
+  past it counted as no match, and under `maxContains`, `not` or `oneOf` a value JSON Schema refuses passed. A quiet
+  judgement now judges as JSON Schema does; where a schema judges a value directly, an integer past what a handler
+  holds is still refused.
+- **The taken flag counted a notification, and was cleared only by `bote_req_begin`.** It is set by a request with an
+  id, and cleared by every codec call, so a legacy batch of a notification and a refused response is a 400, and
+  `codec_unanswerable` through the heap form answers for the message just processed. It reads the state of the last
+  message the codec processed on the calling thread, where at 3.8.7 it read its argument; the 3.8.8 entry did not say
+  so.
+- **The scratch lock was released with a plain store**, which an aarch64 core may let pass the critical section's
+  rewind and copy. It is released by an atomic add, as bote's other locks are: a release on aarch64, and on x86 a
+  locked add, where a fence before the store cost the heap forms about 110 ns a call (measured, and not shipped).
+
+### Tests
+
+- **`tests/bote_schema_comp.tcyr`**, 89, new: `allOf` met, missed, at its path; `anyOf` of types and of object
+  schemas, under `items`; `oneOf` by each, by both, by neither; `not`, `{}` and `false`, of `not`; `if` with `then`
+  and `else` each met and missed, without `if`, with no branch, `then` only; the conformance suite's schema through
+  the dispatcher; an inputSchema root's `oneOf`; a result's `anyOf`; the budget refusing 50,000 items through 257
+  alternatives in under two seconds, refusing an argument through the dispatcher, and staying far from three
+  alternatives over 50,000 items or one type over 100,000, and, its globals set low, stopping the walk with the
+  refusal last, alone, after the walk's own and past a full cap; from the review of 3.8.8, each keyword by its
+  dialect (draft-07, 2019-09, draft-06, a property by its root's), a draft-07 result and arguments taken as a client
+  takes them, a `dependentRequired` name that is no text, quiet judgements as JSON Schema judges (`[5,1e30]` under
+  `maxContains`, 1e30 under `not`), and the taken flag through the heap form and a batch; the WARNs, the dialect's
+  among them; 0 heap bytes; the arena's first chunk for 5,000 quiet judgements; the heap form keeping its answer.
+- **`tests/bote_http_era.tcyr`**, 2000, from 1988: a legacy batch of a notification and a response, or of a
+  notification and no object, a 400.
+- **`tests/bote_threads.tcyr`**, 82, from 81: the heap forms' scratch on six threads, 1,800 judgements through
+  `compiled_validate`, each answer its own and whole.
+- **`tests/bote_tool_schema.tcyr`**: composition at the root warned of no longer.
+- **`fuzz/schema_walk.fcyr`**: composition drawn, the reference judging it on bayan's trees.
+- **31 mutants, 31 killed.** One survived the first run, a gap now tested: the budget's refusal held to the cap,
+  which no test had filled before the budget was spent (`contains` asks of every item after the cap fills). The
+  ordering of the scratch lock's release is no mutant a test on x86 can kill.
+
+### Performance
+
+**A call costs what it did; registration reads more keywords.** Interleaved A/B against 3.8.8, 15 rounds pinned to
+one core, the working tree's benches on both sides. Minimums, in ns:
+
+| Bench | 3.8.8 | 3.8.9 | Delta |
+|---|---:|---:|---:|
+| `codec_process_message` | 4,360 | 4,332 | −0.6% |
+| `dispatch_tools_call` | 2,706 | 2,678 | −1.0% |
+| `validate_compiled_simple` | 493 | 502 | +1.8% |
+| `validate_compiled_nested` | 1,009 | 1,013 | +0.4% |
+| `libro_export_100` | 1,827,000 | 1,819,000 | −0.4% |
+| `fs_read_64k` | 3,733,000 | 3,706,000 | −0.7% |
+| `schema_compile_simple` | 11,838 | 13,994 | +18.2% |
+| `schema_compile_nested` | 27,549 | 32,175 | +16.8% |
+
+- **The budget costs a value one decrement, and composition a schema without it one load.** Taken out of the walk
+  in a copy of this tree, they moved the validate rows by less than a nanosecond.
+- **A fence before the scratch lock's release cost the heap forms about 110 ns a call** (`validate_compiled_simple`,
+  which calls `compiled_validate`, at 605 ns against 492 without it): an `mfence` on x86. The lock is released by an
+  atomic add instead, ordered on aarch64 as bote's other locks are, and the rows are where 3.8.8 left them.
+- **Registration reads seven keywords more and the dialect**, about 350 ns each: paid once a definition, never for a
+  call.
+
 ## [3.8.8] — 2026-11-04 · The parts of a value
+
+> ⚠ **Corrected at 3.8.9.** These claims below were not true, found by an independent review of this release.
+> - "`prefixItems`, `contains` with `minContains` and `maxContains`, ... `dependentRequired` and `dependentSchemas` are
+>   judged." Whatever `$schema` named: a draft-07 or 2019-09 schema has no `prefixItems`, and draft-07 none of the
+>   others but `contains`, so a draft-07 result a client takes was a tool error, and `contains` with `minContains: 0`
+>   passed an empty array the client refuses.
+> - "`dependentRequired`: a member present requires the names it lists." A name that is no text was dropped, and its
+>   requirement never asked.
+> - "The slot judges as `slot` does". Inside `contains`, an argument's integer past what a handler holds counted as no
+>   match, so under `maxContains: 1` the array `[5,1e30]` ran the handler.
+> - "The codec now says as it goes whether it took a request or a notification". A notification counted as taken, so
+>   a legacy batch of a notification and a response it refused was a 200; and only `bote_req_begin` cleared it, so
+>   through the heap form `codec_process_message` every message after one request read as taken.
+> - "taken under a lock of its own". The lock was released with a plain store, which on aarch64 may pass the arena's
+>   rewind and the answer's copy.
 
 **`prefixItems`, `contains` with `minContains` and `maxContains`, `propertyNames`, `dependentRequired` and
 `dependentSchemas` are judged.** Each judges an array's items or an object's keys and members with no pattern and no

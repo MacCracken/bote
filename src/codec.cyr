@@ -303,8 +303,8 @@ fn _cdc_admit_l_a(a, line, err_out, log, keys) {
 fn _cdc_admit_a(a, line, err_out) { return _cdc_admit_l_a(a, line, err_out, 1, 0); }
 fn _cdc_admit_k_a(a, line, err_out, keys) { return _cdc_admit_l_a(a, line, err_out, 1, keys); }
 
-# 1 when `resp`, the answer the codec gave the message begun last, answers input it took no
-# request or notification from: no JSON, no request object, a notification it refused, a
+# 1 when `resp`, the answer the codec gave the last message it processed on this thread,
+# answers input it took no request with an id from (3.8.9: a notification is not one): no JSON, no request object, a notification it refused, a
 # JSON-RPC response a client sent, a batch of nothing it took. An HTTP transport answers it
 # with 400 (3.8.7): MCP's Streamable HTTP requires an HTTP error status for input the server
 # does not accept. (3.8.8, from the 3.8.7 review) The codec says so as it goes (the state's
@@ -332,7 +332,10 @@ fn _cdc_process_single_k_a(a, line, dispatcher, claims, keys) {
     # The request, named for its cancellation check (3.7.5): the state once, for every
     # message, since on a worker it is a thread-local lookup. (3.8.8) And taken.
     var rs = bote_req_state();
-    store64(rs + BOTE_REQ_STATE_TAKEN, 1);
+    # (3.8.9, from the 3.8.8 review) A request with an id, which its answer answers: a batch
+    # of a notification and a response the codec refused was taken through the notification,
+    # and went with 200.
+    if (req_id(req) != 0) { store64(rs + BOTE_REQ_STATE_TAKEN, 1); }
     store64(rs + BOTE_REQ_STATE_CANCEL + 16, req_id(req));
     # And for its progress (3.7.6): where its token is, none sent yet.
     store64(rs + BOTE_REQ_STATE_PROGRESS + 16, req_params(req));
@@ -599,6 +602,10 @@ fn codec_process_message(input, dispatcher, claims) {
 # codec_process_message with every byte bote owns on `a`, the response included:
 # the caller keeps `a` until it has sent the response.
 fn codec_process_message_a(a, input, dispatcher, claims) {
+    # (3.8.9, from the 3.8.8 review) What this message takes, from nothing: through 3.8.8 only
+    # bote_req_begin cleared it, which the heap form never calls, so after one request taken
+    # every later message's answer read as taken.
+    store64(bote_req_state() + BOTE_REQ_STATE_TAKEN, 0);
     if (input == 0) { return _cdc_parse_error_a(a, "empty input"); }
     var len = strlen(input);
     var i = _cdc_skip_ws(input, len, 0);

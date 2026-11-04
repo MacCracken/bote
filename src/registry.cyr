@@ -684,13 +684,30 @@ fn _reg_warn_kw(tool, key, kw) {
 # (3.8.5) minLength, maxLength, minItems, maxItems, minProperties, maxProperties,
 # exclusiveMinimum, exclusiveMaximum and additionalProperties are judged, and no longer here.
 # (3.8.7) const and uniqueItems too. (3.8.8) prefixItems, contains, propertyNames,
-# dependentRequired and dependentSchemas.
-var BOTE_UNENFORCED = "anyOf oneOf allOf not $ref $dynamicRef $recursiveRef pattern multipleOf if then else patternProperties unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
+# dependentRequired and dependentSchemas. (3.8.9) allOf, anyOf, oneOf, not, if, then, else.
+var BOTE_UNENFORCED = "$ref $dynamicRef $recursiveRef pattern multipleOf patternProperties unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
 
 # Every WARN the schema `v`, at `key` of tool `tool`, earns: each keyword in `kws` it
 # holds, a type bote does not know, alone or in a type array, and a keyword it judges with a
 # value it cannot judge by.
-fn _reg_warn_schema(tool, key, v, kws) {
+fn _reg_warn_schema(tool, key, v, kws) { return _reg_warn_schema_d(tool, key, v, kws, _sch_dialect(v)); }
+
+# _reg_warn_schema for a schema of dialect `d`, a root's (_sch_dialect) for its properties too.
+fn _reg_warn_schema_d(tool, key, v, kws, d) {
+    # (3.8.9, from the 3.8.8 review) A keyword its dialect does not have judges nothing, here
+    # or to a client, which picks its validator by `$schema`.
+    var late = 0;
+    if (d != 2020) { late = _reg_words("prefixItems "); }
+    if (d == 7) { late = _reg_words("prefixItems minContains maxContains dependentRequired dependentSchemas "); }
+    if (d == 2019) { late = _reg_words("prefixItems "); }
+    if (d == 6) { late = _reg_words("prefixItems minContains maxContains dependentRequired dependentSchemas if then else "); }
+    if (late != 0) {
+        var li = 0;
+        while (li < vec_len(late)) {
+            if (jsonx_has(v, vec_get(late, li)) == 1) { _reg_warn_kw(tool, key, _dsp_named_msg(vec_get(late, li), ", which this schema's dialect does not have", 0)); }
+            li = li + 1;
+        }
+    }
     var k = 0;
     while (k < vec_len(kws)) {
         if (jsonx_has(v, vec_get(kws, k)) == 1) { _reg_warn_kw(tool, key, vec_get(kws, k)); }
@@ -764,6 +781,26 @@ fn _reg_warn_schema(tool, key, v, kws) {
         }
         if (dsok == 0) { _reg_warn_kw(tool, key, "dependentSchemas that is no object of schemas"); }
     }
+    # (3.8.9) Composition, each keyword a value it can judge by.
+    var ck = _reg_words("allOf anyOf oneOf ");
+    var cki = 0;
+    while (cki < vec_len(ck)) {
+        var cr = jsonx_get_raw(v, vec_get(ck, cki));
+        if (cr != 0 && _sch_schemas(v, vec_get(ck, cki)) == 0) {
+            _reg_warn_kw(tool, key, _dsp_named_msg(vec_get(ck, cki), " that is no non-empty array of schemas", 0));
+        }
+        cki = cki + 1;
+    }
+    var nk = _reg_words("not if then else ");
+    var nki = 0;
+    while (nki < vec_len(nk)) {
+        var nr = jsonx_get_raw(v, vec_get(nk, nki));
+        if (nr != 0 && _sch_is_schema_text(nr) == 0) { _reg_warn_kw(tool, key, _dsp_named_msg(vec_get(nk, nki), " that is no schema", 0)); }
+        nki = nki + 1;
+    }
+    if (d != 6 && jsonx_has(v, "if") == 0 && (jsonx_has(v, "then") == 1 || jsonx_has(v, "else") == 1)) {
+        _reg_warn_kw(tool, key, "then or else without if");
+    }
     var uq = jsonx_get_raw(v, "uniqueItems");
     if (uq != 0 && streq(uq, "true") == 0 && streq(uq, "false") == 0) {
         _reg_warn_kw(tool, key, "uniqueItems that is no boolean");
@@ -822,13 +859,16 @@ fn _reg_warn_unenforced(tool_def) {
     var kws = _reg_words(BOTE_UNENFORCED);
     # (3.8.3) An inputSchema given as JSON can hold any keyword at its root.
     var js = tool_schema_json(tool_def_input_schema(tool_def));
-    if (js != 0) { _reg_warn_schema(tool_def_name(tool_def), "inputSchema", js, kws); }
+    if (js != 0) { _reg_warn_schema_d(tool_def_name(tool_def), "inputSchema", js, kws, _sch_dialect(js)); }
     var props = schema_properties(tool_def_input_schema(tool_def));
     if (props == 0) { return 0; }
     var i = 0;
     while (i < vec_len(props)) {
         var pair = vec_get(props, i);
-        _reg_warn_schema(tool_def_name(tool_def), schema_prop_key(pair), schema_prop_value(pair), kws);
+        # A JSON inputSchema's properties are of its root's dialect (3.8.9).
+        var pd = _sch_dialect(schema_prop_value(pair));
+        if (js != 0) { pd = _sch_dialect(js); }
+        _reg_warn_schema_d(tool_def_name(tool_def), schema_prop_key(pair), schema_prop_value(pair), kws, pd);
         i = i + 1;
     }
     return 0;
@@ -838,11 +878,12 @@ fn _reg_warn_unenforced(tool_def) {
 fn _reg_warn_output(tool_def) {
     var kws = _reg_words(BOTE_UNENFORCED);
     var os = tool_def_output_schema(tool_def);
-    _reg_warn_schema(tool_def_name(tool_def), "outputSchema", os, kws);
+    var od = _sch_dialect(os);
+    _reg_warn_schema_d(tool_def_name(tool_def), "outputSchema", os, kws, od);
     var members = _jx_members(jsonx_get_raw(os, "properties"));
     var mi = 0;
     while (mi < vec_len(members)) {
-        _reg_warn_schema(tool_def_name(tool_def), _dsp_named_msg("outputSchema.", vec_get(members, mi), 0), vec_get(members, mi + 1), kws);
+        _reg_warn_schema_d(tool_def_name(tool_def), _dsp_named_msg("outputSchema.", vec_get(members, mi), 0), vec_get(members, mi + 1), kws, od);
         mi = mi + 2;
     }
     return 0;

@@ -618,9 +618,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 6471 total across thirty-one files (+ a core-only drift smoke)
+### Tests — 6573 total across thirty-two files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 6471 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 6573 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 991 — core protocol/dispatch/codec/schema/session/transports
@@ -631,7 +631,7 @@ cyrius test tests/bote_content.tcyr       # 25 — typed content blocks
 cyrius test tests/bote_fetch.tcyr         # 62 — a request made in a child: the record, the cap, the deadline, a real GET
 cyrius test tests/bote_fs_tools.tcyr      # 78 — fs_write / fs_read / fs_mkdir
 cyrius test tests/bote_host.tcyr          # 207 — host registry + SSRF guard (IPv4 + IPv6)
-cyrius test tests/bote_http_era.tcyr      # 1988 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
+cyrius test tests/bote_http_era.tcyr      # 2000 — MCP 2026-07-28 on HTTP, on the real handlers, and the 403 for a missing scope
 cyrius test tests/bote_jwks.tcyr          # 49 — a jwks_uri: what it may be, and real fetches from a child
 cyrius test tests/bote_jwt.tcyr           # 510 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
 cyrius test tests/bote_libro_tools.tcyr   # 103 — libro_tools wrappers
@@ -646,11 +646,12 @@ cyrius test tests/bote_schema_walk.tcyr   # 124 — one walk of a value: the cou
 cyrius test tests/bote_request_keys.tcyr  # 92 — a request naming a key twice, or one that is no text, refused on every path
 cyrius test tests/bote_schema_eq.tcyr     # 92 — const, enum of any value, uniqueItems and type arrays, by JSON Schema's equality
 cyrius test tests/bote_schema_parts.tcyr  # 77 — prefixItems, contains, propertyNames and the dependent keywords; quiet judgements
+cyrius test tests/bote_schema_comp.tcyr   # 89 — allOf, anyOf, oneOf, not, if / then / else; the budget; keywords by dialect
 cyrius test tests/bote_progress.tcyr      # 110 — progress on a request's own stream: the writer, stdio, unix, WebSocket, HTTP's SSE response
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter
 cyrius test tests/bote_streamable.tcyr    # 64 — Streamable HTTP / SSE internals
-cyrius test tests/bote_threads.tcyr       # 81 — bote on worker threads: each case from several threads at once
+cyrius test tests/bote_threads.tcyr       # 82 — bote on worker threads: each case from several threads at once
 cyrius test tests/bote_transport_unix.tcyr # 76 — Unix transport: sockaddr, accept-error policy, backoff, deadlines, closed-peer write
 cyrius test tests/bote_web_tools.tcyr     # 88 — web_fetch / web_search + the SSRF guard (URL and resolved address) + their records
 cyrius test tests/bote_ws.tcyr            # 94 — WebSocket config + wire-up + the send-deadline drop + scopes per frame + what an upgrade and a connection keep

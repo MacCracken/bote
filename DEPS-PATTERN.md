@@ -336,6 +336,12 @@ it was listed with and passed through 3.8.7. A PropertyDef is 208 bytes and a Co
 `prop_new` and `compiled_new` set the new words, and one a consumer allocates itself must be that
 size, with them zeroed (and +192, +200 of a PropertyDef -1).
 
+(3.8.9) `allOf`, `anyOf`, `oneOf`, `not` and `if` / `then` / `else` are judged, on a value and on
+an inputSchema's root, so a schema that names them refuses what it passed through 3.8.8. A
+judgement has a budget, 100,000 values and 32 for each byte, past which the value is refused as
+`more work to judge than its size allows`. A PropertyDef is 272 bytes and a CompiledSchema 112;
+`prop_new` and `compiled_new` set the new words, zeroed.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`

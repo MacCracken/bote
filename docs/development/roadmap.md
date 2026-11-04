@@ -33,12 +33,12 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.9 — JSON Schema coverage, its fourth bite: composition.** `allOf`, `anyOf`, `oneOf`, `not` and
-`if` / `then` / `else`, on the quiet judgement 3.8.8 made for `contains` (a subschema asked whether a value
-meets it, keeping nothing): `allOf` judged as the schema itself is, `anyOf` and `oneOf` by how many
-subschemas a value meets, `not` by none, `if` choosing which of `then` and `else` judges. Bound the work a
-client can make of nested composition. Then `$ref` with the resource bounds the spec asks for; `pattern`
-and `format` last, each an engine of its own.
+**3.8.10 — JSON Schema coverage, its fifth bite: `$ref`.** References within the document (`#`, a JSON
+Pointer into `$defs` or anywhere, an `$anchor`), resolved at registration; a reference outside it refused
+there, as bote fetches nothing on a schema's word. A reference that leads back to itself is what makes a
+schema a graph and its work exponential: 3.8.9's budget bounds it, and registration should refuse a cycle
+that consumes no input (a `$ref` to itself through only `allOf`). Then `pattern` and `format`, each an
+engine of its own, `multipleOf`, `patternProperties` and the `unevaluated*` keywords.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
@@ -52,11 +52,11 @@ stdio's) are each one connection's, and a worker per connection would need a hom
   and it judges the counting keywords that walk makes cheap: `minLength` / `maxLength`, `minItems` / `maxItems`,
   `minProperties` / `maxProperties`, the exclusive bounds and `additionalProperties`; since 3.8.7, by JSON
   Schema's equality, `const`, `enum` of any value and `uniqueItems`, and type arrays; since 3.8.8
-  `prefixItems`, `contains` with its counts, `propertyNames`, `dependentRequired` and `dependentSchemas`. It
-  still warns at registration of what it lists and does not judge: `anyOf`, `oneOf`, `allOf`, `not`, `$ref`,
-  `pattern`, `multipleOf`, `format` (which the official client enforces), `if` / `then` / `else`,
-  `patternProperties` (and `additionalProperties` beside it), the `unevaluated*` keywords, draft-07's array
-  `items`, `additionalItems` and `dependencies`. Numbers
+  `prefixItems`, `contains` with its counts, `propertyNames`, `dependentRequired` and `dependentSchemas`; since
+  3.8.9 composition, `allOf`, `anyOf`, `oneOf`, `not`, `if` / `then` / `else`, under a budget of work. It still
+  warns at registration of what it lists and does not judge: `$ref`, `pattern`, `multipleOf`, `format` (which the
+  official client enforces), `patternProperties` (and `additionalProperties` beside it), the `unevaluated*`
+  keywords, draft-07's array `items`, `additionalItems` and `dependencies`. Numbers
   are compared exactly, where a client holding them as doubles may find two equal that bote does not: past 15
   significant digits or a double's range (`1e400`, `1e-400`), a result's `uniqueItems` array could be refused by a client and passed here. Enforce the
   rest in bites, with the resource bounds the spec asks for on `$ref` and
