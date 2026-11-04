@@ -246,7 +246,7 @@ fn main() {
     assert_eq(prop_tag(tool_def_output_prop(rr)), SCH_OBJECT, "registration: ...and is compiled again");
     var ml = _tool("t_lines", "{\n  \"type\": \"object\",\r\n  \"properties\": {\"a\": {\"type\": \"string\"}}\n}");
     dispatcher_register_tool(d, ml, &h_ret);
-    _ase(tool_def_output_schema(ml), "{  \"type\": \"object\",  \"properties\": {\"a\": {\"type\": \"string\"}}}", "registration: a schema on several lines is kept on one");
+    _ase(tool_def_output_json(ml), "{  \"type\": \"object\",  \"properties\": {\"a\": {\"type\": \"string\"}}}", "registration: a schema on several lines is kept on one");
 
     # ---- The 2025-11-25 form ----
     _ase(_legacy_form(USERS), "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"id\",\"name\"]}}},\"required\":[\"result\"]}", "legacy form: an array root is the property result of an object");
@@ -267,10 +267,10 @@ fn main() {
 
     # ---- What registration warns of ----
     _lc_begin();
-    dispatcher_register_tool(d, _tool("t_warn", "{\"type\":\"string\",\"pattern\":\"^a\",\"properties\":{\"n\":{\"type\":\"string\",\"maxLength\":3},\"k\":{\"type\":[\"string\",\"null\"]}}}"), &h_ret);
+    dispatcher_register_tool(d, _tool("t_warn", "{\"type\":\"string\",\"pattern\":\"^a\",\"properties\":{\"n\":{\"type\":\"string\",\"const\":\"x\"},\"k\":{\"type\":[\"string\",\"null\"]}}}"), &h_ret);
     _lc_end();
     assert(_has(_lc_find("property=outputSchema keyword=pattern"), "schema keyword not enforced") == 1, "warn: a keyword at the root");
-    assert(_lc_find("property=outputSchema.n keyword=maxLength") != 0, "warn: a keyword on a property");
+    assert(_lc_find("property=outputSchema.n keyword=const") != 0, "warn: a keyword on a property");
     assert(_lc_find("property=outputSchema.k keyword=\"type array\"") != 0, "warn: a type array");
 
     # ---- tools/list ----
@@ -288,7 +288,7 @@ fn main() {
     _expect(d, "t_weather", OK_W, OK_W, OK_W, "call: a result that matches goes out as it was");
     var noc = _err_result("t_weather", "the tool has an outputSchema and the result has no structuredContent");
     _expect(d, "t_weather", "{\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}", noc, noc, "call: no structuredContent is a tool error");
-    var bad = _err_result("t_weather", "the result's structuredContent does not match the outputSchema: structuredContent: missing required field: humidity; structuredContent.temperature: expected number");
+    var bad = _err_result("t_weather", "the result's structuredContent does not match the outputSchema: structuredContent.temperature: expected number; structuredContent: missing required field: humidity");
     _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":{\"temperature\":\"hot\",\"conditions\":\"c\"}}", bad, bad, "call: structuredContent that does not match is a tool error naming each violation");
     var notobj = _err_result("t_weather", "the result's structuredContent does not match the outputSchema: structuredContent: expected object");
     _expect(d, "t_weather", "{\"content\":[],\"structuredContent\":[1]}", notobj, notobj, "call: an array where the schema has an object");
@@ -490,10 +490,10 @@ fn main() {
     vec_push(kp, schema_prop_new("m", "{\"type\":\"number\",\"exclusiveMinimum\":0}"));
     dispatcher_register_tool(rod, tool_def_new("t_kwin", "d", schema_new("object", kp, vec_new())), &h_ret);
     _lc_end();
-    assert(_lc_find("property=outputSchema keyword=additionalProperties") != 0, "review: additionalProperties is warned of");
+    assert(_lc_find("keyword=additionalProperties") == 0, "review: additionalProperties is judged, and warned of no longer (3.8.5)");
     assert(_lc_find("property=outputSchema.i keyword=\"enum on a type other than string\"") != 0, "review: an enum on an integer is warned of");
     assert(_lc_find("property=outputSchema.u keyword=\"an unknown type\"") != 0, "review: an unknown type is warned of");
-    assert(_lc_find("tool=t_kwin property=m keyword=exclusiveMinimum") != 0, "review: ...and on the input side");
+    assert(_lc_find("tool=t_kwin property=m keyword=exclusiveMinimum") == 0, "review: ...and exclusiveMinimum on the input side (3.8.5)");
 
     # ---- The heap ----
     # A call costs `args` on the heap, as since 3.4.15; nothing in its result's handling
@@ -848,6 +848,28 @@ fn main() {
     _ret = "{\"type\":\"\\u0072\\u0065\\u0073\\u006f\\u0075\\u0072\\u0063\\u0065\\u005f\\u006c\\u0069\\u006e\\u006b\",\"uri\":\"res://x\",\"name\":\"x\"}";
     var lnk = _call(cd, "t_link", 0);
     assert(_has(lnk, "\"content\":[{\"type\":\"\\u0072") == 1 && _has(lnk, "\"text\":") == 0, "review 3.8.2: a resource_link of 78 escaped bytes is lifted as a block (it went as text)");
+
+    # ---- From the review of 3.8.4 (3.8.5) ----
+    # The schema listed is registration's own: a setter called after it changes nothing listed
+    # or judged until the next registration, which checks it.
+    var sd = dispatcher_new(tool_registry_new());
+    var stt = _tool("t_set", "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"integer\"}}}");
+    dispatcher_register_tool(sd, stt, &h_ret);
+    tool_def_with_output_schema(stt, 0);
+    var sl0 = _list(sd, 1);
+    assert(_has(sl0, "\"outputSchema\":{\"type\":\"object\",\"properties\":{\"n\"") == 1, "review 3.8.4: a schema set to none after registration is still listed, as it is still judged");
+    _ret = "{\"content\":[],\"structuredContent\":{\"n\":\"x\"}}";
+    assert(_has(_call(sd, "t_set", 1), "structuredContent.n: expected integer") == 1, "review 3.8.4: ...and judged");
+    tool_def_with_output_schema(stt, "{\n\"type\": \"object\"}");
+    var sl1 = _list(sd, 1);
+    assert(_has(sl1, "\"outputSchema\":{\"type\":\"object\",\"properties\":{\"n\"") == 1 && strstr(sl1, "\n") < 0, "review 3.8.4: one set on two lines is not listed until registered (it went out with a raw LF)");
+    tool_def_with_output_schema(stt, "not json");
+    assert(dispatcher_register_tool(sd, stt, &h_ret) != 0, "review 3.8.4: no JSON, refused at registration");
+    var sl2 = _list(sd, 1);
+    assert(jsonx_valid(sl2, strlen(sl2)) == 1 && _has(sl2, "not json") == 0, "review 3.8.4: ...and never listed (it was, and every list was no JSON)");
+    tool_def_with_output_schema(stt, "{\"type\":\"object\",\"properties\":{\"m\":{\"type\":\"string\"}}}");
+    dispatcher_register_tool(sd, stt, &h_ret);
+    assert(_has(_list(sd, 1), "\"m\":{\"type\":\"string\"}") == 1, "review 3.8.4: registered again, the new one listed");
 
     return assert_summary();
 }

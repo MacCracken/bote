@@ -2685,7 +2685,8 @@ fn main() {
     assert_eq(vec_len(compiled_validate(fcomp, "{\"forbid\":1}")), 1, "schema: `false` allows nothing");
     assert_eq(vec_len(compiled_validate(fcomp, "{\"other\":1}")), 0, "schema: ...and is only about its own key");
     var wprops = vec_new();
-    vec_push(wprops, schema_prop_new("p", "{\"type\":\"string\",\"maxLength\":3}"));
+    # (3.8.5) maxLength is judged now; pattern is not.
+    vec_push(wprops, schema_prop_new("p", "{\"type\":\"string\",\"pattern\":\"^a\"}"));
     vec_push(wprops, schema_prop_new("q", "{\"type\":[\"string\",\"null\"]}"));
     var loose_reg = tool_registry_new();
     _lc_begin();

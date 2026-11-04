@@ -18,7 +18,104 @@ have per release.
 
 _(empty)_
 
+## [3.8.5] — 2026-11-03 · One walk of a value
+
+**bote judges a value in one walk, and judges the counting keywords that walk makes cheap.** Each object's members are
+looked up once, where each property and each required name was a scan of its own; a value is judged where it lies,
+where every property's value was copied out first; and a violation's path is written out only for a violation, where
+one was built for every element and every property below the root. `minLength` and `maxLength` (in characters, as
+JSON Schema counts them), `minItems` and `maxItems`, `minProperties` and `maxProperties`, `exclusiveMinimum` and
+`exclusiveMaximum`, and `additionalProperties` (false, or a schema the other members must meet) are judged now, where
+registration warned of each, so a tool with no parameters that says `additionalProperties: false`, as the spec
+recommends, refuses an argument. Each keyword judges the values of its kind whatever the schema's `type`, as JSON
+Schema has it.
+
+**Three defects in 3.8.4 land ahead of it**, from an independent review of that release. The worst: a libro tool's
+error result carried `structuredContent` its own outputSchema refuses, and the v1 TypeScript SDK's client, which judges
+an error result's too, threw on every one. See the correction notice in 3.8.4.
+
+The stated minimum cyrius (6.7.13) is unchanged.
+
+### Added
+
+- **The counting keywords, judged** (core, `src/schema.cyr`): `minLength` and `maxLength`, counted in characters as
+  JSON Schema counts them (code points: a surrogate pair is one, an escape is one); `minItems` and `maxItems`;
+  `minProperties` and `maxProperties`; `exclusiveMinimum` and `exclusiveMaximum`, compared exactly as `minimum` and
+  `maximum` are; and `additionalProperties`, `false` refusing any member no property names and a schema judging them,
+  at the root of an inputSchema given as JSON and at every object below. Beside `patternProperties` it is not judged,
+  since which members it covers turns on patterns bote does not match, and registration warns of it there
+  (`additionalProperties beside patternProperties`). Each comes off `BOTE_UNENFORCED`, so registration no longer warns
+  of it. A violation reads `v.b: additional property not allowed`, `shorter than minLength`, `longer than maxLength`,
+  `fewer items than minItems`, `more items than maxItems`, `fewer properties than minProperties`,
+  `more properties than maxProperties`, `not greater than exclusiveMinimum`, `not less than exclusiveMaximum`.
+- `prop_min_length`, `prop_max_length`, `prop_min_items`, `prop_max_items`, `prop_exclusive_min_raw`,
+  `prop_exclusive_max_raw`, `compiled_additional`, `compiled_min_properties`, `compiled_max_properties`.
+
+### Changed
+
+- **One walk of a value** (`_sv_value`, `_sv_object`, `_sv_array`, in place of `_validate_value` and
+  `_validate_against`). An object's members are walked once: a key is compared as written with each name where a schema
+  has eight or fewer (`BOTE_SV_LINEAR`), else decoded and looked up in a map, either way giving its property and a slot
+  that each `required` name is met by. A value is judged as the span of the document it is, never copied. A violation's
+  path is a chain of frames on the stack, written out only for a violation. A schema that judges no member does not walk
+  at all. CompiledSchema is 80 B and PropertyDef 144 B.
+- **Each keyword judges the values of its kind, whatever `type` says**, as JSON Schema has it: `{"maxLength":2}`
+  judges a string and passes a number, and `minimum`, `items` and `properties` with no `type` judge the numbers, arrays
+  and objects they meet. Through 3.8.4 they judged nothing without the matching `type`. `enum` is judged on strings
+  only, as before.
+- **A bound that is no number judges nothing.** `{"type":"number","minimum":"x"}` was read as `minimum` 0.
+- **Violations come in the order of the members**, and the `required` names an object misses after them. Through
+  3.8.4 the missing names came first. The messages are the same.
+- A member a schema names, written twice, is judged by its first occurrence, which is what bote hands a handler; one
+  it does not name is judged by `additionalProperties` at every occurrence.
+
+### Fixed
+
+From the review of 3.8.4:
+
+- **A libro tool's error result carried `structuredContent` its own outputSchema refuses.** `{"ok":false,"error":…}`
+  lacks what each success requires, and the v1 TypeScript SDK's client, which judges an error result's
+  `structuredContent`, threw on every libro error. An error result now holds its JSON in its text block and no
+  `structuredContent`, but for `libro_verify`'s on a broken chain, whose `ok`, `code`, `index` and `message` its schema
+  takes. The schemas lose the `error` property.
+- **The listed outputSchema lived in the word the public setter writes.** `tool_def_with_output_schema` called after
+  registration sent its bytes unchecked until the next registration. Registration's copy has a slot of its own now,
+  `tool_def_output_json` (ToolDef 152 B, +144), and the setter's value is read only by the next registration.
+- **`fs_read`'s cut went back without bound** over bytes that are no UTF-8: 65,600 bytes of 0x80 came back as nothing,
+  `bytes` 0. It goes back three bytes at most, the longest a character needs, and cuts at the cap past that.
+
+### Tests
+
+- **`tests/bote_schema_walk.tcyr`**, 79, new: each new keyword at and either side of its bound, characters counted in
+  escapes, UTF-8 and surrogate pairs, a lone surrogate as one, the exclusive bounds past 2^62 and against fractions, a
+  bound that is no number; `additionalProperties` false, true, a schema, beside `patternProperties`, a required name no
+  property names; each keyword by kind with no `type`; paths through keys, indexes and keys again, on both ways of
+  matching a key; keys compared and looked up, escaped, 300 bytes long, holding a NUL, a name's prefix, named twice;
+  the cap of 32; an inputSchema's root and a result through the dispatcher; the WARNs; and the heap: a hundred
+  judgements with thirteen violations each keeping nothing, and a 60 KB string judged without an arena chunk.
+- **`tests/bote_output.tcyr`**, 255, from 249: a setter called after registration changing nothing listed or judged,
+  and no JSON never listed.
+- **`tests/bote_libro_tools.tcyr`**, 103, from 101: seven error results, each with no `structuredContent` or one its
+  schema takes.
+- **`tests/bote_fs_tools.tcyr`**, 78, from 76: a cut through bytes that are no UTF-8, and a four-byte character across
+  the cap.
+- **`fuzz/schema_walk.fcyr`**, new: 20,000 schemas drawn over the keywords bote judges and six values for each, about
+  110,000 judged as a reference on bayan's parse judges them (29,167 passed, 80,324 refused), with no heap. A value naming
+  a key twice is skipped, since bayan refuses one.
+- **32 mutants, 32 killed.** Three survived the first run and showed gaps, now tested: a path of two keys on the
+  looked-up way, a count exactly at `minProperties`, and an escape counted as one character against a tight bound. The
+  fuzz harness kills the three of four it was run against that it can reach; the fourth, a repeated key, it skips.
+
 ## [3.8.4] — 2026-11-03 · Output schemas on bote's own tools
+
+> ⚠ **Corrected at 3.8.5.** These claims below were not true, found by an independent review of this release.
+> - "A failed call is an error result, `{"ok":false,"error":…}`, which neither bote nor a client judges." The v1
+>   TypeScript SDK's client judges an error result's `structuredContent` too, and that object lacks what each success
+>   schema requires, so every libro error (a proof out of range, a retention policy missing its value, libro not set up)
+>   threw in that client instead of coming back. The official client 547 passes were the v2 client's, which skips them.
+> - "The list wrote the consumer's buffer… Registration keeps its own copy." It kept its copy of the outputSchema in the
+>   word `tool_def_with_output_schema` sets, so a setter called after registration sent its bytes unchecked until the next
+>   registration: none listed while calls were still judged, a raw LF, or a schema that is no JSON at all.
 
 **The libro tools and `fs_read` say what their results hold.** Each lists an outputSchema, the dispatcher judges every
 result that is no error by it, and a client can check it: the official client, on the real binary over stdio, checks

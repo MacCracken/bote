@@ -1,0 +1,319 @@
+# bote_schema_walk.tcyr — one walk of a value against its schema (3.8.5): minLength and
+# maxLength in characters, the exclusive bounds, minItems and maxItems, additionalProperties,
+# minProperties and maxProperties, each keyword judging the values of its kind, paths built
+# only for a violation, keys compared and looked up, the cap, the dispatcher, the WARNs, and
+# the heap.
+#
+# Run: cyrius test tests/bote_schema_walk.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+fn h_tool(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+var _ret = 0;
+fn h_ret(args, claims) { return _ret; }
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
+fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+# The violations of `value` against `schema`, judged as a result is, named from "v".
+fn _vs(schema, value) { return _sch_check_value_a(bote_req_begin(), parse_property(schema), "v", value); }
+fn _ok(schema, value) { if (_vs(schema, value) == 0) { return 1; } return 0; }
+fn _v0(schema, value) {
+    var v = _vs(schema, value);
+    if (v == 0) { return "(none)"; }
+    return _cat(vec_get(v, 0), "");
+}
+fn _n(schema, value) {
+    var v = _vs(schema, value);
+    if (v == 0) { return 0; }
+    return vec_len(v);
+}
+# As arguments are judged: from the root, with no name.
+fn _args(schema, value) {
+    var v = compiled_check_a(bote_req_begin(), _compile_object_body(schema), value);
+    if (v == 0) { return "(none)"; }
+    return _cat(vec_get(v, 0), "");
+}
+fn _ase(got, want, name) {
+    if (got == 0 || want == 0) { return assert(got == want, name); }
+    return assert_streq(got, want, name);
+}
+fn _msg(method, params) {
+    return _cat3(_cat3("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"", method, "\",\"params\":{"), params, "}}");
+}
+# The names a, b, ... of n properties, each {"type":"integer"}.
+fn _many(n) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"type\":\"object\",\"properties\":{");
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"p");
+        str_builder_add_int(sb, i);
+        str_builder_add_cstr(sb, "\":{\"type\":\"integer\"}");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "},\"additionalProperties\":false}");
+    return str_data(str_builder_build(sb));
+}
+
+var _lc_all = 0;
+fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    var b = alloc(n + 1);
+    memcpy(b, msg, n);
+    store8(b + n, 0);
+    vec_push(_lc_all, b);
+    return 0;
+}
+fn _lc_begin() { _lc_all = vec_new(); sakshi_set_emit_hook(&_lc_hook); sakshi_set_level(SK_TRACE); return 0; }
+fn _lc_end() { sakshi_clear_emit_hook(); sakshi_set_level(SK_ERROR); return 0; }
+fn _lc_find(sub) {
+    var i = 0;
+    while (i < vec_len(_lc_all)) {
+        if (_has(vec_get(_lc_all, i), sub) == 1) { return vec_get(_lc_all, i); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    sakshi_set_level(SK_ERROR);
+
+    # ---- Strings: minLength and maxLength, in characters ----
+    var sl = "{\"type\":\"string\",\"minLength\":2,\"maxLength\":3}";
+    assert_eq(_ok(sl, "\"ab\""), 1, "length: two passes");
+    assert_eq(_ok(sl, "\"abc\""), 1, "length: three passes");
+    _ase(_v0(sl, "\"a\""), "v: shorter than minLength", "length: one is shorter");
+    _ase(_v0(sl, "\"abcd\""), "v: longer than maxLength", "length: four is longer");
+    assert_eq(_ok(sl, "\"\\u00e9t\\u00e9\""), 1, "length: three escaped characters are three");
+    assert_eq(_ok(sl, "\"été\""), 1, "length: ...and three in UTF-8, six bytes");
+    assert_eq(_ok(sl, "\"\\ud83d\\ude00\\ud83d\\ude00\""), 1, "length: a surrogate pair is one character");
+    assert_eq(_ok(sl, "\"😀😀😀😀\""), 0, "length: four in UTF-8, sixteen bytes, are four");
+    assert_eq(_ok(sl, "\"a\\n\""), 1, "length: an escape is one character");
+    assert_eq(_ok("{\"maxLength\":1}", "\"\\n\""), 1, "length: ...exactly one");
+    assert_eq(_ok(sl, "\"\\ud800\\u0041\""), 1, "length: a lone surrogate is one, as a validator counts it");
+    assert_eq(_ok("{\"maxLength\":0}", "\"\""), 1, "length: maxLength 0 takes the empty string");
+
+    # ---- Numbers: exclusive bounds ----
+    var xb = "{\"type\":\"number\",\"exclusiveMinimum\":0,\"exclusiveMaximum\":10}";
+    assert_eq(_ok(xb, "5"), 1, "exclusive: inside passes");
+    _ase(_v0(xb, "0"), "v: not greater than exclusiveMinimum", "exclusive: the minimum itself is refused");
+    _ase(_v0(xb, "10"), "v: not less than exclusiveMaximum", "exclusive: the maximum itself is refused");
+    assert_eq(_ok(xb, "0.0001"), 1, "exclusive: just above passes");
+    assert_eq(_ok(xb, "9.99e0"), 1, "exclusive: just below, with an exponent, passes");
+    assert_eq(_ok(xb, "-0"), 0, "exclusive: -0 is 0");
+    assert_eq(_ok("{\"exclusiveMinimum\":4611686018427387904}", "4611686018427387905"), 1, "exclusive: compared exactly past 2^62");
+    assert_eq(_ok("{\"exclusiveMinimum\":4611686018427387904}", "4611686018427387904"), 0, "exclusive: ...and equal refused");
+    assert_eq(_ok("{\"type\":\"integer\",\"exclusiveMinimum\":2.5}", "2"), 0, "exclusive: an integer under a fractional bound");
+    assert_eq(_ok("{\"type\":\"integer\",\"exclusiveMinimum\":2.5}", "3"), 1, "exclusive: ...and over it");
+    assert_eq(_ok("{\"type\":\"number\",\"minimum\":\"x\"}", "-5"), 1, "bounds: a minimum that is no number judges nothing (it was read as 0)");
+
+    # ---- Arrays: minItems and maxItems ----
+    var ai = "{\"type\":\"array\",\"minItems\":1,\"maxItems\":2,\"items\":{\"type\":\"integer\"}}";
+    assert_eq(_ok(ai, "[1]"), 1, "items: one passes");
+    assert_eq(_ok(ai, "[1,2]"), 1, "items: two pass");
+    _ase(_v0(ai, "[]"), "v: fewer items than minItems", "items: none are too few");
+    _ase(_v0(ai, "[1,2,3]"), "v: more items than maxItems", "items: three are too many");
+    _ase(_v0(ai, "[1,\"x\"]"), "v[1]: expected integer", "items: an element named by its index");
+    assert_eq(_n(ai, "[\"a\",\"b\",\"c\"]"), 4, "items: every element judged, and the count too");
+
+    # ---- Objects: additionalProperties, minProperties, maxProperties ----
+    var ap = "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}},\"additionalProperties\":false}";
+    assert_eq(_ok(ap, "{\"a\":1}"), 1, "additional: a named member passes");
+    _ase(_v0(ap, "{\"a\":1,\"b\":2}"), "v.b: additional property not allowed", "additional: false refuses another, by its name");
+    _ase(_v0(ap, "{\"\\u0061\":1,\"\\u0062\":2}"), "v.b: additional property not allowed", "additional: keys read as they decode, named as they decode");
+    assert_eq(_ok("{\"type\":\"object\",\"additionalProperties\":true}", "{\"z\":1}"), 1, "additional: true takes anything");
+    var aps = "{\"type\":\"object\",\"properties\":{\"a\":{}},\"additionalProperties\":{\"type\":\"string\"}}";
+    assert_eq(_ok(aps, "{\"a\":1,\"b\":\"x\"}"), 1, "additional: a schema judges the rest");
+    _ase(_v0(aps, "{\"a\":1,\"b\":2}"), "v.b: expected string", "additional: ...and names what fails it");
+    assert_eq(_ok("{\"type\":\"object\",\"patternProperties\":{\"^x\":{}},\"additionalProperties\":false}", "{\"xa\":1,\"b\":2}"), 1, "additional: beside patternProperties not judged");
+    var rq = "{\"type\":\"object\",\"required\":[\"r\"],\"additionalProperties\":false}";
+    _ase(_v0(rq, "{\"r\":1}"), "v.r: additional property not allowed", "additional: a required name no property names is still additional");
+    var mp = "{\"type\":\"object\",\"minProperties\":1,\"maxProperties\":2}";
+    _ase(_v0(mp, "{}"), "v: fewer properties than minProperties", "counts: none is too few");
+    assert_eq(_ok(mp, "{\"a\":1,\"b\":2}"), 1, "counts: two pass");
+    assert_eq(_ok(mp, "{\"a\":1}"), 1, "counts: one, the minimum, passes");
+    _ase(_v0(mp, "{\"a\":1,\"b\":2,\"c\":3}"), "v: more properties than maxProperties", "counts: three are too many");
+    _ase(_args(ap, "{\"a\":1,\"x\":2}"), "x: additional property not allowed", "additional: an argument named from the root");
+
+    # ---- Each keyword judges the values of its kind, whatever the type ----
+    assert_eq(_ok("{\"maxLength\":2}", "12345"), 1, "kinds: maxLength passes a number");
+    assert_eq(_ok("{\"maxLength\":2}", "\"abc\""), 0, "kinds: ...and judges a string with no type said");
+    assert_eq(_ok("{\"minimum\":3}", "\"a\""), 1, "kinds: minimum passes a string");
+    assert_eq(_ok("{\"minimum\":3}", "2"), 0, "kinds: ...and judges a number (through 3.8.4 an untyped minimum judged nothing)");
+    assert_eq(_ok("{\"items\":{\"type\":\"string\"}}", "[1]"), 0, "kinds: items with no type judges an array");
+    assert_eq(_ok("{\"properties\":{\"a\":{\"type\":\"string\"}}}", "{\"a\":1}"), 0, "kinds: properties with no type judge an object");
+    assert_eq(_ok("{\"properties\":{\"a\":{\"type\":\"string\"}}}", "7"), 1, "kinds: ...and pass what is no object");
+    assert_eq(_ok("{\"type\":\"string\",\"maxItems\":0}", "\"x\""), 1, "kinds: an array keyword passes a string");
+
+    # ---- Paths, built only for a violation ----
+    var deep = "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"object\",\"properties\":{\"b\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"c\":{\"type\":\"integer\"}},\"required\":[\"d\"]}}}}}}";
+    var dv = _vs(deep, "{\"a\":{\"b\":[{\"c\":1,\"d\":1},{\"c\":\"x\"}]}}");
+    assert(dv != 0 && vec_len(dv) == 2, "paths: two violations");
+    if (dv != 0 && vec_len(dv) == 2) {
+        _ase(vec_get(dv, 0), "v.a.b[1].c: expected integer", "paths: a key below an index below keys");
+        _ase(vec_get(dv, 1), "v.a.b[1]: missing required field: d", "paths: a required name named from its object");
+    }
+    _ase(_v0("{\"type\":\"object\"}", "[]"), "v: expected object", "paths: the root");
+    _ase(_v0("{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}}}}", "[{\"id\":1}]"), "v[0].id: expected string", "paths: an index at the root");
+    _ase(_args("{\"type\":\"object\",\"required\":[\"x\"]}", "{}"), "missing required field: x", "paths: an argument's required name, bare");
+
+    # ---- Keys: compared as written with few names, looked up with many ----
+    assert_eq(_ok("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}", "{\"\\u0061\":\"x\"}"), 0, "keys: an escaped key meets its property (few names)");
+    var m9 = _many(9);
+    assert_eq(_ok(m9, "{\"p0\":1,\"p8\":2}"), 1, "keys: nine names, looked up");
+    _ase(_v0(m9, "{\"p\\u0038\":\"x\"}"), "v.p8: expected integer", "keys: an escaped key meets its property (many names)");
+    _ase(_v0(m9, "{\"q\":1}"), "v.q: additional property not allowed", "keys: ...and one no property names");
+    var m9n = _cat3("{\"type\":\"object\",\"properties\":{\"p0\":", m9, ",\"p1\":{},\"p2\":{},\"p3\":{},\"p4\":{},\"p5\":{},\"p6\":{},\"p7\":{},\"p8\":{}}}");
+    _ase(_v0(m9n, "{\"p0\":{\"p8\":\"x\"}}"), "v.p0.p8: expected integer", "keys: a path of two keys looked up, joined with a dot");
+    var m8 = _many(8);
+    _ase(_v0(m8, "{\"p\\u0037\":\"x\"}"), "v.p7: expected integer", "keys: eight names, compared, and named as they decode");
+    _ase(_v0(m8, "{\"q\\u0071\":1}"), "v.qq: additional property not allowed", "keys: ...an additional one too");
+    var lk = str_builder_new();
+    str_builder_add_cstr(lk, "{\"type\":\"object\",\"properties\":{\"");
+    var li = 0;
+    while (li < 300) { str_builder_add_cstr(lk, "k"); li = li + 1; }
+    str_builder_add_cstr(lk, "\":{\"type\":\"integer\"}},\"additionalProperties\":false}");
+    var lks = str_data(str_builder_build(lk));
+    var lv = str_builder_new();
+    str_builder_add_cstr(lv, "{\"\\u006b");
+    li = 1;
+    while (li < 300) { str_builder_add_cstr(lv, "k"); li = li + 1; }
+    str_builder_add_cstr(lv, "\":\"x\"}");
+    assert(_has(_v0(lks, str_data(str_builder_build(lv))), "expected integer") == 1, "keys: a 300-byte key written with an escape meets its property");
+    assert_eq(_ok(ap, "{\"a\\u0000\":1}"), 0, "keys: a key that decodes to hold a NUL names nothing, so is additional");
+    _ase(_v0(m9, "{\"p0\\u0000\":1}"), "v.p0: additional property not allowed", "keys: ...and with many names, looked up, where it decoded to p0 cut at the NUL");
+    _ase(_v0(m8, "{\"p\":1}"), "v.p: additional property not allowed", "keys: a key that is a name's prefix is not that name");
+    assert_eq(_ok("{\"type\":\"object\",\"required\":[\"a\\u0000b\"]}", "{}"), 0, "keys: a required name holding a NUL, never met, though nothing else is judged");
+    var rp = "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}";
+    assert_eq(_ok(rp, "{\"a\":1,\"a\":\"x\"}"), 1, "keys: a member named twice judged by its first, as bote reads it");
+    assert_eq(_ok(rp, "{\"a\":\"x\",\"a\":1}"), 0, "keys: ...whichever the first is");
+
+    # ---- At most 32 violations, as before ----
+    var many_bad = str_builder_new();
+    str_builder_add_cstr(many_bad, "[");
+    li = 0;
+    while (li < 100) { if (li > 0) { str_builder_add_cstr(many_bad, ","); } str_builder_add_cstr(many_bad, "\"x\""); li = li + 1; }
+    str_builder_add_cstr(many_bad, "]");
+    assert_eq(_n("{\"items\":{\"type\":\"integer\"}}", str_data(str_builder_build(many_bad))), 32, "cap: thirty-two of a hundred");
+
+    # ---- Through the dispatcher: an inputSchema's root, and a result ----
+    var d = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(d, tool_def_new("t_root", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"additionalProperties\":false,\"maxProperties\":1}")), &h_tool);
+    var cr = codec_process_message(_msg("tools/call", "\"name\":\"t_root\",\"arguments\":{\"a\":\"x\",\"b\":1}"), d, 0);
+    assert(_has(cr, "b: additional property not allowed") == 1 && _has(cr, "more properties than maxProperties") == 1, "dispatch: an inputSchema's root additionalProperties and maxProperties judged");
+    assert(_has(codec_process_message(_msg("tools/call", "\"name\":\"t_root\",\"arguments\":{\"a\":\"x\"}"), d, 0), "\"isError\":true") == 0, "dispatch: ...and a call that keeps them served");
+    dispatcher_register_tool(d, tool_def_with_output_schema(tool_def_new("t_out", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"integer\"}},\"additionalProperties\":false}"), &h_ret);
+    _ret = "{\"content\":[],\"structuredContent\":{\"n\":1,\"extra\":2}}";
+    assert(_has(codec_process_message(_msg("tools/call", "\"name\":\"t_out\",\"arguments\":{}"), d, 0), "structuredContent.extra: additional property not allowed") == 1, "dispatch: a result's additional member refused");
+
+    # ---- Registration warns of what it still does not judge ----
+    _lc_begin();
+    var wd = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_now", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"additionalProperties\":false,\"minProperties\":1,\"maxProperties\":3,\"properties\":{\"s\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":2},\"a\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":2},\"n\":{\"type\":\"number\",\"exclusiveMinimum\":0,\"exclusiveMaximum\":1}}}"), &h_ret);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_pat", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"patternProperties\":{\"^x\":{}},\"additionalProperties\":false}"), &h_ret);
+    _lc_end();
+    assert(_lc_find("tool=w_now") == 0, "warn: none for a keyword judged now");
+    assert(_lc_find("tool=w_pat property=outputSchema keyword=\"additionalProperties beside patternProperties\"") != 0, "warn: additionalProperties beside patternProperties");
+    assert(_lc_find("tool=w_pat property=outputSchema keyword=patternProperties") != 0, "warn: ...and patternProperties");
+
+    # ---- The heap: judging allocates on the arena only ----
+    var hs = parse_property(_many(12));
+    var hsb = str_builder_new();
+    str_builder_add_cstr(hsb, "{");
+    li = 0;
+    while (li < 12) {
+        if (li > 0) { str_builder_add_cstr(hsb, ","); }
+        str_builder_add_cstr(hsb, "\"p");
+        str_builder_add_int(hsb, li);
+        str_builder_add_cstr(hsb, "\":\"bad\"");
+        li = li + 1;
+    }
+    str_builder_add_cstr(hsb, ",\"extra\":1}");
+    var hv = str_data(str_builder_build(hsb));
+    _sch_check_value_a(bote_req_begin(), hs, "v", hv);
+    var h0 = alloc_used();
+    li = 0;
+    while (li < 100) { _sch_check_value_a(bote_req_begin(), hs, "v", hv); li = li + 1; }
+    assert_eq(alloc_used() - h0, 0, "heap: a hundred judgements, thirteen violations each, keep nothing");
+    var bigs = str_builder_new();
+    str_builder_add_cstr(bigs, "{\"s\":\"");
+    li = 0;
+    while (li < 60000) { str_builder_add_cstr(bigs, "x"); li = li + 1; }
+    str_builder_add_cstr(bigs, "\"}");
+    var bigv = str_data(str_builder_build(bigs));
+    var bp = parse_property("{\"type\":\"object\",\"properties\":{\"s\":{\"type\":\"string\"}}}");
+    var ba = bote_req_begin();
+    var bm[16];
+    bote_arena_mark(ba, &bm);
+    var before = bote_req_arena_bytes(ba);
+    _sch_check_value_a(ba, bp, "v", bigv);
+    assert_eq(bote_req_arena_bytes(ba), before, "heap: a 60 KB string judged takes no arena chunk (it was copied out)");
+    bote_arena_release(ba, &bm);
+
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit_group(rc);

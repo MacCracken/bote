@@ -136,13 +136,21 @@ fn _lt_result(json, is_error) {
     return str_data(str_builder_build(sb));
 }
 
-# A failed call: {"ok":false,"error":"<msg>"}, as a CallToolResult with isError.
+# A failed call: {"ok":false,"error":"<msg>"} in a text block, as a CallToolResult with
+# isError and no structuredContent (3.8.5). Through 3.8.4 that object was its
+# structuredContent too, which the tool's outputSchema, describing a success, refuses, and a
+# client that judges an error result's structuredContent (the v1 TypeScript SDK's) threw.
 fn _lt_error(msg) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"ok\":false,\"error\":\"");
     _json_emit_escaped(sb, msg);
     str_builder_add_cstr(sb, "\"}");
-    return _lt_result(str_data(str_builder_build(sb)), 1);
+    var json = str_data(str_builder_build(sb));
+    var rb = str_builder_new();
+    str_builder_add_cstr(rb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
+    _json_emit_escaped(rb, json);
+    str_builder_add_cstr(rb, "\"}],\"isError\":true}");
+    return str_data(str_builder_build(rb));
 }
 
 # Emit one entry as a JSON object into sb.
@@ -450,18 +458,19 @@ fn _lt_prop(props, name, json) {
 
 # What each tool's structuredContent holds when it succeeds, its outputSchema (3.8.4): the
 # dispatcher judges every result that is no error by it, and a client can too. A failed
-# call is an error result, its structuredContent {"ok":false,...}, which neither judges.
+# call is an error result with no structuredContent (3.8.5), but for libro_verify's on a
+# broken chain, `ok` false with `code`, `index` and `message`, which its schema allows.
 # Only keywords bote enforces at the root and on its properties, so registration warns
 # of none; a `timestamp` may be null, which only a type array says, below them.
 var BOTE_LIBRO_ENTRY_OS = "{\"type\":\"object\",\"properties\":{\"timestamp\":{\"type\":[\"string\",\"null\"],\"description\":\"When it was recorded, RFC 3339, or null when it holds no time.\"},\"severity\":{\"type\":\"integer\",\"description\":\"0 debug, 1 info, 2 warning, 3 error, 4 critical, 5 security.\"},\"source\":{\"type\":\"string\"},\"action\":{\"type\":\"string\"},\"agent_id\":{\"type\":\"string\",\"description\":\"The agent, or empty when it names none.\"},\"hash\":{\"type\":\"string\",\"description\":\"Its hash, hex.\"}},\"required\":[\"timestamp\",\"severity\",\"source\",\"action\",\"agent_id\",\"hash\"]}";
 
-# An outputSchema: `ok`, then the properties `props` (JSON members, each `"name":{...}`),
-# `required` beside `ok` (each `,"name"`), and `error`, which a failure's result holds.
+# An outputSchema: `ok`, then the properties `props` (JSON members, each `"name":{...}`), and
+# `required` beside `ok` (each `,"name"`).
 fn _lt_os(props, required) {
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\",\"description\":\"true. A failed call is an error result, ok false.\"},");
+    str_builder_add_cstr(sb, "{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\",\"description\":\"true when the call succeeded. A failed call is an error result, with no structuredContent but for libro_verify on a broken chain.\"},");
     str_builder_add_cstr(sb, props);
-    str_builder_add_cstr(sb, ",\"error\":{\"type\":\"string\",\"description\":\"Why the call failed, in an error result.\"}},\"required\":[\"ok\"");
+    str_builder_add_cstr(sb, "},\"required\":[\"ok\"");
     str_builder_add_cstr(sb, required);
     str_builder_add_cstr(sb, "]}");
     return str_data(str_builder_build(sb));

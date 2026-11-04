@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.8.4"; }
+fn _bote_server_version() { return "3.8.5"; }
 
 # ================================================================
 # Tool name validation (project_tool convention)
@@ -383,11 +383,11 @@ fn _dsp_tool_serving(a, d, name, ver, ver_out, has_out, fp_out) {
     bote_reg_read();
     var t = _registry_get_u(dispatcher_registry(d), name);
     if (t != 0) {
-        # A word at a time: the stdlib's memcpy goes a byte at a time, 240 ns for these 144
-        # bytes, which every call paid.
-        var snap = alloc_via(a, 144);
+        # A word at a time: the stdlib's memcpy goes a byte at a time, 240 ns for 144 bytes,
+        # which every call paid.
+        var snap = alloc_via(a, 152);
         var w = 0;
-        while (w < 144) { store64(snap + w, load64(t + w)); w = w + 8; }
+        while (w < 152) { store64(snap + w, load64(t + w)); w = w + 8; }
         t = snap;
     }
     var has = map_has(dispatcher_handlers(d), name);
@@ -878,7 +878,7 @@ fn _dsp_tool_list_room(t) {
     n = n + _dsp_room(tool_def_version(t)) + _dsp_room(tool_def_deprecated(t));
     # The inputSchema as registration kept it (3.8.3), and each form of an outputSchema.
     n = n + _dsp_len(tool_def_input_json(t));
-    var os = tool_def_output_schema(t);
+    var os = tool_def_output_json(t);
     if (os != 0) { n = n + 32 + strlen(os); }
     var ol = tool_def_output_legacy(t);
     if (ol != 0) { n = n + strlen(ol); }
@@ -918,7 +918,7 @@ fn _build_tools_list_result_a(a, reg, profile, modern) {
         _json_emit_str_field(sb, "description", tool_def_description(t));
         str_builder_add_cstr(sb, ",\"inputSchema\":");
         _emit_input_schema(sb, t);
-        var os = tool_def_output_schema(t);
+        var os = tool_def_output_json(t);
         if (os != 0) {
             if (modern == 0 && tool_def_output_legacy(t) != 0) { os = tool_def_output_legacy(t); }
             str_builder_add_cstr(sb, ",\"outputSchema\":");

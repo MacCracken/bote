@@ -276,7 +276,7 @@ fn main() {
     # ---- Arguments, judged by what bote enforces of the schema ----
     assert(_has(_call(d, "j_suite", "{\"contactMethod\":\"fax\"}", 1), "value 'fax' not in enum") == 1, "call: an enum of the suite's schema");
     assert(_has(_call(d, "j_suite", "{\"name\":1}", 0), "name: expected string") == 1, "call: a property's type");
-    assert(_has(_call(d, "j_suite", "{\"name\":\"x\",\"extra\":1}", 0), "\"isError\":true") == 0, "call: additionalProperties is not enforced");
+    assert(_has(_call(d, "j_suite", "{\"name\":\"x\",\"extra\":1}", 0), "extra: additional property not allowed") == 1, "call: additionalProperties false at the root is enforced (3.8.5; it was listed and not judged)");
     assert(_has(_call(d, "j_esc", "{}", 0), "missing required field: p_a") == 1, "call: a required name as it decodes");
     assert(_has(_call(d, "j_esc", "{\"p_a\":1}", 0), "p_a: expected string") == 1, "call: a property named as it decodes");
     assert(_has(_call(d, "j_esc", "{\"p_a\":\"v\"}", 0), "\"isError\":true") == 0, "call: ...met");
@@ -291,7 +291,7 @@ fn main() {
     assert(_lc_find("tool=w_suite property=inputSchema keyword=if") != 0, "warn: if at the root");
     assert(_lc_find("tool=w_suite property=inputSchema keyword=then") != 0, "warn: then");
     assert(_lc_find("tool=w_suite property=inputSchema keyword=else") != 0, "warn: else");
-    assert(_lc_find("tool=w_suite property=inputSchema keyword=additionalProperties") != 0, "warn: additionalProperties at the root");
+    assert(_lc_find("tool=w_suite property=inputSchema keyword=additionalProperties") == 0, "warn: additionalProperties at the root is judged, and warned of no longer (3.8.5)");
     assert(_lc_find("tool=w_suite property=address keyword=$ref") != 0, "warn: a property's $ref");
     assert(_lc_find("tool=w_suite property=inputSchema keyword=anyOf") == 0, "warn: not what sits below a root keyword");
     assert(_lc_find("tool=w_struct property=inputSchema") == 0, "warn: no root for a ToolSchema");
@@ -391,7 +391,7 @@ fn main() {
     var obuf = _cat("{\"type\":\"object\",\"description\":\"out\"}", "");
     var jtool = tool_def_with_output_schema(_jtool("r_copy", jbuf), obuf);
     dispatcher_register_tool(rd, jtool, &h_tool);
-    assert(tool_def_input_json(jtool) != jbuf && tool_def_output_schema(jtool) != obuf, "review: the inputSchema and outputSchema listed are registration's copies");
+    assert(tool_def_input_json(jtool) != jbuf && tool_def_output_json(jtool) != obuf, "review: the inputSchema and outputSchema listed are registration's copies");
     store8(jbuf + 1, 10);
     store8(obuf + 1, 10);
     var cl = _list(rd, 1);

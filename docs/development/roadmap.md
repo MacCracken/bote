@@ -33,7 +33,8 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.5 — JSON Schema coverage, its first bite**, the next item of 3.8.x below: it is large, and goes in pieces.
+**3.8.6 — JSON Schema coverage, its second bite**: type arrays, `const`, `enum` of any value and
+`uniqueItems`, which share one piece of work, JSON value equality (numbers by value, objects in any key order).
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
@@ -42,19 +43,18 @@ stdio's) are each one connection's, and a worker per connection would need a hom
 
 ## 3.8.x — The tool surface
 
-- **JSON Schema coverage.** The 2026-07-28 revision allows any 2020-12 keyword. bote validates a subset and
-  warns at registration about the keywords it advertises and does not enforce: `anyOf`, `oneOf`, `allOf`,
-  `not`, `$ref`, `pattern`, the length and item bounds, `const`, `format` (which the official client
-  enforces), draft-07's array `items`, `additionalItems` and `dependencies`, type arrays and non-string enums,
-  and `additionalProperties`, the root keyword the spec recommends for a tool with no parameters, which an
-  inputSchema given as JSON can say since 3.8.3 and bote lists without judging. Enforce them, with the resource bounds the spec asks for on `$ref` and composition. The warnings cover a
-  schema's root and its properties, not what is nested below them. And judge an object with one pass of the
-  scanner for all of its names: each property and each required name is a scan of its own today, 2.6 µs for an object
-  of three, which an outputSchema now pays on every result as an inputSchema does on every call: since bote's own tools
-  are judged (3.8.4), `libro_export` of 100 entries spends about 1.3 ms of its 2.7 ms on it, and `fs_read` of 64 KB
-  1.25 ms of 4.5, seven passes over the text and a copy of it (`libro_export_100`, `fs_read_64k` in the benches). Name a violation's
-  path only once there is one, below the root too: a path is built today for every array element and every property
-  under the root, violation or not.
+- **JSON Schema coverage.** The 2026-07-28 revision allows any 2020-12 keyword. Since 3.8.5 bote judges a value
+  in one walk, each object's members looked up once, nothing copied out, and a path written only for a violation;
+  and it judges the counting keywords that walk makes cheap: `minLength` / `maxLength`, `minItems` / `maxItems`,
+  `minProperties` / `maxProperties`, the exclusive bounds and `additionalProperties`. It still warns at
+  registration of what it lists and does not judge: `anyOf`, `oneOf`, `allOf`, `not`, `$ref`, `pattern`, `const`,
+  `multipleOf`, `uniqueItems`, `format` (which the official client enforces), `prefixItems`, `contains`,
+  `if` / `then` / `else`, `propertyNames`, `patternProperties` (and `additionalProperties` beside it), the
+  `dependent*` and `unevaluated*` keywords, draft-07's array `items`, `additionalItems` and `dependencies`, type
+  arrays and non-string enums. Enforce them in bites, with the resource bounds the spec asks for on `$ref` and
+  composition. The warnings cover a schema's root and its properties, not what is nested below them. And the
+  repeated-key check over a result's `structuredContent` (3.8.1) is a walk of its own, 240 µs of `libro_export`'s
+  100 entries beside the validator's 280: fold it into the one walk where the schema covers the value.
 - **What a valid tool call still leaves on the heap.** A request costs bote nothing that outlives it, except
   `args` and whatever a handler allocates, because the 2.0 ABI lets a handler keep both. bote's own
   libro, fs and web handlers need not: give them the request arena, and bound the binary. `fs_read` of a

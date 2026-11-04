@@ -1,0 +1,442 @@
+# Fuzz: one walk of a value against its schema (3.8.5) gives the verdict a reference gives.
+#
+# Schemas are drawn from a grammar over what bote judges: a type or none, an enum of
+# strings, minLength and maxLength, minimum, maximum and both exclusive bounds on integers,
+# items, minItems and maxItems, properties, required, additionalProperties (false, true or a
+# schema), minProperties and maxProperties, nested two deep. Values are drawn alike: keys
+# spelled plainly and escaped, some named twice, strings of one to four characters in one
+# to four bytes each, escapes and surrogate pairs among them. The reference judges bayan's
+# parse of both. Exit codes:
+#
+#   10   a value bote passes the reference refuses, or the reverse;
+#   20   the rounds drew fewer than a thousand values passed or a thousand refused;
+#   30   judging left bytes on the heap.
+#
+# A value naming a key twice is drawn and skipped: bayan refuses one, so it cannot be the
+# reference for it, and bote's reading of such a value (its first occurrence where the schema
+# names the key) is what its unit tests check.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+
+
+alloc_init();
+
+var _rng = 2718281828459045235;
+fn _rand() {
+    _rng = _rng ^ (_rng << 13);
+    _rng = _rng ^ (_rng >> 7);
+    _rng = _rng ^ (_rng << 17);
+    if (_rng < 0) { return 0 - _rng; }
+    return _rng;
+}
+fn _r(n) { return _rand() % n; }
+
+var _NAMES = 0;
+var _KEYS = 0;
+var _STRS = 0;
+var _ENUMS = 0;
+fn _pools() {
+    _NAMES = vec_new();
+    vec_push(_NAMES, "a"); vec_push(_NAMES, "b"); vec_push(_NAMES, "c"); vec_push(_NAMES, "d");
+    _KEYS = vec_new();
+    vec_push(_KEYS, "a"); vec_push(_KEYS, "b"); vec_push(_KEYS, "c"); vec_push(_KEYS, "d");
+    vec_push(_KEYS, "e"); vec_push(_KEYS, "\\u0061"); vec_push(_KEYS, "\\u0062"); vec_push(_KEYS, "zz");
+    _STRS = vec_new();
+    vec_push(_STRS, "\"\""); vec_push(_STRS, "\"x\""); vec_push(_STRS, "\"ab\""); vec_push(_STRS, "\"abc\"");
+    vec_push(_STRS, "\"abcd\""); vec_push(_STRS, "\"\\u00e9t\\u00e9\""); vec_push(_STRS, "\"\\ud83d\\ude00\"");
+    vec_push(_STRS, "\"a\\nb\""); vec_push(_STRS, "\"é\""); vec_push(_STRS, "\"x\\u0079\""); vec_push(_STRS, "\"日本\"");
+    _ENUMS = vec_new();
+    vec_push(_ENUMS, "\"x\""); vec_push(_ENUMS, "\"ab\""); vec_push(_ENUMS, "\"xy\""); vec_push(_ENUMS, "\"\\u00e9t\\u00e9\"");
+    return 0;
+}
+
+fn _add(a, sb, s) { str_builder_add_cstr_a(a, sb, s); return 0; }
+fn _addi(a, sb, v) { str_builder_add_int_a(a, sb, v); return 0; }
+
+# A member `kw` with a small integer, or with a count from 0 to 3.
+fn _kw_int(a, sb, kw, v, sep) {
+    if (sep == 1) { _add(a, sb, ","); }
+    _add(a, sb, "\"");
+    _add(a, sb, kw);
+    _add(a, sb, "\":");
+    _addi(a, sb, v);
+    return 1;
+}
+
+fn _schema(a, sb, depth) {
+    _add(a, sb, "{");
+    var sep = 0;
+    var t = _r(8);
+    if (depth >= 2 && t >= 5) { t = _r(5); }
+    var tn = 0;
+    if (t == 0) { tn = "string"; }
+    elif (t == 1) { tn = "integer"; }
+    elif (t == 2) { tn = "boolean"; }
+    elif (t == 3) { tn = "null"; }
+    elif (t == 5) { tn = "array"; }
+    elif (t == 6) { tn = "object"; }
+    if (tn != 0) {
+        _add(a, sb, "\"type\":\"");
+        _add(a, sb, tn);
+        _add(a, sb, "\"");
+        sep = 1;
+    }
+    # Keywords of every kind, by chance, whatever the type: each judges the values of its kind.
+    if (t == 0 && _r(3) == 0) {
+        if (sep == 1) { _add(a, sb, ","); }
+        _add(a, sb, "\"enum\":[");
+        var ne = 1 + _r(3);
+        var ei = 0;
+        while (ei < ne) { if (ei > 0) { _add(a, sb, ","); } _add(a, sb, vec_get(_ENUMS, _r(vec_len(_ENUMS)))); ei = ei + 1; }
+        _add(a, sb, "]");
+        sep = 1;
+    }
+    if (_r(4) == 0) { sep = _kw_int(a, sb, "minLength", _r(4), sep); }
+    if (_r(4) == 0) { sep = _kw_int(a, sb, "maxLength", _r(4), sep); }
+    if (_r(5) == 0) { sep = _kw_int(a, sb, "minimum", _r(7) - 3, sep); }
+    if (_r(5) == 0) { sep = _kw_int(a, sb, "maximum", _r(7) - 3, sep); }
+    if (_r(5) == 0) { sep = _kw_int(a, sb, "exclusiveMinimum", _r(7) - 3, sep); }
+    if (_r(5) == 0) { sep = _kw_int(a, sb, "exclusiveMaximum", _r(7) - 3, sep); }
+    if (_r(5) == 0) { sep = _kw_int(a, sb, "minItems", _r(4), sep); }
+    if (_r(5) == 0) { sep = _kw_int(a, sb, "maxItems", _r(4), sep); }
+    if (depth < 2 && (t == 5 || _r(6) == 0)) {
+        if (sep == 1) { _add(a, sb, ","); }
+        _add(a, sb, "\"items\":");
+        _schema(a, sb, depth + 1);
+        sep = 1;
+    }
+    if (depth < 2 && (t == 6 || _r(6) == 0)) {
+        var np = _r(4);
+        if (np > 0) {
+            if (sep == 1) { _add(a, sb, ","); }
+            _add(a, sb, "\"properties\":{");
+            var used = 0;
+            var pi = 0;
+            while (pi < np) {
+                var nm = _r(4);
+                if ((used & (1 << nm)) == 0) {
+                    if (used != 0) { _add(a, sb, ","); }
+                    used = used | (1 << nm);
+                    _add(a, sb, "\"");
+                    _add(a, sb, vec_get(_NAMES, nm));
+                    _add(a, sb, "\":");
+                    _schema(a, sb, depth + 1);
+                }
+                pi = pi + 1;
+            }
+            _add(a, sb, "}");
+            sep = 1;
+        }
+        if (_r(2) == 0) {
+            if (sep == 1) { _add(a, sb, ","); }
+            _add(a, sb, "\"required\":[");
+            var nr = 1 + _r(2);
+            var rused = 0;
+            var rfirst = 1;
+            var ri = 0;
+            while (ri < nr) {
+                var rn = _r(5);
+                if ((rused & (1 << rn)) == 0) {
+                    rused = rused | (1 << rn);
+                    if (rfirst == 0) { _add(a, sb, ","); }
+                    rfirst = 0;
+                    if (rn == 4) { _add(a, sb, "\"e\""); }
+                    else { _add(a, sb, "\""); _add(a, sb, vec_get(_NAMES, rn)); _add(a, sb, "\""); }
+                }
+                ri = ri + 1;
+            }
+            _add(a, sb, "]");
+            sep = 1;
+        }
+        var ap = _r(5);
+        if (ap == 1 || ap == 2 || ap == 3) {
+            if (sep == 1) { _add(a, sb, ","); }
+            _add(a, sb, "\"additionalProperties\":");
+            if (ap == 1) { _add(a, sb, "false"); }
+            elif (ap == 2) { _add(a, sb, "true"); }
+            else { _add(a, sb, "{\"type\":\"integer\",\"maximum\":2}"); }
+            sep = 1;
+        }
+        if (_r(5) == 0) { sep = _kw_int(a, sb, "minProperties", _r(4), sep); }
+        if (_r(5) == 0) { sep = _kw_int(a, sb, "maxProperties", _r(4), sep); }
+    }
+    _add(a, sb, "}");
+    return 0;
+}
+
+fn _value(a, sb, depth) {
+    var r = _r(10);
+    if (depth >= 3 && r >= 7) { r = _r(7); }
+    if (r <= 1) { _add(a, sb, vec_get(_STRS, _r(vec_len(_STRS)))); return 0; }
+    if (r <= 3) { _addi(a, sb, _r(9) - 4); return 0; }
+    if (r == 4) { if (_r(2) == 0) { _add(a, sb, "true"); } else { _add(a, sb, "false"); } return 0; }
+    if (r == 5) { _add(a, sb, "null"); return 0; }
+    if (r == 6) { _add(a, sb, "1.5"); return 0; }
+    if (r == 7) {
+        _add(a, sb, "[");
+        var n = _r(5);
+        var i = 0;
+        while (i < n) { if (i > 0) { _add(a, sb, ","); } _value(a, sb, depth + 1); i = i + 1; }
+        _add(a, sb, "]");
+        return 0;
+    }
+    _add(a, sb, "{");
+    var m = _r(5);
+    var j = 0;
+    while (j < m) {
+        if (j > 0) { _add(a, sb, ","); }
+        _add(a, sb, "\"");
+        _add(a, sb, vec_get(_KEYS, _r(vec_len(_KEYS))));
+        _add(a, sb, "\":");
+        _value(a, sb, depth + 1);
+        j = j + 1;
+    }
+    _add(a, sb, "}");
+    return 0;
+}
+
+# ---- The reference, on bayan's trees ----
+
+fn _s_is(s, lit) {
+    if (s == 0) { return 0; }
+    if (str_len(s) != strlen(lit)) { return 0; }
+    return memeq(str_data(s), lit, strlen(lit));
+}
+fn _s_eq(x, y) {
+    if (str_len(x) != str_len(y)) { return 0; }
+    return memeq(str_data(x), str_data(y), str_len(x));
+}
+fn _member(v, name) {
+    var i = 0;
+    while (i < bayan_json_v_obj_len(v)) {
+        if (_s_is(bayan_json_v_obj_key(v, i), name) == 1) { return bayan_json_v_obj_val(v, i); }
+        i = i + 1;
+    }
+    return 0;
+}
+fn _int_kw(s, kw) {
+    var m = _member(s, kw);
+    if (m == 0 || bayan_json_v_is_int(m) == 0) { return 0 - 99; }
+    return bayan_json_v_int(m);
+}
+fn _cps(st) {
+    var p = str_data(st);
+    var n = str_len(st);
+    var c = 0;
+    var i = 0;
+    while (i < n) { if ((load8(p + i) & 192) != 128) { c = c + 1; } i = i + 1; }
+    return c;
+}
+fn _is_num(v) {
+    if (bayan_json_v_is_int(v) == 1) { return 1; }
+    return bayan_json_v_is_float(v);
+}
+
+# 1 when the reference finds `inst` valid against `sch`.
+fn _ok(sch, inst) {
+    var t = _member(sch, "type");
+    if (t != 0) {
+        if (_s_is(bayan_json_v_str(t), "string") == 1 && bayan_json_v_is_str(inst) == 0) { return 0; }
+        if (_s_is(bayan_json_v_str(t), "integer") == 1 && bayan_json_v_is_int(inst) == 0) { return 0; }
+        if (_s_is(bayan_json_v_str(t), "boolean") == 1 && bayan_json_v_is_bool(inst) == 0) { return 0; }
+        if (_s_is(bayan_json_v_str(t), "null") == 1 && bayan_json_v_is_null(inst) == 0) { return 0; }
+        if (_s_is(bayan_json_v_str(t), "array") == 1 && bayan_json_v_is_arr(inst) == 0) { return 0; }
+        if (_s_is(bayan_json_v_str(t), "object") == 1 && bayan_json_v_is_obj(inst) == 0) { return 0; }
+    }
+    if (bayan_json_v_is_str(inst) == 1) {
+        var en = _member(sch, "enum");
+        if (en != 0 && t != 0 && _s_is(bayan_json_v_str(t), "string") == 1) {
+            var found = 0;
+            var ei = 0;
+            while (ei < bayan_json_v_arr_len(en)) {
+                if (_s_eq(bayan_json_v_str(bayan_json_v_arr_get(en, ei)), bayan_json_v_str(inst)) == 1) { found = 1; }
+                ei = ei + 1;
+            }
+            if (found == 0) { return 0; }
+        }
+        var cp = _cps(bayan_json_v_str(inst));
+        var mnl = _int_kw(sch, "minLength");
+        if (mnl != 0 - 99 && cp < mnl) { return 0; }
+        var mxl = _int_kw(sch, "maxLength");
+        if (mxl != 0 - 99 && cp > mxl) { return 0; }
+    }
+    if (bayan_json_v_is_int(inst) == 1) {
+        var iv = bayan_json_v_int(inst);
+        var mi = _int_kw(sch, "minimum");
+        if (mi != 0 - 99 && iv < mi) { return 0; }
+        var ma = _int_kw(sch, "maximum");
+        if (ma != 0 - 99 && iv > ma) { return 0; }
+        var xi = _int_kw(sch, "exclusiveMinimum");
+        if (xi != 0 - 99 && iv <= xi) { return 0; }
+        var xa = _int_kw(sch, "exclusiveMaximum");
+        if (xa != 0 - 99 && iv >= xa) { return 0; }
+    }
+    if (bayan_json_v_is_float(inst) == 1) {
+        # 1.5 against small integer bounds.
+        var fmi = _int_kw(sch, "minimum");
+        if (fmi != 0 - 99 && fmi > 1) { return 0; }
+        var fma = _int_kw(sch, "maximum");
+        if (fma != 0 - 99 && fma < 2) { return 0; }
+        var fxi = _int_kw(sch, "exclusiveMinimum");
+        if (fxi != 0 - 99 && fxi > 1) { return 0; }
+        var fxa = _int_kw(sch, "exclusiveMaximum");
+        if (fxa != 0 - 99 && fxa < 2) { return 0; }
+    }
+    if (bayan_json_v_is_arr(inst) == 1) {
+        var it = _member(sch, "items");
+        var n = bayan_json_v_arr_len(inst);
+        if (it != 0) {
+            var k = 0;
+            while (k < n) { if (_ok(it, bayan_json_v_arr_get(inst, k)) == 0) { return 0; } k = k + 1; }
+        }
+        var mni = _int_kw(sch, "minItems");
+        if (mni != 0 - 99 && n < mni) { return 0; }
+        var mxi = _int_kw(sch, "maxItems");
+        if (mxi != 0 - 99 && n > mxi) { return 0; }
+    }
+    if (bayan_json_v_is_obj(inst) == 1) {
+        var props = _member(sch, "properties");
+        var req = _member(sch, "required");
+        var ap = _member(sch, "additionalProperties");
+        var nm = bayan_json_v_obj_len(inst);
+        var j = 0;
+        while (j < nm) {
+            var key = bayan_json_v_obj_key(inst, j);
+            var val = bayan_json_v_obj_val(inst, j);
+            # The first occurrence of a key the schema names; every occurrence of one it does not.
+            var named = 0;
+            var ps = 0;
+            if (props != 0) {
+                var pk = 0;
+                while (pk < bayan_json_v_obj_len(props)) {
+                    if (_s_eq(bayan_json_v_obj_key(props, pk), key) == 1) { named = 1; ps = bayan_json_v_obj_val(props, pk); }
+                    pk = pk + 1;
+                }
+            }
+            if (req != 0) {
+                var rk = 0;
+                while (rk < bayan_json_v_arr_len(req)) {
+                    if (_s_eq(bayan_json_v_str(bayan_json_v_arr_get(req, rk)), key) == 1) { named = 1; }
+                    rk = rk + 1;
+                }
+            }
+            var first = 1;
+            if (named == 1) {
+                var q = 0;
+                while (q < j) { if (_s_eq(bayan_json_v_obj_key(inst, q), key) == 1) { first = 0; } q = q + 1; }
+            }
+            if (first == 1) {
+                if (ps != 0) {
+                    if (_ok(ps, val) == 0) { return 0; }
+                } elif (ap != 0) {
+                    if (bayan_json_v_is_bool(ap) == 1) {
+                        if (bayan_json_v_bool(ap) == 0) { return 0; }
+                    } elif (_ok(ap, val) == 0) { return 0; }
+                }
+            }
+            j = j + 1;
+        }
+        if (req != 0) {
+            var ri = 0;
+            while (ri < bayan_json_v_arr_len(req)) {
+                var rs = bayan_json_v_str(bayan_json_v_arr_get(req, ri));
+                var present = 0;
+                var mk = 0;
+                while (mk < nm) { if (_s_eq(bayan_json_v_obj_key(inst, mk), rs) == 1) { present = 1; } mk = mk + 1; }
+                if (present == 0) { return 0; }
+                ri = ri + 1;
+            }
+        }
+        var mnp = _int_kw(sch, "minProperties");
+        if (mnp != 0 - 99 && nm < mnp) { return 0; }
+        var mxp = _int_kw(sch, "maxProperties");
+        if (mxp != 0 - 99 && nm > mxp) { return 0; }
+    }
+    return 1;
+}
+
+fn main() {
+    sakshi_set_level(SK_ERROR);
+    _pools();
+    var big = bote_req_begin();
+    alloc_via(big, 8388608);
+    var heap = 0;
+    var passed = 0;
+    var refused = 0;
+    var skipped = 0;
+    var round = 0;
+    while (round < 20000) {
+        var sa = default_alloc();
+        var ssb = str_builder_new();
+        _schema(sa, ssb, 0);
+        var sch = str_data(str_builder_build(ssb));
+        var prop = parse_property(sch);
+        var sv = bayan_json_v_parse_buf(sch, strlen(sch));
+        var k = 0;
+        while (k < 6) {
+            var a = bote_req_begin();
+            var vsb = str_builder_new_a(a);
+            _sb_grow_a(a, vsb, 4096);
+            _value(a, vsb, 0);
+            var inst = str_data(str_builder_build_a(a, vsb));
+            var iv = bayan_json_v_parse_buf(inst, strlen(inst));
+            # bayan refuses an object that names a key twice, so it cannot judge that value:
+            # bote's reading of one is its unit tests'.
+            if (iv == 0) { skipped = skipped + 1; k = k + 1; continue; }
+            var want = _ok(sv, iv);
+            var h0 = alloc_used();
+            var got = 0;
+            if (_sch_check_value_a(a, prop, "v", inst) == 0) { got = 1; }
+            heap = heap + alloc_used() - h0;
+            if (got != want) { println(sch); println(inst); println_int(got); return 10; }
+            if (got == 1) { passed = passed + 1; } else { refused = refused + 1; }
+            k = k + 1;
+        }
+        round = round + 1;
+    }
+    if (passed < 1000 || refused < 1000) { println_int(passed); println_int(refused); return 20; }
+    if (heap != 0) { println_int(heap); return 30; }
+    println("schema_walk: every value bayan parses judged as the reference judges it, 0 heap bytes");
+    println_int(passed);
+    println_int(refused);
+    return 0;
+}
+
+var rc = main();
+sys_exit_group(rc);

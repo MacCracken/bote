@@ -163,6 +163,8 @@ fn schema_prop_value(p) { return load64(p + 8); }
 #                    registration (3.8.3)
 #   +136 own_compiled 1 when registration compiled +48, and compiles it again each time (3.8.4);
 #                    0 when the consumer attached it with tool_def_with_compiled
+#   +144 output_json the outputSchema as tools/list sends it, on one line, registration's own
+#                    copy (3.8.5): +80 is the consumer's, which tool_def_with_output_schema sets
 #
 # Profiles are opaque consumer-defined tags (e.g. "security", "web", "full")
 # used to expose curated tool subsets via a `profile` filter on tools/list.
@@ -170,7 +172,7 @@ fn schema_prop_value(p) { return load64(p + 8); }
 # (profiles == 0) is in no profile. See _build_tools_list_result_a in dispatch.
 
 fn tool_def_new(name, description, input_schema) {
-    var d = alloc(144);
+    var d = alloc(152);
     store64(d, name);
     store64(d + 8, description);
     store64(d + 16, input_schema);
@@ -189,6 +191,7 @@ fn tool_def_new(name, description, input_schema) {
     store64(d + 120, 0);
     store64(d + 128, 0);
     store64(d + 136, 0);
+    store64(d + 144, 0);
     return d;
 }
 
@@ -228,6 +231,7 @@ fn tool_def_title(d) { return load64(d + 104); }
 fn tool_def_icons(d) { return load64(d + 112); }
 fn tool_def_display(d) { return load64(d + 120); }
 fn tool_def_input_json(d) { return load64(d + 128); }
+fn tool_def_output_json(d) { return load64(d + 144); }
 
 # Exact-match membership: 1 if `profile` (non-null) is one of the tool's
 # profile tags, else 0. A null profile or an untagged tool returns 0.
@@ -677,7 +681,9 @@ fn _reg_warn_kw(tool, key, kw) {
 # with no parameters is told to say). (3.8.2) `format`, which the official client
 # enforces, and draft-07's `additionalItems` and `dependencies`; an array `items` is a
 # WARN of its own (_reg_warn_schema).
-var BOTE_UNENFORCED = "anyOf oneOf allOf not $ref $dynamicRef $recursiveRef pattern minLength maxLength minItems maxItems const additionalProperties exclusiveMinimum exclusiveMaximum multipleOf uniqueItems minProperties maxProperties prefixItems contains if then else propertyNames patternProperties dependentRequired dependentSchemas unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
+# (3.8.5) minLength, maxLength, minItems, maxItems, minProperties, maxProperties,
+# exclusiveMinimum, exclusiveMaximum and additionalProperties are judged, and no longer here.
+var BOTE_UNENFORCED = "anyOf oneOf allOf not $ref $dynamicRef $recursiveRef pattern const multipleOf uniqueItems prefixItems contains if then else propertyNames patternProperties dependentRequired dependentSchemas unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
 
 # Every WARN the schema `v`, at `key` of tool `tool`, earns: each keyword in `kws` it
 # holds, a type array, a type bote does not know, and an `enum` on a type other than a
@@ -696,6 +702,11 @@ fn _reg_warn_schema(tool, key, v, kws) {
     }
     var it = jsonx_get_raw_a(default_alloc(), v, "items");
     if (it != 0 && load8(it) == 91) { _reg_warn_kw(tool, key, "items as an array"); }
+    # (3.8.5) Which members additionalProperties covers turns on patterns bote does not match,
+    # so beside patternProperties it is not judged.
+    if (jsonx_has(v, "additionalProperties") == 1 && jsonx_has(v, "patternProperties") == 1) {
+        _reg_warn_kw(tool, key, "additionalProperties beside patternProperties");
+    }
     return 0;
 }
 
@@ -1030,7 +1041,10 @@ fn _registry_stage(tool_def, st) {
     store64(tool_def + 64, load64(st));
     store64(tool_def + 48, load64(st + 56));
     store64(tool_def + 136, load64(st + 64));
-    if (load64(st + 40) == 1) { store64(tool_def + 80, load64(st + 8)); }
+    # (3.8.5) The listed form in a slot of registration's own: through 3.8.4 it went in +80,
+    # which tool_def_with_output_schema sets, so a setter called after registration sent its
+    # bytes unchecked, a raw LF or no JSON at all, until the next registration.
+    store64(tool_def + 144, load64(st + 8));
     store64(tool_def + 88, load64(st + 16));
     store64(tool_def + 96, load64(st + 24));
     store64(tool_def + 120, load64(st + 32));

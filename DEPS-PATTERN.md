@@ -300,6 +300,16 @@ a consumer that relied on the first compile sticking, and changed the schema aft
 the schema it registered. bote's own libro tools and `fs_read` list an outputSchema, and
 `fs_read`'s result carries `structuredContent` beside its text block.
 
+(3.8.5) bote judges `additionalProperties`, the length, item and member counts and the
+exclusive bounds, so a schema that says `additionalProperties: false` now refuses an argument
+or a result with a member it does not name, where through 3.8.4 it was listed and not judged;
+and each keyword judges the values of its kind whatever `type` says. Violations come in the
+order of the members. A ToolDef is 152 bytes: the outputSchema `tools/list` sends is
+registration's own (`tool_def_output_json`, +144), and `tool_def_output_schema` gives back what
+the consumer set. A CompiledSchema is 80 bytes and a PropertyDef 144: one made with
+`compiled_new` / `compiled_add_property` / `compiled_set_required` and `prop_new` works as
+before.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`

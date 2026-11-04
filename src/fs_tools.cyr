@@ -268,8 +268,12 @@ fn _fs_read_into(buf, full) {
     if (got > FS_READ_CAP) {
         cut = 1;
         got = FS_READ_CAP;
-        # Not through the middle of a character.
-        while (got > 0 && (load8(buf + got) & 192) == 128) { got = got - 1; }
+        # Not through the middle of a character, which is at most three bytes back: bytes
+        # that are no UTF-8 went back without bound through 3.8.4, and 64 KB of 0x80 came back
+        # as nothing. The escaper writes U+FFFD for such a byte, as for any other.
+        var back = 0;
+        while (back < 3 && got > 0 && (load8(buf + got) & 192) == 128) { got = got - 1; back = back + 1; }
+        if (back == 3 && (load8(buf + got) & 192) == 128) { got = got + 3; }
     }
     var z = 0;
     while (z < got) {

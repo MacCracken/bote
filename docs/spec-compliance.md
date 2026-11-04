@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.8.4 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.8.5 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
 > ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not. Every other table here is against 2025-11-25.
 
@@ -142,14 +142,15 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | Numeric bounds (`minimum`, `maximum`) for number + integer | `prop_min` / `prop_max` | ✅ — exponents read (3.4.8); a fractional value is compared as itself (3.4.15), and a fractional bound is truncated |
 | `integer` per JSON Schema 2020-12 (a zero fractional part counts: `5.0`, `1e2`) | `schema::_sch_num_parse` | ✅ (3.4.8; any `.` was refused before) |
 | Required field check | `compiled_required` | ✅ |
-| Recursive nested object validation | `_validate_against` | ✅ |
+| Recursive nested object validation | `_sv_object` | ✅ (3.8.5) in one walk of its members, each looked up once, and judged where it lies |
 | Array `items` typing | `prop_items` | ✅ |
 | `type` read as it decodes, and `null` | `schema::parse_property` | ✅ (3.8.1) `"obj\u0065ct"` is an object; `null` is judged. Through 3.8.0 both judged nothing |
 | `required` names and string `enum` values compared as they decode | `schema::_sch_str_dec_a` | ✅ (3.8.1) on the schema's side and the value's. Through 3.8.0 `"required":["\u00e9"]` was never met |
 | Multi-violation reporting (collect all, don't fail-fast) | `compiled_validate` returns vec | ✅ |
-| Permissive on extra (unknown) fields | by design | ✅ |
+| Permissive on extra (unknown) fields, unless `additionalProperties` says otherwise | `_sv_object` | ✅ (3.8.5) `additionalProperties` false refuses a member no property names, and a schema judges it; beside `patternProperties` it is not judged, and registration warns |
+| `minLength` / `maxLength` (code points), `minItems` / `maxItems`, `minProperties` / `maxProperties`, `exclusiveMinimum` / `exclusiveMaximum` | `schema::_sv_string`, `_sv_array`, `_sv_object`, `_sv_number` | ✅ (3.8.5); each keyword judges the values of its kind whatever `type` says, as JSON Schema has it |
 | Schema `false` allows nothing | `SCH_NEVER` | ✅ (3.4.15; it allowed anything) |
-| Keywords outside the subset (`anyOf`, `oneOf`, `allOf`, `not`, `$ref`, `pattern`, length and item bounds, `const`, type arrays, non-string enums) | `registry::_reg_warn_unenforced`, (3.8.0) `_reg_warn_output` | 🟡 advertised in `tools/list`, not enforced; a WARN at registration names each (3.4.15), on an outputSchema's root and its properties too (3.8.0). Roadmap 3.8.x |
+| Keywords outside the subset (`anyOf`, `oneOf`, `allOf`, `not`, `$ref`, `pattern`, `const`, `multipleOf`, `uniqueItems`, `format`, `if` / `then` / `else`, `patternProperties`, type arrays, non-string enums, and the rest of `BOTE_UNENFORCED`) | `registry::_reg_warn_unenforced`, (3.8.0) `_reg_warn_output` | 🟡 advertised in `tools/list`, not enforced; a WARN at registration names each (3.4.15), on an outputSchema's root and its properties too (3.8.0). Roadmap 3.8.x |
 | An outputSchema judges a result's `structuredContent`, any JSON value | `schema::_sch_check_value_a` | ✅ (3.8.0) the same subset, from the schema's root: each violation named from `structuredContent` (`structuredContent.temperature: expected number`, `structuredContent[0].id: expected string`). (3.8.1) A key named twice in any object of it is refused, as bote would judge the first and a client reads the last; a key of any length is read as it decodes; an integer is not bounded as an argument is. An outputSchema that repeats a key, has one holding a NUL, or names a dialect other than 2020-12, 2019-09, draft-07 or draft-06 is refused at registration |
 
 ## Session Management

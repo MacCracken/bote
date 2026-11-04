@@ -299,6 +299,27 @@ fn main() {
     fs_tools_register(dispatcher_new(tool_registry_new()));
     _lc_end();
     assert_eq(_lc_count, 0, "structured: registration warns of nothing");
+    # (3.8.5, from the review of 3.8.4) The cut goes back three bytes at most, the longest a
+    # character needs: a run of bytes that are no UTF-8 came back as nothing.
+    var bad = alloc(65601);
+    var bi2 = 0;
+    while (bi2 < 65600) { store8(bad + bi2, 128); bi2 = bi2 + 1; }
+    store8(bad + 65600, 0);
+    var bfd = file_open("build/fst/cont.txt", O_WRONLY | O_CREAT | O_TRUNC, 420);
+    file_write(bfd, bad, 65600);
+    file_close(bfd);
+    var cres = fs_read_handler("{\"path\":\"build/fst/cont.txt\"}", 0);
+    assert(_lc_has(cres, "\"bytes\":65536,\"truncated\":true") == 1, "cut: bytes that are no UTF-8 cut at the cap (they came back as nothing)");
+    var em = alloc(65601);
+    var ej = 0;
+    while (ej < 65534) { store8(em + ej, 120); ej = ej + 1; }
+    store8(em + 65534, 240); store8(em + 65535, 159); store8(em + 65536, 152); store8(em + 65537, 128);
+    ej = 65538;
+    while (ej < 65600) { store8(em + ej, 121); ej = ej + 1; }
+    var efd = file_open("build/fst/emoji.txt", O_WRONLY | O_CREAT | O_TRUNC, 420);
+    file_write(efd, em, 65600);
+    file_close(efd);
+    assert(_lc_has(fs_read_handler("{\"path\":\"build/fst/emoji.txt\"}", 0), "\"bytes\":65534,\"truncated\":true") == 1, "cut: a four-byte character across the cap left out whole");
 
     return assert_summary();
 }

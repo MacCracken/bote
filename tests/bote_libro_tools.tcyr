@@ -75,13 +75,14 @@ fn _scf(r, key) {
     if (v == 0) { return ""; }
     return v;
 }
-# 1 when r is a CallToolResult (content array + structuredContent) whose
-# isError is `want_err` (1: true, 0: absent).
+# 1 when r is a CallToolResult whose isError is `want_err` (1: true, 0: absent): a content
+# array, and structuredContent when it is no error. (3.8.5) An error result has none, but
+# libro_verify's on a broken chain, which its schema allows.
 fn _lt_shape_ok(r, want_err) {
     if (r == 0) { return 0; }
     var c = jsonx_get_raw(r, "content");
     if (c == 0 || load8(c) != 91) { return 0; }
-    if (jsonx_get_raw(r, "structuredContent") == 0) { return 0; }
+    if (want_err == 0 && jsonx_get_raw(r, "structuredContent") == 0) { return 0; }
     var ie = jsonx_get_raw(r, "isError");
     if (want_err == 1) {
         if (ie == 0 || streq(ie, "true") == 0) { return 0; }
@@ -369,8 +370,36 @@ fn main() {
     }
     # A failure is an error result, sent as the tool made it.
     var ofail = codec_process_message(_lt_msg("tools/call", _lt_call_params("libro_proof", "{\"index\":99}"), 1), d, 0);
-    assert(_lc_has(ofail, "\"isError\":true") == 1 && _lc_has(ofail, "\"structuredContent\":{\"ok\":false,\"error\":\"index out of range\"}") == 1,
-      "outputSchema: a failure goes as its error result, judged by nothing");
+    assert(_lc_has(ofail, "\"isError\":true") == 1 && _lc_has(ofail, "index out of range") == 1 && _lc_has(ofail, "structuredContent") == 0,
+      "outputSchema: a failure is an error result with no structuredContent (3.8.5: it carried one its schema refuses)");
+    # Every error result a libro tool sends holds no structuredContent, or one its schema takes:
+    # a client that judges an error result's (the v1 TypeScript SDK's) refused them through 3.8.4.
+    libro_tools_init(chain_new());
+    var errs = vec_new();
+    vec_push(errs, "libro_proof"); vec_push(errs, libro_tool_proof("{\"index\":0}", 0));
+    vec_push(errs, "libro_proof"); vec_push(errs, libro_tool_proof("{}", 0));
+    vec_push(errs, "libro_retention"); vec_push(errs, libro_tool_retention("{\"policy\":\"keep_count\"}", 0));
+    vec_push(errs, "libro_retention"); vec_push(errs, libro_tool_retention("{\"policy\":\"nope\"}", 0));
+    var ebc = chain_new();
+    chain_append(ebc, SEV_INFO, str_from("bote"), str_from("x"), str_from("{}"));
+    chain_append(ebc, SEV_INFO, str_from("bote"), str_from("y"), str_from("{}"));
+    store64(vec_get(load64(ebc), 0) + 32, str_from("tampered"));
+    libro_tools_init(ebc);
+    vec_push(errs, "libro_verify"); vec_push(errs, libro_tool_verify("{}", 0));
+    libro_tools_init(0);
+    vec_push(errs, "libro_query"); vec_push(errs, libro_tool_query("{}", 0));
+    vec_push(errs, "libro_export"); vec_push(errs, libro_tool_export("{}", 0));
+    var eok = 0;
+    var ei = 0;
+    while (ei < vec_len(errs)) {
+        var er = vec_get(errs, ei + 1);
+        var esc = jsonx_get_raw(er, "structuredContent");
+        var eprop = tool_def_output_prop(registry_get(reg, vec_get(errs, ei)));
+        if (_lc_has(er, "\"isError\":true") == 1 && (esc == 0 || _sch_check_value_a(bote_req_begin(), eprop, "structuredContent", esc) == 0)) { eok = eok + 1; }
+        ei = ei + 2;
+    }
+    assert_eq(eok, 7, "outputSchema: seven error results, each holding none or one its schema takes");
+    assert(jsonx_get_raw(vec_get(errs, 9), "structuredContent") != 0, "outputSchema: ...a broken chain's verify keeping the index it names");
     var ovf = chain_new();
     chain_append(ovf, SEV_INFO, str_from("bote"), str_from("x"), str_from("{}"));
     chain_append(ovf, SEV_INFO, str_from("bote"), str_from("y"), str_from("{}"));
