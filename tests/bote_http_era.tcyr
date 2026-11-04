@@ -849,6 +849,13 @@ fn _clauses(k) {
     _t(k, _raw("POST", "", _lb("tools/list")), 404, "", "the session gate still holds for legacy traffic");
     _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"), 202, "", "a legacy notification is 202");
     _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"cursor\":\"a\",\"cursor\":\"b\"}}"), 200, "-32600", "a legacy request naming a key twice (3.8.6)");
+    # (3.8.7, from the 3.8.6 review) Input bote cannot take as a request is an HTTP error on
+    # the legacy path too, as Streamable HTTP has it (a 200 with the error through 3.8.6).
+    _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{\"a\":1,\"a\":2}}"), 400, "-32600", "a legacy notification naming a key twice is a 400");
+    assert(_has(_body, "\"id\":null"), _nm(k, "...its error with no id"));
+    _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"1.0\",\"method\":\"notifications/x\"}"), 400, "-32600", "a legacy notification the codec refuses otherwise is a 400");
+    _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":7,\"id\":8,\"method\":\"tools/list\"}"), 400, "-32600", "an id named twice, answered with no id, is a 400");
+    _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"no/such\"}"), 200, "-32601", "control: an error for a request with an id stays a 200");
     _t(k, _raw("POST", withsid, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"progressToken\":1}}}"), 200, "", "legacy _meta with no version");
     assert(_has(_body, "resultType") == 0, _nm(k, "...is legacy"));
     _t(k, _raw("POST", _cat3("MCP-Protocol-Version: 2025-11-25\r\n", withsid, ""), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2025-11-25\"}}}"), 200, "", "an older revision in both the header and _meta");

@@ -199,6 +199,12 @@ fn _http_handle(config, cfd, buf, n) {
         extra = str_data(str_builder_build_a(bote_req_alloc(), sb));
     }
     if (resp == 0) { return bote_http_send_accepted(cfd, 0); }
+    # (3.8.7, from the 3.8.6 review) Input bote could not take as a request, a refused
+    # notification among it, is an HTTP error, not a 200 (it was a 200 with this body).
+    if (codec_unanswerable(resp) == 1) {
+        _he_refuse_json(&hc, SK_DEBUG, HTTP_BAD_REQUEST, "invalid_request", resp);
+        return 0;
+    }
     sandhi_server_send_response_a(bote_req_alloc(), cfd, HTTP_OK, "OK", "application/json",
       resp, strlen(resp), extra);
     return 0;

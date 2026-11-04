@@ -683,11 +683,12 @@ fn _reg_warn_kw(tool, key, kw) {
 # WARN of its own (_reg_warn_schema).
 # (3.8.5) minLength, maxLength, minItems, maxItems, minProperties, maxProperties,
 # exclusiveMinimum, exclusiveMaximum and additionalProperties are judged, and no longer here.
-var BOTE_UNENFORCED = "anyOf oneOf allOf not $ref $dynamicRef $recursiveRef pattern const multipleOf uniqueItems prefixItems contains if then else propertyNames patternProperties dependentRequired dependentSchemas unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
+# (3.8.7) const and uniqueItems too.
+var BOTE_UNENFORCED = "anyOf oneOf allOf not $ref $dynamicRef $recursiveRef pattern multipleOf prefixItems contains if then else propertyNames patternProperties dependentRequired dependentSchemas unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
 
 # Every WARN the schema `v`, at `key` of tool `tool`, earns: each keyword in `kws` it
-# holds, a type array, a type bote does not know, and an `enum` on a type other than a
-# string, which bote judges for strings only.
+# holds, a type bote does not know, alone or in a type array, and a keyword it judges with a
+# value it cannot judge by.
 fn _reg_warn_schema(tool, key, v, kws) {
     var k = 0;
     while (k < vec_len(kws)) {
@@ -695,10 +696,31 @@ fn _reg_warn_schema(tool, key, v, kws) {
         k = k + 1;
     }
     var ty = jsonx_get_str_dec_a(default_alloc(), v, "type");
-    if (jsonx_has(v, "type") == 1 && ty == 0) { _reg_warn_kw(tool, key, "type array"); }
     if (ty != 0 && _reg_type_known(ty) == 0) { _reg_warn_kw(tool, key, "an unknown type"); }
-    if (jsonx_has(v, "enum") == 1 && (ty == 0 || streq(ty, "string") == 0)) {
-        _reg_warn_kw(tool, key, "enum on a type other than string");
+    # (3.8.7) A type array is judged, its names each a type; one it does not know, or none,
+    # judges nothing for that name.
+    var tr = jsonx_get_raw(v, "type");
+    if (tr != 0 && ty == 0) {
+        if (_sch_first_nonws(tr) != 91) {
+            _reg_warn_kw(tool, key, "type that is no string or array");
+        } else {
+            var tel = _sch_split_array(tr);
+            if (vec_len(tel) == 0) { _reg_warn_kw(tool, key, "an empty type array"); }
+            var tj = 0;
+            var tbad = 0;
+            while (tj < vec_len(tel)) {
+                var tv = vec_get(tel, tj);
+                if (_sch_is_string(tv) == 0 || _reg_type_known(_sch_str_dec_a(default_alloc(), tv)) == 0) { tbad = 1; }
+                tj = tj + 1;
+            }
+            if (tbad == 1) { _reg_warn_kw(tool, key, "a type array naming an unknown type"); }
+        }
+    }
+    var en = jsonx_get_raw(v, "enum");
+    if (en != 0 && _sch_first_nonws(en) != 91) { _reg_warn_kw(tool, key, "enum that is no array"); }
+    var uq = jsonx_get_raw(v, "uniqueItems");
+    if (uq != 0 && streq(uq, "true") == 0 && streq(uq, "false") == 0) {
+        _reg_warn_kw(tool, key, "uniqueItems that is no boolean");
     }
     var it = jsonx_get_raw_a(default_alloc(), v, "items");
     if (it != 0 && load8(it) == 91) { _reg_warn_kw(tool, key, "items as an array"); }

@@ -121,6 +121,57 @@ fn _rep(c, n) {
     return b;
 }
 
+# Members "key":0 for the first `n` lines of the file at `path`, or "r00000"... when 0.
+fn _members_of(path, n) {
+    var sb = str_builder_new();
+    if (path == 0) {
+        var r = 0;
+        while (r < n) {
+            if (r > 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"r");
+            var d = 10000;
+            while (d > 0) { str_builder_add_int(sb, (r / d) % 10); d = d / 10; }
+            str_builder_add_cstr(sb, "\":0");
+            r = r + 1;
+        }
+        return str_data(str_builder_build(sb));
+    }
+    var lo[8];
+    var txt = file_read_whole(path, &lo);
+    var len = load64(&lo);
+    var i = 0;
+    var k = 0;
+    var st = 0;
+    while (i < len && k < n) {
+        if (load8(txt + i) == 10) {
+            if (k > 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"");
+            var kb = alloc(i - st + 1);
+            memcpy(kb, txt + st, i - st);
+            store8(kb + i - st, 0);
+            str_builder_add_cstr(sb, kb);
+            str_builder_add_cstr(sb, "\":0");
+            k = k + 1;
+            st = i + 1;
+        }
+        i = i + 1;
+    }
+    return str_data(str_builder_build(sb));
+}
+# Nanoseconds the key check takes over `m`, the least of three.
+fn _key_ns(m) {
+    var best = 0;
+    var i = 0;
+    while (i < 3) {
+        var t0 = clock_now_ns();
+        _jx_valid_keys_a(bote_req_begin(), m, strlen(m));
+        var t = clock_now_ns() - t0;
+        if (i == 0 || t < best) { best = t; }
+        i = i + 1;
+    }
+    return best;
+}
+
 var _lc_all = 0;
 fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
     var n = msg_len;
@@ -266,6 +317,47 @@ fn main() {
     assert(dr3 != 0 && resp_error_obj(dr3) == 0, "dispatcher_dispatch: control: served");
     assert_eq(_calls, 1, "dispatcher_dispatch: ...by its handler");
 
+
+    # ---- (3.8.7, from the 3.8.6 review) keys a client chooses to share a bucket ----
+    # Each key's unseeded FNV-1a hash shares its low 16 bits with every other's, found offline
+    # by the reviewer; 3.8.6's table hashed with FNV's own basis and indexed by those bits, so
+    # these 5,000 took 209 ms to check against 1.3 ms for 5,000 others.
+    var mcol = _call_msg(_cat3("{", _members_of("tests/fixtures/fnv_low16_collisions.txt", 5000), "}"));
+    var mrnd = _call_msg(_cat3("{", _members_of(0, 5000), "}"));
+    assert_eq(_jx_valid_keys_a(bote_req_begin(), mcol, strlen(mcol)), 1, "flood: the colliding keys are no repeat");
+    var tcol = _key_ns(mcol);
+    var trnd = _key_ns(mrnd);
+    assert(tcol < trnd * 4 + 2000000, "flood: they take no longer than as many other keys (the seed, and the finalizer)");
+    # And neither takes more than a small multiple of the syntax check alone: a table whose keys
+    # all land in a few buckets, whatever the hash, is quadratic for both.
+    var tsyn = 0;
+    var si = 0;
+    while (si < 3) {
+        var s0 = clock_now_ns();
+        jsonx_valid(mrnd, strlen(mrnd));
+        var sd = clock_now_ns() - s0;
+        if (si == 0 || sd < tsyn) { tsyn = sd; }
+        si = si + 1;
+    }
+    assert(trnd < tsyn * 20 + 1000000 && tcol < tsyn * 20 + 1000000, "flood: 5,000 keys of either kind cost a few syntax checks, not a walk of every key per key");
+    var mcol2 = _call_msg(_cat3("{", _members_of("tests/fixtures/fnv_low16_collisions.txt", 5000), ",\"aaaaaa\":1}"));
+    assert(_refused(codec_process_message(mcol2, d, 0), "1"), "flood: ...and the first again among them found");
+
+    # ---- (3.8.7, from the 3.8.6 review) the exact walker's arena ----
+    var eb = str_builder_new();
+    str_builder_add_cstr(eb, "{\"a\\u0062\":[");
+    var ei = 0;
+    while (ei < 18000) { if (ei > 0) { str_builder_add_cstr(eb, ","); } str_builder_add_cstr(eb, "{}"); ei = ei + 1; }
+    str_builder_add_cstr(eb, "]}");
+    var em = str_data(str_builder_build(eb));
+    var ena = bote_req_arena_new();
+    assert_eq(_jx_repeats_n_a(ena, em, strlen(em), 0), 0, "arena: 18,000 empty objects behind an escaped key repeat nothing");
+    assert(bote_req_arena_bytes(ena) < 262144, "arena: ...on less than 256 KB of arena (2.68 MB at 3.8.6)");
+
+    # ---- (3.8.7, from the 3.8.6 review) an id named twice in a message malformed besides ----
+    assert(_has(codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":7,\"id\":8}", d, 0), "\"id\":null") == 1, "envelope: id twice and no method, answered with null");
+    assert(_has(codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":7,\"id\":8,\"method\":5,\"method\":\"ping\"}", d, 0), "\"id\":null") == 1, "envelope: ...and with a method that is no string");
+    assert(_has(codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":7}", d, 0), "\"id\":7") == 1, "envelope: control: one id, echoed");
     # ---- the log ----
     _lc_all = vec_new();
     sakshi_set_emit_hook(&_lc_hook);

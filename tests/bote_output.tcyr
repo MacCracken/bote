@@ -267,11 +267,12 @@ fn main() {
 
     # ---- What registration warns of ----
     _lc_begin();
-    dispatcher_register_tool(d, _tool("t_warn", "{\"type\":\"string\",\"pattern\":\"^a\",\"properties\":{\"n\":{\"type\":\"string\",\"const\":\"x\"},\"k\":{\"type\":[\"string\",\"null\"]}}}"), &h_ret);
+    dispatcher_register_tool(d, _tool("t_warn", "{\"type\":\"string\",\"pattern\":\"^a\",\"properties\":{\"n\":{\"type\":\"number\",\"multipleOf\":2,\"const\":4},\"k\":{\"type\":[\"string\",\"null\"]}}}"), &h_ret);
     _lc_end();
     assert(_has(_lc_find("property=outputSchema keyword=pattern"), "schema keyword not enforced") == 1, "warn: a keyword at the root");
-    assert(_lc_find("property=outputSchema.n keyword=const") != 0, "warn: a keyword on a property");
-    assert(_lc_find("property=outputSchema.k keyword=\"type array\"") != 0, "warn: a type array");
+    assert(_lc_find("property=outputSchema.n keyword=multipleOf") != 0, "warn: a keyword on a property");
+    assert(_lc_find("keyword=const") == 0, "warn: const is judged, and warned of no longer (3.8.7)");
+    assert(_lc_find("property=outputSchema.k keyword=") == 0, "warn: a type array is judged, and warned of no longer (3.8.7)");
 
     # ---- tools/list ----
     var ll = _list(d, 0);
@@ -491,7 +492,7 @@ fn main() {
     dispatcher_register_tool(rod, tool_def_new("t_kwin", "d", schema_new("object", kp, vec_new())), &h_ret);
     _lc_end();
     assert(_lc_find("keyword=additionalProperties") == 0, "review: additionalProperties is judged, and warned of no longer (3.8.5)");
-    assert(_lc_find("property=outputSchema.i keyword=\"enum on a type other than string\"") != 0, "review: an enum on an integer is warned of");
+    assert(_lc_find("enum on a type other than string") == 0, "review: an enum on an integer is judged, and warned of no longer (3.8.7)");
     assert(_lc_find("property=outputSchema.u keyword=\"an unknown type\"") != 0, "review: an unknown type is warned of");
     assert(_lc_find("tool=t_kwin property=m keyword=exclusiveMinimum") == 0, "review: ...and exclusiveMinimum on the input side (3.8.5)");
 

@@ -449,6 +449,30 @@ fn main() {
     var vb2 = _sch_check_value_a(bote_req_arena_new(), bigp, "v", itbad2);
     assert(vb2 != 0 && vec_len(vb2) == 3, "seen: three objects with a violation each, three violations");
     assert(vb2 != 0 && vec_len(vb2) == 3 && streq(vec_get(vb2, 0), "v[0].q0: expected integer") == 1 && streq(vec_get(vb2, 1), "v[1].q1: expected integer") == 1 && streq(vec_get(vb2, 2), "v[2].q2: expected integer") == 1, "seen: ...each as it was written");
+    # (3.8.7, from the 3.8.6 review) Through the heap forms a mark and a release do nothing, so
+    # the table is a bitset with 512 slots on the stack: 18,000 objects against 80 properties
+    # kept 1.58 MB of heap a call through compiled_validate at 3.8.6.
+    var h80 = str_builder_new();
+    str_builder_add_cstr(h80, "{\"type\":\"object\",\"properties\":{\"list\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{");
+    li = 0;
+    while (li < 80) {
+        if (li > 0) { str_builder_add_cstr(h80, ","); }
+        str_builder_add_cstr(h80, "\"q");
+        str_builder_add_int(h80, li);
+        str_builder_add_cstr(h80, "\":{\"type\":\"integer\"}");
+        li = li + 1;
+    }
+    str_builder_add_cstr(h80, "}}}}}");
+    var c80 = _compile_object_body(str_data(str_builder_build(h80)));
+    var v80 = _cat3("{\"list\":", itv, "}");
+    assert_eq(vec_len(compiled_validate(c80, v80)), 0, "seen: 18,000 objects against 80 properties pass through compiled_validate");
+    var hb0 = alloc_used();
+    li = 0;
+    while (li < 5) { compiled_validate(c80, v80); li = li + 1; }
+    assert((alloc_used() - hb0) / 5 < 4096, "seen: ...and keep what its answer takes, no table an object (1.58 MB a call at 3.8.6)");
+    var v80b = _cat("{\"list\":[{\"q79\":\"x\"},{\"q0\":1,\"q79\":2}", ",{\"q5\":\"y\"}]}");
+    var r80 = compiled_validate(c80, v80b);
+    assert(vec_len(r80) == 2 && streq(vec_get(r80, 0), "list[0].q79: expected integer") == 1 && streq(vec_get(r80, 1), "list[2].q5: expected integer") == 1, "seen: the bits find the last slot and others, and each object's own");
 
     return assert_summary();
 }

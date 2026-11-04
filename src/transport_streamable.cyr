@@ -501,6 +501,12 @@ fn _strm_handle_post(cfd, buf, n, config) {
         extra = str_data(str_builder_build_a(bote_req_alloc(), sb));
     }
     if (resp == 0) { return bote_http_send_accepted(cfd, 0); }
+    # (3.8.7, from the 3.8.6 review) Input bote could not take as a request, a refused
+    # notification among it, is an HTTP error, not a 200 (it was a 200 with this body).
+    if (codec_unanswerable(resp) == 1) {
+        _he_refuse_json(&hc, SK_DEBUG, HTTP_BAD_REQUEST, "invalid_request", resp);
+        return 0;
+    }
     # Piggyback: when the client accepts SSE and its session has pending
     # notifications, answer with text/event-stream — the JSON-RPC response
     # (id-less frame) followed by the drained notifications — so a client that

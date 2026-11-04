@@ -405,6 +405,19 @@ fn _jx_rep_value(a, v, n, i, nul) {
         return i;
     }
     if (c != 123) { return _jx_skip_value(v, n, i); }
+    # What an object's walk takes of the arena, its keys and their decodings, is given back
+    # when it ends (3.8.7, from the 3.8.6 review): kept to the end of the whole walk, a vec
+    # for every object, empty ones too, made one escaped key in 54 KB of `[{},{},...]` grow
+    # the arena by 2.68 MB, for the life of the thread.
+    var om[16];
+    bote_arena_mark(a, &om);
+    var r = _jx_rep_object(a, v, n, i, nul);
+    bote_arena_release(a, &om);
+    return r;
+}
+
+# _jx_rep_value for the object at v[i].
+fn _jx_rep_object(a, v, n, i, nul) {
     # Each key as it decodes, a pointer and a length: into `v` where it has no escape.
     var ks = vec_new_a(a);
     i = _jx_skip_ws(v, n, i + 1);
@@ -443,8 +456,45 @@ fn _jx_rep_value(a, v, n, i, nul) {
     return i;
 }
 
+# A seed for every table bote hashes a client's keys or values into (3.8.7): made the first
+# time one is, from the clock, and published by compare-and-swap, so every thread hashes
+# with the same one. With a basis a client knows it can choose keys that land in one bucket,
+# since the index is the hash's low bits and a match is found by trying, and a lookup that
+# should be one look walks every key before it: 10,000 such keys in one object are 50
+# million compares. Through 3.8.6 _jx_rep_keys used FNV's own basis.
+var _jx_seed = 0;
+fn _jx_hash_seed() {
+    var s = atomic_load(&_jx_seed);
+    if (s != 0) { return s; }
+    var fresh = _jx_mix(clock_now_ns() ^ (&s)) | 1;
+    if (atomic_cas(&_jx_seed, 0, fresh) == 1) { return fresh; }
+    return atomic_load(&_jx_seed);
+}
+
+# A 64-bit finalizer (MurmurHash3's fmix64), the shifts logical: every bit of `x` moves the
+# low bits a table index is taken from.
+fn _jx_mix(x) {
+    x = x ^ ((x >> 33) & 2147483647);
+    x = x * (0 - 49064778989728563);
+    x = x ^ ((x >> 33) & 2147483647);
+    x = x * (0 - 4265267296055464877);
+    x = x ^ ((x >> 33) & 2147483647);
+    return x;
+}
+
+# FNV-1a over the n bytes at p from `h`, finalized: a seeded hash of them.
+fn _jx_hash_bytes(h, p, n) {
+    var b = 0;
+    while (b < n) {
+        h = (h ^ load8(p + b)) * 1099511628211;
+        b = b + 1;
+    }
+    return _jx_mix(h);
+}
+
 # 1 when two of the keys in `ks` (pointer, length, pointer, length, ...) are the same.
-# A table on `a` past eight of them, so a large object costs one look per key.
+# A table on `a` past eight of them, so a large object costs one look per key, the keys
+# hashed with the process's seed (3.8.7).
 fn _jx_rep_keys(a, ks) {
     var cnt = vec_len(ks) / 2;
     if (cnt < 2) { return 0; }
@@ -465,16 +515,11 @@ fn _jx_rep_keys(a, ks) {
     while (size < cnt * 2) { size = size * 2; }
     var t = alloc_via(a, size * 8);
     memset(t, 0, size * 8);
+    var seed = _jx_hash_seed();
     while (j < cnt) {
         var kp = vec_get(ks, j * 2);
         var kl = vec_get(ks, j * 2 + 1);
-        var h = 0 - 3750763034362895579;
-        var b = 0;
-        while (b < kl) {
-            h = (h ^ load8(kp + b)) * 1099511628211;
-            b = b + 1;
-        }
-        h = h & (size - 1);
+        var h = _jx_hash_bytes(seed, kp, kl) & (size - 1);
         while (load64(t + h * 8) != 0) {
             var e = load64(t + h * 8) - 1;
             if (vec_get(ks, e * 2 + 1) == kl && memeq(vec_get(ks, e * 2), kp, kl) == 1) { return 1; }
@@ -813,7 +858,11 @@ fn _jx_valid_literal(buf, len, i, lit, n) {
 # returned. *kc becomes 1 when the key is one kept, and 2 past BOTE_KEYS_INLINE keys, when
 # only the exact walker (_jx_repeats_n_a) can say, as for a key holding an escape or a byte
 # past ASCII, which must be read as it decodes (_jx_valid_key_string finds those).
-var BOTE_KEYS_INLINE = 16;
+# BOTE_KEYS_INLINE is a constant (3.8.7, from the 3.8.6 review): `ks` in _jx_valid_object is
+# 256 bytes, sixteen keys, and a global raised past that wrote off its end.
+enum BoteJsonxLimit {
+    BOTE_KEYS_INLINE = 16;
+}
 
 fn _jx_valid_key(buf, p, kl, ks, nk, kc) {
     var o = 0;
@@ -835,7 +884,7 @@ fn _jx_valid_key(buf, p, kl, ks, nk, kc) {
 fn _jx_valid_object(buf, len, i, depth, kc) {
     i = _jx_skip_ws(buf, len, i + 1);
     if (i < len && load8(buf + i) == 125) { return i + 1; }
-    var ks[256];
+    var ks[256];  # BOTE_KEYS_INLINE keys, 16 bytes each
     var nk = 0;
     while (i < len) {
         if (load8(buf + i) != 34) { return 0 - 1; }

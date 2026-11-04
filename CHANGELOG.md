@@ -18,7 +18,158 @@ have per release.
 
 _(empty)_
 
+## [3.8.7] — 2026-11-04 · Values by value
+
+**`const`, `enum` of any value, `uniqueItems` and type arrays are judged, by JSON Schema's equality.** Two values are
+equal when both are null, the same boolean, numbers of the same value (`1`, `1.0`, `1e0`), strings of the same
+characters however they are escaped, arrays of equal items in order, or objects with the same keys and equal values,
+in any order. `const` and `enum` judge every value whatever `type` says, where `enum` was judged only for a string
+property and `const` not at all; `uniqueItems` finds two equal items through a seeded hash table, so an array costs a
+look per item; a type array takes a value of any type it names. Each was warned of at registration through 3.8.6.
+
+**Tool names are the spec's.** `dispatcher_register_tool` holds a name to 1 to 128 characters from `A-Z a-z 0-9 _ - .`,
+the rule registration already held every definition to, where it also required an underscore and refused `-` and `.`
+(bote's `project_tool` convention), so `t`, `get-weather` and `tool.v2` registered through the registry and were
+refused, silently, through the dispatcher.
+
+**Six defects in 3.8.6 land beside them**, from an independent review of that release. The worst: any client could
+choose keys that made one message's key check quadratic, 1.02 s for a 121 KB message. See the correction notice in
+3.8.6.
+
+The stated minimum cyrius (6.7.13) is unchanged.
+
+### Added
+
+- **`const`** (core, `src/schema.cyr`): the value equals the one named. A violation reads `not the const value`.
+- **`enum` of any value**: a string is compared with the enum's strings as it decodes, as before, and any other value
+  with each value that is no string. A violation reads `value 'x' not in enum` for a string and `value not in enum`
+  for another value.
+- **`uniqueItems`**: each item hashed by its value (a number by its sign, exponent and significant digits, a string by
+  its characters, an object by the sum of its members' hashes, so in any order) into a table on the arena, and an item
+  compared only with one of the same hash. A violation names the first two found: `items 0 and 2 are equal, against
+  uniqueItems`. The table and what the hashes read are given back before it.
+- **Type arrays**: `"type": ["string", "null"]` takes a value of any type it names, and a violation names them in one
+  order, `expected string or null`. An integer named without `number` is held to the range an argument may be, as
+  `type: "integer"` is. One name is that type; none bote knows judges nothing.
+- `prop_type_mask`, `prop_const_raw`, `prop_enum_raw`, `prop_unique_items`. A PropertyDef is 176 bytes.
+
+### Changed
+
+- **Strings compared as a client reads them, where finding two equal is the refusal.** For `uniqueItems` a string's
+  bytes that are no UTF-8 are read as a client's decoder reads them, one U+FFFD for each maximal part, and a lone
+  surrogate as U+FFFD, so two items a client finds equal are never two here. For `const` and `enum` a string that is no
+  text equals nothing, as `enum` has had it since 3.8.3.
+- **Numbers are compared exactly**, as decimals. A client that holds numbers as doubles may find two equal that bote
+  does not, past 15 significant digits or 2^53; in a result's array judged by `uniqueItems` it would refuse what bote
+  passed.
+- **`validate_tool_name` is the spec's rule**, and `dispatcher_register_tool` leaves the check to registration, which
+  logs why it refuses a name at ERROR; through 3.8.6 a name it refused got no line.
+- Registration no longer warns of `const`, `uniqueItems`, a type array or an `enum` on a type other than string. It
+  warns of a type array naming a type it does not know, an empty one, a `type` that is neither a string nor an array,
+  an `enum` that is no array and a `uniqueItems` that is no boolean.
+
+### Security
+
+- **Keys a client chose could make the exact walker's key check quadratic** (from the review of 3.8.6, MEDIUM). Its
+  table hashed keys with FNV-1a's own basis and took the index from the hash's low bits, which depend only on the
+  basis's low bits: keys sharing them, found once offline, landed every key of an object in one bucket, 209 ms for a
+  55 KB message against 1.3 ms for as many other keys, and 1.02 s for 121 KB, under every transport's cap and with no
+  token. Every table bote keys by a client's bytes (`_jx_rep_keys`, `uniqueItems`, the object equality) now hashes with
+  a seed made once per process from the clock (`_jx_hash_seed`, published by compare-and-swap) and a 64-bit finalizer
+  that moves the low bits with every bit (`_jx_mix`). The reviewer's 5,000 keys now take what any 5,000 take.
+
+### Fixed
+
+From the review of 3.8.6:
+
+- **A notification bote refused was a 200 on the legacy path.** `http` and `streamable` now answer any input the codec
+  could not take as a request, the answer an error with a null id (`codec_unanswerable`), with 400, as Streamable HTTP
+  requires, the error its body: a notification naming a key twice, one the codec refuses otherwise, invalid JSON, an
+  id named twice. An error for a request with an id stays a 200. The bridge answers under its own contract, 200.
+- **An id named twice was echoed when the message was malformed besides**: `{"jsonrpc":"2.0","id":7,"id":8}` was
+  answered with id 7. It is answered with null.
+- **The exact walker kept a vec for every object, empty ones too, to the end of its walk**, so one escaped key in
+  54 KB of `[{},{},...]` grew the arena by 2.68 MB for the life of the thread. Each object's walk gives back what it
+  took.
+- **The table of seen members stayed on the heap through the heap forms**, `compiled_validate` and
+  `registry_validate_params`, where a mark and a release do nothing: 18,000 objects against 80 properties kept
+  1.58 MB a call. It is a bitset, 512 slots on the stack, so those forms keep only their answer up to 512 names, and
+  an eighth of the table past them.
+- **`BOTE_KEYS_INLINE` was a global a consumer could raise** past the sixteen keys the stack buffer it sizes holds; it
+  is a constant.
+
+### Tests
+
+- **`tests/bote_schema_eq.tcyr`**, 83, new: `const` for numbers in every spelling, past 2^53 and past a double's
+  exponent, strings raw and escaped, a surrogate pair, the empty string, strings that are no text, null, booleans,
+  arrays in order and objects in any order, forty members through the table, nested; `enum` of each kind of value,
+  untyped and on an integer; type arrays, each type, the message, integers and fractions, an object's and an array's
+  keywords under one, one name, none, an unknown one; `uniqueItems` by value, by decoding, in any order, literals, two
+  strings a client reads as one U+FFFD; 20,000 integers, 20,000 strings, 5,000 objects, 20,000 equal arrays and two
+  objects of 2,000 members in under two seconds; the dispatcher on arguments and on a result; the WARNs; the seed and
+  the finalizer; and 0 heap bytes for refused calls, 4,000 tags among them, and the arena given back.
+- **`tests/bote_request_keys.tcyr`**, 92, from 83: the reviewer's 5,000 colliding keys
+  (`tests/fixtures/fnv_low16_collisions.txt`) taking no longer than 5,000 others, both within a few syntax checks,
+  and their repeat found; 18,000 empty objects behind an escaped key on less than 256 KB of arena; an id named twice
+  in a malformed message.
+- **`tests/bote_http_era.tcyr`**, 1938, from 1912: the legacy path's 400s on `http` and `streamable`, and a request's
+  error kept a 200.
+- **`tests/bote_schema_walk.tcyr`**, 124, from 121: `compiled_validate` keeping only its answer for 18,000 objects
+  against 80 properties, and the bits naming the last slot.
+- **`tests/bote.tcyr`**, 991, from 973: every kind of name the spec allows, 128 and 129 characters, what it refuses,
+  three names registered through the dispatcher, listed and called, and the ERROR line for one it refuses.
+- **`tests/bote_output.tcyr`**, 256, from 255: the WARNs of what is now judged.
+- **`fuzz/schema_walk.fcyr`**: type arrays, `const`, `enum` of any values and `uniqueItems` drawn, the reference's
+  equality its own on bayan's trees.
+- **33 mutants, 32 killed, and one showed code that did nothing**: the number hash's trim of trailing zeros, which
+  `_sch_num_norm` had already left out; it is gone. One survived the first run and showed a gap, now tested: a key
+  hash of the first byte alone, which the flood test missed because its 5,000 other keys all began with one letter.
+  That a seed is unpredictable is not something a test can show.
+
+### Performance
+
+**The new keywords cost a value a few loads where it has none of them, and registration about a microsecond more.**
+Interleaved A/B against 3.8.6, 15 rounds pinned to one core, the working tree's benches on both sides. Minimums, in ns:
+
+| Bench | 3.8.6 | 3.8.7 | Delta |
+|---|---:|---:|---:|
+| `validate_compiled_simple` | 429 | 455 | +6.1% |
+| `validate_compiled_nested` | 907 | 939 | +3.5% |
+| `codec_process_message` | 4,378 | 4,377 | −0.0% |
+| `dispatch_tools_call` | 2,719 | 2,688 | −1.1% |
+| `dispatch_tools_call_output` | 5,751 | 5,789 | +0.7% |
+| `libro_export_100` | 1,805,000 | 1,818,000 | +0.7% |
+| `schema_compile_simple` | 8,296 | 9,266 | +11.7% |
+| `schema_compile_nested` | 19,161 | 21,873 | +14.2% |
+
+- **A value judged pays for the keywords it does not have**: every value now asks whether its schema has a type
+  array, a `const` or an `enum`, and a member's slot is a bit, where it was a byte. About 26 ns on a call with one
+  property. Writing the bit arithmetic as shifts, where a division may be, moved it by less than two runs of one
+  binary differ, and it was left as it was.
+- **Registration reads three keywords more** (`const`, `uniqueItems`, the raw `type`), about 350 ns each: paid once a
+  definition, never for a call.
+- **`uniqueItems` is linear**: 20,000 distinct integers, 20,000 distinct strings, 5,000 objects, 20,000 equal arrays
+  and two objects of 2,000 members are judged together in under two seconds in the test, where comparing every pair
+  is 200 million comparisons for 20,000 items.
+- **The flood is gone**: the reviewer's 5,000 colliding keys cost what any 5,000 keys cost, 1.29 ms against 1.28 ms
+  for the check alone on 55 KB, and 4.5 ms for 121 KB through the codec, where 3.8.6 took 209 ms and 1.02 s.
+- **The rest is code position.** `jsonx_get_str_flat` +12.3% and `codec_serialize_response` +7.3% run no code this
+  release changes.
+
 ## [3.8.6] — 2026-11-04 · A key named twice
+
+> ⚠ **Corrected at 3.8.7.** These claims below were not true, found by an independent review of this release.
+> - "The check rides the syntax check the codec already made, so a message is still walked once", and its cost of
+>   130 to 180 ns. An object of more than sixteen keys, or a key with an escape, sends a message to the exact walker,
+>   whose table hashed keys with FNV's own basis and took the index from the low bits: keys chosen offline to share
+>   them made the check quadratic, 209 ms for a 55 KB message and 1.02 s for 121 KB, from any client.
+> - "a notification is a 400 where it was a 202". Only on the 2026-07-28 path: a legacy notification naming a key
+>   twice got a 200 with the error on `http` and `streamable`, and the bridge answers 200 under its own contract.
+> - "Its id is echoed unless the id is the key named twice." Not when the message is malformed besides:
+>   `{"jsonrpc":"2.0","id":7,"id":8}` was answered with id 7.
+> - "that judgement now takes less than a megabyte". Only on a bote arena: through `compiled_validate` and
+>   `registry_validate_params`, which run on the heap, a mark and a release do nothing, and 18,000 objects against
+>   80 properties kept 1.58 MB a call.
 
 **A request that names a key twice is refused before anything reads it.** bote's one key scanner reads the first of a
 repeated key, the inputSchema check with it, and a handler is handed the arguments as written: `{"count":3,"count":"x"}`
@@ -27,7 +178,8 @@ value nothing judged. A message that names a key twice in any object (the envelo
 object below them, keys compared as they decode), or names a key that is no text, which a client decodes to U+FFFD and
 another key may spell, is now an invalid request, `-32600`. Its id is echoed unless the id is the key named twice. The
 check rides the syntax check the codec already made, so a message is still walked once. Reported by a consumer and
-reproduced in bote first (`docs/development/issues/2026-11-03-request-duplicate-keys-read-first-wins.md`, closed).
+reproduced in bote first (`docs/development/issues/archive/2026-11-03-request-duplicate-keys-read-first-wins.md`, closed
+and archived).
 
 **Four defects in 3.8.5 land beside it**, from an independent review of that release. The worst: `maxLength` counted
 no character for a byte from 0x80 to 0xBF that starts no sequence, so 60,000 of them met `maxLength: 4` and reached the

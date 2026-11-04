@@ -182,13 +182,13 @@ lib/                        — cyrius stdlib + AGNOS dep bundles,
   authentication bypasses).
 
 tests/
-├── bote.tcyr                  — 973 core assertions
+├── bote.tcyr                  — 991 core assertions
 ├── conformance.tcyr           — 218 (JSON-RPC 2.0 + MCP 2025-11-25 + 2026-07-28, by spec clause, via codec_process_message)
 ├── bote_auth.tcyr             — 91 (bearer + allowlist + JWT + PKCE validators; 401 log lines; the 403; the head check)
 ├── bote_content.tcyr          — 25 (content blocks + annotations)
 ├── bote_fetch.tcyr            — 62 (a request made in a child: the record, the cap, the deadline, a real GET, no heap)
 ├── bote_fs_tools.tcyr         — 78 (fs_tools; refused-path log lines; control bytes read back as valid JSON)
-├── bote_http_era.tcyr         — 1912 (MCP 2026-07-28 on HTTP, on the real handlers over a socketpair; scopes and the 403)
+├── bote_http_era.tcyr         — 1938 (MCP 2026-07-28 on HTTP, on the real handlers over a socketpair; scopes and the 403)
 ├── bote_host.tcyr             — 207 (host registry + SSRF + resolved-address classifiers + the IPv6 parser vs cyrius's)
 ├── bote_jwks.tcyr             — 49 (a jwks_uri: what it may be, real fetches from a child)
 ├── bote_jwt.tcyr              — 510 (JWT: HS256, RS256, ES256, JWK Sets, every claim, scopes, the cache, keys from a source, no heap)
@@ -199,8 +199,9 @@ tests/
 ├── bote_output.tcyr           — 255 (3.8.0: a tool's outputSchema, registration to the heap)
 ├── bote_input.tcyr            — 148 (3.8.2: multi round-trip requests, -32021, the sealed state and its binding, the heap)
 ├── bote_tool_schema.tcyr      — 103 (3.8.3: an inputSchema as its own JSON, what registration refuses, the list, the heap)
-├── bote_schema_walk.tcyr      — 121 (3.8.5: one walk of a value, the counting keywords, additionalProperties, paths, the heap)
-├── bote_request_keys.tcyr     — 83 (3.8.6: a request naming a key twice, or one that is no text, refused on every path)
+├── bote_schema_walk.tcyr      — 124 (3.8.5: one walk of a value, the counting keywords, additionalProperties, paths, the heap)
+├── bote_request_keys.tcyr     — 92 (3.8.6: a request naming a key twice, or one that is no text, refused on every path)
+├── bote_schema_eq.tcyr        — 83 (3.8.7: const, enum of any value, uniqueItems and type arrays, by JSON Schema's equality)
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 64 (streamable HTTP / SSE)

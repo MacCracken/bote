@@ -1,6 +1,13 @@
 # A request that repeats a JSON key is read first-wins; a handler can act on a value the schema check never saw
 
-**Status:** ✅ **CLOSED at 3.8.6** — see "Resolution" at the end. Filed 2026-11-03 from szal 2.3.1, against bote 3.8.5 (HEAD `3.8.5`). Measured on
+> ## 📦 CLOSED — archived 2026-11-04 at bote 3.8.6
+>
+> Fixed at 3.8.6 (the Resolution at the end). Re-verified on the 3.8.6 tree before
+> archiving: the three rows below are refused with `-32600` and no handler runs
+> (`tests/bote_request_keys.tcyr`, 83 / 83, natively and under `qemu-aarch64`), and
+> `fuzz/request_keys.fcyr` passes 20,000 rounds. What is below is the report as filed.
+
+**Status:** ✅ **CLOSED at 3.8.6**, archived. Filed 2026-11-03 from szal 2.3.1, against bote 3.8.5 (HEAD `3.8.5`). Measured on
 the 3.4.10, 3.8.4 and 3.8.5 `dist/bote-core.cyr`, driven through `codec_process_message` on a
 `dispatcher_new` dispatcher with szal's 54 tools registered.
 **Severity:** medium — the dispatcher's inputSchema check and the tool handler can read different values

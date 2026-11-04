@@ -321,6 +321,15 @@ UTF-8 as a client's decoder reads them, one U+FFFD for each maximal part, where 
 stray continuation byte as none. A `required` name pushed into a CompiledSchema's vec after
 `compiled_set_required` is met by its member, as through 3.8.4; 3.8.5 refused every call.
 
+(3.8.7) `const`, `enum` of any value, `uniqueItems` and type arrays are judged, so a schema that
+names them refuses what it was listed with and passed through 3.8.6: an untyped `enum`, an `enum`
+on an integer, a `const`, a repeat in a `uniqueItems` array, a value of a type a type array does
+not name. A PropertyDef is 176 bytes; one made by `prop_new` has the new words zeroed, and one a
+consumer allocates itself must be that size. `dispatcher_register_tool` takes every name the spec
+allows (1 to 128 of `A-Z a-z 0-9 _ - .`), where it also required an underscore and refused `-`
+and `.`; `validate_tool_name` is that rule. On `http` and `streamable`, legacy input the codec
+cannot take as a request (its answer an error with a null id) is a 400, where it was a 200.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`

@@ -48,45 +48,22 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.8.6"; }
+fn _bote_server_version() { return "3.8.7"; }
 
 # ================================================================
-# Tool name validation (project_tool convention)
+# Tool name validation
 # ================================================================
 #
-# Returns 0 if valid, BoteError ptr otherwise.
-
-fn _is_alnum_or_under(c) {
-    if (c >= 48 && c <= 57) { return 1; }
-    if (c >= 65 && c <= 90) { return 1; }
-    if (c >= 97 && c <= 122) { return 1; }
-    if (c == 95) { return 1; }
-    return 0;
-}
-
+# Returns 0 if `name` may name a tool, else a BoteError. The spec's rule (3.8.7): 1 to 128
+# characters from A-Z a-z 0-9 _ - . (MCP 2025-11-25, "Tool names"), which registration holds
+# every definition to (`registry_check_tool_def`). Through 3.8.6 this also required an
+# underscore (bote's project_tool convention) and refused - and ., so `dispatcher_register_tool`
+# refused names the spec allows, and allowed up to 256 characters, which registration refused.
 fn validate_tool_name(name) {
-    if (name == 0) {
-        return bote_err_new(BOTE_ERR_INVALID_PARAMS, "", "tool name must be 1-256 characters");
-    }
-    var n = strlen(name);
-    if (n == 0 || n > 256) {
-        return bote_err_new(BOTE_ERR_INVALID_PARAMS, "", "tool name must be 1-256 characters");
-    }
-    var i = 0;
-    var has_under = 0;
-    while (i < n) {
-        var c = load8(name + i);
-        if (_is_alnum_or_under(c) == 0) {
-            return bote_err_new(BOTE_ERR_INVALID_PARAMS, name, "tool name must be alphanumeric + underscore");
-        }
-        if (c == 95) { has_under = 1; }
-        i = i + 1;
-    }
-    if (has_under == 0) {
-        return bote_err_new(BOTE_ERR_INVALID_PARAMS, name,
-          "tool name must contain at least one underscore (project_tool format)");
-    }
-    return 0;
+    if (_reg_name_ok(name) == 1) { return 0; }
+    var shown = "";
+    if (name != 0) { shown = name; }
+    return bote_err_new(BOTE_ERR_INVALID_PARAMS, shown, "the tool name must be 1-128 characters from A-Z a-z 0-9 _ - .");
 }
 
 # ================================================================
@@ -429,8 +406,7 @@ fn _emit_tool_name_payload(name) {
 fn dispatcher_register_tool(d, tool_def, handler_fp) {
     if (tool_def == 0) { return bote_err_new(BOTE_ERR_INVALID_PARAMS, "", "tool definition is null"); }
     var name = tool_def_name(tool_def);
-    var verr = validate_tool_name(name);
-    if (verr != 0) { return verr; }
+    # Registration's checks hold the name to the spec's rule (3.8.7), and log why it refuses one.
     var st[72];
     var rerr = _registry_prepare(tool_def, &st);
     if (rerr != 0) { return rerr; }

@@ -1025,15 +1025,51 @@ fn main() {
     assert_eq(jsonx_is_object("  {} "), 1, "is_object skips ws");
     assert_eq(jsonx_is_object("null"), 0, "null not object");
 
-    # ---------------- validate_tool_name ----------------
+    # ---------------- validate_tool_name (3.8.7: the spec's rule) ----------------
     assert_eq(validate_tool_name("good_name"), 0, "valid name");
     assert_eq(validate_tool_name("a_b_c_1_2"), 0, "valid name with digits");
+    assert_eq(validate_tool_name("t"), 0, "name: one character (refused through 3.8.6)");
+    assert_eq(validate_tool_name("noundercore"), 0, "name: no underscore");
+    assert_eq(validate_tool_name("get-weather"), 0, "name: a hyphen");
+    assert_eq(validate_tool_name("tool.v2"), 0, "name: a dot");
+    assert_eq(validate_tool_name("A-Z.a_z-0.9"), 0, "name: every kind of character the spec allows");
+    var tn128 = alloc(130);
+    memset(tn128, 97, 128);
+    store8(tn128 + 128, 0);
+    assert_eq(validate_tool_name(tn128), 0, "name: 128 characters");
+    var tn129 = alloc(131);
+    memset(tn129, 97, 129);
+    store8(tn129 + 129, 0);
+    assert(validate_tool_name(tn129) != 0, "name: 129 refused (allowed up to 256 through 3.8.6)");
     assert(validate_tool_name(0) != 0, "null name fails");
     assert(validate_tool_name("") != 0, "empty fails");
-    assert(validate_tool_name("noundercore") != 0, "no underscore fails");
-    assert(validate_tool_name("bad-name") != 0, "hyphen fails");
     assert(validate_tool_name("bad name") != 0, "space fails");
     assert(validate_tool_name("bad/name") != 0, "slash fails");
+    assert(validate_tool_name("caf\xc3\xa9") != 0, "name: a byte past ASCII fails");
+    assert(validate_tool_name("a,b") != 0 && validate_tool_name("a=b") != 0, "name: BOTE_TOOL_SCOPES's separators fail");
+    assert_streq(bote_err_reason(validate_tool_name("bad name")), "the tool name must be 1-128 characters from A-Z a-z 0-9 _ - .", "name: the reason, registration's");
+    # Through the dispatcher, as through the registry (3.8.7).
+    var tnd = dispatcher_new(tool_registry_new());
+    assert_eq(dispatcher_register_tool(tnd, tool_def_new("t", "d", schema_new("object", 0, vec_new())), &h_echo), 0, "name: the dispatcher registers t");
+    assert_eq(dispatcher_register_tool(tnd, tool_def_new("get-weather", "d", schema_new("object", 0, vec_new())), &h_echo), 0, "name: ...and get-weather");
+    assert_eq(dispatcher_register_tool(tnd, tool_def_new("tool.v2", "d", schema_new("object", 0, vec_new())), &h_echo), 0, "name: ...and tool.v2");
+    var tnl = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", tnd, 0);
+    assert(_lc_has(tnl, "\"name\":\"t\"") == 1 && _lc_has(tnl, "\"name\":\"get-weather\"") == 1 && _lc_has(tnl, "\"name\":\"tool.v2\"") == 1, "name: all three listed");
+    var tnc = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get-weather\",\"arguments\":{\"city\":\"x\"}}}", tnd, 0);
+    assert(_lc_has(tnc, "\"result\"") == 1 && _lc_has(tnc, "\"error\"") == 0 && _lc_has(tnc, "city") == 1, "name: get-weather called and served");
+    tnc = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"tool.v2\",\"arguments\":{}}}", tnd, 0);
+    assert(_lc_has(tnc, "\"result\"") == 1 && _lc_has(tnc, "\"error\"") == 0, "name: tool.v2 called and served");
+    _lc_begin();
+    var tnr = dispatcher_register_tool(tnd, tool_def_new(tn129, "d", schema_new("object", 0, vec_new())), &h_echo);
+    _lc_end();
+    assert(tnr != 0 && bote_err_tag(tnr) == BOTE_ERR_INVALID_PARAMS, "name: 129 characters refused through the dispatcher");
+    assert(_lc_level == SK_ERROR && _lc_has(_lc_buf, "tool registration refused") == 1 && _lc_has(_lc_buf, "1-128 characters") == 1, "name: ...with the ERROR line registration gives (silent through 3.8.6)");
+    _lc_begin();
+    tnr = dispatcher_register_tool(tnd, tool_def_new("bad name", "d", schema_new("object", 0, vec_new())), &h_echo);
+    _lc_end();
+    assert(tnr != 0 && _lc_level == SK_ERROR, "name: a space refused through the dispatcher, aloud");
+    var tnl2 = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", tnd, 0);
+    assert(_lc_has(tnl2, "bad name") == 0 && _lc_has(tnl2, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") == 0, "name: ...and neither registered");
 
     # ---------------- dispatch: initialize ----------------
     var dreg = tool_registry_new();
@@ -1472,7 +1508,8 @@ fn main() {
     assert_eq(dispatcher_dispatch(d, notif, 0), 0, "notification dispatch returns 0");
 
     # ---------------- dispatch: dynamic register_tool with bad name ----------------
-    var bad_reg = dispatcher_register_tool(d, tool_def_new("badname", "x", sa), &h_echo);
+    # (3.8.7) A name the spec refuses: "badname", with no underscore, is one it allows.
+    var bad_reg = dispatcher_register_tool(d, tool_def_new("bad/name", "x", sa), &h_echo);
     assert(bad_reg != 0, "bad name register fails");
     assert_eq(bote_err_tag(bad_reg), BOTE_ERR_INVALID_PARAMS, "bad name -> INVALID_PARAMS");
 
@@ -2693,15 +2730,15 @@ fn main() {
     assert_eq(vec_len(compiled_validate(fcomp, "{\"forbid\":1}")), 1, "schema: `false` allows nothing");
     assert_eq(vec_len(compiled_validate(fcomp, "{\"other\":1}")), 0, "schema: ...and is only about its own key");
     var wprops = vec_new();
-    # (3.8.5) maxLength is judged now; pattern is not.
+    # (3.8.5) maxLength is judged now; pattern is not. (3.8.7) Nor format; a type array is.
     vec_push(wprops, schema_prop_new("p", "{\"type\":\"string\",\"pattern\":\"^a\"}"));
-    vec_push(wprops, schema_prop_new("q", "{\"type\":[\"string\",\"null\"]}"));
+    vec_push(wprops, schema_prop_new("q", "{\"type\":[\"string\",\"null\"],\"format\":\"email\"}"));
     var loose_reg = tool_registry_new();
     _lc_begin();
     registry_register(loose_reg, tool_def_new("loose", "l", schema_new("object", wprops, vec_new())));
     assert_eq(_lc_count, 2, "schema: one WARN per keyword it cannot enforce");
     assert_eq(_lc_level, SK_WARN, "schema: ...at WARN");
-    assert(_lc_has(_lc_buf, "keyword=\"type array\"") == 1, "schema: ...naming the keyword");
+    assert(_lc_has(_lc_buf, "keyword=format") == 1, "schema: ...naming the keyword");
     _lc_begin();
     registry_register(loose_reg, tool_def_new("tight", "t", schema_new("object", _strict_props(), vec_new())));
     assert_eq(_lc_count, 0, "schema: a schema it can enforce logs nothing");

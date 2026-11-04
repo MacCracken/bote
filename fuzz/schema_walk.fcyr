@@ -9,7 +9,10 @@
 # Strings holding bytes that are no UTF-8, counted as a client's decoder reads them; half
 # the `properties` padded with nine names no value uses, so a key is decoded and looked up
 # past eight names; a 300-byte name, and keys spelling it plainly, with an escape, and one
-# byte short. The reference judges bayan's parse of both. Exit codes:
+# byte short. (3.8.7) Type arrays, `const` and `enum` of any values, `uniqueItems`, the
+# reference's equality its own, a string that is no text equal to nothing for `const` and
+# `enum` and read as a client reads it for `uniqueItems`. The reference judges bayan's parse
+# of both. Exit codes:
 #
 #   10   a value bote passes the reference refuses, or the reverse;
 #   20   the rounds drew fewer than a thousand values passed or a thousand refused;
@@ -74,7 +77,19 @@ var _NAMES = 0;
 var _KEYS = 0;
 var _STRS = 0;
 var _ENUMS = 0;
+var _ANYV = 0;
+var _TARR = 0;
 fn _pools() {
+    # (3.8.7) Values a `const` or an `enum` of any value names, and type arrays.
+    _ANYV = vec_new();
+    vec_push(_ANYV, "\"x\""); vec_push(_ANYV, "\"ab\""); vec_push(_ANYV, "1"); vec_push(_ANYV, "2");
+    vec_push(_ANYV, "-3"); vec_push(_ANYV, "1.5"); vec_push(_ANYV, "null"); vec_push(_ANYV, "true");
+    vec_push(_ANYV, "false"); vec_push(_ANYV, "[1]"); vec_push(_ANYV, "[]"); vec_push(_ANYV, "{}");
+    vec_push(_ANYV, "{\"a\":1}"); vec_push(_ANYV, "\"\\u00e9t\\u00e9\""); vec_push(_ANYV, "[true,null]");
+    _TARR = vec_new();
+    vec_push(_TARR, "[\"string\",\"null\"]"); vec_push(_TARR, "[\"integer\",\"string\"]");
+    vec_push(_TARR, "[\"array\",\"object\"]"); vec_push(_TARR, "[\"boolean\",\"null\",\"integer\"]");
+    vec_push(_TARR, "[\"object\",\"null\"]"); vec_push(_TARR, "[\"integer\"]");
     _NAMES = vec_new();
     # (3.8.6) A name of 300 bytes, and keys that spell it plainly, with an escape, and one byte
     # short of it: the walk decodes a long key where a schema has more than eight names.
@@ -131,10 +146,26 @@ fn _schema(a, sb, depth) {
     elif (t == 3) { tn = "null"; }
     elif (t == 5) { tn = "array"; }
     elif (t == 6) { tn = "object"; }
-    if (tn != 0) {
+    if (tn != 0 && _r(5) == 0) {
+        # (3.8.7) A type array in place of the type.
+        _add(a, sb, "\"type\":");
+        _add(a, sb, vec_get(_TARR, _r(vec_len(_TARR))));
+        sep = 1;
+    } elif (tn != 0) {
         _add(a, sb, "\"type\":\"");
         _add(a, sb, tn);
         _add(a, sb, "\"");
+        sep = 1;
+    }
+    if (_r(10) == 0) {
+        if (sep == 1) { _add(a, sb, ","); }
+        _add(a, sb, "\"const\":");
+        _add(a, sb, vec_get(_ANYV, _r(vec_len(_ANYV))));
+        sep = 1;
+    }
+    if (_r(5) == 0) {
+        if (sep == 1) { _add(a, sb, ","); }
+        if (_r(4) == 0) { _add(a, sb, "\"uniqueItems\":false"); } else { _add(a, sb, "\"uniqueItems\":true"); }
         sep = 1;
     }
     # Keywords of every kind, by chance, whatever the type: each judges the values of its kind.
@@ -144,6 +175,15 @@ fn _schema(a, sb, depth) {
         var ne = 1 + _r(3);
         var ei = 0;
         while (ei < ne) { if (ei > 0) { _add(a, sb, ","); } _add(a, sb, vec_get(_ENUMS, _r(vec_len(_ENUMS)))); ei = ei + 1; }
+        _add(a, sb, "]");
+        sep = 1;
+    } elif (_r(7) == 0) {
+        # (3.8.7) An enum of any values, on any type.
+        if (sep == 1) { _add(a, sb, ","); }
+        _add(a, sb, "\"enum\":[");
+        var na = 1 + _r(3);
+        var ai = 0;
+        while (ai < na) { if (ai > 0) { _add(a, sb, ","); } _add(a, sb, vec_get(_ANYV, _r(vec_len(_ANYV)))); ai = ai + 1; }
         _add(a, sb, "]");
         sep = 1;
     }
@@ -318,9 +358,173 @@ fn _is_num(v) {
     return bayan_json_v_is_float(v);
 }
 
+# (3.8.7) 1 when the bytes of `st` are UTF-8 throughout: each maximal part a whole sequence.
+fn _utf8_ok(st) {
+    var p = str_data(st);
+    var n = str_len(st);
+    var i = 0;
+    while (i < n) {
+        var b = load8(p + i);
+        var need = 0 - 1;
+        var lo = 128;
+        var hi = 191;
+        if (b < 128) { need = 0; }
+        elif (b >= 194 && b <= 223) { need = 1; }
+        elif (b >= 224 && b <= 239) { need = 2; if (b == 224) { lo = 160; } if (b == 237) { hi = 159; } }
+        elif (b >= 240 && b <= 244) { need = 3; if (b == 240) { lo = 144; } if (b == 244) { hi = 143; } }
+        if (need < 0) { return 0; }
+        var k = 1;
+        while (k <= need) {
+            if (i + k >= n) { return 0; }
+            var cb = load8(p + i + k);
+            var l2 = 128;
+            var h2 = 191;
+            if (k == 1) { l2 = lo; h2 = hi; }
+            if (cb < l2 || cb > h2) { return 0; }
+            k = k + 1;
+        }
+        i = i + need + 1;
+    }
+    return 1;
+}
+# The bytes of `st` as a client reads them, each maximal part that is no sequence a U+FFFD:
+# a cstr with its length at *ol.
+fn _client(st, ol) {
+    var p = str_data(st);
+    var n = str_len(st);
+    var o = alloc(n * 3 + 1);
+    var w = 0;
+    var i = 0;
+    while (i < n) {
+        var b = load8(p + i);
+        var need = 0;
+        var lo = 128;
+        var hi = 191;
+        var bad = 0;
+        if (b < 128) { need = 0; }
+        elif (b >= 194 && b <= 223) { need = 1; }
+        elif (b >= 224 && b <= 239) { need = 2; if (b == 224) { lo = 160; } if (b == 237) { hi = 159; } }
+        elif (b >= 240 && b <= 244) { need = 3; if (b == 240) { lo = 144; } if (b == 244) { hi = 143; } }
+        else { bad = 1; }
+        var k = 1;
+        while (bad == 0 && k <= need && i + k < n) {
+            var cb = load8(p + i + k);
+            var l2 = 128;
+            var h2 = 191;
+            if (k == 1) { l2 = lo; h2 = hi; }
+            if (cb < l2 || cb > h2) { break; }
+            k = k + 1;
+        }
+        if (bad == 0 && k == need + 1) {
+            var c = 0;
+            while (c < k) { store8(o + w, load8(p + i + c)); w = w + 1; c = c + 1; }
+        } else {
+            store8(o + w, 239); store8(o + w + 1, 191); store8(o + w + 2, 189);
+            w = w + 3;
+        }
+        i = i + k;
+    }
+    store64(ol, w);
+    return o;
+}
+# Two strings equal: as a client reads them (`client` 1), or, where a string that is no text
+# equals nothing, as their bytes are.
+fn _str_eq(x, y, client) {
+    if (client == 0) {
+        if (_utf8_ok(x) == 0 || _utf8_ok(y) == 0) { return 0; }
+        return _s_eq(x, y);
+    }
+    var lx[8];
+    var ly[8];
+    var cx = _client(x, &lx);
+    var cy = _client(y, &ly);
+    if (load64(&lx) != load64(&ly)) { return 0; }
+    if (load64(&lx) == 0) { return 1; }
+    return memeq(cx, cy, load64(&lx));
+}
+# JSON Schema's equality on bayan's trees. The pools hold one fraction, 1.5, so two
+# fractions are equal and a fraction is no integer.
+fn _veq(x, y, client) {
+    if (bayan_json_v_is_null(x) == 1) { return bayan_json_v_is_null(y); }
+    if (bayan_json_v_is_bool(x) == 1) {
+        if (bayan_json_v_is_bool(y) == 0) { return 0; }
+        if (bayan_json_v_bool(x) == bayan_json_v_bool(y)) { return 1; }
+        return 0;
+    }
+    if (bayan_json_v_is_int(x) == 1) {
+        if (bayan_json_v_is_int(y) == 0) { return 0; }
+        if (bayan_json_v_int(x) == bayan_json_v_int(y)) { return 1; }
+        return 0;
+    }
+    if (bayan_json_v_is_float(x) == 1) { return bayan_json_v_is_float(y); }
+    if (bayan_json_v_is_str(x) == 1) {
+        if (bayan_json_v_is_str(y) == 0) { return 0; }
+        return _str_eq(bayan_json_v_str(x), bayan_json_v_str(y), client);
+    }
+    if (bayan_json_v_is_arr(x) == 1) {
+        if (bayan_json_v_is_arr(y) == 0) { return 0; }
+        var n = bayan_json_v_arr_len(x);
+        if (n != bayan_json_v_arr_len(y)) { return 0; }
+        var i = 0;
+        while (i < n) { if (_veq(bayan_json_v_arr_get(x, i), bayan_json_v_arr_get(y, i), client) == 0) { return 0; } i = i + 1; }
+        return 1;
+    }
+    if (bayan_json_v_is_obj(x) == 1) {
+        if (bayan_json_v_is_obj(y) == 0) { return 0; }
+        var m = bayan_json_v_obj_len(x);
+        if (m != bayan_json_v_obj_len(y)) { return 0; }
+        var j = 0;
+        while (j < m) {
+            var hit = 0;
+            var q = 0;
+            while (q < m && hit == 0) {
+                if (_s_eq(bayan_json_v_obj_key(x, j), bayan_json_v_obj_key(y, q)) == 1) {
+                    if (_veq(bayan_json_v_obj_val(x, j), bayan_json_v_obj_val(y, q), client) == 0) { return 0; }
+                    hit = 1;
+                }
+                q = q + 1;
+            }
+            if (hit == 0) { return 0; }
+            j = j + 1;
+        }
+        return 1;
+    }
+    return 0;
+}
+# 1 when `inst` is of the type a `type` name `nm` (a bayan Str) names.
+fn _type_is(nm, inst) {
+    if (_s_is(nm, "string") == 1) { return bayan_json_v_is_str(inst); }
+    if (_s_is(nm, "integer") == 1) { return bayan_json_v_is_int(inst); }
+    if (_s_is(nm, "number") == 1) { return _is_num(inst); }
+    if (_s_is(nm, "boolean") == 1) { return bayan_json_v_is_bool(inst); }
+    if (_s_is(nm, "null") == 1) { return bayan_json_v_is_null(inst); }
+    if (_s_is(nm, "array") == 1) { return bayan_json_v_is_arr(inst); }
+    if (_s_is(nm, "object") == 1) { return bayan_json_v_is_obj(inst); }
+    return 0;
+}
+
 # 1 when the reference finds `inst` valid against `sch`.
 fn _ok(sch, inst) {
     var t = _member(sch, "type");
+    if (t != 0 && bayan_json_v_is_arr(t) == 1) {
+        var tok = 0;
+        var ti = 0;
+        while (ti < bayan_json_v_arr_len(t)) { if (_type_is(bayan_json_v_str(bayan_json_v_arr_get(t, ti)), inst) == 1) { tok = 1; } ti = ti + 1; }
+        if (tok == 0) { return 0; }
+        t = 0;
+    }
+    var cst = _member(sch, "const");
+    if (cst != 0 && _veq(cst, inst, 0) == 0) { return 0; }
+    var en = _member(sch, "enum");
+    if (en != 0) {
+        var found = 0;
+        var ei = 0;
+        while (ei < bayan_json_v_arr_len(en)) {
+            if (_veq(bayan_json_v_arr_get(en, ei), inst, 0) == 1) { found = 1; }
+            ei = ei + 1;
+        }
+        if (found == 0) { return 0; }
+    }
     if (t != 0) {
         if (_s_is(bayan_json_v_str(t), "string") == 1 && bayan_json_v_is_str(inst) == 0) { return 0; }
         if (_s_is(bayan_json_v_str(t), "integer") == 1 && bayan_json_v_is_int(inst) == 0) { return 0; }
@@ -330,16 +534,6 @@ fn _ok(sch, inst) {
         if (_s_is(bayan_json_v_str(t), "object") == 1 && bayan_json_v_is_obj(inst) == 0) { return 0; }
     }
     if (bayan_json_v_is_str(inst) == 1) {
-        var en = _member(sch, "enum");
-        if (en != 0 && t != 0 && _s_is(bayan_json_v_str(t), "string") == 1) {
-            var found = 0;
-            var ei = 0;
-            while (ei < bayan_json_v_arr_len(en)) {
-                if (_s_eq(bayan_json_v_str(bayan_json_v_arr_get(en, ei)), bayan_json_v_str(inst)) == 1) { found = 1; }
-                ei = ei + 1;
-            }
-            if (found == 0) { return 0; }
-        }
         var cp = _cps(bayan_json_v_str(inst));
         var mnl = _int_kw(sch, "minLength");
         if (mnl != 0 - 99 && cp < mnl) { return 0; }
@@ -379,6 +573,18 @@ fn _ok(sch, inst) {
         if (mni != 0 - 99 && n < mni) { return 0; }
         var mxi = _int_kw(sch, "maxItems");
         if (mxi != 0 - 99 && n > mxi) { return 0; }
+        var uq = _member(sch, "uniqueItems");
+        if (uq != 0 && bayan_json_v_is_bool(uq) == 1 && bayan_json_v_bool(uq) == 1) {
+            var ua = 0;
+            while (ua < n) {
+                var ub = ua + 1;
+                while (ub < n) {
+                    if (_veq(bayan_json_v_arr_get(inst, ua), bayan_json_v_arr_get(inst, ub), 1) == 1) { return 0; }
+                    ub = ub + 1;
+                }
+                ua = ua + 1;
+            }
+        }
     }
     if (bayan_json_v_is_obj(inst) == 1) {
         var props = _member(sch, "properties");

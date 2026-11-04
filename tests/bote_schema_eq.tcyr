@@ -1,0 +1,309 @@
+# bote_schema_eq.tcyr — JSON Schema's equality and the keywords that use it (3.8.7): const,
+# enum of any value and uniqueItems, by value, in any key order and any spelling; type
+# arrays; the dispatcher on both sides; the WARNs; and the heap, the arena and the time an
+# array of many items takes.
+#
+# Run: cyrius test tests/bote_schema_eq.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+fn h_tool(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+var _ret = 0;
+fn h_ret(args, claims) { return _ret; }
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
+fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+fn _vs(schema, value) { return _sch_check_value_a(bote_req_begin(), parse_property(schema), "v", value); }
+fn _ok(schema, value) { if (_vs(schema, value) == 0) { return 1; } return 0; }
+fn _v0(schema, value) {
+    var v = _vs(schema, value);
+    if (v == 0) { return "(none)"; }
+    return _cat(vec_get(v, 0), "");
+}
+fn _ase(got, want, name) {
+    if (got == 0 || want == 0) { return assert(got == want, name); }
+    return assert_streq(got, want, name);
+}
+fn _msg(method, params) {
+    return _cat3(_cat3("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"", method, "\",\"params\":{"), params, "}}");
+}
+# An array of `n` items, item i written by `kind`: 0 the integer i, 1 the string "s<i>",
+# 2 the same [1,2] every time, 3 {"k<i>":i}.
+fn _arr(n, kind) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "[");
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        if (kind == 0) { str_builder_add_int(sb, i); }
+        elif (kind == 1) { str_builder_add_cstr(sb, "\"s"); str_builder_add_int(sb, i); str_builder_add_cstr(sb, "\""); }
+        elif (kind == 2) { str_builder_add_cstr(sb, "[1,2]"); }
+        else { str_builder_add_cstr(sb, "{\"k"); str_builder_add_int(sb, i); str_builder_add_cstr(sb, "\":"); str_builder_add_int(sb, i); str_builder_add_cstr(sb, "}"); }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]");
+    return str_data(str_builder_build(sb));
+}
+# An object of `n` members k0..k(n-1), each its index, from `from` round to the start.
+fn _obj(n, from) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{");
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        var k = (i + from) % n;
+        str_builder_add_cstr(sb, "\"k");
+        str_builder_add_int(sb, k);
+        str_builder_add_cstr(sb, "\":");
+        str_builder_add_int(sb, k);
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
+var _lc_all = 0;
+fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    var b = alloc(n + 1);
+    memcpy(b, msg, n);
+    store8(b + n, 0);
+    vec_push(_lc_all, b);
+    return 0;
+}
+fn _lc_begin() { _lc_all = vec_new(); sakshi_set_emit_hook(&_lc_hook); sakshi_set_level(SK_TRACE); return 0; }
+fn _lc_end() { sakshi_clear_emit_hook(); sakshi_set_level(SK_ERROR); return 0; }
+fn _lc_find(sub) {
+    var i = 0;
+    while (i < vec_len(_lc_all)) {
+        if (_has(vec_get(_lc_all, i), sub) == 1) { return vec_get(_lc_all, i); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # ---- const: numbers by value ----
+    var c1 = "{\"const\":1}";
+    assert(_ok(c1, "1") == 1 && _ok(c1, "1.0") == 1 && _ok(c1, "1e0") == 1 && _ok(c1, "10e-1") == 1 && _ok(c1, "0.1E1") == 1, "const: 1 as 1, 1.0, 1e0, 10e-1, 0.1E1");
+    _ase(_v0(c1, "2"), "v: not the const value", "const: 2 is not 1");
+    assert(_ok(c1, "\"1\"") == 0 && _ok(c1, "true") == 0 && _ok(c1, "[1]") == 0, "const: nor the string \"1\", true or [1]");
+    assert(_ok("{\"const\":0}", "-0") == 1 && _ok("{\"const\":0}", "0.0e9") == 1, "const: 0 as -0 and 0.0e9");
+    assert(_ok("{\"const\":-2.5}", "-25e-1") == 1 && _ok("{\"const\":-2.5}", "2.5") == 0, "const: a sign and a fraction");
+    assert(_ok("{\"const\":9007199254740993}", "9007199254740993") == 1 && _ok("{\"const\":9007199254740993}", "9007199254740992") == 0, "const: past 2^53, exactly");
+    assert(_ok("{\"const\":1e400}", "10e399") == 1 && _ok("{\"const\":1e-400}", "0") == 0, "const: exponents past a double's");
+
+    # ---- const: strings by their characters ----
+    assert(_ok("{\"const\":\"\xc3\xa9\"}", "\"\\u00e9\"") == 1 && _ok("{\"const\":\"\\u00E9\"}", "\"\xc3\xa9\"") == 1, "const: a character raw and escaped, either way");
+    assert(_ok("{\"const\":\"a/b\"}", "\"a\\/b\"") == 1, "const: \\/ is /");
+    assert(_ok("{\"const\":\"\xf0\x9f\x98\x80\"}", "\"\\ud83d\\ude00\"") == 1, "const: a surrogate pair is its character");
+    assert(_ok("{\"const\":\"\"}", "\"\"") == 1 && _ok("{\"const\":\"\"}", "\" \"") == 0, "const: the empty string");
+    assert(_ok("{\"const\":\"e\"}", "\"\xc3\xa9\"") == 0, "const: a letter is not its accented form");
+    assert(_ok("{\"const\":\"\\ufffd\"}", "\"\\ud800\"") == 0 && _ok("{\"const\":\"\\ufffd\"}", "\"\xff\"") == 0, "const: a string that is no text meets nothing, as enum has since 3.8.3");
+
+    # ---- const: null, booleans, arrays, objects ----
+    assert(_ok("{\"const\":null}", "null") == 1 && _ok("{\"const\":null}", "false") == 0, "const: null");
+    assert(_ok("{\"const\":true}", "true") == 1 && _ok("{\"const\":true}", "1") == 0 && _ok("{\"const\":false}", "true") == 0, "const: booleans");
+    var ca = "{\"const\":[1,\"a\",[2]]}";
+    assert(_ok(ca, "[ 1.0 , \"\\u0061\" , [ 2e0 ] ]") == 1, "const: an array item by item, spelled any way");
+    assert(_ok(ca, "[1,\"a\"]") == 0 && _ok(ca, "[1,\"a\",[2],3]") == 0 && _ok(ca, "[\"a\",1,[2]]") == 0 && _ok(ca, "[]") == 0, "const: ...in order, and no more nor fewer");
+    var co = "{\"const\":{\"a\":1,\"b\":[1,2]}}";
+    assert(_ok(co, "{\"b\":[1,2],\"a\":1.0}") == 1 && _ok(co, "{\"\\u0061\":1,\"b\":[1,2]}") == 1, "const: an object in any order, its keys as they decode");
+    assert(_ok(co, "{\"a\":1}") == 0 && _ok(co, "{\"a\":1,\"b\":[1,2],\"c\":0}") == 0 && _ok(co, "{\"a\":2,\"b\":[1,2]}") == 0 && _ok(co, "{\"a\":1,\"c\":[1,2]}") == 0, "const: ...the same keys, each value equal");
+    assert(_ok("{\"const\":{}}", "{}") == 1 && _ok("{\"const\":{}}", "{\"a\":1}") == 0 && _ok("{\"const\":{}}", "[]") == 0, "const: {}");
+    var big = _obj(40, 0);
+    assert(_ok(_cat3("{\"const\":", big, "}"), _obj(40, 17)) == 1, "const: forty members in another order, through the table");
+    assert(_ok(_cat3("{\"const\":", big, "}"), _cat(_obj(39, 3), "")) == 0, "const: ...and one fewer");
+    assert(_ok("{\"const\":{\"x\":{\"y\":[{\"z\":null}]}}}", "{\"x\":{\"y\":[{\"z\":null}]}}") == 1 && _ok("{\"const\":{\"x\":{\"y\":[{\"z\":null}]}}}", "{\"x\":{\"y\":[{\"z\":0}]}}") == 0, "const: nested");
+
+    # ---- enum of any value ----
+    var e1 = "{\"enum\":[\"a\",1,null,[1],{\"k\":true}]}";
+    assert(_ok(e1, "\"a\"") == 1 && _ok(e1, "1.0") == 1 && _ok(e1, "null") == 1 && _ok(e1, "[1]") == 1 && _ok(e1, "{\"k\":true}") == 1, "enum: each kind of value, untyped (judged nothing through 3.8.6)");
+    _ase(_v0(e1, "\"b\""), "v: value 'b' not in enum", "enum: a string not in it, named");
+    _ase(_v0(e1, "2"), "v: value not in enum", "enum: a number not in it");
+    assert(_ok(e1, "[1,1]") == 0 && _ok(e1, "{\"k\":false}") == 0 && _ok(e1, "true") == 0 && _ok(e1, "\"1\"") == 0, "enum: ...an array, an object, a boolean, a string spelling a number");
+    assert(_ok("{\"type\":\"integer\",\"enum\":[1,2]}", "2") == 1 && _ok("{\"type\":\"integer\",\"enum\":[1,2]}", "3") == 0, "enum: on an integer (warned of through 3.8.6)");
+    assert(_ok("{\"enum\":[\"\\u00e9\"]}", "\"\xc3\xa9\"") == 1, "enum: its strings decoded, as before");
+    _ase(_v0("{\"enum\":[1,2]}", "\"x\""), "v: value 'x' not in enum", "enum: a string against one with no strings");
+    assert(_ok("{\"type\":\"string\",\"enum\":[\"a\",\"b\"]}", "\"b\"") == 1 && _ok("{\"type\":\"string\",\"enum\":[\"a\",\"b\"]}", "\"c\"") == 0, "enum: strings as ever");
+
+    # ---- type arrays ----
+    var tsn = "{\"type\":[\"string\",\"null\"]}";
+    assert(_ok(tsn, "\"x\"") == 1 && _ok(tsn, "null") == 1, "type array: each type it names (judged nothing through 3.8.6)");
+    _ase(_v0(tsn, "1"), "v: expected string or null", "type array: another refused, naming them");
+    assert(_ok(tsn, "true") == 0 && _ok(tsn, "[]") == 0 && _ok(tsn, "{}") == 0, "type array: ...a boolean, an array, an object");
+    var tis = "{\"type\":[\"integer\",\"string\"]}";
+    assert(_ok(tis, "1") == 1 && _ok(tis, "1.0") == 1 && _ok(tis, "\"a\"") == 1, "type array: an integer, 1.0 among them");
+    _ase(_v0(tis, "1.5"), "v: expected string or integer", "type array: a fraction is no integer; the names in one order");
+    assert(_ok("{\"type\":[\"number\",\"integer\"]}", "1.5") == 1, "type array: number takes a fraction");
+    assert(_ok("{\"type\":[\"boolean\",\"array\"]}", "false") == 1 && _ok("{\"type\":[\"boolean\",\"array\"]}", "[1]") == 1, "type array: boolean and array");
+    var ton = "{\"type\":[\"object\",\"null\"],\"properties\":{\"a\":{\"type\":\"integer\"}}}";
+    _ase(_v0(ton, "{\"a\":\"x\"}"), "v.a: expected integer", "type array: an object's properties judged");
+    assert(_ok(ton, "null") == 1 && _ok(ton, "{\"a\":1}") == 1, "type array: ...and null taken");
+    _ase(_v0("{\"type\":[\"array\",\"boolean\"],\"items\":{\"type\":\"integer\"}}", "[1,\"x\"]"), "v[1]: expected integer", "type array: an array's items judged");
+    _ase(_v0("{\"type\":[\"integer\"]}", "1.5"), "v: expected integer", "type array: one name is that type");
+    _ase(_v0("{\"type\":[\"string\",\"null\"],\"maxLength\":2}", "\"abc\""), "v: longer than maxLength", "type array: each keyword by kind still");
+    assert(_ok("{\"type\":[]}", "5") == 1 && _ok("{\"type\":[\"strin\"]}", "5") == 1, "type array: none, or none bote knows, judges nothing");
+    _ase(_v0("{\"type\":[\"strin\",\"null\"]}", "5"), "v: expected null", "type array: ...and one it knows is that type");
+
+    # ---- uniqueItems ----
+    var uq = "{\"uniqueItems\":true}";
+    assert(_ok(uq, "[1,2,3]") == 1 && _ok(uq, "[]") == 1 && _ok(uq, "[1]") == 1, "unique: distinct items, none, one");
+    _ase(_v0(uq, "[1,2,1]"), "v: items 0 and 2 are equal, against uniqueItems", "unique: a repeat refused, naming the items");
+    assert(_ok(uq, "[1,1.0]") == 0 && _ok(uq, "[0,-0]") == 0 && _ok(uq, "[1e2,100]") == 0, "unique: numbers by value");
+    assert(_ok(uq, "[\"a\",\"\\u0061\"]") == 0 && _ok(uq, "[\"\xc3\xa9\",\"\\u00e9\"]") == 0, "unique: strings as they decode");
+    assert(_ok(uq, "[[1,2],[1,2]]") == 0 && _ok(uq, "[{\"a\":1,\"b\":2},{\"b\":2,\"a\":1}]") == 0, "unique: arrays, and objects in any order");
+    assert(_ok(uq, "[{\"a\":1},{\"a\":2}]") == 1 && _ok(uq, "[[1,2],[2,1]]") == 1 && _ok(uq, "[1,\"1\",[1],{\"1\":1},true,null]") == 1, "unique: what differs, kinds and orders");
+    assert(_ok(uq, "[true,true]") == 0 && _ok(uq, "[null,null]") == 0 && _ok(uq, "[true,false,null]") == 1, "unique: literals");
+    assert(_ok(uq, "[\"\xff\",\"\xfe\"]") == 0, "unique: two strings a client reads as one U+FFFD are one");
+    assert(_ok(uq, "[\"\\ud800\",\"\\ufffd\"]") == 0, "unique: a lone surrogate read as U+FFFD, never two where a client finds one");
+    assert(_ok("{\"uniqueItems\":false}", "[1,1]") == 1, "unique: false allows a repeat");
+    _ase(_v0("{\"uniqueItems\":true,\"items\":{\"type\":\"integer\"}}", "[1,\"x\",1]"), "v[1]: expected integer", "unique: with items, each judged");
+    assert(_ok("{\"type\":\"array\",\"items\":{\"type\":\"array\",\"uniqueItems\":true}}", "[[1,2],[3,3]]") == 0, "unique: nested");
+
+    # ---- many items, in time ----
+    var t0 = clock_now_ns();
+    assert(_ok(uq, _arr(20000, 0)) == 1, "many: 20,000 distinct integers pass");
+    assert(_ok(uq, _arr(20000, 1)) == 1, "many: 20,000 distinct strings pass");
+    assert(_ok(uq, _arr(5000, 3)) == 1, "many: 5,000 distinct objects pass");
+    _ase(_v0(uq, _arr(20000, 2)), "v: items 0 and 1 are equal, against uniqueItems", "many: 20,000 equal arrays, the first two named");
+    var two = _cat3(_cat3("[", _obj(2000, 0), ","), _obj(2000, 999), "]");
+    _ase(_v0(uq, two), "v: items 0 and 1 are equal, against uniqueItems", "many: two objects of 2,000 members in other orders");
+    var ms = (clock_now_ns() - t0) / 1000000;
+    assert(ms < 2000, "many: all of it in under two seconds (comparing every pair is minutes)");
+
+    # ---- the dispatcher ----
+    var d = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(d, tool_def_new("t_eq", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"mode\":{\"enum\":[\"a\",1]},\"v\":{\"const\":{\"x\":[1]}},\"tags\":{\"type\":\"array\",\"uniqueItems\":true},\"opt\":{\"type\":[\"string\",\"null\"]}}}")), &h_tool);
+    var r = codec_process_message(_msg("tools/call", "\"name\":\"t_eq\",\"arguments\":{\"mode\":1.0,\"v\":{\"x\":[1e0]},\"tags\":[\"a\",\"b\"],\"opt\":null}"), d, 0);
+    assert(_has(r, "\"text\":\"ok\"") == 1, "dispatch: arguments that meet each keyword served");
+    r = codec_process_message(_msg("tools/call", "\"name\":\"t_eq\",\"arguments\":{\"mode\":2,\"v\":{\"x\":[2]},\"tags\":[\"a\",\"a\"],\"opt\":3}"), d, 0);
+    assert(_has(r, "mode: value not in enum") == 1 && _has(r, "v: not the const value") == 1 && _has(r, "tags: items 0 and 1 are equal") == 1 && _has(r, "opt: expected string or null") == 1, "dispatch: each refused, named");
+    dispatcher_register_tool(d, tool_def_with_output_schema(tool_def_new("t_eqo", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"ids\":{\"type\":\"array\",\"uniqueItems\":true},\"st\":{\"enum\":[\"ok\",0]}}}"), &h_ret);
+    _ret = "{\"content\":[],\"structuredContent\":{\"ids\":[1,2],\"st\":0}}";
+    assert(_has(codec_process_message(_msg("tools/call", "\"name\":\"t_eqo\",\"arguments\":{}"), d, 0), "isError") == 0, "dispatch: a result that meets them passes");
+    _ret = "{\"content\":[],\"structuredContent\":{\"ids\":[1,1.0],\"st\":1}}";
+    var ro = codec_process_message(_msg("tools/call", "\"name\":\"t_eqo\",\"arguments\":{}"), d, 0);
+    assert(_has(ro, "\"isError\":true") == 1 && _has(ro, "structuredContent.ids: items 0 and 1 are equal") == 1, "dispatch: a result with a repeat refused (a client's validator refuses it)");
+    var dr = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(dr, tool_def_new("t_ir", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"n\":{\"type\":[\"integer\",\"null\"]}}}")), &h_tool);
+    assert(_has(codec_process_message(_msg("tools/call", "\"name\":\"t_ir\",\"arguments\":{\"n\":1e30}"), dr, 0), "n: integer out of range") == 1, "dispatch: an integer named in a type array held to an argument's range");
+
+    # ---- registration's WARNs ----
+    _lc_begin();
+    var wd = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_bad", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":[\"strin\",\"null\"]},\"b\":{\"type\":[]},\"c\":{\"type\":5},\"e\":{\"enum\":\"x\"},\"u\":{\"type\":\"array\",\"uniqueItems\":\"yes\"}}}"), &h_ret);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_good", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":[\"string\",\"null\"]},\"c\":{\"const\":[1]},\"e\":{\"type\":\"integer\",\"enum\":[1,2]},\"u\":{\"type\":\"array\",\"uniqueItems\":true},\"f\":{\"type\":\"array\",\"uniqueItems\":false}}}"), &h_ret);
+    _lc_end();
+    assert(_lc_find("a type array naming an unknown type") != 0, "warn: a type array naming an unknown type");
+    assert(_lc_find("an empty type array") != 0, "warn: an empty type array");
+    assert(_lc_find("type that is no string or array") != 0, "warn: a type that is a number");
+    assert(_lc_find("enum that is no array") != 0, "warn: an enum that is no array");
+    assert(_lc_find("uniqueItems that is no boolean") != 0, "warn: uniqueItems a string");
+    assert(_lc_find("w_good") == 0, "warn: none for a type array, const, an integer enum, uniqueItems true and false");
+
+    # ---- the seed ----
+    var sd = _jx_hash_seed();
+    assert(sd != 0 && _jx_hash_seed() == sd, "seed: made once, and kept");
+    assert(_jx_mix(1) != _jx_mix(2) && (_jx_mix(1) & 65535) != (_jx_mix(65537) & 65535), "seed: the finalizer moves the low bits with the high");
+
+    # ---- the heap and the arena ----
+    _ret = "{\"content\":[],\"structuredContent\":{\"ids\":[1,1.0],\"st\":1}}";
+    var hm = _msg("tools/call", "\"name\":\"t_eq\",\"arguments\":{\"mode\":2,\"v\":{\"x\":[2]},\"tags\":[\"a\",\"a\"],\"opt\":3}");
+    codec_process_message_a(bote_req_begin(), hm, d, 0);
+    var h0 = alloc_used();
+    var hi = 0;
+    while (hi < 50) { codec_process_message_a(bote_req_begin(), hm, d, 0); hi = hi + 1; }
+    assert_eq(alloc_used() - h0, 0, "heap: fifty refused calls keep nothing");
+    var bm = _msg("tools/call", _cat3("\"name\":\"t_eq\",\"arguments\":{\"tags\":", _arr(4000, 1), ",\"mode\":9}"));
+    assert(_has(codec_process_message(bm, d, 0), "mode: value not in enum") == 1, "heap: 4,000 tags beside a mode not in the enum, refused");
+    codec_process_message_a(bote_req_begin(), bm, d, 0);
+    h0 = alloc_used();
+    hi = 0;
+    while (hi < 10) { codec_process_message_a(bote_req_begin(), bm, d, 0); hi = hi + 1; }
+    assert_eq(alloc_used() - h0, 0, "heap: 4,000 tags judged unique beside a refusal keep nothing");
+    # The table and what the hashes read are given back: judged again, the arena holds no more.
+    var na = bote_req_arena_new();
+    var uqp = parse_property(uq);
+    var a20 = _arr(20000, 1);
+    var nm[16];
+    bote_arena_mark(na, &nm);
+    assert(_sch_check_value_a(na, uqp, "v", a20) == 0, "arena: 20,000 strings judged...");
+    var nb = bote_req_arena_bytes(na);
+    hi = 0;
+    while (hi < 5) { _sch_check_value_a(na, uqp, "v", a20); hi = hi + 1; }
+    assert_eq(bote_req_arena_bytes(na), nb, "arena: ...and five times more on the same arena take no more of it");
+    var e20 = _cat3("[", _cat3("\"\\u0073\",", _arr(20000, 1) + 1, ""), "");
+    assert(_sch_check_value_a(na, uqp, "v", e20) == 0, "arena: escaped strings, copied to compare, judged...");
+    nb = bote_req_arena_bytes(na);
+    hi = 0;
+    while (hi < 5) { _sch_check_value_a(na, uqp, "v", e20); hi = hi + 1; }
+    assert_eq(bote_req_arena_bytes(na), nb, "arena: ...and given back too");
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit_group(rc);

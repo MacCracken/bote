@@ -24,7 +24,7 @@ enum SchemaTypeTag {
 }
 
 # ================================================================
-# PropertyDef (144 bytes):
+# PropertyDef (176 bytes):
 #   +0  type_tag         i64
 #   +8  description      cstr or 0
 #   +16 enum_values      vec of cstrs (string only) or 0
@@ -43,20 +43,25 @@ enum SchemaTypeTag {
 #   +120 max_items       its most, or -1
 #   +128 exclusive_min_raw  the exclusiveMinimum as written, or 0
 #   +136 exclusive_max_raw  the exclusiveMaximum as written, or 0
+#   +144 type_mask      (3.8.7) for a `type` that is an array of names, a bit for each
+#                       (1 << its SchemaTypeTag), the tag SCH_ANY; 0 for one name or none
+#   +152 const_raw      the `const` value as written, or 0
+#   +160 enum_raw       vec of each `enum` value as written, or 0; +16 holds its strings,
+#                       decoded at registration
+#   +168 unique_items   1 for `uniqueItems: true`, else 0
 #
 # (3.8.5) Each keyword applies to a value of its kind whatever the schema's `type`, as in
 # JSON Schema: `{"maxLength":3}` judges a string and passes a number. The type is a check of
-# its own. `enum` is judged on strings only, as before.
+# its own. (3.8.7) `const` and `enum` judge every value, by JSON Schema's equality.
 # ================================================================
 
 fn prop_new(tag) {
-    var p = alloc(144);
+    var p = alloc(176);
     store64(p, tag);
     var k = 8;
     while (k < 96) { store64(p + k, 0); k = k + 8; }
     while (k < 128) { store64(p + k, 0 - 1); k = k + 8; }
-    store64(p + 128, 0);
-    store64(p + 136, 0);
+    while (k < 176) { store64(p + k, 0); k = k + 8; }
     return p;
 }
 
@@ -78,6 +83,10 @@ fn prop_min_items(p) { return load64(p + 112); }
 fn prop_max_items(p) { return load64(p + 120); }
 fn prop_exclusive_min_raw(p) { return load64(p + 128); }
 fn prop_exclusive_max_raw(p) { return load64(p + 136); }
+fn prop_type_mask(p) { return load64(p + 144); }
+fn prop_const_raw(p) { return load64(p + 152); }
+fn prop_enum_raw(p) { return load64(p + 160); }
+fn prop_unique_items(p) { return load64(p + 168); }
 
 # ================================================================
 # CompiledSchema (80 bytes):
@@ -505,35 +514,52 @@ fn parse_property(raw_json) {
     # (3.8.1) The type as it decodes, as a client reads it: `"obj\u0065ct"` is an object.
     # Through 3.8.0 it was read as written, judged nothing, and so did "null".
     var type_str = jsonx_get_str_dec_a(default_alloc(), raw_json, "type");
-    var tag = SCH_ANY;
-    if (type_str != 0) {
-        if (streq(type_str, "string") == 1) { tag = SCH_STRING; }
-        elif (streq(type_str, "number") == 1) { tag = SCH_NUMBER; }
-        elif (streq(type_str, "integer") == 1) { tag = SCH_INTEGER; }
-        elif (streq(type_str, "boolean") == 1) { tag = SCH_BOOLEAN; }
-        elif (streq(type_str, "array") == 1) { tag = SCH_ARRAY; }
-        elif (streq(type_str, "object") == 1) { tag = SCH_OBJECT; }
-        elif (streq(type_str, "null") == 1) { tag = SCH_NULL; }
+    var tag = _sch_type_tag(type_str);
+    # (3.8.7) A type array: any of the types it names. One name is that type.
+    var tmask = 0;
+    var type_raw = jsonx_get_raw(raw_json, "type");
+    if (type_str == 0 && type_raw != 0 && _vp_first_nonws(type_raw) == 91) {
+        var tel = _sch_split_array(type_raw);
+        var ti = 0;
+        var tn = 0;
+        while (ti < vec_len(tel)) {
+            var tv = vec_get(tel, ti);
+            if (_sch_is_string(tv) == 1) {
+                var tt = _sch_type_tag(_sch_str_dec_a(default_alloc(), tv));
+                if (tt != SCH_ANY && (tmask & (1 << tt)) == 0) { tmask = tmask | (1 << tt); tn = tn + 1; tag = tt; }
+            }
+            ti = ti + 1;
+        }
+        if (tn != 1) { tag = SCH_ANY; }
+        if (tn == 1) { tmask = 0; }
     }
     var p = prop_new(tag);
+    store64(p + 144, tmask);
     store64(p + 8, jsonx_get_str(raw_json, "description"));
+    # (3.8.7) `enum` and `const`, for any type: each value as written, and the enum's strings
+    # decoded, which a string is compared with as it decodes. Through 3.8.6 enum was judged
+    # only where the type was string, and const not at all.
+    var enum_raw = jsonx_get_raw(raw_json, "enum");
+    if (enum_raw != 0 && _vp_first_nonws(enum_raw) == 91) {
+        var vals = vec_new();
+        var elems = _sch_split_array(enum_raw);
+        var ne = vec_len(elems);
+        var ei = 0;
+        while (ei < ne) {
+            var ev = vec_get(elems, ei);
+            var dv = 0;
+            if (_sch_is_string(ev) == 1) { dv = _sch_str_dec_a(default_alloc(), ev); }
+            if (dv != 0) { vec_push(vals, dv); }
+            ei = ei + 1;
+        }
+        store64(p + 16, vals);
+        store64(p + 160, elems);
+    }
+    store64(p + 152, jsonx_get_raw(raw_json, "const"));
+    var uq = jsonx_get_raw(raw_json, "uniqueItems");
+    if (uq != 0 && streq(uq, "true") == 1) { store64(p + 168, 1); }
 
     if (tag == SCH_STRING) {
-        var enum_raw = jsonx_get_raw(raw_json, "enum");
-        if (enum_raw != 0) {
-            var vals = vec_new();
-            var elems = _sch_split_array(enum_raw);
-            var ne = vec_len(elems);
-            var ei = 0;
-            while (ei < ne) {
-                var ev = vec_get(elems, ei);
-                var dv = 0;
-                if (_sch_is_string(ev) == 1) { dv = _sch_str_dec_a(default_alloc(), ev); }
-                if (dv != 0) { vec_push(vals, dv); }
-                ei = ei + 1;
-            }
-            store64(p + 16, vals);
-        }
         var def_s = jsonx_get_str(raw_json, "default");
         if (def_s != 0) { store64(p + 24, def_s); }
     } elif (tag != SCH_ANY) {
@@ -560,6 +586,19 @@ fn parse_property(raw_json) {
         store64(p + 72, _compile_object_body(raw_json));
     }
     return p;
+}
+
+# The SchemaTypeTag a `type` name decodes to, or SCH_ANY for none or one bote does not know.
+fn _sch_type_tag(ts) {
+    if (ts == 0) { return SCH_ANY; }
+    if (streq(ts, "string") == 1) { return SCH_STRING; }
+    if (streq(ts, "number") == 1) { return SCH_NUMBER; }
+    if (streq(ts, "integer") == 1) { return SCH_INTEGER; }
+    if (streq(ts, "boolean") == 1) { return SCH_BOOLEAN; }
+    if (streq(ts, "array") == 1) { return SCH_ARRAY; }
+    if (streq(ts, "object") == 1) { return SCH_OBJECT; }
+    if (streq(ts, "null") == 1) { return SCH_NULL; }
+    return SCH_ANY;
 }
 
 # 1 when the raw JSON value `v` is a number.
@@ -867,6 +906,454 @@ fn _sv_str_is(p, bl, w) {
     return _jx_dec_eq(p, bl, w, strlen(w));
 }
 
+# ================================================================
+# Equality (3.8.7): JSON Schema 2020-12 §4.2.2, for `const`, `enum` and `uniqueItems`. Two
+# values are equal when both are null, the same boolean, numbers of the same value, strings
+# of the same characters, arrays of equal items in order, or objects with the same keys and
+# an equal value for each. Numbers are compared exactly, as decimals (_sch_num_cmp): a client
+# that holds a number as a double may find two equal that differ past its precision.
+# ================================================================
+
+# The kind of the value at buf[i]: 1 a string, 2 a number, 3 true, 4 false, 5 null, 6 an
+# array, 7 an object, 0 none.
+fn _sv_kind_at(buf, i) {
+    var c = load8(buf + i);
+    if (c == 34) { return 1; }
+    if (c == 45 || (c >= 48 && c <= 57)) { return 2; }
+    if (c == 116) { return 3; }
+    if (c == 102) { return 4; }
+    if (c == 110) { return 5; }
+    if (c == 91) { return 6; }
+    if (c == 123) { return 7; }
+    return 0;
+}
+
+# The dl bytes at d written to o with each maximal part of a sequence that is no UTF-8, and
+# each byte no sequence starts with, as one U+FFFD (EF BF BD), as a client's decoder reads
+# them (_sv_strlen counts the same way). The length written; o has room for dl * 3.
+fn _sv_utf8_fix(d, dl, o) {
+    var w = 0;
+    var i = 0;
+    var st = 0;
+    var need = 0;
+    var lo = 128;
+    var hi = 191;
+    while (i < dl) {
+        var b = load8(d + i);
+        if (need > 0) {
+            if (b >= lo && b <= hi) {
+                lo = 128;
+                hi = 191;
+                need = need - 1;
+                i = i + 1;
+                if (need == 0) {
+                    while (st < i) { store8(o + w, load8(d + st)); w = w + 1; st = st + 1; }
+                }
+            } else {
+                store8(o + w, 239); store8(o + w + 1, 191); store8(o + w + 2, 189);
+                w = w + 3;
+                need = 0;
+                lo = 128;
+                hi = 191;
+            }
+        } elif (b < 128) {
+            store8(o + w, b);
+            w = w + 1;
+            i = i + 1;
+        } elif (b >= 194 && b <= 223) {
+            st = i; need = 1; i = i + 1;
+        } elif (b >= 224 && b <= 239) {
+            st = i;
+            if (b == 224) { lo = 160; }
+            if (b == 237) { hi = 159; }
+            need = 2;
+            i = i + 1;
+        } elif (b >= 240 && b <= 244) {
+            st = i;
+            if (b == 240) { lo = 144; }
+            if (b == 244) { hi = 143; }
+            need = 3;
+            i = i + 1;
+        } else {
+            store8(o + w, 239); store8(o + w + 1, 191); store8(o + w + 2, 189);
+            w = w + 3;
+            i = i + 1;
+        }
+    }
+    if (need > 0) {
+        store8(o + w, 239); store8(o + w + 1, 191); store8(o + w + 2, 189);
+        w = w + 3;
+    }
+    return w;
+}
+
+# The characters the string body p[0, bl) holds, on `a`, its length at *out_len: escapes
+# decoded (a lone surrogate as U+FFFD), and bytes that are no UTF-8 as a client reads them,
+# so two strings a client reads as one are one here. With `strict` 1, 0 for a string that
+# is no text, which meets no value (3.8.3). Plain ASCII is its own, and is not copied.
+fn _sv_str_norm_a(a, p, bl, strict, out_len) {
+    var j = 0;
+    var plain = 1;
+    while (j < bl && plain == 1) {
+        var c = load8(p + j);
+        if (c == 92 || c >= 128) { plain = 0; }
+        j = j + 1;
+    }
+    if (plain == 1) { store64(out_len, bl); return p; }
+    if (strict == 1 && _jx_key_text_ok(p, bl) == 0) { return 0; }
+    var d = alloc_via(a, bl + 1);
+    var dl = _jx_unescape_into(p, bl, d);
+    var o = alloc_via(a, dl * 3 + 1);
+    store64(out_len, _sv_utf8_fix(d, dl, o));
+    return o;
+}
+
+# The index past the value at buf[i], and past the comma after it, at the next value, the
+# close, or n.
+fn _sv_next(buf, n, i) {
+    var e = _jx_skip_value(buf, n, i);
+    if (e <= i) { return n; }
+    i = _jx_skip_ws(buf, n, e);
+    if (i < n && load8(buf + i) == 44) { i = _jx_skip_ws(buf, n, i + 1); }
+    return i;
+}
+
+# 1 when the value at b1[i1] (n1 bytes in b1) equals the one at b2[i2]. With `strict` 1, a
+# string that is no text equals nothing (`const` and `enum`, as bote has judged enum since
+# 3.8.3); with 0, it is read as a client reads it (`uniqueItems`, where finding two items
+# equal is the refusal). Scratch on `a` is given back.
+fn _sv_eq(a, b1, n1, i1, b2, n2, i2, strict) {
+    i1 = _jx_skip_ws(b1, n1, i1);
+    i2 = _jx_skip_ws(b2, n2, i2);
+    if (i1 >= n1 || i2 >= n2) { return 0; }
+    var k = _sv_kind_at(b1, i1);
+    if (k == 0 || k != _sv_kind_at(b2, i2)) { return 0; }
+    if (k == 2) {
+        if (_sch_num_cmp(b1 + i1, b2 + i2) == 0) { return 1; }
+        return 0;
+    }
+    if (k >= 3 && k <= 5) { return 1; }
+    var mk[16];
+    bote_arena_mark(a, &mk);
+    var r = 0;
+    if (k == 1) {
+        var e1 = _jx_skip_string(b1, n1, i1);
+        var e2 = _jx_skip_string(b2, n2, i2);
+        var l1[8];
+        var l2[8];
+        var s1 = _sv_str_norm_a(a, b1 + i1 + 1, e1 - i1 - 2, strict, &l1);
+        var s2 = 0;
+        if (s1 != 0) { s2 = _sv_str_norm_a(a, b2 + i2 + 1, e2 - i2 - 2, strict, &l2); }
+        if (s2 != 0 && load64(&l1) == load64(&l2) && (load64(&l1) == 0 || memeq(s1, s2, load64(&l1)) == 1)) { r = 1; }
+    } elif (k == 6) {
+        var p = _jx_skip_ws(b1, n1, i1 + 1);
+        var q = _jx_skip_ws(b2, n2, i2 + 1);
+        r = 2;
+        while (r == 2) {
+            var pe = 0;
+            var qe = 0;
+            if (p >= n1 || load8(b1 + p) == 93) { pe = 1; }
+            if (q >= n2 || load8(b2 + q) == 93) { qe = 1; }
+            if (pe == 1 && qe == 1) { r = 1; }
+            elif (pe == 1 || qe == 1) { r = 0; }
+            elif (_sv_eq(a, b1, n1, p, b2, n2, q, strict) == 0) { r = 0; }
+            else {
+                p = _sv_next(b1, n1, p);
+                q = _sv_next(b2, n2, q);
+            }
+        }
+    } else {
+        r = _sv_obj_eq(a, b1, n1, i1, b2, n2, i2, strict);
+    }
+    bote_arena_release(a, &mk);
+    return r;
+}
+
+# The members of the object at buf[i] onto `a`: three words each, the key's characters, their
+# length, and where its value starts. Their number at *count.
+fn _sv_members_a(a, buf, n, i, count) {
+    var m = 0;
+    var cap = 8;
+    var out = alloc_via(a, cap * 24);
+    i = _jx_skip_ws(buf, n, i + 1);
+    while (i < n && load8(buf + i) == 34) {
+        var ke = _jx_skip_string(buf, n, i);
+        if (m == cap) {
+            var grown = alloc_via(a, cap * 48);
+            var w = 0;
+            while (w < cap * 3) { store64(grown + w * 8, load64(out + w * 8)); w = w + 1; }
+            out = grown;
+            cap = cap * 2;
+        }
+        var kl[8];
+        var kp = _sv_str_norm_a(a, buf + i + 1, ke - i - 2, 0, &kl);
+        i = _jx_skip_ws(buf, n, ke);
+        if (i >= n || load8(buf + i) != 58) { break; }
+        i = _jx_skip_ws(buf, n, i + 1);
+        store64(out + m * 24, kp);
+        store64(out + m * 24 + 8, load64(&kl));
+        store64(out + m * 24 + 16, i);
+        m = m + 1;
+        i = _sv_next(buf, n, i);
+    }
+    store64(count, m);
+    return out;
+}
+
+# _sv_eq for two objects: the same number of members, and for each key of the first one
+# of the second, with an equal value. A member is found through a table past eight of them,
+# so a large object is not compared key by key with every key.
+fn _sv_obj_eq(a, b1, n1, i1, b2, n2, i2, strict) {
+    var c1[8];
+    var c2[8];
+    var m1 = _sv_members_a(a, b1, n1, i1, &c1);
+    var m2 = _sv_members_a(a, b2, n2, i2, &c2);
+    var cnt = load64(&c1);
+    if (cnt != load64(&c2)) { return 0; }
+    var size = 0;
+    var t = 0;
+    var seed = _jx_hash_seed();
+    if (cnt > 8) {
+        size = 16;
+        while (size < cnt * 2) { size = size * 2; }
+        t = alloc_via(a, size * 8);
+        var z = 0;
+        while (z < size) { store64(t + z * 8, 0); z = z + 1; }
+        var bi = 0;
+        while (bi < cnt) {
+            var h = _jx_hash_bytes(seed, load64(m2 + bi * 24), load64(m2 + bi * 24 + 8)) & (size - 1);
+            while (load64(t + h * 8) != 0) { h = (h + 1) & (size - 1); }
+            store64(t + h * 8, bi + 1);
+            bi = bi + 1;
+        }
+    }
+    var ai = 0;
+    while (ai < cnt) {
+        var kp = load64(m1 + ai * 24);
+        var kl = load64(m1 + ai * 24 + 8);
+        var hit = 0 - 1;
+        if (t != 0) {
+            var s = _jx_hash_bytes(seed, kp, kl) & (size - 1);
+            while (load64(t + s * 8) != 0 && hit < 0) {
+                var o = load64(t + s * 8) - 1;
+                if (load64(m2 + o * 24 + 8) == kl && (kl == 0 || memeq(load64(m2 + o * 24), kp, kl) == 1)) { hit = o; }
+                s = (s + 1) & (size - 1);
+            }
+        } else {
+            var bj = 0;
+            while (bj < cnt && hit < 0) {
+                if (load64(m2 + bj * 24 + 8) == kl && (kl == 0 || memeq(load64(m2 + bj * 24), kp, kl) == 1)) { hit = bj; }
+                bj = bj + 1;
+            }
+        }
+        if (hit < 0) { return 0; }
+        if (_sv_eq(a, b1, n1, load64(m1 + ai * 24 + 16), b2, n2, load64(m2 + hit * 24 + 16), strict) == 0) { return 0; }
+        ai = ai + 1;
+    }
+    return 1;
+}
+
+# A hash of the value at buf[i] that two values _sv_eq finds equal share (as a client reads
+# its strings): a number by its value (sign, exponent, significant digits), a string by its
+# characters, an array by its items in order, an object by its members in any order. Seeded
+# with the process's seed, so a client cannot choose items that share a bucket.
+fn _sv_hash(a, buf, n, i) {
+    var seed = _jx_hash_seed();
+    i = _jx_skip_ws(buf, n, i);
+    if (i >= n) { return seed; }
+    var k = _sv_kind_at(buf, i);
+    if (k == 1) {
+        var e = _jx_skip_string(buf, n, i);
+        var sl[8];
+        var sp = _sv_str_norm_a(a, buf + i + 1, e - i - 2, 0, &sl);
+        return _jx_hash_bytes(seed ^ 1, sp, load64(&sl));
+    }
+    if (k == 2) {
+        var x[64];
+        if (_sch_num_norm(buf + i, &x) == 0) { return seed ^ 2; }
+        var sg = load64(&x);
+        if (sg == 0) { return _jx_mix(seed ^ 20); }
+        # The significant digits, trailing zeros already left out (_sch_num_norm).
+        var d0 = load64(&x + 48);
+        var d1 = load64(&x + 56);
+        var h = _jx_mix(seed ^ (sg + 2)) ^ _jx_mix(load64(&x + 8) + 3);
+        while (d0 < d1) {
+            h = (h ^ _sch_num_digit(buf + i, &x, d0)) * 1099511628211;
+            d0 = d0 + 1;
+        }
+        return _jx_mix(h);
+    }
+    if (k >= 3 && k <= 5) { return _jx_mix(seed + k); }
+    if (k == 6) {
+        var ha = _jx_mix(seed ^ 6);
+        var j = _jx_skip_ws(buf, n, i + 1);
+        while (j < n && load8(buf + j) != 93) {
+            ha = _jx_mix(ha ^ _sv_hash(a, buf, n, j));
+            j = _sv_next(buf, n, j);
+        }
+        return ha;
+    }
+    if (k == 7) {
+        # A sum of each member's hash, in whatever order they come.
+        var acc = 0;
+        var cnt = 0;
+        var j2 = _jx_skip_ws(buf, n, i + 1);
+        while (j2 < n && load8(buf + j2) == 34) {
+            var ke = _jx_skip_string(buf, n, j2);
+            var kl[8];
+            var kp = _sv_str_norm_a(a, buf + j2 + 1, ke - j2 - 2, 0, &kl);
+            j2 = _jx_skip_ws(buf, n, ke);
+            if (j2 >= n || load8(buf + j2) != 58) { return seed ^ 7; }
+            j2 = _jx_skip_ws(buf, n, j2 + 1);
+            acc = acc + _jx_mix(_jx_hash_bytes(seed ^ 7, kp, load64(&kl)) ^ _sv_hash(a, buf, n, j2));
+            cnt = cnt + 1;
+            j2 = _sv_next(buf, n, j2);
+        }
+        return _jx_mix(acc ^ _jx_mix(seed + 8 + cnt));
+    }
+    return seed;
+}
+
+# `uniqueItems` for the array [vs, ve) of `buf`, `count` items: each item's hash into a table
+# on the arena, and an item compared only with one of the same hash, so an array costs a
+# look per item, where comparing every pair is quadratic in what a client sends. What the
+# check reads is given back before the violation, which names the first two found equal.
+fn _sv_unique(slot, f, buf, n, vs, ve, count) {
+    var a = _vs_alloc(slot);
+    var mk[16];
+    bote_arena_mark(a, &mk);
+    var it = alloc_via(a, count * 16);
+    var size = 16;
+    while (size < count * 2) { size = size * 2; }
+    var t = alloc_via(a, size * 8);
+    var z = 0;
+    while (z < size) { store64(t + z * 8, 0); z = z + 1; }
+    var d1 = 0 - 1;
+    var d2 = 0 - 1;
+    var i = _jx_skip_ws(buf, n, vs + 1);
+    var j = 0;
+    while (i < ve && load8(buf + i) != 93 && j < count && d1 < 0) {
+        var h = _sv_hash(a, buf, n, i);
+        store64(it + j * 16, i);
+        store64(it + j * 16 + 8, h);
+        var s = h & (size - 1);
+        while (load64(t + s * 8) != 0 && d1 < 0) {
+            var o = load64(t + s * 8) - 1;
+            if (load64(it + o * 16 + 8) == h && _sv_eq(a, buf, n, load64(it + o * 16), buf, n, i, 0) == 1) {
+                d1 = o;
+                d2 = j;
+            }
+            s = (s + 1) & (size - 1);
+        }
+        if (d1 < 0) { store64(t + s * 8, j + 1); }
+        i = _sv_next(buf, n, i);
+        j = j + 1;
+    }
+    bote_arena_release(a, &mk);
+    if (d1 >= 0) {
+        var sb = str_builder_new_a(a);
+        str_builder_add_cstr_a(a, sb, "items ");
+        str_builder_add_int_a(a, sb, d1);
+        str_builder_add_cstr_a(a, sb, " and ");
+        str_builder_add_int_a(a, sb, d2);
+        str_builder_add_cstr_a(a, sb, " are equal, against uniqueItems");
+        _sv_violation(slot, f, str_data(str_builder_build_a(a, sb)));
+    }
+    return 0;
+}
+
+# A type array's check (3.8.7): 1 when the value at buf[vs], its first byte `c`, is of a
+# type `tm` names, else a violation naming them, and 0. An integer named alone is held to
+# the range an argument may be, as `type: "integer"` is.
+fn _sv_types_ok(slot, f, buf, vs, c, isnum, tm) {
+    if (c == 34 && (tm & (1 << SCH_STRING)) != 0) { return 1; }
+    if ((c == 116 || c == 102) && (tm & (1 << SCH_BOOLEAN)) != 0) { return 1; }
+    if (c == 110 && (tm & (1 << SCH_NULL)) != 0) { return 1; }
+    if (c == 91 && (tm & (1 << SCH_ARRAY)) != 0) { return 1; }
+    if (c == 123 && (tm & (1 << SCH_OBJECT)) != 0) { return 1; }
+    if (isnum == 1) {
+        if ((tm & (1 << SCH_NUMBER)) != 0) { return 1; }
+        var islot[8];
+        if ((tm & (1 << SCH_INTEGER)) != 0 && _sch_num_parse(buf + vs, &islot) == 2) {
+            var iv = load64(&islot);
+            if (load64(slot + 24) == 0 && (iv >= SCH_NUM_SAT || iv <= 0 - SCH_NUM_SAT)) {
+                _sv_violation(slot, f, "integer out of range");
+                return 0;
+            }
+            return 1;
+        }
+    }
+    if (_vs_full(slot) == 1) { return 0; }
+    var a = _vs_alloc(slot);
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, "expected ");
+    var first = 1;
+    var tags = "string number integer boolean array object null ";
+    var bits[56];
+    store64(&bits, SCH_STRING); store64(&bits + 8, SCH_NUMBER); store64(&bits + 16, SCH_INTEGER);
+    store64(&bits + 24, SCH_BOOLEAN); store64(&bits + 32, SCH_ARRAY); store64(&bits + 40, SCH_OBJECT);
+    store64(&bits + 48, SCH_NULL);
+    var bi = 0;
+    var wi = 0;
+    while (bi < 7) {
+        var ws = wi;
+        while (load8(tags + wi) != 32) { wi = wi + 1; }
+        if ((tm & (1 << load64(&bits + bi * 8))) != 0) {
+            if (first == 0) { str_builder_add_cstr_a(a, sb, " or "); }
+            first = 0;
+            var wd = alloc_via(a, wi - ws + 1);
+            memcpy(wd, tags + ws, wi - ws);
+            store8(wd + wi - ws, 0);
+            str_builder_add_cstr_a(a, sb, wd);
+        }
+        wi = wi + 1;
+        bi = bi + 1;
+    }
+    _sv_violation(slot, f, str_data(str_builder_build_a(a, sb)));
+    return 0;
+}
+
+# `enum` (3.8.7, for every value): a string against the enum's strings as it decodes, a
+# string that is no text meeting none (3.8.3); any other value against each value that is
+# no string, by _sv_eq.
+fn _sv_enum(slot, f, buf, n, vs, ve, prop) {
+    var a = _vs_alloc(slot);
+    var found = 0;
+    if (load8(buf + vs) == 34) {
+        var p = buf + vs + 1;
+        var bl = ve - vs - 2;
+        var allowed = prop_enum_values(prop);
+        if (allowed != 0 && _jx_key_text_ok(p, bl) == 1) {
+            var i = 0;
+            while (i < vec_len(allowed) && found == 0) {
+                if (_sv_str_is(p, bl, vec_get(allowed, i)) == 1) { found = 1; }
+                i = i + 1;
+            }
+        }
+        if (found == 0 && _vs_full(slot) == 0) {
+            var sb = str_builder_new_a(a);
+            _sb_grow_a(a, sb, bl + 32);
+            str_builder_add_cstr_a(a, sb, "value '");
+            if (_jx_key_text_ok(p, bl) == 1) {
+                var dec = alloc_via(a, bl + 1);
+                if (_jx_unescape_into(p, bl, dec) == strlen(dec)) { str_builder_add_cstr_a(a, sb, dec); }
+            }
+            str_builder_add_cstr_a(a, sb, "' not in enum");
+            _sv_violation(slot, f, str_data(str_builder_build_a(a, sb)));
+        }
+        return 0;
+    }
+    var er = prop_enum_raw(prop);
+    var ei = 0;
+    while (ei < vec_len(er) && found == 0) {
+        var ev = vec_get(er, ei);
+        if (_sch_first_nonws(ev) != 34 && _sv_eq(a, buf, n, vs, ev, strlen(ev), 0, 1) == 1) { found = 1; }
+        ei = ei + 1;
+    }
+    if (found == 0) { _sv_violation(slot, f, "value not in enum"); }
+    return 0;
+}
+
 # The value [vs, ve) of `buf` against `prop`, its violations into `slot`, named from `f`.
 fn _sv_value(slot, f, buf, n, vs, ve, prop) {
     var tag = prop_tag(prop);
@@ -896,6 +1383,15 @@ fn _sv_value(slot, f, buf, n, vs, ve, prop) {
             return 0;
         }
     }
+    # (3.8.7) A type array: the value is of one of its types.
+    var tm = prop_type_mask(prop);
+    if (tm != 0 && _sv_types_ok(slot, f, buf, vs, c, isnum, tm) == 0) { return 0; }
+    # (3.8.7) `const` and `enum`, whatever the value is, by JSON Schema's equality.
+    var cr = prop_const_raw(prop);
+    if (cr != 0 && _sv_eq(_vs_alloc(slot), buf, n, vs, cr, strlen(cr), 0, 1) == 0) {
+        _sv_violation(slot, f, "not the const value");
+    }
+    if (prop_enum_raw(prop) != 0) { _sv_enum(slot, f, buf, n, vs, ve, prop); }
     # Each keyword, by what the value is.
     if (c == 34) { return _sv_string(slot, f, buf, vs, ve, prop); }
     if (isnum == 1) { return _sv_number(slot, f, buf, vs, prop); }
@@ -905,32 +1401,6 @@ fn _sv_value(slot, f, buf, n, vs, ve, prop) {
 }
 
 fn _sv_string(slot, f, buf, vs, ve, prop) {
-    var p = buf + vs + 1;
-    var bl = ve - vs - 2;
-    var allowed = prop_enum_values(prop);
-    if (allowed != 0 && prop_tag(prop) == SCH_STRING) {
-        # (3.8.3) A string that is no text a client reads as bote does meets no value.
-        var found = 0;
-        if (_jx_key_text_ok(p, bl) == 1) {
-            var i = 0;
-            while (i < vec_len(allowed) && found == 0) {
-                if (_sv_str_is(p, bl, vec_get(allowed, i)) == 1) { found = 1; }
-                i = i + 1;
-            }
-        }
-        if (found == 0) {
-            var ea = _vs_alloc(slot);
-            var sb = str_builder_new_a(ea);
-            _sb_grow_a(ea, sb, bl + 32);
-            str_builder_add_cstr_a(ea, sb, "value '");
-            if (_jx_key_text_ok(p, bl) == 1) {
-                var dec = alloc_via(ea, bl + 1);
-                if (_jx_unescape_into(p, bl, dec) == strlen(dec)) { str_builder_add_cstr_a(ea, sb, dec); }
-            }
-            str_builder_add_cstr_a(ea, sb, "' not in enum");
-            _sv_violation(slot, f, str_data(str_builder_build_a(ea, sb)));
-        }
-    }
     var mn = prop_min_length(prop);
     var mx = prop_max_length(prop);
     if (mn >= 0 || mx >= 0) {
@@ -978,7 +1448,8 @@ fn _sv_array(slot, f, buf, n, vs, ve, prop) {
     var items = prop_items(prop);
     var mn = prop_min_items(prop);
     var mx = prop_max_items(prop);
-    if (items == 0 && mn < 0 && mx < 0) { return 0; }
+    var uq = prop_unique_items(prop);
+    if (items == 0 && mn < 0 && mx < 0 && uq == 0) { return 0; }
     var fr[32];
     var count = 0;
     var i = _jx_skip_ws(buf, n, vs + 1);
@@ -994,6 +1465,7 @@ fn _sv_array(slot, f, buf, n, vs, ve, prop) {
     }
     if (mn >= 0 && count < mn) { _sv_violation(slot, f, "fewer items than minItems"); }
     if (mx >= 0 && count > mx) { _sv_violation(slot, f, "more items than maxItems"); }
+    if (uq == 1 && count > 1 && _vs_full(slot) == 0) { _sv_unique(slot, f, buf, n, vs, ve, count); }
     return 0;
 }
 
@@ -1010,20 +1482,28 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
     # A schema that judges no member, requires none and counts none has nothing to walk for.
     var req0 = compiled_required(comp);
     if (nw == 0 && additional == 0 && mn < 0 && mx < 0 && (req0 == 0 || vec_len(req0) == 0)) { return 0; }
+    # A bit for each slot (3.8.7, from the 3.8.6 review): 512 of them on the stack, so a
+    # schema of that many names takes nothing of the arena or, through the heap forms
+    # (compiled_validate, registry_validate_params), of the heap, where a mark and a release
+    # do nothing. Past 512 a table on the arena, given back when this object's walk adds no
+    # violation: kept, a 57 KB array of objects judged by a schema of 1,000 properties grew
+    # the arena by 19 MB (3.8.6).
     var seen0[64];
     var seen = &seen0;
-    # A larger table is the arena's, and given back when this object's walk adds no violation
-    # (3.8.6, from the 3.8.5 review): kept, a 57 KB array of objects judged by a schema of
-    # 1,000 properties grew the arena by 19 MB. A violation's bytes come after it, and stay.
+    var nb = (nw + 7) / 8;
     var smk[16];
     var sv0 = load64(slot + 16);
-    if (nw > 64) {
+    if (nb > 64) {
         bote_arena_mark(a, &smk);
-        seen = alloc_via(a, nw);
+        seen = alloc_via(a, nb);
     }
     var z = 0;
-    while (z < nw && z < 64) { store64(seen + z, 0); z = z + 8; }
-    while (z < nw) { store8(seen + z, 0); z = z + 1; }
+    if (nb <= 64) {
+        while (z < nb) { store64(seen + z, 0); z = z + 8; }
+    } else {
+        while (z + 8 <= nb) { store64(seen + z, 0); z = z + 8; }
+        while (z < nb) { store8(seen + z, 0); z = z + 1; }
+    }
     var kb[256];
     var fr[32];
     var count = 0;
@@ -1071,8 +1551,10 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
         }
         var first = 1;
         if (w != 0) {
-            if (load8(seen + load64(w) - 1) == 1) { first = 0; }
-            store8(seen + load64(w) - 1, 1);
+            var sb0 = load64(w) - 1;
+            var sbit = 1 << (sb0 % 8);
+            if ((load8(seen + sb0 / 8) & sbit) != 0) { first = 0; }
+            store8(seen + sb0 / 8, load8(seen + sb0 / 8) | sbit);
         }
         if (first == 1 && _vs_full(slot) == 0) {
             var prop = 0;
@@ -1101,7 +1583,7 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
             if (rkey != 0) {
                 if (ri * 2 + 1 < vec_len(reqw) && vec_get(reqw, ri * 2) == rkey) {
                     var rw = vec_get(reqw, ri * 2 + 1);
-                    if (rw != 0 && load8(seen + load64(rw) - 1) == 1) { met = 1; }
+                    if (rw != 0 && (load8(seen + (load64(rw) - 1) / 8) & (1 << ((load64(rw) - 1) % 8))) != 0) { met = 1; }
                 } elif (_jx_find_value_pos(buf + vs, ve - vs, rkey) >= 0) {
                     # A name compiled_set_required did not see: pushed into the vec after it
                     # (3.8.6, from the 3.8.5 review). It is looked for in the object, as 3.8.4
@@ -1124,7 +1606,7 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
     }
     if (mn >= 0 && count < mn) { _sv_violation(slot, f, "fewer properties than minProperties"); }
     if (mx >= 0 && count > mx) { _sv_violation(slot, f, "more properties than maxProperties"); }
-    if (nw > 64 && load64(slot + 16) == sv0) { bote_arena_release(a, &smk); }
+    if (nb > 64 && load64(slot + 16) == sv0) { bote_arena_release(a, &smk); }
     return 0;
 }
 

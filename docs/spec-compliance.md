@@ -1,6 +1,6 @@
 # MCP Spec Compliance
 
-> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.8.6 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
+> **Spec Version**: 2025-11-25 (default), 2026-07-28 (stateless core) | **Bote Version**: 3.8.7 (cyrius 6.7.18) | **Last Audited**: 2026-11-01 ([closeout audit](audit/2026-11-01-closeout.md))
 >
 > ⚠ **bote speaks the current revision, 2026-07-28, beside the older ones.** [That section](#mcp-2026-07-28-stateless-path) lists what is in and what is not. Every other table here is against 2025-11-25.
 
@@ -130,8 +130,7 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | Tool deprecation message | `tool_def_with_deprecated` | ✅ |
 | Tool annotations: `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` — serialized in `tools/list` | `ToolAnnotations` (+ `ann_read_only` / `ann_destructive` presets); `_emit_annotations` | ✅ |
 | Tool profile tags + optional `{"profile":"<tag>"}` filter on `tools/list` (bote extension) | `tool_def_with_profiles` + `_build_tools_list_result` | ✅ |
-| `project_tool` naming convention enforced on dynamic register | `validate_tool_name` | ✅ |
-| Tool names follow the spec's guidance (1–128 characters from `A-Z a-z 0-9 _ - .`) and inputSchema is an object schema ("MUST be a valid JSON Schema object") | `registry::registry_check_tool_def` | ✅ (3.4.8) — checked at every registration; a refused definition is not registered, an ERROR line says why, and the call returns a BoteError. It refuses the `Str`-for-cstr registrations the consumer audit found in t-ron and phylax |
+| Tool names follow the spec's guidance (1–128 characters from `A-Z a-z 0-9 _ - .`) and inputSchema is an object schema ("MUST be a valid JSON Schema object") | `registry::registry_check_tool_def` | ✅ (3.4.8) — checked at every registration; a refused definition is not registered, an ERROR line says why, and the call returns a BoteError. It refuses the `Str`-for-cstr registrations the consumer audit found in t-ron and phylax. (3.8.7) `dispatcher_register_tool` too: through 3.8.6 it ran bote's own `project_tool` rule first, which required an underscore and refused `-` and `.`, so `t`, `get-weather` and `tool.v2` registered through the registry and were refused, silently, through the dispatcher. `validate_tool_name` is the spec's rule |
 
 ## Schema Validation
 
@@ -139,7 +138,9 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 |---|---|---|
 | Input schemas compiled at registration, so every tool's arguments are validated | `registry::registry_register` → `compiled_compile` | ✅ (3.4.8) — through 3.4.7 nothing compiled a schema, so only `required` was ever checked in production |
 | JSON Schema subset — string, number, integer, boolean, array, object, ANY | `schema::SchemaTypeTag` | ✅ |
-| String enum constraint | `prop_enum_values` | ✅ |
+| `enum` of any value, and `const` | `schema::_sv_enum`, `_sv_eq` | ✅ (3.8.7) every value, whatever `type` says, by JSON Schema's equality (§4.2.2): numbers by value (`1`, `1.0`, `1e0`), strings by their characters however escaped, arrays in order, objects in any order. A string that is no text equals nothing. Through 3.8.6 `enum` was judged only for a string property and `const` not at all |
+| `uniqueItems` | `schema::_sv_unique`, `_sv_hash` | ✅ (3.8.7) each item hashed by its value into a seeded table, so an array costs a look per item; a string's bytes that are no UTF-8 read as a client reads them, so two items a client finds equal are equal here. Numbers are compared exactly: a client holding them as doubles may find two equal past 15 significant digits or 2^53 that bote does not |
+| Type arrays (`"type": ["string", "null"]`) | `schema::_sv_types_ok` | ✅ (3.8.7) a value of any type named; an integer named without `number` held to an argument's range, as `type: "integer"` is |
 | Numeric bounds (`minimum`, `maximum`) for number + integer | `prop_min` / `prop_max` | ✅ — exponents read (3.4.8); a fractional value is compared as itself (3.4.15), and a fractional bound is truncated |
 | `integer` per JSON Schema 2020-12 (a zero fractional part counts: `5.0`, `1e2`) | `schema::_sch_num_parse` | ✅ (3.4.8; any `.` was refused before) |
 | Required field check | `compiled_required` | ✅ |
@@ -151,7 +152,7 @@ Asserted in `tests/conformance.tcyr`, M1 to M75, through `codec_process_message`
 | Permissive on extra (unknown) fields, unless `additionalProperties` says otherwise | `_sv_object` | ✅ (3.8.5) `additionalProperties` false refuses a member no property names, and a schema judges it; beside `patternProperties` it is not judged, and registration warns |
 | `minLength` / `maxLength` (code points), `minItems` / `maxItems`, `minProperties` / `maxProperties`, `exclusiveMinimum` / `exclusiveMaximum` | `schema::_sv_string`, `_sv_array`, `_sv_object`, `_sv_number` | ✅ (3.8.5); each keyword judges the values of its kind whatever `type` says, as JSON Schema has it. (3.8.6) Bytes that are no UTF-8 are counted as a client's decoder reads them, one U+FFFD for each maximal part (WHATWG Encoding, Unicode §3.9): 3.8.5 counted a byte from 0x80 to 0xBF that starts no sequence as none, so 60,000 of them met `maxLength: 4`. A value bote cannot judge by (`maxLength: "3"`, `exclusiveMinimum: true`, `additionalProperties: "no"`) judges nothing, and registration WARNs of it |
 | Schema `false` allows nothing | `SCH_NEVER` | ✅ (3.4.15; it allowed anything) |
-| Keywords outside the subset (`anyOf`, `oneOf`, `allOf`, `not`, `$ref`, `pattern`, `const`, `multipleOf`, `uniqueItems`, `format`, `if` / `then` / `else`, `patternProperties`, type arrays, non-string enums, and the rest of `BOTE_UNENFORCED`) | `registry::_reg_warn_unenforced`, (3.8.0) `_reg_warn_output` | 🟡 advertised in `tools/list`, not enforced; a WARN at registration names each (3.4.15), on an outputSchema's root and its properties too (3.8.0). Roadmap 3.8.x |
+| Keywords outside the subset (`anyOf`, `oneOf`, `allOf`, `not`, `$ref`, `pattern`, `multipleOf`, `format`, `if` / `then` / `else`, `patternProperties`, `prefixItems`, `contains`, and the rest of `BOTE_UNENFORCED`) | `registry::_reg_warn_unenforced`, (3.8.0) `_reg_warn_output` | 🟡 advertised in `tools/list`, not enforced; a WARN at registration names each (3.4.15), on an outputSchema's root and its properties too (3.8.0). Roadmap 3.8.x |
 | An outputSchema judges a result's `structuredContent`, any JSON value | `schema::_sch_check_value_a` | ✅ (3.8.0) the same subset, from the schema's root: each violation named from `structuredContent` (`structuredContent.temperature: expected number`, `structuredContent[0].id: expected string`). (3.8.1) A key named twice in any object of it is refused, as bote would judge the first and a client reads the last; a key of any length is read as it decodes; an integer is not bounded as an argument is. An outputSchema that repeats a key, has one holding a NUL, or names a dialect other than 2020-12, 2019-09, draft-07 or draft-06 is refused at registration |
 
 ## Session Management
