@@ -74,6 +74,10 @@ The stated minimum cyrius (6.7.13) is unchanged.
 
 ### Fixed
 
+- **CI's test step reports a file that exits non-zero.** It captured each file's output with `out=$(...); rc=$?`
+  under `bash -e`, so a failing file ended the step at the assignment, before its output, its FAIL line or any
+  later file: the log showed the file's name and `exit code 1`. It is `rc=0; out=$(...) || rc=$?`.
+
 From the review of 3.8.10:
 
 - **A walk's bytes were uncharged** (HIGH). `_sv_object` and `_sv_array` charge the budget one for every four bytes
@@ -146,6 +150,11 @@ From the review of 3.8.10:
   - A root's `const` and `enum`; a batch's valid result after a call whose arguments spent their base; violation
     names.
   - Five expectations changed with the reading: a definition nothing names compiles nothing.
+- **`tests/bote_listen_line.tcyr`**, 193, from 192: the last of four threads' resource updates is posted once the
+  stdio thread has taken the queue. 200 URIs overflow a 16-entry queue whenever that thread falls behind, and an
+  update posted into an overflowed queue is told as the URI the subscription holds, `res://t/`, as designed: more
+  than happened, never less. Posted at once, it failed on a two-core runner, in 2 of 6 runs on 3.8.10 too. It
+  passes 10 of 10 on two cores and 5 of 5 on one.
 - **`tests/bote.tcyr`**, **`tests/bote_output.tcyr`**, **`tests/bote_schema_parts.tcyr`** (78, from 77): their
   examples of a keyword bote does not judge are `patternProperties`, `format` and `unevaluatedProperties` now.
   `propertyNames` with a `pattern` is judged.

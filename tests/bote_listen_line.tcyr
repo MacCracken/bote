@@ -288,6 +288,17 @@ fn _uris_filter(v) {
 
 var _up_d = 0;
 var _up_go = 0;
+# 1 once the writing thread has taken line `c`'s queue: nothing queued and no overflow
+# (+112, +120), within `ms`; else 0.
+fn _line_taken(c, ms) {
+    var end = clock_now_ms() + ms;
+    while (clock_now_ms() < end) {
+        if (atomic_load(c + 112) == 0 && atomic_load(c + 120) == 0) { return 1; }
+        sleep_ms(1);
+    }
+    return 0;
+}
+
 fn _updater(i) {
     while (atomic_load(&_up_go) == 0) { }
     var k = 0;
@@ -1135,6 +1146,11 @@ fn main() {
         thread_join(load64(uts + ci * 8));
         ci = ci + 1;
     }
+    # 200 URIs through a queue of 16 overflow it whenever the writing thread falls behind, and
+    # an update arriving overflowed is told as the URI the subscription holds, `res://t/`:
+    # more than happened, never less. The last one is posted once the queue is taken, so it
+    # is told as itself. (Posted at once, it failed on a two-core runner, 2 in 6 runs.)
+    assert_eq(_line_taken(sc, 5000), 1, "stdio: the writing thread takes four threads' updates while the client is quiet");
     dispatcher_resource_updated(sd, "res://t/last");
     assert_eq(_rd_await(so, _upd("\"res://t/last\"", "\"ru\""), 5000), 1, "stdio: updates from four threads, written while the client is quiet");
     sys_close(sw);

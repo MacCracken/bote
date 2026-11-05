@@ -370,7 +370,11 @@ jobs:
             # SIGSEGV'd before printing its summary, passed this step with
             # no output at all. Same class as cyrius 6.6.6's own runner fix
             # ("a binary that ran nothing scored a PASS").
-            out=$(cyrius test "$tcyr" 2>&1); rc=$?
+            # 3.8.11: `|| rc=$?`, not `; rc=$?`. A step runs under `bash -e`, so a file that
+            # exited non-zero ended the whole step at the assignment, before its output, its
+            # FAIL line or any later file: the log showed the file's name and nothing else.
+            rc=0
+            out=$(cyrius test "$tcyr" 2>&1) || rc=$?
             tail=$(echo "$out" | tail -3)
             echo "$tail"
             if [ $rc -ne 0 ]; then

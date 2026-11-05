@@ -618,9 +618,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 6976 total across thirty-five files (+ a core-only drift smoke)
+### Tests — 6977 total across thirty-five files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 6976 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 6977 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 991 — core protocol/dispatch/codec/schema/session/transports
@@ -636,7 +636,7 @@ cyrius test tests/bote_jwks.tcyr          # 49 — a jwks_uri: what it may be, a
 cyrius test tests/bote_jwt.tcyr           # 510 — JWT: HS256, RS256, ES256, JWK Sets, every claim enforcement, scopes, tokens already verified, keys from a source
 cyrius test tests/bote_libro_tools.tcyr   # 103 — libro_tools wrappers
 cyrius test tests/bote_listen.tcyr        # 224 — subscriptions/listen: the filter, and real streams on the three HTTP handlers
-cyrius test tests/bote_listen_line.tcyr   # 192 — subscriptions/listen where the connection is the stream: stdio, unix, WebSocket
+cyrius test tests/bote_listen_line.tcyr   # 193 — subscriptions/listen where the connection is the stream: stdio, unix, WebSocket
 cyrius test tests/bote_log.tcyr           # 50 — sakshi logging: levels, line bytes, escaping, truncation
 cyrius test tests/bote_display.tcyr       # 107 — titles, icons, serverInfo's details and instructions: the checks, each list, the heap
 cyrius test tests/bote_output.tcyr        # 264 — outputSchema: registration, the 2025-11-25 form, tools/list, each result judged and shaped, the heap
