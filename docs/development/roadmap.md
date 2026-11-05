@@ -33,14 +33,15 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.15 — JSON Schema coverage, its tenth bite: `unevaluatedProperties` and `unevaluatedItems`.** Each needs to
-know what every other keyword judged of the value, through composition and references, as the client's Ajv tracks
-it (its `evaluated` props and items, merged across `allOf`, `anyOf`, `oneOf`, `if` and `$ref`). Then draft-07's
-array `items`, `additionalItems` and `dependencies` (and `dependencies` in 2020-12, which the client's engine judges
-too); the `format*` limit keywords, which compare a date, a time or a date-time through JavaScript's `Date` and
-would need its parser for the strings `format` takes; and a `\p{...}` name in a pattern checked against ECMA-262's
-tables, which grow with each Unicode version, so a pattern naming one the client refuses is refused. `format: regex`
-stays unjudged until bote reads JavaScript's syntax without the `u` flag (Annex B), as the client checks it.
+**3.8.16 — JSON Schema coverage, its eleventh bite: draft-07's and 2019-09's array `items`, `additionalItems` and
+`dependencies`** (and `dependencies` in 2020-12, which the client's engine judges too, and counts as evaluating what
+its schemas evaluate). bote counts an array `items` and `additionalItems` as evaluated for `unevaluatedItems`
+(3.8.15) and judges neither; registration refuses `unevaluated*` beside `dependencies`. Then the `format*` limit
+keywords, which compare a date, a time or a date-time through JavaScript's `Date` and would need its parser for the
+strings `format` takes; and a `\p{...}` name in a pattern checked against ECMA-262's tables, which grow with each
+Unicode version, so a pattern naming one the client refuses is refused (and with those tables, a capture group
+named past ASCII that JavaScript takes, which 3.8.15 refuses with the rest). `format: regex` stays unjudged until
+bote reads JavaScript's syntax without the `u` flag (Annex B), as the client checks it.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
@@ -60,9 +61,11 @@ stdio's) are each one connection's, and a worker per connection would need a hom
   JavaScript's, and `multipleOf`, exactly; since 3.8.12 `patternProperties`, with `additionalProperties` beside it;
   since 3.8.13 `format`, each of ajv-formats' as it defines them but `regex`; since 3.8.14 `$dynamicRef` and
   `$recursiveRef`, where the client's Ajv and JSON Schema read them alike, to the root that holds their anchor, the
-  rest refused at registration. It still warns at registration of what it lists and does not judge: the
-  `unevaluated*` keywords, draft-07's array `items`, `additionalItems` and `dependencies`, the `format*` limit
-  keywords and `format: regex` (each of which the official client enforces). What the client's validator cannot
+  rest refused at registration; since 3.8.15 `unevaluatedProperties` and `unevaluatedItems`, where the client's Ajv
+  counts what is evaluated as JSON Schema does (a model of its count finds where it does not, and where its code
+  throws, and registration refuses those). It still warns at registration of what it lists and does not judge:
+  draft-07's array `items`, `additionalItems` and `dependencies`, the `format*` limit keywords and `format: regex`
+  (each of which the official client enforces). What the client's validator cannot
   compile, in either form a schema is listed in, registration refuses (3.8.13, 3.8.14), but a pattern's `\p{...}`
   name, which it does not check. Numbers
   are compared exactly, where a client holding them as doubles may find two equal that bote does not: past 15

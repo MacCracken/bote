@@ -212,6 +212,7 @@ tests/
 ├── bote_format.tcyr           — 372 (3.8.13: every format, as the client's own validator judges it)
 ├── bote_schema_dyn.tcyr       — 127 (3.8.14: $dynamicRef and $recursiveRef, the form 2025-11-25 lists)
 ├── bote_schema_client.tcyr    — 133 (3.8.14: what the client cannot compile; Object.prototype's names and odd counts as it reads them)
+├── bote_schema_uneval.tcyr    — 150 (3.8.15: unevaluatedProperties and unevaluatedItems; what the client's Ajv counts otherwise or throws on, refused; the 3.8.14 review)
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 64 (streamable HTTP / SSE)

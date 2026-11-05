@@ -274,11 +274,12 @@ fn main() {
     # ---- What registration warns of ----
     _lc_begin();
     # (3.8.11) pattern and multipleOf are judged now; format and unevaluatedProperties are not.
-    # (3.8.13) format is too; formatMaximum is not.
-    dispatcher_register_tool(d, _tool("t_warn", "{\"type\":\"string\",\"format\":\"date\",\"formatMaximum\":\"2020-01-01\",\"properties\":{\"n\":{\"type\":\"number\",\"unevaluatedProperties\":false,\"const\":4},\"k\":{\"type\":[\"string\",\"null\"]}}}"), &h_ret);
+    # (3.8.13) format is too; formatMaximum is not. (3.8.15) unevaluatedProperties is too;
+    # dependencies is not.
+    dispatcher_register_tool(d, _tool("t_warn", "{\"type\":\"string\",\"format\":\"date\",\"formatMaximum\":\"2020-01-01\",\"properties\":{\"n\":{\"type\":\"number\",\"dependencies\":{\"a\":[\"b\"]},\"const\":4},\"k\":{\"type\":[\"string\",\"null\"]}}}"), &h_ret);
     _lc_end();
     assert(_has(_lc_find("property=outputSchema keyword=formatMaximum"), "schema keyword not enforced") == 1, "warn: a keyword at the root");
-    assert(_lc_find("property=outputSchema.n keyword=unevaluatedProperties") != 0, "warn: a keyword on a property");
+    assert(_lc_find("property=outputSchema.n keyword=dependencies") != 0, "warn: a keyword on a property");
     assert(_lc_find("keyword=const") == 0, "warn: const is judged, and warned of no longer (3.8.7)");
     assert(_lc_find("property=outputSchema.k keyword=") == 0, "warn: a type array is judged, and warned of no longer (3.8.7)");
 

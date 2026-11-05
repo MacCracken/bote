@@ -22,7 +22,9 @@
 # ipv4 or int32, each judged by hand, strings in the pool that meet them. (3.8.14) A root
 # `$dynamicAnchor: "r"` and a `$dynamicRef: "#r"`, plainly or escaped, where a part of the value
 # is judged, so it never leads back. The reference judges bayan's parse of both, a `$ref` by the
-# definition it names and a `$dynamicRef` by the root. Exit codes:
+# definition it names and a `$dynamicRef` by the root. (3.8.15) `unevaluatedProperties` and `unevaluatedItems`,
+# each judged by an annotation collector of the reference's own (_evp, _evi), as JSON Schema
+# 2020-12 collects what is evaluated. Exit codes:
 #
 #   10   a value bote passes the reference refuses, or the reverse;
 #   20   the rounds drew fewer than a thousand values passed or a thousand refused;
@@ -430,7 +432,31 @@ fn _schema(a, sb, depth) {
             sep = 1;
         }
     }
+    # (3.8.15) unevaluatedProperties and unevaluatedItems, false, true, a type or a schema of
+    # their own, judging what every keyword beside them left (the reference's _evp and _evi).
+    if (_r(5) == 0) {
+        if (sep == 1) { _add(a, sb, ","); }
+        _add(a, sb, "\"unevaluatedProperties\":");
+        _uneval_value(a, sb, depth);
+        sep = 1;
+    }
+    if (_r(7) == 0) {
+        if (sep == 1) { _add(a, sb, ","); }
+        _add(a, sb, "\"unevaluatedItems\":");
+        _uneval_value(a, sb, depth);
+        sep = 1;
+    }
     _add(a, sb, "}");
+    return 0;
+}
+
+# (3.8.15) What an unevaluated keyword holds.
+fn _uneval_value(a, sb, depth) {
+    var u = _r(5);
+    if (u == 0 || u == 1) { _add(a, sb, "false"); }
+    elif (u == 2) { _add(a, sb, "true"); }
+    elif (u == 3 || depth >= 2) { _add(a, sb, "{\"type\":\"integer\"}"); }
+    else { _schema_part(a, sb, depth + 1); }
     return 0;
 }
 
@@ -938,8 +964,164 @@ fn _ok(sch, inst) {
                 dz = dz + 1;
             }
         }
+        # (3.8.15) unevaluatedProperties: each member nothing beside it evaluated.
+        var uvp = _member(sch, "unevaluatedProperties");
+        if (uvp != 0) {
+            var ev = vec_new();
+            if (_evp(sch, inst, ev, 1) == 0) {
+                var uj = 0;
+                while (uj < nm) {
+                    var uk = bayan_json_v_obj_key(inst, uj);
+                    if (_in_strs(ev, uk) == 0 && _ok_bool(uvp, bayan_json_v_obj_val(inst, uj)) == 0) { return 0; }
+                    uj = uj + 1;
+                }
+            }
+        }
+    }
+    # (3.8.15) unevaluatedItems: each item past those evaluated.
+    var uvi = _member(sch, "unevaluatedItems");
+    if (uvi != 0 && bayan_json_v_is_arr(inst) == 1) {
+        var ec = _evi(sch, inst, 1);
+        if (ec >= 0) {
+            var ui = ec;
+            while (ui < bayan_json_v_arr_len(inst)) {
+                if (_ok_bool(uvi, bayan_json_v_arr_get(inst, ui)) == 0) { return 0; }
+                ui = ui + 1;
+            }
+        }
     }
     return 1;
+}
+
+# (3.8.15) The schema `true` or `false` as a bool node, or an object node: `false` passes nothing.
+fn _ok_bool(sch, inst) {
+    if (bayan_json_v_is_bool(sch) == 1) { return bayan_json_v_bool(sch); }
+    return _ok(sch, inst);
+}
+
+fn _in_strs(v, s) {
+    var i = 0;
+    while (i < vec_len(v)) { if (_s_eq(vec_get(v, i), s) == 1) { return 1; } i = i + 1; }
+    return 0;
+}
+
+# (3.8.15) Into `ev`, the names of the object `inst`'s members the schema `sch`, valid on it,
+# evaluates, as JSON Schema 2020-12 collects annotations: those `properties` names, those a
+# pattern of `patternProperties` matches, and those of each subschema that judges the object
+# itself and passes (`allOf`, each passing `anyOf` schema, the one passing `oneOf` schema, an
+# `if` that passes and its `then`, or the `else`, each `dependentSchemas` schema whose key is
+# present, what `$ref` and `$dynamicRef` name); `not` none. 1 for every member: an
+# `additionalProperties`, or an `unevaluatedProperties` (but `sch`'s own, with `self` 1).
+fn _evp(sch, inst, ev, self) {
+    if (bayan_json_v_is_obj(sch) == 0) { return 0; }
+    if (self == 0 && _member(sch, "unevaluatedProperties") != 0) { return 1; }
+    if (_member(sch, "additionalProperties") != 0) { return 1; }
+    var nm = bayan_json_v_obj_len(inst);
+    var props = _member(sch, "properties");
+    var ppr = _member(sch, "patternProperties");
+    var j = 0;
+    while (j < nm) {
+        var key = bayan_json_v_obj_key(inst, j);
+        var hit = 0;
+        if (props != 0) {
+            var pk = 0;
+            while (pk < bayan_json_v_obj_len(props)) { if (_s_eq(bayan_json_v_obj_key(props, pk), key) == 1) { hit = 1; } pk = pk + 1; }
+        }
+        if (ppr != 0) {
+            var pq = 0;
+            while (pq < bayan_json_v_obj_len(ppr)) { if (_pat_ok(bayan_json_v_obj_key(ppr, pq), key) == 1) { hit = 1; } pq = pq + 1; }
+        }
+        if (hit == 1 && _in_strs(ev, key) == 0) { vec_push(ev, key); }
+        j = j + 1;
+    }
+    var subs = vec_new();
+    _ev_subs(sch, inst, subs);
+    var dse = _member(sch, "dependentSchemas");
+    if (dse != 0) {
+        var dz = 0;
+        while (dz < bayan_json_v_obj_len(dse)) {
+            if (_has_key(inst, bayan_json_v_obj_key(dse, dz)) == 1) { vec_push(subs, bayan_json_v_obj_val(dse, dz)); }
+            dz = dz + 1;
+        }
+    }
+    var si = 0;
+    while (si < vec_len(subs)) {
+        if (_evp(vec_get(subs, si), inst, ev, 0) == 1) { return 1; }
+        si = si + 1;
+    }
+    return 0;
+}
+
+# Onto `subs`, the subschemas of `sch` that judge the value `inst` itself and pass on it,
+# their annotations kept: what `$ref` and `$dynamicRef` name, each `allOf` schema, each
+# passing `anyOf` schema, the one passing `oneOf` schema, a passing `if` and its `then`, or the
+# `else`.
+fn _ev_subs(sch, inst, subs) {
+    if (_member(sch, "$dynamicRef") != 0) { vec_push(subs, _ROOT); }
+    var rf = _member(sch, "$ref");
+    if (rf != 0) {
+        var rs = bayan_json_v_str(rf);
+        var dig = str_data(rs) + str_len(rs) - 1;
+        var tgt = _member(_member(_ROOT, "$defs"), _cat_d(load8(dig)));
+        if (tgt != 0) { vec_push(subs, tgt); }
+    }
+    var alo = _member(sch, "allOf");
+    var k = 0;
+    if (alo != 0) { while (k < bayan_json_v_arr_len(alo)) { vec_push(subs, bayan_json_v_arr_get(alo, k)); k = k + 1; } }
+    var ano = _member(sch, "anyOf");
+    if (ano != 0) {
+        k = 0;
+        while (k < bayan_json_v_arr_len(ano)) {
+            if (_ok_bool(bayan_json_v_arr_get(ano, k), inst) == 1) { vec_push(subs, bayan_json_v_arr_get(ano, k)); }
+            k = k + 1;
+        }
+    }
+    var ono = _member(sch, "oneOf");
+    if (ono != 0) {
+        var hit = 0;
+        var nh = 0;
+        k = 0;
+        while (k < bayan_json_v_arr_len(ono)) {
+            if (_ok_bool(bayan_json_v_arr_get(ono, k), inst) == 1) { hit = bayan_json_v_arr_get(ono, k); nh = nh + 1; }
+            k = k + 1;
+        }
+        if (nh == 1) { vec_push(subs, hit); }
+    }
+    var ifo = _member(sch, "if");
+    if (ifo != 0) {
+        var br = _member(sch, "else");
+        if (_ok_bool(ifo, inst) == 1) {
+            vec_push(subs, ifo);
+            br = _member(sch, "then");
+        }
+        if (br != 0) { vec_push(subs, br); }
+    }
+    return 0;
+}
+
+# (3.8.15) How many of the array `inst`'s first items the schema `sch`, valid on it, evaluates,
+# -1 for every one, as JSON Schema 2020-12 collects annotations: its `prefixItems`, every item
+# for an `items` or (but `sch`'s own, with `self` 1) an `unevaluatedItems`, and the largest of
+# its passing subschemas' (_ev_subs). A `contains` counts none here, as bote counts none for it:
+# registration refuses an unevaluatedItems beside one, which the official client counts as
+# every item or none.
+fn _evi(sch, inst, self) {
+    if (bayan_json_v_is_obj(sch) == 0) { return 0; }
+    if (self == 0 && _member(sch, "unevaluatedItems") != 0) { return 0 - 1; }
+    if (_member(sch, "items") != 0) { return 0 - 1; }
+    var c = 0;
+    var pfx = _member(sch, "prefixItems");
+    if (pfx != 0) { c = bayan_json_v_arr_len(pfx); }
+    var subs = vec_new();
+    _ev_subs(sch, inst, subs);
+    var si = 0;
+    while (si < vec_len(subs)) {
+        var x = _evi(vec_get(subs, si), inst, 0);
+        if (x < 0) { return 0 - 1; }
+        if (x > c) { c = x; }
+        si = si + 1;
+    }
+    return c;
 }
 
 # "d" and the digit `c`.

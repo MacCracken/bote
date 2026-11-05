@@ -774,8 +774,9 @@ fn _reg_warn_kw(tool, key, kw) {
 # (3.8.7) const and uniqueItems too. (3.8.8) prefixItems, contains, propertyNames,
 # dependentRequired and dependentSchemas. (3.8.9) allOf, anyOf, oneOf, not, if, then, else.
 # (3.8.10) $ref, within its document. (3.8.11) pattern and multipleOf. (3.8.12) patternProperties.
-# (3.8.14) $dynamicRef and $recursiveRef, where they name the root.
-var BOTE_UNENFORCED = "unevaluatedProperties unevaluatedItems additionalItems dependencies formatMinimum formatMaximum formatExclusiveMinimum formatExclusiveMaximum ";
+# (3.8.14) $dynamicRef and $recursiveRef, where they name the root. (3.8.15) unevaluatedProperties and
+# unevaluatedItems.
+var BOTE_UNENFORCED = "additionalItems dependencies formatMinimum formatMaximum formatExclusiveMinimum formatExclusiveMaximum ";
 
 # Every WARN the schema `v`, at `key` of tool `tool`, earns: each keyword in `kws` it
 # holds, a type bote does not know, alone or in a type array, and a keyword it judges with a
@@ -788,9 +789,9 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
     # or to a client, which picks its validator by `$schema`.
     var late = 0;
     if (d != 2020) { late = _reg_words("prefixItems "); }
-    if (d == 7) { late = _reg_words("prefixItems minContains maxContains dependentRequired dependentSchemas $dynamicRef $recursiveRef "); }
+    if (d == 7) { late = _reg_words("prefixItems minContains maxContains dependentRequired dependentSchemas $dynamicRef $recursiveRef unevaluatedProperties unevaluatedItems "); }
     if (d == 2019) { late = _reg_words("prefixItems "); }
-    if (d == 6) { late = _reg_words("prefixItems minContains maxContains dependentRequired dependentSchemas $dynamicRef $recursiveRef "); }
+    if (d == 6) { late = _reg_words("prefixItems minContains maxContains dependentRequired dependentSchemas $dynamicRef $recursiveRef unevaluatedProperties unevaluatedItems "); }
     if (late != 0) {
         var li = 0;
         while (li < vec_len(late)) {
@@ -982,6 +983,10 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
             }
             if (ppd == 1 && jsonx_has(v, "additionalProperties") == 1) {
                 _reg_warn_kw(tool, key, "additionalProperties beside a pattern bote's engine does not take, which judges nothing");
+            }
+            # (3.8.15) Which members such a pattern evaluates is not known either.
+            if (ppd == 1 && jsonx_has(v, "unevaluatedProperties") == 1) {
+                _reg_warn_kw(tool, key, "unevaluatedProperties beside a pattern bote's engine does not take, which judges nothing");
             }
         }
     }

@@ -79,10 +79,15 @@ fn _tab(txt, i, e) { var j = i; while (j < e && load8(txt + j) != 9) { j = j + 1
 fn _field(txt, s, e) { return _sch_str_dec_a(default_alloc(), _slice_cstr(default_alloc(), txt, s, e - s)); }
 fn main() {
     alloc_init();
+    args_init();
+    # (3.8.15) The directory its cases are in, build/dynref-diff unless one is named:
+    # scripts/uneval-diff.sh runs it on its own.
+    var dir = "build/dynref-diff";
+    if (argc() > 1) { dir = argv(1); }
     var lo[8];
-    var txt = file_read_whole("build/dynref-diff/cases.txt", &lo);
+    var txt = file_read_whole(_cat(dir, "/cases.txt"), &lo);
     var len = load64(&lo);
-    if (txt == 0 || len == 0) { println("dynref_diff: no build/dynref-diff/cases.txt"); return 2; }
+    if (txt == 0 || len == 0) { println(_cat(_cat("dynref_diff: no ", dir), "/cases.txt")); return 2; }
     var ar = bote_req_arena_new();
     var i = 0;
     var n = 0; var both = 0; var neither = 0; var danger = 0; var strict = 0; var wdiff = 0;
@@ -90,6 +95,8 @@ fn main() {
     var cur = 0;
     var curdoc = 0;
     var tk = str_builder_new();
+    # Each value judged otherwise, or the client throws on: kind, schema, value, client, bote.
+    var mm = str_builder_new();
     # Why bote refuses what the client takes: each reason's first 60 bytes, counted.
     var why_n = map_new();
     var why_k = vec_new();
@@ -147,6 +154,17 @@ fn main() {
             var bv = 0;
             if (r == 0 || vec_len(r) == 0) { bv = 1; }
             bote_arena_release(ar, &mk2);
+            if (v0 == 2 || bv != v0) {
+                if (v0 == 2) { str_builder_add_cstr(mm, "THROWS\t"); } else { str_builder_add_cstr(mm, "VERDICT\t"); }
+                str_builder_add_cstr(mm, curdoc);
+                str_builder_add_cstr(mm, "\t");
+                str_builder_add_cstr(mm, v);
+                str_builder_add_cstr(mm, "\t");
+                str_builder_add_cstr(mm, _sch_itoa(v0));
+                str_builder_add_cstr(mm, "\t");
+                str_builder_add_cstr(mm, _sch_itoa(bv));
+                str_builder_add_cstr(mm, "\n");
+            }
             if (v0 == 2) {
                 thrown = thrown + 1;
                 if (thrown < 10) { println(_cat(_cat("CLIENT THROWS ", curdoc), _cat(" on ", v))); }
@@ -164,7 +182,9 @@ fn main() {
     }
     # Every schema bote takes and the client cannot compile, one a line, for a closer look.
     var tkb = str_builder_build(tk);
-    file_write_all("build/dynref-diff/taken.txt", str_data(tkb), strlen(str_data(tkb)));
+    file_write_all(_cat(dir, "/taken.txt"), str_data(tkb), str_len(tkb));
+    var mmb = str_builder_build(mm);
+    file_write_all(_cat(dir, "/judged.txt"), str_data(mmb), str_len(mmb));
     println(_cat("schemas ", _sch_itoa(n)));
     println(_cat("both take ", _sch_itoa(both)));
     println(_cat("both refuse ", _sch_itoa(neither)));

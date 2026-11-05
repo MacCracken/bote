@@ -283,6 +283,13 @@ var _b_compiled_dyn = 0;
 var _b_dyn_params = "{\"name\":\"a\",\"children\":[{\"name\":\"b\",\"children\":[{\"name\":\"c\",\"children\":[]},{\"name\":\"d\"}]},{\"name\":\"e\"}]}";
 fn b_validate_dynamic_ref() { return vec_len(compiled_validate(_b_compiled_dyn, _b_dyn_params)); }
 # -- end 3.8.14 --
+# -- 3.8.15 --
+# A call's arguments judged by `unevaluatedProperties: false` beside a `$ref`'s properties
+# and a discriminated `oneOf`, each member looked for in what every keyword evaluated.
+var _b_compiled_uneval = 0;
+var _b_uneval_params = "{\"id\":\"x1\",\"kind\":\"circle\",\"r\":2,\"label\":\"a\"}";
+fn b_validate_unevaluated() { return vec_len(compiled_validate(_b_compiled_uneval, _b_uneval_params)); }
+# -- end 3.8.15 --
 
 fn b_schema_compile_simple() {
     return compiled_compile(_b_schema_simple);
@@ -498,6 +505,9 @@ fn _bench_setup() {
     # -- 3.8.14 --
     _b_compiled_dyn = compiled_compile(tool_schema_from_json("{\"type\":\"object\",\"$dynamicAnchor\":\"node\",\"required\":[\"name\"],\"properties\":{\"name\":{\"type\":\"string\"},\"children\":{\"type\":\"array\",\"items\":{\"$dynamicRef\":\"#node\"}}}}"));
     # -- end 3.8.14 --
+    # -- 3.8.15 --
+    _b_compiled_uneval = compiled_compile(tool_schema_from_json("{\"type\":\"object\",\"$defs\":{\"base\":{\"properties\":{\"id\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}},\"required\":[\"id\"]}},\"allOf\":[{\"$ref\":\"#/$defs/base\"}],\"oneOf\":[{\"properties\":{\"kind\":{\"const\":\"circle\"},\"r\":{\"type\":\"number\"}},\"required\":[\"kind\",\"r\"]},{\"properties\":{\"kind\":{\"const\":\"square\"},\"side\":{\"type\":\"number\"}},\"required\":[\"kind\",\"side\"]}],\"unevaluatedProperties\":false}"));
+    # -- end 3.8.15 --
 
     # Fresh (uncompiled) schemas for the schema_compile bench. Built
     # once at setup so the bench callback measures pure compile cost
@@ -774,6 +784,11 @@ fn main() {
     bench_run(b53, &b_validate_dynamic_ref, 10000);
     vec_push(benches, b53);
     # -- end 3.8.14 --
+    # -- 3.8.15 --
+    var b54 = bench_new("validate_unevaluated");
+    bench_run(b54, &b_validate_unevaluated, 10000);
+    vec_push(benches, b54);
+    # -- end 3.8.15 --
     bote_req_begin();
     bote_conn_arm();
     thread_join(thread_create(&_b_thread_nop, 0));

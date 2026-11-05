@@ -394,7 +394,12 @@ fn _brx_group(ps) {
 # identifier may hold bote does not read, and the name is declined.
 fn _brx_group_name(ps) {
     var a = load64(ps + 64);
-    var room = (load64(ps + 8) - load64(ps + 16)) * 4 + 8;
+    # (3.8.15, from the 3.8.14 review) Room for the name alone, as far as its `>` (or the
+    # pattern's end): sized by what was left of the pattern, each name kept that much of the
+    # arena, 3.6 GB for 80 KB of `\k<a>`.
+    var span = 0;
+    while (_brx_peek_at(ps, span) >= 0 && _brx_peek_at(ps, span) != 62) { span = span + 1; }
+    var room = span * 4 + 8;
     var nm = alloc_via(a, room);
     var o = 0;
     var nc = _brx_take(ps);
@@ -431,7 +436,10 @@ fn _brx_group_name(ps) {
         nc = _brx_take(ps);
     }
     store8(nm + o, 0);
-    if (plain == 0) { _brx_decline(ps, "a group name bote's engine does not take"); }
+    if (plain == 0) {
+        store64(ps + 112, 1);
+        _brx_decline(ps, "a group name bote's engine does not take");
+    }
     return nm;
 }
 
@@ -919,14 +927,12 @@ fn _brx_check_backrefs(ps) {
     return 0;
 }
 
+# 1 when a group was given the name `name`: one look in the parser's map of named groups
+# (3.8.15, from the 3.8.14 review; each name was compared with every one, 1.6 s for 8,000
+# groups and as many backreferences).
 fn _brx_name_given(ps, name) {
-    var decls = load64(ps + 40);
-    var i = 0;
-    while (i < vec_len(decls)) {
-        if (streq(vec_get(decls, i), name) == 1) { return 1; }
-        i = i + 1;
-    }
-    return 0;
+    if (name == 0) { return 0; }
+    return map_has(load64(ps + 48), name);
 }
 
 # 1 when the tree's every match starts with `^`.
@@ -981,6 +987,21 @@ fn bote_rx_refused_of(src) {
     return 0;
 }
 
+# (3.8.15, from the 3.8.14 review) 1 when the pattern `src` names a capture group past ASCII,
+# whether JavaScript takes the name (an identifier's character, as `é`) or refuses it (`€`, an
+# emoji, a joiner first): which is which bote does not read, as it holds no Unicode identifier
+# tables, and registration refuses both. Kept nothing.
+fn bote_rx_wide_name_of(src) {
+    if (src == 0) { return 0; }
+    var wide[8];
+    store64(&wide, 0);
+    var mk[16];
+    var a = _sch_scratch_take(&mk);
+    _brx_compile_w(a, a, src, 0, 0, 0, &wide);
+    _sch_scratch_give(&mk);
+    return load64(&wide);
+}
+
 # (3.8.13) 1 when two groups of the pattern share a name, in two alternatives: ECMA-262 takes
 # it since 2025, and JavaScript engines before that (Node before 23) refuse the pattern.
 fn bote_rx_names_twice(rx) { return load64(rx + 32); }
@@ -991,9 +1012,13 @@ fn _brx_compile_on(a, keep, src, rx, names_out) { return _brx_compile_r(a, keep,
 
 # _brx_compile_on, with 1 written to *refused (when it is not 0) for a pattern JavaScript
 # refuses with the u flag (3.8.14).
-fn _brx_compile_r(a, keep, src, rx, names_out, refused) {
-    var ps = alloc_via(a, 112);
-    memset(ps, 0, 112);
+fn _brx_compile_r(a, keep, src, rx, names_out, refused) { return _brx_compile_w(a, keep, src, rx, names_out, refused, 0); }
+
+# _brx_compile_r, with 1 written to *wide (when it is not 0) for a pattern naming a group past
+# ASCII (3.8.15). The parser's state 120 B: +112 such a name met.
+fn _brx_compile_w(a, keep, src, rx, names_out, refused, wide) {
+    var ps = alloc_via(a, 120);
+    memset(ps, 0, 120);
     var nn[8];
     store64(ps, _brx_cps(a, src, &nn));
     store64(ps + 8, load64(&nn));
@@ -1004,6 +1029,7 @@ fn _brx_compile_r(a, keep, src, rx, names_out, refused) {
     var root = _brx_disj(ps);
     if (load64(ps + 24) == 0 && load64(ps + 16) < load64(ps + 8)) { _brx_fail(ps, "an unmatched )"); }
     if (load64(ps + 24) == 0) { _brx_check_backrefs(ps); }
+    if (wide != 0) { store64(wide, load64(ps + 112)); }
     if (load64(ps + 24) != 0) {
         if (load8(ps + 104) == 0) {
             if (rx != 0) { store64(rx + 40, 1); }

@@ -1,0 +1,367 @@
+# bote 3.8.15: `unevaluatedProperties` and `unevaluatedItems`, judged as JSON Schema 2020-12 collects
+# what is evaluated, each expected verdict the official client's own (AjvJsonSchemaValidator of
+# @modelcontextprotocol/client); registration's refusals of what that client's Ajv counts
+# otherwise, compiles into code that throws, or judges otherwise for where its code runs (the
+# model, src/schema.cyr _sch_aev, and _sch_tuple_quiet_why), each checked against the client;
+# and what the 3.8.14 review found. scripts/uneval-diff.sh holds the same to the client over
+# 100,000 random schemas.
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/regex.cyr"
+include "src/format.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
+fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+fn _vs(schema, value) { return _sch_check_value_a(bote_req_begin(), parse_property(schema), "v", value); }
+fn _ok(schema, value) { if (_vs(schema, value) == 0) { return 1; } return 0; }
+# As arguments: an inputSchema given as JSON, judged as a call's arguments are.
+fn _aok(schema, value) {
+    var r = compiled_validate(compiled_compile(tool_schema_from_json(schema)), value);
+    if (r == 0 || vec_len(r) == 0) { return 1; }
+    return 0;
+}
+fn _why(os) {
+    var w = registry_check_tool_def(tool_def_with_output_schema(tool_def_new("t_why", "d", schema_new("object", 0, vec_new())), os));
+    if (w == 0) { return "(none)"; }
+    return w;
+}
+fn _iwhy(js) {
+    var w = registry_check_tool_def(tool_def_new("t_iwhy", "d", tool_schema_from_json(js)));
+    if (w == 0) { return "(none)"; }
+    return w;
+}
+fn _twhy(name, prop) {
+    var ps = vec_new();
+    vec_push(ps, schema_prop_new(name, prop));
+    var w = registry_check_tool_def(tool_def_new("t_twhy", "d", schema_new("object", ps, vec_new())));
+    if (w == 0) { return "(none)"; }
+    return w;
+}
+var _lc_all = 0;
+fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    var b = alloc(n + 1);
+    memcpy(b, msg, n);
+    store8(b + n, 0);
+    vec_push(_lc_all, b);
+    return 0;
+}
+fn _lc_begin() { _lc_all = vec_new(); sakshi_set_emit_hook(&_lc_hook); sakshi_set_level(SK_TRACE); return 0; }
+fn _lc_end() { sakshi_clear_emit_hook(); sakshi_set_level(SK_ERROR); return 0; }
+fn _lc_find(sub) {
+    var i = 0;
+    while (i < vec_len(_lc_all)) {
+        if (_has(vec_get(_lc_all, i), sub) == 1) { return vec_get(_lc_all, i); }
+        i = i + 1;
+    }
+    return 0;
+}
+fn h_ok(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+
+fn _vs_s(schema, value) {
+    var r = _vs(schema, value);
+    if (r == 0 || vec_len(r) == 0) { return "(none)"; }
+    return vec_get(r, 0);
+}
+fn _ar(schema, value) { return _aok(schema, value); }
+# Every violation of a result, joined.
+fn _vs_all(schema, value) {
+    var r = _vs(schema, value);
+    var sb = str_builder_new();
+    var i = 0;
+    while (r != 0 && i < vec_len(r)) { str_builder_add_cstr(sb, vec_get(r, i)); str_builder_add_cstr(sb, "|"); i = i + 1; }
+    return str_data(str_builder_build(sb));
+}
+
+# A pattern of `n` named groups and as many backreferences to them, onto `sb`.
+fn _named_pattern(n) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"type\":\"string\",\"pattern\":\"");
+    var i = 0;
+    while (i < n) { str_builder_add_cstr(sb, "(?<n"); str_builder_add_int(sb, i); str_builder_add_cstr(sb, ">x)"); i = i + 1; }
+    i = 0;
+    while (i < n) { str_builder_add_cstr(sb, "\\\\k<n"); str_builder_add_int(sb, i); str_builder_add_cstr(sb, ">"); i = i + 1; }
+    str_builder_add_cstr(sb, "\"}");
+    return str_data(str_builder_build(sb));
+}
+
+fn main() {
+    alloc_init();
+    # ---- Judged: what each schema evaluates, as JSON Schema and the client count it ----
+    assert_eq(_ok("{\"properties\":{\"a\":{}},\"unevaluatedProperties\":false}", "{\"a\":1}"), 1, "judged: properties");
+    assert_eq(_ok("{\"properties\":{\"a\":{}},\"unevaluatedProperties\":false}", "{\"a\":1,\"b\":2}"), 0, "judged: properties: another member");
+    assert_eq(_ok("{\"allOf\":[{\"properties\":{\"a\":{}}}],\"unevaluatedProperties\":false}", "{\"a\":1}"), 1, "judged: allOf");
+    assert_eq(_ok("{\"allOf\":[{\"properties\":{\"a\":{}}}],\"unevaluatedProperties\":false}", "{\"b\":1}"), 0, "judged: allOf: another member");
+    assert_eq(_ok("{\"$defs\":{\"d\":{\"properties\":{\"a\":{}}}},\"$ref\":\"#/$defs/d\",\"properties\":{\"b\":{}},\"unevaluatedProperties\":false}", "{\"a\":1,\"b\":2}"), 1, "judged: $ref and properties");
+    assert_eq(_ok("{\"$defs\":{\"d\":{\"properties\":{\"a\":{}}}},\"$ref\":\"#/$defs/d\",\"properties\":{\"b\":{}},\"unevaluatedProperties\":false}", "{\"c\":1}"), 0, "judged: $ref: another member");
+    assert_eq(_ok("{\"anyOf\":[{\"properties\":{\"kind\":{\"const\":\"a\"},\"x\":{}},\"required\":[\"kind\"]},{\"properties\":{\"kind\":{\"const\":\"b\"},\"y\":{}},\"required\":[\"kind\"]}],\"unevaluatedProperties\":false}", "{\"kind\":\"a\",\"x\":1}"), 1, "judged: anyOf: the passing branch's members");
+    assert_eq(_ok("{\"anyOf\":[{\"properties\":{\"kind\":{\"const\":\"a\"},\"x\":{}},\"required\":[\"kind\"]},{\"properties\":{\"kind\":{\"const\":\"b\"},\"y\":{}},\"required\":[\"kind\"]}],\"unevaluatedProperties\":false}", "{\"kind\":\"a\",\"y\":1}"), 0, "judged: anyOf: a member of the failing branch");
+    assert_eq(_ok("{\"oneOf\":[{\"properties\":{\"kind\":{\"const\":\"a\"},\"x\":{}},\"required\":[\"kind\"]},{\"properties\":{\"kind\":{\"const\":\"b\"},\"y\":{}},\"required\":[\"kind\"]}],\"unevaluatedProperties\":false}", "{\"kind\":\"b\",\"y\":1}"), 1, "judged: oneOf: the passing branch");
+    assert_eq(_ok("{\"oneOf\":[{\"properties\":{\"kind\":{\"const\":\"a\"},\"x\":{}},\"required\":[\"kind\"]},{\"properties\":{\"kind\":{\"const\":\"b\"},\"y\":{}},\"required\":[\"kind\"]}],\"unevaluatedProperties\":false}", "{\"kind\":\"b\",\"x\":1}"), 0, "judged: oneOf: a member of the failing branch");
+    assert_eq(_ok("{\"properties\":{\"kind\":{}},\"if\":{\"properties\":{\"kind\":{\"const\":\"a\"}}},\"then\":{\"properties\":{\"x\":{}}},\"else\":{\"properties\":{\"y\":{}}},\"unevaluatedProperties\":false}", "{\"kind\":\"b\",\"y\":1}"), 1, "judged: if: else's member where if fails");
+    assert_eq(_ok("{\"properties\":{\"kind\":{}},\"if\":{\"properties\":{\"kind\":{\"const\":\"a\"}}},\"then\":{\"properties\":{\"x\":{}}},\"else\":{\"properties\":{\"y\":{}}},\"unevaluatedProperties\":false}", "{\"kind\":\"b\",\"x\":1}"), 0, "judged: if: then's member where if fails");
+    assert_eq(_ok("{\"properties\":{\"kind\":{}},\"if\":{\"properties\":{\"kind\":{\"const\":\"a\"}}},\"then\":{\"properties\":{\"x\":{}}},\"else\":{\"properties\":{\"y\":{}}},\"unevaluatedProperties\":false}", "{\"kind\":\"a\",\"x\":1}"), 1, "judged: if: then's member where if passes");
+    assert_eq(_ok("{\"patternProperties\":{\"^x\":{}},\"unevaluatedProperties\":false}", "{\"xa\":1}"), 1, "judged: patternProperties");
+    assert_eq(_ok("{\"patternProperties\":{\"^x\":{}},\"unevaluatedProperties\":false}", "{\"a\":1}"), 0, "judged: patternProperties: another member");
+    assert_eq(_ok("{\"additionalProperties\":true,\"unevaluatedProperties\":false}", "{\"a\":1}"), 1, "judged: additionalProperties: true");
+    assert_eq(_ok("{\"properties\":{\"a\":{}},\"unevaluatedProperties\":{\"type\":\"integer\"}}", "{\"a\":\"x\",\"b\":1}"), 1, "judged: a schema: the others judged by it");
+    assert_eq(_ok("{\"properties\":{\"a\":{}},\"unevaluatedProperties\":{\"type\":\"integer\"}}", "{\"b\":\"x\"}"), 0, "judged: a schema: refused by it");
+    assert_eq(_ok("{\"properties\":{\"o\":{\"properties\":{\"a\":{}},\"unevaluatedProperties\":false}}}", "{\"o\":{\"b\":1}}"), 0, "judged: below a property");
+    assert_eq(_ok("{\"dependentSchemas\":{\"a\":{\"properties\":{\"a\":{},\"b\":{}}}},\"unevaluatedProperties\":false}", "{\"a\":1,\"b\":1}"), 1, "judged: dependentSchemas");
+    assert_eq(_ok("{\"dependentSchemas\":{\"a\":{\"properties\":{\"a\":{},\"b\":{}}}},\"unevaluatedProperties\":false}", "{\"b\":1}"), 0, "judged: dependentSchemas: not taken");
+    assert_eq(_ok("{\"not\":{\"properties\":{\"b\":{\"type\":\"string\"}}},\"unevaluatedProperties\":false}", "{\"b\":1}"), 0, "judged: not evaluates nothing");
+    assert_eq(_ok("{\"prefixItems\":[{},{}],\"unevaluatedItems\":false}", "[1,2]"), 1, "judged: prefixItems");
+    assert_eq(_ok("{\"prefixItems\":[{},{}],\"unevaluatedItems\":false}", "[1,2,3]"), 0, "judged: prefixItems: one more");
+    assert_eq(_ok("{\"items\":{},\"unevaluatedItems\":false}", "[1,2,3]"), 1, "judged: items");
+    assert_eq(_ok("{\"allOf\":[{\"prefixItems\":[{}]}],\"prefixItems\":[{},{}],\"unevaluatedItems\":false}", "[1,2]"), 1, "judged: allOf's prefixItems and its own");
+    assert_eq(_ok("{\"allOf\":[{\"prefixItems\":[{},{},{}]}],\"prefixItems\":[{},{}],\"unevaluatedItems\":false}", "[1,2,3]"), 1, "judged: allOf's three");
+    assert_eq(_ok("{\"allOf\":[{\"prefixItems\":[{}]}],\"prefixItems\":[{},{}],\"unevaluatedItems\":false}", "[1,2,3]"), 0, "judged: allOf's one and its own two: a third");
+    assert_eq(_ok("{\"anyOf\":[{\"prefixItems\":[{\"const\":\"a\"},{}]},{\"prefixItems\":[{\"const\":\"b\"}]}],\"unevaluatedItems\":false}", "[\"a\",1]"), 1, "judged: anyOf of tuples");
+    assert_eq(_ok("{\"anyOf\":[{\"prefixItems\":[{\"const\":\"a\"},{}]},{\"prefixItems\":[{\"const\":\"b\"}]}],\"unevaluatedItems\":false}", "[\"b\",1]"), 0, "judged: anyOf of tuples: the shorter one passes");
+    assert_eq(_ok("{\"anyOf\":[{\"prefixItems\":[{\"const\":\"a\"},{}]},{\"prefixItems\":[{\"const\":\"b\"}]}],\"unevaluatedItems\":false}", "[\"a\",1,2]"), 0, "judged: anyOf of tuples: one more");
+    assert_eq(_ok("{\"prefixItems\":[{}],\"unevaluatedItems\":{\"type\":\"integer\"}}", "[\"x\",1,2]"), 1, "judged: unevaluatedItems as a schema");
+    assert_eq(_ok("{\"prefixItems\":[{}],\"unevaluatedItems\":{\"type\":\"integer\"}}", "[\"x\",\"y\"]"), 0, "judged: unevaluatedItems as a schema: refused by it");
+    assert_eq(_ok("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"items\":{\"type\":\"integer\"},\"unevaluatedItems\":false}", "[1,2]"), 1, "judged: 2019-09: items");
+    assert_eq(_ok("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"properties\":{\"a\":{}},\"unevaluatedProperties\":false}", "{\"b\":1}"), 0, "judged: 2019-09: unevaluatedProperties");
+    assert_eq(_ok("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"unevaluatedProperties\":false}", "{\"a\":1}"), 1, "judged: draft-07 judges neither");
+    assert_eq(_ok("{\"properties\":{\"__proto__\":{\"type\":\"string\"}}}", "{\"__proto__\":5}"), 1, "judged: __proto__ in a result: no property");
+    assert_eq(_ok("{\"properties\":{\"a\":{}},\"unevaluatedProperties\":{\"properties\":{\"z\":{}},\"unevaluatedProperties\":false}}", "{\"a\":1,\"b\":{\"z\":1}}"), 1, "judged: a value judged by an unevaluatedProperties schema with its own");
+    assert_eq(_ok("{\"properties\":{\"a\":{}},\"unevaluatedProperties\":{\"properties\":{\"z\":{}},\"unevaluatedProperties\":false}}", "{\"a\":1,\"b\":{\"y\":1}}"), 0, "judged: ...and refused by it");
+    assert_eq(_ok("{\"unevaluatedItems\":{\"prefixItems\":[{}],\"unevaluatedItems\":false}}", "[[1],[2]]"), 1, "judged: items judged by an unevaluatedItems schema with its own");
+    assert_eq(_ok("{\"unevaluatedItems\":{\"prefixItems\":[{}],\"unevaluatedItems\":false}}", "[[1],[2,3]]"), 0, "judged: ...and refused by it");
+    # Arguments, as JSON Schema judges them.
+    assert_eq(_aok("{\"type\":\"object\",\"properties\":{\"a\":{}},\"unevaluatedProperties\":false}", "{\"a\":1}"), 1, "arguments: a property's member");
+    assert_eq(_aok("{\"type\":\"object\",\"properties\":{\"a\":{}},\"unevaluatedProperties\":false}", "{\"b\":1}"), 0, "arguments: another member");
+    assert_eq(_aok("{\"type\":\"object\",\"anyOf\":[{\"properties\":{\"a\":{}},\"required\":[\"a\"]},{\"properties\":{\"b\":{}},\"required\":[\"b\"]}],\"unevaluatedProperties\":false}", "{\"b\":1}"), 1, "arguments: the passing branch");
+    assert_eq(_aok("{\"type\":\"object\",\"anyOf\":[{\"properties\":{\"a\":{}},\"required\":[\"a\"]},{\"properties\":{\"b\":{}},\"required\":[\"b\"]}],\"unevaluatedProperties\":false}", "{\"b\":1,\"a\":{}}"), 1, "arguments: both branches");
+    assert_eq(_aok("{\"type\":\"object\",\"anyOf\":[{\"properties\":{\"a\":{}},\"required\":[\"a\"]},{\"properties\":{\"b\":{}},\"required\":[\"b\"]}],\"unevaluatedProperties\":false}", "{\"b\":1,\"c\":2}"), 0, "arguments: a member neither evaluates");
+    # The message and path of a member refused.
+    assert(_has(_vs_s("{\"properties\":{\"a\":{}},\"unevaluatedProperties\":false}", "{\"a\":1,\"bz\":2}"), "unevaluated property not allowed") == 1, "message: an unevaluated property");
+    assert(_has(_vs_s("{\"properties\":{\"a\":{}},\"unevaluatedProperties\":false}", "{\"a\":1,\"bz\":2}"), "bz") == 1, "message: its path names the member");
+    assert(_has(_vs_s("{\"prefixItems\":[{}],\"unevaluatedItems\":false}", "[1,2]"), "unevaluated item not allowed") == 1, "message: an unevaluated item");
+
+    # ---- Refused: what the client's Ajv counts otherwise, or throws on ----
+    assert(_has(_why("{\"if\":{\"properties\":{\"foo\":{\"const\":\"then\"}},\"required\":[\"foo\"]},\"else\":{\"properties\":{\"baz\":{\"type\":\"string\"}},\"required\":[\"baz\"]},\"unevaluatedProperties\":false}"), "an if evaluates") == 1, "refused: an if's properties, which the client counts where it fails (the official suite's case)");
+    assert(streq(_why("{\"properties\":{\"kind\":{}},\"if\":{\"properties\":{\"kind\":{\"const\":\"a\"}}},\"then\":{\"properties\":{\"x\":{}}},\"else\":{\"properties\":{\"y\":{}}},\"unevaluatedProperties\":false}"), "(none)") == 1, "taken: an if's properties that the schema evaluates anyway");
+    assert(_has(_why("{\"anyOf\":[{\"patternProperties\":{\"^a\":{\"type\":\"string\"}}},{\"type\":\"object\"}],\"unevaluatedProperties\":false}"), "from a branch the value fails too") == 1, "refused: patternProperties in a failing anyOf branch");
+    assert(_has(_why("{\"oneOf\":[{\"allOf\":[{\"patternProperties\":{\"x\":{}}},{\"unevaluatedProperties\":{\"type\":\"integer\"}}]},{}],\"unevaluatedProperties\":false}"), "from a branch the value fails too") == 1, "refused: a branch whose count is a variable holding every property");
+    assert(_has(_why("{\"anyOf\":[{\"anyOf\":[{\"properties\":{\"a\":{}}}],\"required\":[\"z\"]},{\"type\":\"object\"}],\"unevaluatedProperties\":false}"), "from a branch the value fails too") == 1, "refused: an anyOf inside a failing anyOf branch");
+    assert(_has(_why("{\"$defs\":{\"b\":{\"properties\":{\"a\":{}}}},\"$ref\":\"#/$defs/b\",\"oneOf\":[{\"properties\":{\"x\":{}},\"required\":[\"x\"]},{\"properties\":{\"y\":{}},\"required\":[\"y\"]}],\"unevaluatedProperties\":false}"), "forgets") == 1, "refused: a $ref's properties beside oneOf, which the client forgets");
+    assert(streq(_why("{\"$defs\":{\"b\":{\"properties\":{\"a\":{}}}},\"allOf\":[{\"$ref\":\"#/$defs/b\"}],\"oneOf\":[{\"properties\":{\"x\":{}},\"required\":[\"x\"]},{\"properties\":{\"y\":{}},\"required\":[\"y\"]}],\"unevaluatedProperties\":false}"), "(none)") == 1, "taken: the same in an allOf, which comes after oneOf");
+    assert(_has(_why("{\"properties\":{\"a\":{},\"c\":{}},\"dependentSchemas\":{\"a\":{\"properties\":{\"b\":{}}}},\"unevaluatedProperties\":false}"), "forgets") == 1, "refused: properties before a dependentSchemas not taken");
+    assert(_has(_why("{\"allOf\":[{\"properties\":{\"a\":{}}}],\"if\":{\"required\":[\"k\"]},\"then\":{\"properties\":{\"b\":{}}},\"unevaluatedProperties\":false}"), "forgets") == 1, "refused: an allOf's properties before a then not taken");
+    assert(_has(_why("{\"$dynamicAnchor\":\"n\",\"properties\":{\"c\":{\"$dynamicRef\":\"#n\",\"unevaluatedProperties\":false}}}"), "$dynamicRef or $recursiveRef") == 1, "refused: beside a $dynamicRef");
+    assert(_has(_why("{\"dependencies\":{\"a\":{\"properties\":{\"b\":{}}}},\"unevaluatedProperties\":false}"), "under dependencies") == 1, "refused: dependencies, which bote does not judge");
+    assert(_has(_why("{\"anyOf\":[{\"properties\":{\"a\":{\"type\":\"string\"}}},{\"type\":\"object\"}],\"patternProperties\":{\"^b\":{}}}"), "throws for some objects") == 1, "refused: patternProperties after an anyOf (no unevaluated keyword)");
+    assert(_has(_why("{\"items\":{\"$ref\":\"#\",\"patternProperties\":{\"^a\":{}}}}"), "throws for some objects") == 1, "refused: patternProperties beside a $ref to the root");
+    assert(_has(_why("{\"$dynamicAnchor\":\"s\",\"items\":{\"patternProperties\":{\".\":{\"type\":\"string\"}},\"$dynamicRef\":\"#s\"}}"), "throws for some objects") == 1, "refused: patternProperties beside a $dynamicRef to the root (the review's)");
+    assert(_has(_why("{\"patternProperties\":{\"x\":{}},\"if\":{\"properties\":{\"b\":{}},\"allOf\":[{\"oneOf\":[{\"unevaluatedProperties\":false}]}]},\"then\":{\"prefixItems\":[]}}"), "throws for some objects") == 1, "refused: patternProperties after an if judged with its errors cut short");
+    assert(_has(_why("{\"additionalProperties\":{\"anyOf\":[{\"$ref\":\"#/$defs/d\",\"patternProperties\":{\"x\":{}}}]},\"$defs\":{\"d\":{\"$ref\":\"#/$defs/e\",\"anyOf\":[{\"patternProperties\":{\"^a\":{}}}]},\"e\":false}}"), "throws for some objects") == 1, "refused: patternProperties beside a call whose count is a variable");
+    assert(streq(_why("{\"anyOf\":[{\"properties\":{\"a\":{\"type\":\"string\"}}},{\"type\":\"object\"}],\"allOf\":[{\"patternProperties\":{\"^b\":{}}}]}"), "(none)") == 1, "taken: the same with the patternProperties in an allOf");
+    assert(streq(_why("{\"anyOf\":[{\"properties\":{\"a\":{\"type\":\"string\"}}},{\"type\":\"object\"}],\"properties\":{\"c\":{}},\"patternProperties\":{\"^b\":{}}}"), "(none)") == 1, "taken: the same beside properties, which set the count first");
+    assert(_has(_why("{\"contains\":{\"type\":\"string\"},\"unevaluatedItems\":false}"), "beside a contains") == 1, "refused: unevaluatedItems beside contains");
+    assert(_has(_why("{\"anyOf\":[{\"additionalProperties\":true},{\"prefixItems\":[{}]}],\"unevaluatedItems\":false}"), "under anyOf") == 1, "refused: an anyOf branch that counts no items");
+    assert(_has(_why("{\"anyOf\":[{\"prefixItems\":[{}]},true],\"unevaluatedItems\":false}"), "under anyOf") == 1, "refused: an anyOf branch true");
+    assert(_has(_why("{\"if\":{\"prefixItems\":[{\"type\":\"string\"}]},\"then\":{\"minItems\":1},\"unevaluatedItems\":false}"), "under anyOf") == 1, "refused: items an if counts");
+    assert(_has(_why("{\"anyOf\":[{\"items\":{}},{\"prefixItems\":[{}]}],\"unevaluatedItems\":false}"), "under anyOf") == 1, "refused: a branch counting every item, read as 1");
+    assert(_has(_why("{\"items\":{\"$ref\":\"#\",\"unevaluatedItems\":false}}"), "a schema it is compiled within") == 1, "refused: a recursive $ref beside unevaluatedItems");
+    assert(_has(_why("{\"items\":{\"unevaluatedProperties\":false,\"anyOf\":[{\"unevaluatedProperties\":false},{\"properties\":{\"b\":{}}}]}}"), "an earlier item or member") == 1, "refused: a branch's count read for each item");
+    assert(_has(_why("{\"items\":{\"unevaluatedItems\":false,\"anyOf\":[{\"prefixItems\":[{\"type\":\"integer\"},{}]},{\"prefixItems\":[{\"type\":\"string\"}]}]}}"), "an earlier item or member") == 1, "refused: a branch's count of items read for each item");
+    assert(streq(_why("{\"anyOf\":[{\"prefixItems\":[{\"const\":\"a\"},{}]},{\"prefixItems\":[{\"const\":\"b\"}]}],\"unevaluatedItems\":false}"), "(none)") == 1, "taken: anyOf of tuples at the root");
+    assert(_has(_why("{\"not\":{\"prefixItems\":[{},false],\"contains\":false}}"), "prefixItems beside a contains under not or if") == 1, "refused: a tuple beside contains under not");
+    assert(_has(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"not\":{\"items\":[{\"type\":\"string\"}],\"contains\":false}}"), "items as an array beside a contains") == 1, "refused: draft-07: the same with an array items");
+    assert(streq(_why("{\"not\":{\"prefixItems\":[{},false],\"allOf\":[{\"contains\":false}]}}"), "(none)") == 1, "taken: the contains in an allOf of its own");
+    assert(_has(_why("{\"items\":{\"contains\":{\"type\":\"string\"}}}"), "empty array after one that met it") == 1, "refused: contains for each item");
+    assert(_has(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"additionalProperties\":{\"contains\":{\"type\":\"string\"}}}"), "empty array after one that met it") == 1, "refused: draft-07: contains for each member");
+    assert(streq(_why("{\"items\":{\"contains\":{\"type\":\"string\"},\"minItems\":1}}"), "(none)") == 1, "taken: contains for each item beside minItems 1");
+    assert(streq(_why("{\"items\":{\"contains\":{\"type\":\"string\"},\"maxContains\":5}}"), "(none)") == 1, "taken: contains for each item with a maxContains");
+    assert(streq(_why("{\"contains\":{\"type\":\"string\"}}"), "(none)") == 1, "taken: contains judged once");
+    assert(_has(_why("{\"not\":{\"anyOf\":[{\"not\":{},\"anyOf\":[{\"unevaluatedProperties\":{}}]},{\"additionalProperties\":{}}]}}"), "compiles into code that throws") == 1, "refused: a not of {} beside anyOf under not");
+    assert(streq(_why("{\"anyOf\":[{\"not\":{},\"anyOf\":[{\"properties\":{\"a\":{}}}]},{}]}"), "(none)") == 1, "taken: a not of {} beside anyOf judged with every error");
+
+    # ---- From the 3.8.14 review ----
+    # $async: at the root the client's validator answers with a promise it reads as valid;
+    # below it, beside a keyword, the client cannot compile the schema.
+    assert(_has(_why("{\"$async\":true,\"type\":\"string\"}"), "names $async at its root") == 1, "review: $async true at the root");
+    assert(_has(_why("{\"$async\":\"x\",\"type\":\"string\"}"), "names $async at its root") == 1, "review: $async a string, true to JavaScript");
+    assert(_has(_why("{\"properties\":{\"a\":{\"$async\":true,\"type\":\"string\"}}}"), "names $async below its root") == 1, "review: $async below the root beside a keyword");
+    assert(streq(_why("{\"properties\":{\"a\":{\"$async\":true}}}"), "(none)") == 1, "review: $async alone below the root, which the client never compiles");
+    assert(streq(_why("{\"$async\":false,\"type\":\"string\"}"), "(none)") == 1, "review: $async false");
+    assert(streq(_why("{\"$async\":0,\"type\":\"string\"}"), "(none)") == 1, "review: $async 0");
+    assert(_has(_iwhy("{\"$async\":true,\"type\":\"object\"}"), "names $async at its root") == 1, "review: $async in an inputSchema given as JSON");
+    # An enum of no values, which the client refuses in every dialect.
+    assert(_has(_why("{\"enum\":[]}"), "an enum of no values") == 1, "review: enum []");
+    assert(_has(_why("{\"properties\":{\"a\":{\"enum\":[]}}}"), "an enum of no values") == 1, "review: enum [] below the root");
+    assert(_has(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"enum\":[]}"), "an enum of no values") == 1, "review: enum [] in draft-07");
+    # A minContains below 0 asks for one match, as the client reads it, unless contains always passes.
+    assert_eq(_ok("{\"contains\":{\"type\":\"string\"},\"minContains\":-1}", "[]"), 0, "review: result, minContains -1 on []");
+    assert_eq(_ok("{\"contains\":{\"type\":\"string\"},\"minContains\":-1}", "[1]"), 0, "review: result, minContains -1 with no match");
+    assert_eq(_ok("{\"contains\":{\"type\":\"string\"},\"minContains\":-1}", "[\"x\"]"), 1, "review: result, minContains -1 with one");
+    assert_eq(_ok("{\"contains\":{\"type\":\"string\"},\"minContains\":-0.5}", "[]"), 0, "review: result, minContains -0.5 on []");
+    assert_eq(_ok("{\"contains\":{\"type\":\"string\"},\"minContains\":-1,\"maxContains\":3}", "[]"), 0, "review: result, minContains -1 beside maxContains");
+    assert_eq(_ok("{\"contains\":{},\"minContains\":-1}", "[]"), 1, "review: result, minContains -1 beside a contains always met");
+    assert_eq(_ok("{\"contains\":{\"type\":\"string\"},\"minContains\":0}", "[]"), 1, "review: result, minContains 0 asks for none");
+    assert_eq(_aok("{\"type\":\"array\",\"contains\":{\"type\":\"string\"},\"minContains\":-1}", "[]"), 0, "review: arguments, minContains -1 on []");
+    # Two $ids Ajv resolves alike (getSchemaRefs), each refused by the client.
+    assert(_has(_why("{\"type\":\"object\",\"$defs\":{\"a\":{\"$id\":\"http://e.com/a/\",\"$defs\":{\"b\":{\"$id\":\"x\"}}},\"c\":{\"$id\":\"http://e.com/a/x\"}}}"), "names one $id twice") == 1, "review: an $id through a nested base");
+    assert(_has(_why("{\"$defs\":{\"a\":{\"$id\":\"https://e.com/y\"},\"b\":{\"$id\":\"https://e.com/y#\"}}}"), "names one $id twice") == 1, "review: a trailing #");
+    assert(_has(_why("{\"$defs\":{\"a\":{\"$id\":\"#\"},\"b\":{\"$id\":\"#\"}}}"), "names one $id twice") == 1, "review: $id # twice");
+    assert(_has(_why("{\"$id\":\"https://e.com/x\",\"$defs\":{\"a\":{\"$id\":\"#\"}}}"), "names one $id twice") == 1, "review: $id # beside the root's");
+    assert(_has(_why("{\"$id\":\"https://e.com/x\",\"$defs\":{\"a\":{\"$id\":\"https://e.com/x#\"}}}"), "names one $id twice") == 1, "review: the root's $id with a # below it");
+    assert(_has(_why("{\"$defs\":{\"a\":{\"$id\":\"http://e.com/q\",\"$anchor\":\"k\"},\"b\":{\"$id\":\"http://e.com/q#k\"}}}"), "names one anchor twice") == 1, "review: an $anchor and an $id naming its URI");
+    assert(streq(_why("{\"$id\":\"https://e.com/r\",\"$defs\":{\"a\":{\"$id\":\"a/\"},\"b\":{\"$id\":\"b/\"}}}"), "(none)") == 1, "review: two $ids apart under one base");
+    assert(streq(_why("{\"$defs\":{\"a\":{\"$id\":\"#\"}}}"), "(none)") == 1, "review: one $id # with no base");
+    # Equality in a result as the client's fast-deep-equal reads Object.prototype's names.
+    assert_eq(_ok("{\"const\":{\"constructor\":{}}}", "{\"constructor\":{}}"), 0, "review: result, const: a constructor member compared by identity");
+    assert_eq(_ok("{\"const\":{\"constructor\":1}}", "{\"constructor\":1}"), 1, "review: result, const: an equal constructor value");
+    assert_eq(_ok("{\"enum\":[{\"constructor\":{}}]}", "{\"constructor\":{}}"), 0, "review: result, enum: a constructor member");
+    assert_eq(_ok("{\"uniqueItems\":true}", "[{\"constructor\":{}},{\"constructor\":{}}]"), 1, "review: result, uniqueItems: two never equal");
+    assert_eq(_ok("{\"uniqueItems\":true,\"items\":{\"type\":\"string\"}}", "[\"x\",\"x\"]"), 0, "review: result, uniqueItems by a table of strings");
+    assert_eq(_ok("{\"enum\":[[1],{\"a\":1}]}", "{\"a\":1}"), 1, "review: result, enum: an object after an array");
+    assert(_has(_vs_s("{\"const\":{\"toString\":\"x\"}}", "{\"toString\":\"x\"}"), "calls comparing it") == 1, "review: result, const: a toString member the client calls, which the client throws on");
+    assert(_has(_vs_s("{\"enum\":[1,{\"valueOf\":1}]}", "{\"valueOf\":1}"), "calls comparing it") == 1, "review: result, enum: a valueOf member, which the client throws on");
+    assert(_has(_vs_s("{\"const\":[{\"valueOf\":1}]}", "[{\"valueOf\":1}]"), "calls comparing it") == 1, "review: result, const: a valueOf member in an array, which the client throws on");
+    assert(_has(_vs_s("{\"uniqueItems\":true}", "[{\"a\":1},{\"valueOf\":2}]"), "calls comparing it") == 1, "review: result, uniqueItems: an item with valueOf, which the client throws on");
+    assert_eq(_aok("{\"type\":\"object\",\"const\":{\"constructor\":{}}}", "{\"constructor\":{}}"), 1, "review: arguments, const by JSON Schema's equality");
+    assert_eq(_aok("{\"type\":\"object\",\"const\":{\"toString\":\"x\"}}", "{\"toString\":\"x\"}"), 1, "review: arguments, a toString member is a member");
+    # A uuid URN fast-uri writes in lower case: the 2025-11-25 form cannot resolve against it.
+    assert(streq(_why("{\"$id\":\"urn:uuid:6E8BC430-9C3A-11D9-9669-0800200C9A66\",\"type\":\"array\",\"$defs\":{\"x\":{\"type\":\"integer\"}},\"items\":{\"$ref\":\"#/$defs/x\"}}"), "(none)") == 0, "review: urn:uuid in capitals");
+    assert(streq(_why("{\"$id\":\"urn:uuid:6e8bc430-9c3a-11d9-9669-0800200c9a66\",\"type\":\"array\",\"$defs\":{\"x\":{\"type\":\"integer\"}},\"items\":{\"$ref\":\"#/$defs/x\"}}"), "(none)") == 1, "review: urn:uuid in lower case");
+    # A capture group named past ASCII: JavaScript refuses some, and bote reads none.
+    assert(_has(_why("{\"type\":\"string\",\"pattern\":\"(?<a\xe2\x82\xac>x)\"}"), "named past ASCII") == 1, "review: a name JavaScript refuses");
+    assert(_has(_why("{\"type\":\"string\",\"pattern\":\"(?<\xc3\xa9>x)\"}"), "named past ASCII") == 1, "review: a name JavaScript takes, refused too");
+    assert(_has(_why("{\"type\":\"object\",\"patternProperties\":{\"(?<\\\\u00e9>x)\":{}}}"), "named past ASCII") == 1, "review: in patternProperties, escaped");
+    assert(streq(_why("{\"type\":\"string\",\"pattern\":\"(?<ab>x)\\\\k<ab>\"}"), "(none)") == 1, "review: an ASCII name");
+    # A property named __proto__: in arguments it judges that member, as JSON Schema has it.
+    assert_eq(_aok("{\"type\":\"object\",\"properties\":{\"__proto__\":{\"type\":\"string\"}}}", "{\"__proto__\":5}"), 0, "review: arguments, __proto__ judged");
+    assert_eq(_aok("{\"type\":\"object\",\"properties\":{\"__proto__\":{\"type\":\"string\"}}}", "{\"__proto__\":\"x\"}"), 1, "review: arguments, __proto__ met");
+    assert_eq(_aok("{\"type\":\"object\",\"properties\":{\"__proto__\":{}},\"unevaluatedProperties\":false}", "{\"__proto__\":\"x\"}"), 1, "review: arguments, __proto__ evaluated");
+    assert_eq(_ok("{\"type\":\"object\",\"properties\":{\"__proto__\":{}},\"unevaluatedProperties\":false}", "{\"__proto__\":\"x\"}"), 0, "review: result, __proto__ no property, as the client reads it");
+
+    # An if whose count is a variable (patternProperties), which the client counts where it fails.
+    assert(_has(_why("{\"if\":{\"patternProperties\":{\"^a\":{\"type\":\"string\"}}},\"then\":{\"required\":[\"q\"]},\"unevaluatedProperties\":false}"), "an if evaluates") == 1, "refused: an if evaluating by patternProperties");
+    # A branch's count read for each member under patternProperties (the client takes q's xa).
+    assert(_has(_why("{\"patternProperties\":{\".\":{\"unevaluatedProperties\":false,\"anyOf\":[{\"unevaluatedProperties\":false},{\"properties\":{\"b\":{}}}]}}}"), "an earlier item or member") == 1, "refused: a branch's count read for each patternProperties member");
+    # A tuple beside contains in a $ref target Ajv inlines under not (the client refuses []).
+    assert(_has(_why("{\"not\":{\"$ref\":\"#/$defs/t\"},\"$defs\":{\"t\":{\"prefixItems\":[{},false],\"contains\":false}}}"), "prefixItems beside a contains under not or if") == 1, "refused: a tuple beside contains through an inlined $ref under not");
+    # What bote counts of an if's items, as JSON Schema counts them (registration refuses the shape,
+    # as the client counts an if's items where it fails).
+    assert_eq(_ok("{\"if\":{\"prefixItems\":[{\"type\":\"string\"}]},\"then\":{\"prefixItems\":[{},{}]},\"unevaluatedItems\":false}", "[\"x\",1]"), 1, "judged: an if and its then counting two items");
+    assert_eq(_ok("{\"if\":{\"prefixItems\":[{\"type\":\"string\"}]},\"then\":{\"prefixItems\":[{},{}]},\"unevaluatedItems\":false}", "[\"x\",1,2]"), 0, "judged: ...and a third item");
+    assert_eq(_ok("{\"if\":{\"prefixItems\":[{\"type\":\"string\"}]},\"else\":{\"prefixItems\":[{}]},\"unevaluatedItems\":false}", "[1]"), 1, "judged: an else counting where the if fails");
+    # uniqueItems over items typed as scalars: the client keys a table, calls no member.
+    assert(_has(_vs_all("{\"uniqueItems\":true,\"items\":{\"type\":[\"string\",\"integer\"]}}", "[1,{\"valueOf\":1}]"), "calls comparing it") == 0, "review: uniqueItems of typed items compares no member");
+    assert(_has(_vs_all("{\"uniqueItems\":true,\"items\":{\"type\":\"string\"}}", "[1,{\"valueOf\":1}]"), "calls comparing it") == 0, "review: ...of one type");
+    assert(_has(_vs_all("{\"uniqueItems\":true,\"items\":{\"type\":[\"string\",\"object\"]}}", "[{\"a\":1},{\"valueOf\":1}]"), "calls comparing it") == 1, "review: ...but one naming object compares them");
+
+    # A pattern's memory and time grow with its length (the review's 96 KB pattern kept 3.6 GB).
+    var p1 = _named_pattern(2000);
+    var p2 = _named_pattern(4000);
+    _why(p1);
+    var h0 = alloc_used();
+    var t1 = clock_now_ns();
+    _why(p1);
+    t1 = clock_now_ns() - t1;
+    var k1 = alloc_used() - h0;
+    h0 = alloc_used();
+    var t2 = clock_now_ns();
+    _why(p2);
+    t2 = clock_now_ns() - t2;
+    var k2 = alloc_used() - h0;
+    assert(k2 < 8 * 1024 * 1024, "review: 4,000 named groups and backreferences keep under 8 MB");
+    assert(t2 < t1 * 4 + 20000000, "review: twice the groups, not four times the time");
+
+    # Registration's word lists and kinds maps made once (the review: 18 KB kept a call).
+    assert(_sch_words_c(0, BOTE_SCH_RULES_07) == _sch_words_c(0, BOTE_SCH_RULES_07), "review: a word list made once");
+    assert(_sch_kinds_map_c(2020) == _sch_kinds_map_c(2020), "review: a kinds map made once");
+    _sch_kinds_map_c(2019);
+    _sch_words_c(1, BOTE_SCH_RULES_2019);
+    h0 = alloc_used();
+    _sch_words_c(0, BOTE_SCH_RULES_07);
+    _sch_words_c(1, BOTE_SCH_RULES_2019);
+    _sch_kinds_map_c(2019);
+    assert_eq(alloc_used() - h0, 0, "review: a word list and a kinds map asked for again keep nothing");
+    var plain = "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"minLength\":1},\"b\":{\"type\":\"integer\",\"minimum\":0}},\"required\":[\"a\"],\"additionalProperties\":false}";
+    _sch_compiled_why(plain);
+    h0 = alloc_used();
+    _sch_compiled_why(plain);
+    assert(alloc_used() - h0 < 8192, "review: a plain schema's compile check keeps under 8 KB");
+
+    # ---- The heap: refused results keep nothing ----
+    var hp = parse_property("{\"properties\":{\"a\":{}},\"anyOf\":[{\"properties\":{\"b\":{}},\"required\":[\"b\"]},{\"prefixItems\":[{},{}]}],\"unevaluatedProperties\":false,\"unevaluatedItems\":false}");
+    _sch_check_value_a(bote_req_begin(), hp, "v", "{\"a\":1,\"c\":2}");
+    var hh = alloc_used();
+    var hi = 0;
+    while (hi < 50) {
+        _sch_check_value_a(bote_req_begin(), hp, "v", "{\"a\":1,\"c\":2}");
+        _sch_check_value_a(bote_req_begin(), hp, "v", "[1,2,3]");
+        hi = hi + 1;
+    }
+    assert_eq(alloc_used() - hh, 0, "heap: a hundred results refused for what they did not evaluate keep nothing");
+
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit_group(rc);

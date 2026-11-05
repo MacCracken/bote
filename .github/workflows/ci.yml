@@ -218,8 +218,9 @@ jobs:
       - name: Differentials build
         # tests/fixtures/regex_diff.cyr, ref_diff.cyr, format_diff.cyr and dynref_diff.cyr are
         # run by hand, through scripts/regex-diff.sh, ref-diff.sh, format-diff.sh and
-        # dynref-diff.sh, because their cases come from node (the last three's from the client's
-        # own validator). Building them here keeps them from rotting.
+        # dynref-diff.sh (and uneval-diff.sh, which runs dynref_diff on its own cases), because
+        # their cases come from node (all but the first's from the client's own validator).
+        # Building them here keeps them from rotting.
         run: |
           for unit in regex_diff ref_diff format_diff dynref_diff; do
             out=$(cyrius build "tests/fixtures/$unit.cyr" "build/$unit-compare" 2>&1)

@@ -2734,8 +2734,9 @@ fn main() {
     var wprops = vec_new();
     # (3.8.5) maxLength is judged now; pattern is not. (3.8.7) Nor format; a type array is.
     # (3.8.11) pattern is judged now; patternProperties is not. (3.8.12) It is too; unevaluatedProperties is not.
-    # (3.8.13) format is judged; formatMaximum is not.
-    vec_push(wprops, schema_prop_new("p", "{\"type\":\"object\",\"unevaluatedProperties\":false}"));
+    # (3.8.13) format is judged; formatMaximum is not. (3.8.15) unevaluatedProperties is judged;
+    # dependencies is not.
+    vec_push(wprops, schema_prop_new("p", "{\"type\":\"object\",\"dependencies\":{\"a\":[\"b\"]}}"));
     vec_push(wprops, schema_prop_new("q", "{\"type\":[\"string\",\"null\"],\"format\":\"date\",\"formatMaximum\":\"2020-01-01\"}"));
     var loose_reg = tool_registry_new();
     _lc_begin();

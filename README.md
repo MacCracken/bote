@@ -618,9 +618,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 7920 total across thirty-eight files (+ a core-only drift smoke)
+### Tests — 8070 total across thirty-nine files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 7920 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 8070 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 991 — core protocol/dispatch/codec/schema/session/transports
@@ -653,6 +653,7 @@ cyrius test tests/bote_schema_pattern.tcyr # 157 — pattern, multipleOf and pat
 cyrius test tests/bote_format.tcyr        # 372 — every format, as the official client's own validator judges it
 cyrius test tests/bote_schema_dyn.tcyr    # 127 — $dynamicRef and $recursiveRef, where the client and JSON Schema read them alike
 cyrius test tests/bote_schema_client.tcyr # 133 — what the client cannot compile, refused; Object.prototype's names and odd counts as it reads them
+cyrius test tests/bote_schema_uneval.tcyr # 150 — unevaluatedProperties and unevaluatedItems, as the client judges them; what its count of them gets wrong, refused
 cyrius test tests/bote_progress.tcyr      # 110 — progress on a request's own stream: the writer, stdio, unix, WebSocket, HTTP's SSE response
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter

@@ -18,7 +18,190 @@ have per release.
 
 _(empty)_
 
+## [3.8.15] — 2026-11-05 · Unevaluated
+
+**`unevaluatedProperties` and `unevaluatedItems` are judged**, in 2019-09 and 2020-12, as JSON Schema collects
+what each keyword evaluated. A member or an item counts as evaluated where one of these reaches it:
+- `properties` names it; a `patternProperties` pattern matches its key; `additionalProperties` (any) covers
+  every member;
+- `prefixItems` covers its first items (in 2019-09, an array `items`); an `items` schema, `additionalItems`, or an
+  `unevaluated*` keyword below covers every one;
+- a subschema that judges the value itself and passes: each `allOf` schema, what `$ref`, `$dynamicRef` and
+  `$recursiveRef` name, each passing `anyOf` schema, the one passing `oneOf` schema, a passing `if` and its `then`
+  (or else the `else`), and each `dependentSchemas` schema whose key is present. `not` counts nothing.
+
+Each member or item none of them reaches is judged by the keyword's schema: `false` refuses it. Draft-07 and draft-06
+have neither keyword, and registration warns of them there. The count is charged to the judgement's budget and depth,
+and a refused member's path names it (`unevaluated property not allowed`, `unevaluated item not allowed`).
+
+**The official client's Ajv counts what is evaluated otherwise in places**, and registration refuses those shapes,
+saying why. A model of Ajv's count (`_sch_aev`, its compile-time `it.props` and `it.items`) finds them. Each was found
+by the new differential and confirmed in the client's own generated code:
+- **an `if` is counted whether it passes or not** (the official JSON-Schema-Test-Suite's "if is false and has
+  unevaluated properties" passes there). Refused where an `if` evaluates a name the schema does not evaluate anyway:
+  `properties: {kind}` beside `if: {properties: {kind: {const: …}}}` is taken;
+- **a count known before an `anyOf`, `oneOf`, `then`, `else` or `dependentSchemas` is forgotten** where that branch
+  fails or is not taken: the branch's count is declared inside the `if` that tests it. Example: `$ref` to a base's
+  properties beside a discriminated `oneOf` refuses the base's members (an `allOf` holding the `$ref`, which Ajv
+  reads after `oneOf`, is taken);
+- **a failing branch's count is kept** where it is a variable: `patternProperties`, a nested composition or a
+  reference inside an `anyOf` or `oneOf` branch;
+- **a `$ref` to a schema it is compiled within** reads that schema's count at run time, and writes into it;
+- **`unevaluatedItems` compares a count that is a variable as a number**: "every item" reads as 1, and an unset
+  count (an `anyOf` branch that counts no items, a `then` not taken) refuses nothing. `contains` counts every item
+  or none (JSON Schema: the items it matches). Refused: `unevaluatedItems` beside a `contains`, or with items
+  counted where Ajv keeps them in a variable it may misread;
+- **a branch's count read for each item or member**: under `items`, `contains`, `patternProperties`,
+  `additionalProperties`, `propertyNames` and the unevaluated keywords Ajv's code runs in a loop, and a count
+  declared inside a branch keeps what an earlier item left. An array of discriminated objects
+  (`items: {oneOf: [...], unevaluatedProperties: false}`) is refused: the client takes `{"k": "b", "x": 1}` after an
+  item that had an `x`;
+- `dependencies`, which bote does not judge yet, and dynamic references in the count.
+
+**Where the client's validator throws, or skips a keyword, whatever is beside it** (found by the same differential;
+none needs an unevaluated keyword), registration refuses too:
+- **`patternProperties` after a count left unset** throws `Cannot set properties of undefined` for some objects:
+  after an `anyOf`, `oneOf`, `then`, `else` or `dependencies` branch, a reference called as a function, or an `if`
+  judged with its errors cut short, with neither `properties` nor `additionalProperties` beside it. The message
+  says to write the `patternProperties` in an `allOf` of its own;
+- **a tuple beside `contains` under `not` or `if`**: Ajv's tuple code leaves the keywords after it unjudged for an
+  array no longer than an item's index (`valid` declared inside the length test), and `contains` among them;
+- **`contains` judged for each item or member** (`items: {contains: …}`, in every dialect): Ajv's `valid` for one
+  match is declared inside the loop over the items, so an empty array keeps the last array's verdict and passes.
+  Taken beside `minItems: 1` or a `maxContains`, which take Ajv's other code;
+- **a `not` of a schema that always passes, beside composition, under `not` or `if`**: Ajv compiles what follows under
+  `if (false)`, its optimizer removes a count declared there, and what reads it throws a `ReferenceError`.
+
+**A sixth differential holds it to the client** (`scripts/uneval-diff.sh`, with `tests/fixtures/uneval_diff_gen.cjs`;
+it needs the client `./scripts/conformance.sh` installs; not CI). It draws 100,000 random schemas built around the
+unevaluated keywords and every keyword that evaluates beside them, eight values each, and the comparison is
+dynref-diff's own program. Of those:
+- none bote takes is one the client cannot compile, in either form;
+- bote's 2025-11-25 form is the SDK's for every schema;
+- all 558,888 values are judged alike, none the client throws on;
+- 15,152 schemas bote refuses are ones the client compiles. Each is one of the shapes above.
+
+2019-09's and draft-07's array `items`, `additionalItems` and `dependencies`, which bote does not judge yet, are left
+out of its grammar: the roadmap's next bite.
+
+### Added
+
+- **`_sv_uneval`**, `_sv_evaluated` and `_sv_items_count` (`src/schema.cyr`): the members and the count of items
+  a schema evaluates of a value, as JSON Schema collects them. PropertyDef is 336 bytes: +312 the
+  `unevaluatedProperties` schema, +320 the `unevaluatedItems` one, +328 its own count of items. CompiledSchema is
+  152 bytes: +136 every member evaluated (an `additionalProperties`), +144 a property named `__proto__` (Fixed).
+- **`_sch_aev`** and the walk `_sch_tuple_quiet_why`: registration's model of the client's count, and the
+  refusals above. State 104 bytes, memoized by pointer and by whether the schema is judged with its errors cut
+  short. A reference's target is in its own compile where the two share a strongly connected component
+  (`_sch_aev_scc`, Tarjan's, with its own stack); a target with no reference keyword in it Ajv inlines
+  (`_sch_aev_inline`, resolve.ts hasRef).
+- **`_sch_client_node_why`**: `$async` and `enum: []` (Fixed).
+- **`bote_rx_wide_name_of(src)`** (`src/regex.cyr`): 1 for a pattern naming a capture group past ASCII.
+- **`scripts/uneval-diff.sh`**, with `tests/fixtures/uneval_diff_gen.cjs`. `tests/fixtures/dynref_diff.cyr` takes the
+  directory its cases are in, and writes each value judged otherwise to `judged.txt`.
+- **`tests/bote.bcyr`**: `validate_unevaluated`, a call's arguments judged by `unevaluatedProperties: false` beside an
+  `allOf` holding a `$ref`'s properties and a discriminated `oneOf`.
+
+### Fixed
+
+From the review of 3.8.14, each refusal checked against the client's own validator:
+- **A pattern's memory grew with the square of its length, kept for good** (MEDIUM). Each `(?<name>` and `\k<name>`
+  took room for the rest of the pattern on the scratch arena: an outputSchema whose pattern was `(?<a>x)` and
+  16,000 `\k<a>` (96 KB) kept 3.6 GB. A name now takes room for itself (`_brx_group_name`), and a backreference's
+  group is found in the parser's map of names (`_brx_name_given`), where each was compared with every name: 8,000
+  groups and as many backreferences took 1.6 s.
+- **`$async` was taken** (MEDIUM). At the root, one JavaScript reads as true makes the client's validator answer
+  with a promise, which the client reads as valid whatever the value, and whose rejection ends a Node process that
+  does not handle it. Below the root, beside a keyword, the client cannot compile the schema. Both refused.
+- **A `minContains` below 0 was read as asking for no match** (MEDIUM). The client asks for one: Ajv sets `valid`
+  only where an item matches, and passes on the length alone only for a `contains` that always passes. Read so now,
+  in arguments and results.
+- **`enum: []` was taken** (LOW–MEDIUM). The client refuses it ("enum must have non-empty array"), in every dialect.
+- **Two `$id`s Ajv resolves alike were taken** (LOW–MEDIUM). Through 3.8.14 an `$id` was compared only against the
+  root's base. Now as Ajv's getSchemaRefs reads them: each `$id` resolved against its parent's base and its trailing
+  `#` or `#/` taken off, each anchor as `#name` against its schema's base, all in one set, and none equal to the
+  root's `$id`. Refused: an `$id` through a nested base, a trailing `#`, `$id: "#"` twice or beside a root `$id`,
+  and an `$id` naming an anchor's URI.
+- **Equality in a result read Object.prototype's names otherwise than the client** (LOW–MEDIUM). The client's Ajv
+  compares with fast-deep-equal for `const`, `enum` and `uniqueItems`. That compares an own `constructor` member by
+  identity, so two objects holding one are equal only where it is an equal value that is no object or array. It
+  calls an own `valueOf` or `toString` member of the first object, which no JSON value is, and throws. In a result
+  bote compares so now (`_sv_eq` with 2 added to `strict`), and refuses a value whose comparison would throw
+  (`holds an object with a member named valueOf or toString…`). For `uniqueItems` that is any item past the first
+  holding such a member, unless `items` names only types that are neither object nor array, where Ajv keys a table
+  by each item instead. Arguments keep JSON Schema's equality.
+- **The client threw on `patternProperties` beside a reference to the root** (LOW–MEDIUM): see above.
+- **A `urn:uuid:` `$id` in capitals was taken** (LOW). fast-uri writes it in lower case, so the client could not
+  compile the 2025-11-25 form, whose references resolve against the `$id` as written (`_sch_id_plain`).
+- **A capture group named past ASCII that JavaScript refuses was only declined** (LOW): `(?<€>x)`, `(?<a€>x)`, an
+  emoji, a joiner first. Bote holds no Unicode identifier tables, so it refuses every group named past ASCII, the
+  names JavaScript takes (`é`) too, saying to name it in ASCII.
+- **Registration kept about 18 KB of heap a call** (LOW): the word lists and kinds maps `_sch_compiled_why` reads
+  were made again on every call. Each is made once for the process now, published by compare-and-swap
+  (`_sch_words_c`, `_sch_kinds_map_c`). A 170-byte schema's check keeps 6,288 bytes (16,416 before); one that
+  names an unevaluated keyword or `patternProperties` keeps about 28 KB more for the model.
+- **In arguments, a property named `__proto__` judged nothing** (LOW). 3.8.14 made `required` in arguments match
+  members only, as JSON Schema reads it, but `properties.__proto__` still judged no member. It judges that member in
+  arguments now, and counts it evaluated there; in a result it is no property, as the client reads it.
+
+### Changed
+
+- **`BOTE_UNENFORCED`** loses `unevaluatedProperties` and `unevaluatedItems`. In draft-07 and draft-06, where neither is
+  a keyword, registration warns of them by dialect.
+- **A WARN for `unevaluatedProperties` beside a pattern bote's engine declines**, which leaves what that pattern covers
+  unknown.
+
+### Tests
+
+- **`tests/bote_schema_uneval.tcyr`** (new, 150): 41 verdicts each the client's own, through every keyword that
+  evaluates, on both sides of each, and three of an `if`'s items as JSON Schema counts them; arguments; messages and
+  paths; 40 refusals with the client's departure for each and the shapes taken beside them; the 3.8.14 review's findings, each with the client's verdict; a pattern's memory
+  and time linear in its names; registration's tables made once; 0 heap bytes for a hundred refused results.
+- **`fuzz/schema_walk.fcyr`** draws `unevaluatedProperties` and `unevaluatedItems`, false, true, a type or a schema
+  of their own, at any level, judged by an annotation collector of the reference's own.
+- **`tests/bote_output.tcyr`** and **`tests/bote.tcyr`**: the WARN rows for a keyword bote cannot enforce name
+  `dependencies`, which it does not judge, in place of `unevaluatedProperties`.
+- Mutation-proven: 61 of 61 mutants killed, of the model, the walks, the judgement and each review fix, by
+  `bote_schema_uneval.tcyr`, `bote_regex.tcyr`, `bote_schema_client.tcyr` and the walk fuzzer. Seven survived the
+  first run (an `if` counting through a variable, the loop under `patternProperties`, an inlined `$ref` under `not`,
+  an `if`'s items judged, the table `uniqueItems` keys for typed items, the tables' heap), and a test for each kills it.
+
+### Performance
+
+- **A/B against 3.8.14**: 15 alternating rounds on one core, each side's own `src/` under the working tree's
+  `tests/bote.bcyr`.
+  - **New row:** `validate_unevaluated` takes 7,314 ns.
+  - **Most rows:** of the 53 both sides have, most move by less than 3%.
+  - **Compile:** `schema_compile_simple` +5.8% (17,980 → 19,017 ns) and `schema_compile_nested` +3.4% (40,986 → 42,396
+    ns). The causes are a 336-byte PropertyDef (312), a 152-byte CompiledSchema (144), and a scan of each document for
+    an unevaluated keyword. Reading those keywords, and each schema's count of items, in every schema of every
+    document cost +11.3% and +8.2%. Both are now read only where the document names an unevaluated keyword (the
+    compile context's +72, 80 bytes).
+  - **Layout, not work:** `validate_compiled_simple` +11.9% (538 → 602 ns), `jsonx_get_str_flat` +6.3% and
+    `codec_serialize_response` −7.3%. The control was 3.8.14 with a never-called copy of the model inserted where
+    3.8.15 has it: it measures `validate_compiled_simple` +10.2% (540 → 595) and `jsonx_get_str_flat` +6.3%, and leaves
+    the compile rows within 0.5%.
+- **Registration's heap:** a 170-byte schema's compile check keeps 6,288 bytes (3.8.14: 16,416; Fixed).
+
 ## [3.8.14] — 2026-11-05 · Dynamic references
+
+> ⚠ **Corrected at 3.8.15.** These claims below were not true, found by an independent review of this release and
+> by uneval-diff.
+> - "Registration took schemas the official client cannot compile … Refused now". It still took `$async` (at the
+>   root the client's validator answers with a promise it reads as valid; below it the client cannot compile),
+>   `enum: []`, two `$id`s Ajv resolves alike (through a nested base, a trailing `#`, `$id: "#"`, an anchor's URI),
+>   and a capture group named past ASCII that JavaScript refuses.
+> - "Counts other than … compared as JavaScript compares them". A `minContains` below 0 was read as asking for no
+>   match; the client asks for one.
+> - "In a result, bote now reads these names as the client does". Not for `const`, `enum` and `uniqueItems`, where
+>   the client's fast-deep-equal compares a `constructor` member by identity and calls a `valueOf` or `toString`
+>   one, and throws. And in arguments a property named `__proto__` judged nothing.
+> - "none bote takes is one the client cannot compile, in either form". The client cannot judge some it compiles:
+>   `patternProperties` beside a reference to the root throws for some objects (dynref-diff drew none).
+> - "bote's 2025-11-25 form is the SDK's for every schema". Not for a schema holding a `__proto__` key, which the
+>   SDK's wrapper drops and bote's keeps: bote's is the faithful one, and dynref-diff draws none.
+> - The parser's group names, new here, kept memory with the square of a pattern's length (3.6 GB for 96 KB), and
+>   registration kept about 18 KB more heap a call.
 
 **`$dynamicRef` and `$recursiveRef` are judged** where the official client's validator and JSON Schema read them
 alike, and refused at registration where they do not. They read them differently:

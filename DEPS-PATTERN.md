@@ -400,6 +400,20 @@ compared as JavaScript compares it (`maxLength: -1` refuses every string), where
 A PropertyDef is 312 bytes, a CompiledSchema 136, a Regex 48; `prop_new` and `compiled_new` set the
 new words, zeroed.
 
+(3.8.15) `unevaluatedProperties` and `unevaluatedItems` are judged in 2019-09 and 2020-12, as JSON
+Schema collects what each keyword evaluated. Registration refuses where the official client's Ajv
+counts what is evaluated otherwise, and where its code throws or skips a keyword whatever is beside
+it, none of which needs an unevaluated keyword: `patternProperties` after a count left unset (write it
+in an `allOf` of its own), a tuple beside `contains` under `not` or `if`, `contains` judged for each
+item or member without `minItems: 1` or a `maxContains`, a `not` of `{}` beside composition under `not`
+or `if`. A schema that registered through 3.8.14 in one of those shapes is refused now, and the
+message says which. From the review of 3.8.14: `$async`, `enum: []`, two `$id`s Ajv resolves alike,
+a `urn:uuid:` `$id` in capitals beside a reference, and a capture group named past ASCII are refused;
+a `minContains` below 0 asks for one match; a result's `const`, `enum` and `uniqueItems` compare as
+the client's fast-deep-equal does, and a result whose comparison would make it throw is refused; in
+arguments a property named `__proto__` judges that member. A PropertyDef is 336 bytes, a
+CompiledSchema 152; `prop_new` and `compiled_new` set the new words, zeroed.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`
