@@ -16,7 +16,9 @@ function r(n) { return Math.floor(rnd() * n); }
 function pick(a) { return a[r(a.length)]; }
 const lits = ['a', 'b', 'c', 'x', 'é', 'ü', '😀', '1', '9', '_', ' ', '-', ',', '/', ':', '!', '=', 'Z'];
 const escs = ['\\d', '\\D', '\\w', '\\W', '\\s', '\\S', '\\.', '\\\\', '\\/', '\\-', '\\u0061', '\\u00e9', '\\u{1F600}', '\\x41', '\\cA', '\\0', '\\t', '\\n', '\\r', '\\f', '\\v',
-  '\\1', '\\k<n>', '\\p{L}', '\\P{Lu}', '\\q', '\\a', '\\ud83d\\ude00', '\\ud800', '\\u{110000}', '\\c1', '\\x4', '\\*', '\\?', '\\(', '\\)', '\\[', '\\]', '\\{', '\\}', '\\|', '\\^', '\\$', '\\+', '\\01'];
+  '\\1', '\\k<n>', '\\p{L}', '\\P{Lu}',
+  // (3.8.14) Backreferences that name a group and that do not, and \p in each shape.
+  '\\k<n0>', '\\k<n1>', '\\2', '\\10', '\\k', '\\k<>', '\\k<n0', '\\pL', '\\p{L', '\\p{=x}', '\\p{Script=Latin}', '\\p{L_x}', '\\p{}', '\\q', '\\a', '\\ud83d\\ude00', '\\ud800', '\\u{110000}', '\\c1', '\\x4', '\\*', '\\?', '\\(', '\\)', '\\[', '\\]', '\\{', '\\}', '\\|', '\\^', '\\$', '\\+', '\\01'];
 const classes = ['[abc]', '[^a-z]', '[\\d\\s]', '[a-\\d]', '[é-ü]', '[😀-😂]', '[\\b]', '[]', '[^]', '[-a]', '[a-]', '[z-a]', '[\\w-]', '[\\-x]', '[a\\]b]', '[[]', '[\\u0061-\\u0063]', '[^\\s\\S]', '[.]', '[\\p{L}]', '[\\1]', '[\\0]', '[\\cZ]', '[a-c-e]', '[\\D]', '[^\\W]'];
 function atom(d) {
   const k = r(100);
@@ -31,6 +33,8 @@ function atom(d) {
   if (g < 5) return '(' + inner + ')';
   if (g < 7) return '(?:' + inner + ')';
   if (g < 8) return '(?<n' + r(3) + '>' + inner + ')';
+  // (3.8.14) Group names and modifiers, as the u flag takes and refuses them.
+  if (g < 9 && r(2) == 0) return pick(['(?<1a>', '(?<>', '(?<$x>', '(?<_é>', '(?<\\u0061b>', '(?<a-b>', '(?<a', '(?-:', '(?ii:', '(?x:', '(?m-s:', '(?i-i:', '(?s)', '(?-i:', '(?ims:']) + inner + ')';
   return pick(['(?=', '(?!', '(?<=', '(?<!', '(?i:']) + inner + ')';
 }
 function quant() {
@@ -40,6 +44,9 @@ function quant() {
   return q + (r(4) == 0 ? '?' : '') + (r(30) == 0 && !VALID ? '*' : '');
 }
 function term(d) {
+  // (3.8.14) Bounds past bote's, on one literal only: on a group V8's search backtracks through
+  // each of 20,000 copies, and one pattern ran for an hour.
+  if (r(200) == 0) return 'a' + pick(['{20000,10001}', '{10001,20000}', '{20000}', '{0020001,20000}']);
   const k = r(100);
   if (k < 6) return '^' + (r(10) == 0 ? '*' : '');
   if (k < 12) return '$';

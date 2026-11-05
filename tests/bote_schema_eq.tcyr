@@ -257,14 +257,16 @@ fn main() {
     # ---- registration's WARNs ----
     _lc_begin();
     var wd = dispatcher_new(tool_registry_new());
-    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_bad", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":[\"strin\",\"null\"]},\"b\":{\"type\":[]},\"c\":{\"type\":5},\"e\":{\"enum\":\"x\"},\"u\":{\"type\":\"array\",\"uniqueItems\":\"yes\"}}}"), &h_ret);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_bad", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"b\":{\"type\":[]}}}"), &h_ret);
     dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_good", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":[\"string\",\"null\"]},\"c\":{\"const\":[1]},\"e\":{\"type\":\"integer\",\"enum\":[1,2]},\"u\":{\"type\":\"array\",\"uniqueItems\":true},\"f\":{\"type\":\"array\",\"uniqueItems\":false}}}"), &h_ret);
     _lc_end();
-    assert(_lc_find("a type array naming an unknown type") != 0, "warn: a type array naming an unknown type");
     assert(_lc_find("an empty type array") != 0, "warn: an empty type array");
-    assert(_lc_find("type that is no string or array") != 0, "warn: a type that is a number");
-    assert(_lc_find("enum that is no array") != 0, "warn: an enum that is no array");
-    assert(_lc_find("uniqueItems that is no boolean") != 0, "warn: uniqueItems a string");
+    # (3.8.14, from the 3.8.13 review) What the client cannot compile, refused where 3.8.13 warned.
+    var wbt = tool_def_new("w_r", "d", schema_new("object", 0, vec_new()));
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wbt, "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":[\"strin\",\"null\"]}}}")), "names in a type array something the official client refuses") == 1, "register: a type array naming an unknown type refused");
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wbt, "{\"type\":\"object\",\"properties\":{\"c\":{\"type\":5}}}")), "names type with a value of a kind") == 1, "register: a type that is a number refused");
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wbt, "{\"type\":\"object\",\"properties\":{\"e\":{\"enum\":\"x\"}}}")), "names enum with a value of a kind") == 1, "register: an enum that is no array refused");
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wbt, "{\"type\":\"object\",\"properties\":{\"u\":{\"type\":\"array\",\"uniqueItems\":\"yes\"}}}")), "names uniqueItems with a value of a kind") == 1, "register: uniqueItems a string refused");
     assert(_lc_find("w_good") == 0, "warn: none for a type array, const, an integer enum, uniqueItems true and false");
 
     # ---- (3.8.8, from the 3.8.7 review) a type array naming a string that is no text ----
@@ -276,8 +278,9 @@ fn main() {
     vec_push(cps, schema_prop_new("a", "{\"type\":[\"null\",\"\xff\"]}"));
     var cr3 = dispatcher_register_tool(cd, tool_def_new("w_lone3", "d", schema_new("object", cps, vec_new())), &h_tool);
     _lc_end();
-    assert(cr1 == 0 && cr2 == 0 && cr3 == 0, "crash: three type arrays with a name that is no text register (each crashed registration at 3.8.7)");
-    assert(_lc_find("tool=w_lone ") != 0 && _lc_find("a type array naming an unknown type") != 0, "crash: ...each warned of as naming an unknown type");
+    # (3.8.14) Each refused, as the client refuses a name that is no JSON type, without a crash.
+    assert(cr1 != 0 && cr2 != 0 && cr3 != 0, "crash: three type arrays with a name that is no text refused, and registration lives (each crashed it at 3.8.7)");
+    assert(_lc_find("tool=w_lone ") != 0 && _lc_find("names in a type array something the official client refuses") != 0, "crash: ...each refused for naming no JSON type");
     assert(_ok("{\"type\":[\"null\",\"\\ud800\"]}", "null") == 1 && _ok("{\"type\":[\"null\",\"\\ud800\"]}", "1") == 0, "crash: ...and judged by the name it knows");
 
     # ---- (3.8.8, from the 3.8.7 review) the heap forms keep only their answer ----

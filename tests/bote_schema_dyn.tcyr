@@ -1,0 +1,361 @@
+# bote_schema_dyn.tcyr — `$dynamicRef` and `$recursiveRef` (3.8.14), judged where the official
+# client's Ajv and JSON Schema both resolve them, to the root that holds their anchor, and
+# refused at registration where they do not; the form 2025-11-25 lists an outputSchema in,
+# refused where the client cannot compile it; the WARNs by dialect; the heap. Every expected
+# verdict below is the client's own (AjvJsonSchemaValidator), and scripts/dynref-diff.sh holds
+# the same to it over random schemas and values.
+#
+# Run: cyrius test tests/bote_schema_dyn.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/regex.cyr"
+include "src/format.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
+fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+fn _vs(schema, value) { return _sch_check_value_a(bote_req_begin(), parse_property(schema), "v", value); }
+fn _ok(schema, value) { if (_vs(schema, value) == 0) { return 1; } return 0; }
+fn _v0(schema, value) {
+    var v = _vs(schema, value);
+    if (v == 0) { return "(none)"; }
+    return _cat(vec_get(v, 0), "");
+}
+# The client's verdict `want` for `value` against `schema`, as a result.
+fn _jr(schema, value, want, name) { return assert_eq(_ok(schema, value), want, name); }
+fn _why(os) {
+    var w = registry_check_tool_def(tool_def_with_output_schema(tool_def_new("t_why", "d", schema_new("object", 0, vec_new())), os));
+    if (w == 0) { return "(none)"; }
+    return w;
+}
+fn _iwhy(js) {
+    var w = registry_check_tool_def(tool_def_new("t_iwhy", "d", tool_schema_from_json(js)));
+    if (w == 0) { return "(none)"; }
+    return w;
+}
+fn _twhy(name, prop) {
+    var ps = vec_new();
+    vec_push(ps, schema_prop_new(name, prop));
+    var w = registry_check_tool_def(tool_def_new("t_twhy", "d", schema_new("object", ps, vec_new())));
+    if (w == 0) { return "(none)"; }
+    return w;
+}
+fn _refused(os, sub, name) { return assert(_has(_why(os), sub) == 1, name); }
+fn _taken(os, name) { return assert_streq(_why(os), "(none)", name); }
+
+var _M = ",\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}";
+fn _call_msg(tool, args, modern) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"");
+    str_builder_add_cstr(sb, tool);
+    str_builder_add_cstr(sb, "\",\"arguments\":");
+    str_builder_add_cstr(sb, args);
+    if (modern == 1) { str_builder_add_cstr(sb, _M); }
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}
+var _ret = 0;
+fn h_ret(args, claims) { return _ret; }
+fn h_ok(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+
+var _lc_all = 0;
+fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    var b = alloc(n + 1);
+    memcpy(b, msg, n);
+    store8(b + n, 0);
+    vec_push(_lc_all, b);
+    return 0;
+}
+fn _lc_begin() { _lc_all = vec_new(); sakshi_set_emit_hook(&_lc_hook); sakshi_set_level(SK_TRACE); return 0; }
+fn _lc_end() { sakshi_clear_emit_hook(); sakshi_set_level(SK_ERROR); return 0; }
+fn _lc_find(sub) {
+    var i = 0;
+    while (i < vec_len(_lc_all)) {
+        if (_has(vec_get(_lc_all, i), sub) == 1) { return vec_get(_lc_all, i); }
+        i = i + 1;
+    }
+    return 0;
+}
+fn _rep_s(x, n) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < n) { str_builder_add_cstr(sb, x); i = i + 1; }
+    return str_data(str_builder_build(sb));
+}
+
+fn main() {
+    alloc_init();
+
+    # ---- judged: the root that holds the anchor ----
+    # 2020-12: a $dynamicRef to the root's $dynamicAnchor recurses to the root
+    var s_0 = "{\"$dynamicAnchor\":\"s\",\"type\":\"object\",\"required\":[\"x\"],\"properties\":{\"a\":{\"$dynamicRef\":\"#s\"}}}";
+    _jr(s_0, "{\"x\":1}", 1, "judge: the root, no member a");
+    _jr(s_0, "{\"x\":1,\"a\":{}}", 0, "judge: a lacks the root's required x");
+    _jr(s_0, "{\"x\":1,\"a\":{\"x\":2}}", 1, "judge: a meets the root");
+    _jr(s_0, "{\"x\":1,\"a\":5}", 0, "judge: a is no object, as the root's type wants");
+    # through items, to any depth
+    var s_1 = "{\"$dynamicAnchor\":\"s\",\"type\":[\"array\",\"integer\"],\"items\":{\"$dynamicRef\":\"#s\"}}";
+    _jr(s_1, "[1,[2,[3]]]", 1, "judge: nested arrays of integers");
+    _jr(s_1, "[1,[\"x\"]]", 0, "judge: a string three down");
+    _jr(s_1, "5", 1, "judge: an integer");
+    _jr(s_1, "\"x\"", 0, "judge: a string");
+    # 2019-09: a $recursiveRef: # beside a root $recursiveAnchor: true
+    var s_2 = "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"$recursiveAnchor\":true,\"required\":[\"x\"],\"properties\":{\"a\":{\"$recursiveRef\":\"#\"}}}";
+    _jr(s_2, "{\"x\":1,\"a\":{}}", 0, "judge: 2019-09 recursive: a lacks x");
+    _jr(s_2, "{\"x\":1,\"a\":{\"x\":1}}", 1, "judge: 2019-09 recursive: a meets the root");
+    # 2020-12 has no $recursiveRef, and the client's engine for it judges one
+    var s_3 = "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$recursiveAnchor\":true,\"required\":[\"x\"],\"properties\":{\"a\":{\"$recursiveRef\":\"#\"}}}";
+    _jr(s_3, "{\"x\":1,\"a\":{}}", 0, "judge: $recursiveRef in 2020-12, judged as the client judges it");
+    _jr(s_3, "{\"x\":1,\"a\":{\"x\":1}}", 1, "judge: ...and met");
+    # 2019-09 has no $dynamicRef, and the client's engine for it judges one
+    var s_4 = "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"$dynamicAnchor\":\"s\",\"required\":[\"x\"],\"properties\":{\"a\":{\"$dynamicRef\":\"#s\"}}}";
+    _jr(s_4, "{\"x\":1,\"a\":{}}", 0, "judge: $dynamicRef in 2019-09, judged");
+    _jr(s_4, "{\"x\":1,\"a\":{\"x\":1}}", 1, "judge: ...and met");
+    # draft-07 has neither, and nor has the client's engine for it
+    var s_5 = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"$dynamicAnchor\":\"s\",\"required\":[\"x\"],\"properties\":{\"a\":{\"$dynamicRef\":\"#s\"}}}";
+    _jr(s_5, "{\"x\":1,\"a\":{}}", 1, "judge: draft-07: a $dynamicRef judges nothing");
+    # draft-06 too
+    var s_6 = "{\"$schema\":\"http://json-schema.org/draft-06/schema#\",\"$recursiveAnchor\":true,\"required\":[\"x\"],\"properties\":{\"a\":{\"$recursiveRef\":\"#\"}}}";
+    _jr(s_6, "{\"x\":1,\"a\":{}}", 1, "judge: draft-06: a $recursiveRef judges nothing");
+    # beside a $ref on the same schema, both judge
+    var s_7 = "{\"$dynamicAnchor\":\"s\",\"required\":[\"x\"],\"$defs\":{\"t\":{\"required\":[\"y\"]}},\"properties\":{\"a\":{\"$ref\":\"#/$defs/t\",\"$dynamicRef\":\"#s\"}}}";
+    _jr(s_7, "{\"x\":1,\"a\":{\"y\":1}}", 0, "judge: the root's x missing");
+    _jr(s_7, "{\"x\":1,\"a\":{\"x\":1}}", 0, "judge: the $ref's y missing");
+    _jr(s_7, "{\"x\":1,\"a\":{\"x\":1,\"y\":1}}", 1, "judge: both met");
+    # inside a definition a $ref names: the root still, as the client finds the root's anchor first
+    var s_8 = "{\"$dynamicAnchor\":\"s\",\"required\":[\"x\"],\"properties\":{\"b\":{\"$ref\":\"#/$defs/t\"}},\"$defs\":{\"t\":{\"properties\":{\"c\":{\"$dynamicRef\":\"#s\"}}}}}";
+    _jr(s_8, "{\"x\":1,\"b\":{\"c\":{}}}", 0, "judge: in a definition, c lacks x");
+    _jr(s_8, "{\"x\":1,\"b\":{\"c\":{\"x\":2}}}", 1, "judge: in a definition, c meets the root");
+    # under anyOf
+    var s_9 = "{\"$dynamicAnchor\":\"s\",\"type\":\"object\",\"properties\":{\"a\":{\"anyOf\":[{\"type\":\"integer\"},{\"$dynamicRef\":\"#s\"}]}}}";
+    _jr(s_9, "{\"a\":1}", 1, "judge: anyOf: the integer");
+    _jr(s_9, "{\"a\":{}}", 1, "judge: anyOf: the root");
+    _jr(s_9, "{\"a\":\"x\"}", 0, "judge: anyOf: neither");
+    _jr(s_9, "{\"a\":{\"a\":\"x\"}}", 0, "judge: anyOf: neither, one down");
+    # under not
+    var s_10 = "{\"$dynamicAnchor\":\"s\",\"type\":\"object\",\"properties\":{\"a\":{\"not\":{\"$dynamicRef\":\"#s\"}}}}";
+    _jr(s_10, "{\"a\":1}", 1, "judge: not: not the root");
+    _jr(s_10, "{\"a\":{}}", 0, "judge: not: the root");
+    var s_esc = "{\"$dynamicAnchor\":\"s\",\"type\":\"object\",\"properties\":{\"a\":{\"$dynamicRef\":\"#\\u0073\"}}}";
+    _jr(s_esc, "{\"a\":1}", 0, "judge: a $dynamicRef written with an escape, as it decodes");
+    _jr(s_esc, "{\"a\":{}}", 1, "judge: ...met");
+    assert(_has(_v0(s_0, "{\"x\":1,\"a\":{\"x\":1,\"a\":{}}}"), "v.a.a") == 1, "judge: the violation's path, two down");
+    var deep = _cat3(_rep_s("[", 60), "1", _rep_s("]", 60));
+    _jr(s_1, deep, 1, "judge: sixty levels");
+    _jr(s_1, _cat3(_rep_s("[", 60), "\"x\"", _rep_s("]", 60)), 0, "judge: sixty levels, a string at the bottom");
+
+    # A $dynamicRef that is no fragment, which registration refuses, judges nothing compiled alone.
+    _jr("{\"required\":[\"x\"],\"properties\":{\"a\":{\"$dynamicRef\":\"x.json#s\"}}}", "{\"x\":1,\"a\":{}}", 1, "judge: a $dynamicRef that is no fragment names no root");
+    # ---- registration: what the client cannot compile ----
+    _refused("{\"properties\":{\"a\":{\"$dynamicRef\":5}}}", "names a $dynamicRef that is no string, which the official client refuses", "register: a $dynamicRef that is no string");
+    _refused("{\"properties\":{\"a\":{\"$dynamicRef\":\"x.json#s\"}}}", "names a $dynamicRef that is no fragment (#name), which the official client refuses", "register: a $dynamicRef that is no fragment");
+    _refused("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"properties\":{\"a\":{\"$recursiveRef\":7}}}", "names a $recursiveRef that is no string", "register: a $recursiveRef that is no string");
+    _refused("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"properties\":{\"a\":{\"$recursiveRef\":\"a#\"}}}", "names a $recursiveRef that is no fragment", "register: a $recursiveRef that is no fragment");
+    # ---- registration: what the client and JSON Schema read apart ----
+    _refused("{\"required\":[\"x\"],\"properties\":{\"a\":{\"$dynamicRef\":\"#\"}}}", "holds a $dynamicRef of # alone", "register: a $dynamicRef of # alone (Ajv: the schema it compiles; JSON Schema: the root)");
+    _refused("{\"$dynamicAnchor\":\"s\",\"properties\":{\"a\":{\"$dynamicRef\":\"#/$defs/d\"}},\"$defs\":{\"d\":{}}}", "holds a $dynamicRef to no anchor's name", "register: a $dynamicRef of a JSON Pointer");
+    _refused("{\"$dynamicAnchor\":\"s\",\"properties\":{\"a\":{\"$dynamicRef\":\"#a%62\"}}}", "holds a $dynamicRef to no anchor's name", "register: a $dynamicRef percent-encoded");
+    _refused("{\"properties\":{\"a\":{\"$dynamicRef\":\"#t\"}},\"$defs\":{\"t\":{\"$anchor\":\"t\",\"type\":\"string\"}}}", "to an anchor other than its root's $dynamicAnchor", "register: a $dynamicRef to a plain $anchor (Ajv: the schema it compiles; JSON Schema: the anchor)");
+    _refused("{\"properties\":{\"b\":{\"$dynamicRef\":\"#n\"},\"c\":{\"$ref\":\"#/$defs/n\"}},\"$defs\":{\"n\":{\"$dynamicAnchor\":\"n\",\"type\":\"string\"}}}", "to an anchor other than its root's $dynamicAnchor", "register: a $dynamicRef to a $dynamicAnchor below the root (Ajv: whichever the value met first)");
+    _refused("{\"$dynamicAnchor\":\"t\",\"properties\":{\"a\":{\"$dynamicRef\":\"#s\"}}}", "to an anchor other than its root's $dynamicAnchor", "register: a $dynamicRef to a name the root's anchor is not");
+    _refused("{\"$dynamicAnchor\":\"s\",\"properties\":{\"a\":{\"$dynamicRef\":\"#s\"}},\"$defs\":{\"u\":{\"$anchor\":\"s\"}}}", "names one anchor twice", "register: the root's name taken by an $anchor below");
+    _refused("{\"$dynamicAnchor\":\"s\",\"properties\":{\"a\":{\"$dynamicRef\":\"#s\"}},\"$defs\":{\"u\":{\"$dynamicAnchor\":\"s\"}}}", "names one anchor twice", "register: ...or by a $dynamicAnchor below");
+    _refused("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"properties\":{\"a\":{\"$recursiveRef\":\"#s\"}}}", "holds a $recursiveRef other than #", "register: a $recursiveRef other than #");
+    _refused("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"required\":[\"x\"],\"properties\":{\"a\":{\"$recursiveRef\":\"#\"}}}", "with no $recursiveAnchor: true on its root", "register: a $recursiveRef with no root anchor");
+    _refused("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"$recursiveAnchor\":false,\"properties\":{\"a\":{\"$recursiveRef\":\"#\"}}}", "with no $recursiveAnchor: true on its root", "register: ...or a root $recursiveAnchor: false");
+    _refused("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"required\":[\"x\"],\"$ref\":\"#/$defs/t\",\"$defs\":{\"t\":{\"properties\":{\"a\":{\"$recursiveRef\":\"#\"}}}}}", "with no $recursiveAnchor: true on its root", "register: a $recursiveRef in a definition, no root anchor (Ajv: the definition's own function)");
+    _refused("{\"$dynamicAnchor\":\"s\",\"properties\":{\"a\":{\"$dynamicRef\":\"#s\"}},\"$defs\":{\"u\":{\"$id\":\"https://ex.com/u\"}}}", "holds a $dynamicRef, and a schema below its root that names a resource of its own with $id", "register: a $dynamicRef beside a resource of its own");
+    _refused("{\"$dynamicAnchor\":\"s\",\"$dynamicRef\":\"#s\"}", "holds a reference that leads back to itself", "register: a $dynamicRef on the root itself");
+    _refused("{\"$dynamicAnchor\":\"s\",\"allOf\":[{\"$dynamicRef\":\"#s\"}]}", "holds a reference that leads back to itself", "register: ...or under the root's allOf");
+    _refused("{\"$dynamicAnchor\":\"s\",\"anyOf\":[{\"$ref\":\"#/$defs/d\"}],\"$defs\":{\"d\":{\"not\":{\"$dynamicRef\":\"#s\"}}}}", "holds a reference that leads back to itself", "register: ...or through a $ref and not");
+    # ---- registration: what it takes ----
+    _taken("{\"$dynamicAnchor\":\"s\",\"type\":\"object\",\"properties\":{\"a\":{\"$dynamicRef\":\"#s\"}}}", "register: a $dynamicRef to the root's $dynamicAnchor");
+    _taken("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"$recursiveAnchor\":true,\"properties\":{\"a\":{\"$recursiveRef\":\"#\"}},\"$defs\":{\"u\":{\"$recursiveAnchor\":true}}}", "register: a $recursiveRef, a second $recursiveAnchor below (the root is outermost to both readings)");
+    _taken("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"properties\":{\"a\":{\"$dynamicRef\":\"#\"},\"b\":{\"$recursiveRef\":5},\"c\":{\"$dynamicRef\":\"x#y\"}}}", "register: draft-07: neither keyword is one, whatever its value");
+    _taken("{\"$dynamicAnchor\":\"s\",\"$defs\":{\"unused\":{\"$dynamicRef\":\"#nope\"}}}", "register: a $dynamicRef in a definition nothing reaches");
+    _taken("{\"$dynamicAnchor\":\"s\",\"type\":\"array\",\"items\":{\"$dynamicRef\":\"#s\"}}", "register: items recursing to the root");
+    _taken("{\"$dynamicAnchor\":\"s\",\"properties\":{\"a\":{\"$dynamicRef\":\"#\\u0073\"}}}", "register: a $dynamicRef written with an escape");
+    # ---- registration: the form 2025-11-25 lists, for a root that is no object ----
+    _refused("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"https://ex.com/s\",\"$dynamicAnchor\":\"s\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/t\"},\"$defs\":{\"t\":{\"type\":\"string\"}}}", "with a relative $ref compiled with it, which the official client cannot compile in the form 2025-11-25 lists", "register: 2025-11-25 form: a root $id, $dynamicAnchor and a relative $ref");
+    _taken("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"https://ex.com/s\",\"$dynamicAnchor\":\"s\",\"type\":\"array\",\"items\":{\"$ref\":\"https://ex.com/s#/$defs/t\"},\"$defs\":{\"t\":{\"type\":\"string\"}}}", "register: 2025-11-25 form: ...the $ref written behind the $id");
+    _taken("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"https://ex.com/s\",\"$dynamicAnchor\":\"s\",\"type\":\"object\",\"properties\":{\"a\":{\"$ref\":\"#/$defs/t\"}},\"$defs\":{\"t\":{\"type\":\"string\"}}}", "register: 2025-11-25 form: ...or an object root, listed as it is");
+    _refused("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"https://ex.com/q\",\"type\":\"array\",\"items\":{\"$dynamicAnchor\":\"n\",\"properties\":{\"a\":{\"$ref\":\"#/$defs/t\"}}},\"$defs\":{\"t\":{\"type\":\"string\"}}}", "with a relative $ref compiled with it", "register: 2025-11-25 form: a $dynamicAnchor below the root, a relative $ref under it");
+    _refused("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"$id\":\"https://ex.com/r\",\"$recursiveAnchor\":true,\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/t\"},\"$defs\":{\"t\":{\"type\":\"string\"}}}", "with a relative $ref compiled with it", "register: 2025-11-25 form: a root $recursiveAnchor: true and a relative $ref");
+    _taken("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"https://ex.com/z\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/t\"},\"$defs\":{\"t\":{\"type\":\"string\"}}}", "register: 2025-11-25 form: a root $id and a relative $ref, no anchor");
+    _refused("{\"$id\":\"\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/t\"},\"$defs\":{\"t\":{\"type\":\"string\"}}}", "holds a $ref beside a root $id that names no base", "register: 2025-11-25 form: a root $id of empty and a $ref");
+    _refused("{\"$id\":null,\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/t\"},\"$defs\":{\"t\":{\"type\":\"string\"}}}", "holds a $ref beside a root $id that names no base", "register: 2025-11-25 form: a root $id of null and a $ref");
+    _refused("{\"$id\":0,\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/t\"},\"$defs\":{\"t\":{\"type\":\"string\"}}}", "holds a $ref beside a root $id that names no base", "register: 2025-11-25 form: a root $id of 0 and a $ref");
+    _refused("{\"$id\":false,\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/t\"},\"$defs\":{\"t\":{\"type\":\"string\"}}}", "holds a $ref beside a root $id that names no base", "register: 2025-11-25 form: a root $id of false and a $ref");
+    _taken("{\"$id\":\"a\",\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/t\"},\"$defs\":{\"t\":{\"type\":\"string\"}}}", "register: 2025-11-25 form: a relative root $id names a base");
+    _taken("{\"$id\":\"\",\"type\":\"array\",\"items\":{\"type\":\"string\"}}", "register: 2025-11-25 form: an empty $id and no $ref");
+    _refused("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"$id\":\"\",\"type\":\"array\",\"items\":{\"$ref\":\"#/definitions/t\"},\"definitions\":{\"t\":{\"type\":\"string\"}}}", "holds a $ref beside a root $id that names no base", "register: 2025-11-25 form: draft-07 too");
+    # ---- (3.8.14, found by the differentials) names, and the form 2025-11-25 lists ----
+    # Each refused below the client refuses, as written or in that form; each taken it takes in both.
+    _refused("{\"type\":\"array\",\"$anchor\":\"s\",\"$defs\":{\"d\":{\"$anchor\":\"s\"}}}", "names one anchor twice", "register: a root $anchor below again (the 2025-11-25 form registers the root's)");
+    _refused("{\"type\":\"array\",\"$anchor\":\"s\",\"$dynamicAnchor\":\"s\"}", "names one anchor twice", "register: a root $anchor and $dynamicAnchor of one name");
+    _refused("{\"type\":\"object\",\"$anchor\":\"s\",\"$defs\":{\"d\":{\"$anchor\":\"s\"}}}", "names one anchor twice", "register: ...with an object root too, two anchors of one name in one resource to JSON Schema (the client takes it)");
+    _taken("{\"type\":\"array\",\"$anchor\":\"s\",\"$dynamicAnchor\":\"t\"}", "register: two root anchors of two names");
+    _refused("{\"$defs\":{\"d\":{\"$id\":\"a\"},\"e\":{\"$id\":\"a\"}}}", "names one $id twice", "register: two $ids alike below the root");
+    _refused("{\"type\":\"object\",\"$id\":\"https://ex.com/n\",\"$defs\":{\"d\":{\"$id\":\"https://ex.com/n\"}}}", "names one $id twice", "register: an $id below alike the root's");
+    _refused("{\"type\":\"array\",\"$id\":\"\",\"$defs\":{\"d\":{\"$id\":\"\"}}}", "holds an $id below its root alike the root's", "register: 2025-11-25 form: a root $id of \"\" and one below");
+    _taken("{\"type\":\"object\",\"$id\":\"\",\"$defs\":{\"d\":{\"$id\":\"\"}}}", "register: ...an object root, listed as it is");
+    _refused("{\"$id\":\"https://ex.com/r\",\"$ref\":\"#/$defs/d\",\"$defs\":{\"d\":{\"items\":true}}}", "holds a root of $id and $ref with no keyword beside them", "register: 2025-11-25 form: a root of $id and $ref alone (the client's Ajv overflows its stack)");
+    _taken("{\"$id\":\"https://ex.com/r\",\"$ref\":\"#/$defs/d\",\"minItems\":1,\"$defs\":{\"d\":{\"items\":true}}}", "register: ...one with a keyword beside them");
+    _taken("{\"type\":\"array\",\"$id\":\"https://ex.com/r\",\"$ref\":\"#/$defs/d\",\"$comment\":\"x\",\"$defs\":{\"d\":{\"items\":true}}}", "register: ...or a $comment");
+    _refused("{\"type\":\"array\",\"$id\":\"https://Example.com/a\",\"items\":{\"$ref\":\"#/$defs/x\"},\"$defs\":{\"x\":{\"type\":\"string\"}}}", "beside a root $id the official client's resolver writes otherwise", "register: 2025-11-25 form: a root $id with a capital in the host, which the resolver writes otherwise");
+    _refused("{\"type\":\"array\",\"$id\":\"https://example.com:443/a\",\"items\":{\"$ref\":\"#/$defs/x\"},\"$defs\":{\"x\":{\"type\":\"string\"}}}", "beside a root $id the official client's resolver writes otherwise", "register: 2025-11-25 form: a root $id with the scheme's own port, which the resolver writes otherwise");
+    _refused("{\"type\":\"array\",\"$id\":\"https://example.com\",\"items\":{\"$ref\":\"#/$defs/x\"},\"$defs\":{\"x\":{\"type\":\"string\"}}}", "beside a root $id the official client's resolver writes otherwise", "register: 2025-11-25 form: a root $id with no path, which the resolver writes otherwise");
+    _refused("{\"type\":\"array\",\"$id\":\"https://example.com/a%41\",\"items\":{\"$ref\":\"#/$defs/x\"},\"$defs\":{\"x\":{\"type\":\"string\"}}}", "beside a root $id the official client's resolver writes otherwise", "register: 2025-11-25 form: a root $id with a letter percent-encoded, which the resolver writes otherwise");
+    _refused("{\"type\":\"array\",\"$id\":\"wss://h/\",\"items\":{\"$ref\":\"#/$defs/x\"},\"$defs\":{\"x\":{\"type\":\"string\"}}}", "beside a root $id the official client's resolver writes otherwise", "register: 2025-11-25 form: a root $id with a wss path of / alone, which the resolver writes otherwise");
+    _refused("{\"type\":\"array\",\"$id\":\"tag:ab:é\",\"items\":{\"$ref\":\"#/$defs/x\"},\"$defs\":{\"x\":{\"type\":\"string\"}}}", "beside a root $id the official client's resolver writes otherwise", "register: 2025-11-25 form: a root $id with a character past ASCII, which the resolver writes otherwise");
+    _taken("{\"type\":\"array\",\"$id\":\"https://example.com/Schemas/Foo.json\",\"items\":{\"$ref\":\"#/$defs/x\"},\"$defs\":{\"x\":{\"type\":\"string\"}}}", "register: 2025-11-25 form: a root $id with capitals in the path, which the resolver writes as it is");
+    _taken("{\"type\":\"array\",\"$id\":\"urn:example:foo\",\"items\":{\"$ref\":\"#/$defs/x\"},\"$defs\":{\"x\":{\"type\":\"string\"}}}", "register: 2025-11-25 form: a root $id with a URN, which the resolver writes as it is");
+    _taken("{\"type\":\"array\",\"$id\":\"http://localhost:8080/x\",\"items\":{\"$ref\":\"#/$defs/x\"},\"$defs\":{\"x\":{\"type\":\"string\"}}}", "register: 2025-11-25 form: a root $id with a port of its own, which the resolver writes as it is");
+    _taken("{\"type\":\"array\",\"$id\":\"https://example.com/a%20b\",\"items\":{\"$ref\":\"#/$defs/x\"},\"$defs\":{\"x\":{\"type\":\"string\"}}}", "register: 2025-11-25 form: a root $id with a space percent-encoded, which the resolver writes as it is");
+    _refused("{\"type\":\"array\",\"$id\":\"https://[::1]/a\",\"items\":{\"$ref\":\"#/$defs/x\"},\"$defs\":{\"x\":{\"type\":\"string\"}}}", "beside a root $id the official client's resolver writes otherwise", "register: 2025-11-25 form: a root $id with an IPv6 literal, refused on the stricter side (the client takes it)");
+    _refused("{\"type\":\"array\",\"$id\":\"https://example.com/a?\",\"items\":{\"$ref\":\"#/$defs/x\"},\"$defs\":{\"x\":{\"type\":\"string\"}}}", "beside a root $id the official client's resolver writes otherwise", "register: 2025-11-25 form: a root $id with an empty query, refused on the stricter side (the client takes it)");
+    _refused("{\"type\":\"array\",\"$id\":\"https:a\",\"items\":{\"$ref\":\"#/$defs/x\"},\"$defs\":{\"x\":{\"type\":\"string\"}}}", "beside a root $id the official client's resolver writes otherwise", "register: 2025-11-25 form: a root $id with no authority, refused on the stricter side (the client takes it)");
+    # ---- (3.8.14, found by dynref-diff) a dynamic reference under not or if, beside other keywords ----
+    # Ajv judges such a schema with its errors cut short, and then by its type and the reference alone.
+    _refused("{\"$dynamicAnchor\":\"s\",\"type\":\"array\",\"items\":{\"not\":{\"$dynamicRef\":\"#s\",\"minItems\":1}}}", "beside other keywords under not or if", "register: a $dynamicRef beside minItems under not");
+    _refused("{\"$dynamicAnchor\":\"s\",\"type\":\"array\",\"items\":{\"if\":{\"$dynamicRef\":\"#s\",\"minItems\":1},\"then\":{\"type\":\"array\"}}}", "beside other keywords under not or if", "register: ...under if");
+    _refused("{\"$dynamicAnchor\":\"s\",\"type\":\"array\",\"items\":{\"not\":{\"anyOf\":[{\"$dynamicRef\":\"#s\",\"minItems\":1}]}}}", "beside other keywords under not or if", "register: ...deeper under not, through anyOf");
+    _taken("{\"$dynamicAnchor\":\"s\",\"type\":\"array\",\"items\":{\"not\":{\"allOf\":[{\"$dynamicRef\":\"#s\"},{\"minItems\":1}]}}}", "register: ...written in an allOf of its own");
+    _taken("{\"$dynamicAnchor\":\"s\",\"type\":[\"array\",\"integer\"],\"items\":{\"not\":{\"$dynamicRef\":\"#s\",\"type\":\"array\"}}}", "register: ...beside type, which the client judges first");
+    _taken("{\"$dynamicAnchor\":\"s\",\"type\":\"array\",\"items\":{\"$dynamicRef\":\"#s\",\"minItems\":1}}", "register: ...beside minItems outside not and if");
+    _taken("{\"$dynamicAnchor\":\"s\",\"type\":\"array\",\"items\":{\"not\":{\"$ref\":\"#/$defs/t\"}},\"$defs\":{\"t\":{\"$dynamicRef\":\"#s\",\"minItems\":1}}}", "register: ...in a definition a $ref under not names, a function of its own");
+    _jr("{\"$dynamicAnchor\":\"s\",\"type\":\"array\",\"items\":{\"not\":{\"allOf\":[{\"$dynamicRef\":\"#s\"},{\"minItems\":1}]}}}", "[[]]", 1, "judge: allOf of its own under not, as the client: an empty array");
+    _jr("{\"$dynamicAnchor\":\"s\",\"type\":\"array\",\"items\":{\"not\":{\"allOf\":[{\"$dynamicRef\":\"#s\"},{\"minItems\":1}]}}}", "[[1]]", 0, "judge: ...and one with an item");
+    # ---- registration: each kind of inputSchema ----
+    assert(_has(_iwhy("{\"type\":\"object\",\"properties\":{\"a\":{\"$dynamicRef\":\"#t\"}}}"), "to an anchor other than its root's $dynamicAnchor") == 1, "register: an inputSchema given as JSON");
+    assert_streq(_iwhy("{\"type\":\"object\",\"$dynamicAnchor\":\"s\",\"properties\":{\"a\":{\"$dynamicRef\":\"#s\"}}}"), "(none)", "register: ...one that names its root takes");
+    assert(_has(_twhy("a", "{\"$dynamicRef\":\"#s\"}"), "to an anchor other than its root's $dynamicAnchor") == 1, "register: a ToolSchema's property, whose listed root bote writes with no anchor");
+    assert(_has(_twhy("a", "{\"$dynamicRef\":5}"), "names a $dynamicRef that is no string") == 1, "register: ...and one that is no string, which 3.8.13 checked only beside a format");
+    assert(_has(_twhy("a", "{\"$id\":5}"), "names an $id that is no string") == 1, "register: a ToolSchema property's $id that is no string (through 3.8.13, taken)");
+
+    # ---- the WARNs, by dialect ----
+    var wd = dispatcher_new(tool_registry_new());
+    _lc_begin();
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_07", "d", schema_new("object", 0, vec_new())), "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"a\":{\"$dynamicRef\":\"#s\"},\"b\":{\"$recursiveRef\":\"#\"}}}"), &h_ok);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_20", "d", schema_new("object", 0, vec_new())), "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$recursiveAnchor\":true,\"type\":\"object\",\"properties\":{\"a\":{\"$recursiveRef\":\"#\"}}}"), &h_ok);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_19", "d", schema_new("object", 0, vec_new())), "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"$dynamicAnchor\":\"s\",\"type\":\"object\",\"properties\":{\"a\":{\"$dynamicRef\":\"#s\"}}}"), &h_ok);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_ok", "d", schema_new("object", 0, vec_new())), "{\"$dynamicAnchor\":\"s\",\"type\":\"object\",\"properties\":{\"a\":{\"$dynamicRef\":\"#s\"}}}"), &h_ok);
+    _lc_end();
+    assert(_lc_find("$dynamicRef, which this schema's dialect does not have") != 0, "warn: draft-07 has no $dynamicRef");
+    assert(_lc_find("$recursiveRef, which this schema's dialect does not have") != 0, "warn: ...nor $recursiveRef");
+    assert(_lc_find("$recursiveRef, which 2020-12 does not have and bote judges, as the official client does") != 0, "warn: 2020-12 has no $recursiveRef, judged");
+    assert(_lc_find("$dynamicRef, which 2019-09 does not have and bote judges, as the official client does") != 0, "warn: 2019-09 has no $dynamicRef, judged");
+    var wok = 0;
+    var wi = 0;
+    while (wi < vec_len(_lc_all)) { if (_has(vec_get(_lc_all, wi), "w_ok") == 1 && _has(vec_get(_lc_all, wi), "Ref") == 1) { wok = 1; } wi = wi + 1; }
+    assert(wok == 0, "warn: none for a $dynamicRef 2020-12 has and bote judges (it was unenforced through 3.8.13)");
+    assert(registry_get(dispatcher_registry(wd), "w_ok") != 0 && registry_get(dispatcher_registry(wd), "w_07") != 0, "warn: ...and each registered");
+
+    # ---- through the dispatcher: a result on both revisions, and arguments ----
+    var d = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(d, tool_def_with_output_schema(tool_def_new("t_tree", "d", schema_new("object", 0, vec_new())), "{\"$dynamicAnchor\":\"s\",\"type\":[\"array\",\"integer\"],\"items\":{\"$dynamicRef\":\"#s\"}}"), &h_ret);
+    _ret = "{\"content\":[{\"type\":\"text\",\"text\":\"t\"}],\"structuredContent\":[1,[2,[3]]]}";
+    var r1 = codec_process_message(_call_msg("t_tree", "{}", 1), d, 0);
+    assert(_has(r1, "isError") == 0 && _has(r1, "[1,[2,[3]]]") == 1, "dispatch: a tree that meets its schema, 2026-07-28");
+    var r2 = codec_process_message(_call_msg("t_tree", "{}", 0), d, 0);
+    assert(_has(r2, "isError") == 0 && _has(r2, "{\"result\":[1,[2,[3]]]}") == 1, "dispatch: ...and 2025-11-25, wrapped");
+    _ret = "{\"content\":[{\"type\":\"text\",\"text\":\"t\"}],\"structuredContent\":[1,[\"x\"]]}";
+    assert(_has(codec_process_message(_call_msg("t_tree", "{}", 1), d, 0), "\"isError\":true") == 1, "dispatch: a string two down refused, 2026-07-28");
+    assert(_has(codec_process_message(_call_msg("t_tree", "{}", 0), d, 0), "\"isError\":true") == 1, "dispatch: ...and 2025-11-25");
+    var tl = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}", d, 0);
+    assert(_has(tl, "\"properties\":{\"result\":{\"$dynamicAnchor\":\"s\"") == 1 && _has(tl, "\"$dynamicRef\":\"#s\"") == 1, "dispatch: the 2025-11-25 form keeps the anchor and its reference");
+    dispatcher_register_tool(d, tool_def_new("t_args", "d", tool_schema_from_json("{\"type\":\"object\",\"$dynamicAnchor\":\"s\",\"properties\":{\"child\":{\"$dynamicRef\":\"#s\"},\"n\":{\"type\":\"integer\"}}}")), &h_ok);
+    assert(_has(codec_process_message(_call_msg("t_args", "{\"child\":{\"child\":{\"n\":1}}}", 1), d, 0), "\"ok\"") == 1, "dispatch: arguments that recurse and meet it");
+    var ra = codec_process_message(_call_msg("t_args", "{\"child\":{\"child\":{\"n\":\"x\"}}}", 1), d, 0);
+    assert(_has(ra, "\"isError\":true") == 1 && _has(ra, "child.child.n: expected integer") == 1, "dispatch: ...and two down, refused at its path");
+
+    # ---- the heap and the arena ----
+    var hm = _call_msg("t_args", "{\"child\":{\"child\":{\"child\":{\"n\":\"x\"}}}}", 1);
+    codec_process_message_a(bote_req_begin(), hm, d, 0);
+    var h0 = alloc_used();
+    var hi = 0;
+    while (hi < 50) { codec_process_message_a(bote_req_begin(), hm, d, 0); hi = hi + 1; }
+    assert_eq(alloc_used() - h0, 0, "heap: fifty calls refused through a $dynamicRef keep nothing");
+    var tp = parse_property("{\"$dynamicAnchor\":\"s\",\"type\":[\"array\",\"integer\"],\"items\":{\"$dynamicRef\":\"#s\"}}");
+    var tv = _cat3(_rep_s("[", 60), "\"x\"", _rep_s("]", 60));
+    _sch_check_value_a(default_alloc(), tp, "v", tv);
+    var h1 = alloc_used();
+    hi = 0;
+    while (hi < 20) { _sch_check_value_a(default_alloc(), tp, "v", tv); hi = hi + 1; }
+    assert(alloc_used() - h1 < 20 * 512, "heap: handed the heap, a refusal sixty down keeps only its answer");
+    var fa = bote_req_arena_new();
+    var fb = bote_req_arena_bytes(fa);
+    _sch_check_value_a(fa, tp, "v", _cat3(_rep_s("[", 60), "1", _rep_s("]", 60)));
+    assert_eq(bote_req_arena_bytes(fa), fb, "arena: sixty levels judged within the arena's first chunk");
+    var gh = alloc_used();
+    hi = 0;
+    while (hi < 20) { _why("{\"$dynamicAnchor\":\"s\",\"properties\":{\"a\":{\"$dynamicRef\":\"#t\"}}}"); hi = hi + 1; }
+    assert(alloc_used() - gh < 20 * 65536, "heap: registration's refusal of a $dynamicRef keeps under 64 KB a time");
+
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit_group(rc);

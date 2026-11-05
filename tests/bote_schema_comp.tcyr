@@ -479,14 +479,17 @@ fn main() {
     # ---- the WARNs ----
     _lc_begin();
     var wd = dispatcher_new(tool_registry_new());
-    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_bad", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"allOf\":{}},\"b\":{\"anyOf\":[]},\"c\":{\"oneOf\":[{},5]},\"d\":{\"not\":5},\"e\":{\"if\":\"x\"},\"f\":{\"then\":{}}}}"), &h_ret);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_bad", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"b\":{\"anyOf\":[]},\"c\":{\"oneOf\":[{},5]},\"f\":{\"then\":{}}}}"), &h_ret);
     dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_good", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"allOf\":[{}]},\"b\":{\"anyOf\":[true,{}]},\"c\":{\"oneOf\":[{},false]},\"d\":{\"not\":{}},\"e\":{\"if\":{},\"then\":{},\"else\":false}}}"), &h_ret);
     _lc_end();
-    assert(_lc_find("allOf that is no non-empty array of schemas") != 0, "warn: allOf an object");
+    # (3.8.14, from the 3.8.13 review) Of a kind the client's engine refuses, refused, where
+    # 3.8.13 warned of each: allOf an object, not a number, if a string.
+    var wro = tool_def_new("w_r", "d", schema_new("object", 0, vec_new()));
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wro, "{\"type\":\"object\",\"properties\":{\"a\":{\"allOf\":{}}}}")), "names allOf with a value of a kind the official client refuses (it takes an array)") == 1, "register: allOf an object refused");
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wro, "{\"type\":\"object\",\"properties\":{\"d\":{\"not\":5}}}")), "names not with a value of a kind the official client refuses (it takes an object or a boolean)") == 1, "register: not a number refused");
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wro, "{\"type\":\"object\",\"properties\":{\"e\":{\"if\":\"x\"}}}")), "names if with a value of a kind") == 1, "register: if a string refused");
     assert(_lc_find("anyOf that is no non-empty array of schemas") != 0, "warn: anyOf empty");
     assert(_lc_find("oneOf that is no non-empty array of schemas") != 0, "warn: oneOf holding a number");
-    assert(_lc_find("not that is no schema") != 0, "warn: not a number");
-    assert(_lc_find("if that is no schema") != 0, "warn: if a string");
     assert(_lc_find("then or else without if") != 0, "warn: then with no if");
     assert(_lc_find("w_good") == 0, "warn: none for each well formed");
     assert(_lc_find("keyword=allOf") == 0 && _lc_find("keyword=anyOf") == 0 && _lc_find("keyword=oneOf") == 0 && _lc_find("keyword=not") == 0 && _lc_find("keyword=if") == 0, "warn: none of them as unenforced");

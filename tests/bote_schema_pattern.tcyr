@@ -76,6 +76,11 @@ fn _cat(a, b) {
 }
 fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
 fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+fn _why(os) {
+    var w = registry_check_tool_def(tool_def_with_output_schema(tool_def_new("t_why", "d", schema_new("object", 0, vec_new())), os));
+    if (w == 0) { return "(none)"; }
+    return w;
+}
 fn _vs(schema, value) { return _sch_check_value_a(bote_req_begin(), parse_property(schema), "v", value); }
 fn _ok(schema, value) { if (_vs(schema, value) == 0) { return 1; } return 0; }
 fn _n(schema, value) {
@@ -286,15 +291,19 @@ fn main() {
     # ---- the WARNs ----
     _lc_begin();
     var wd = dispatcher_new(tool_registry_new());
-    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_p", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"pattern\":\"(?<=x)y\"},\"b\":{\"pattern\":\"[\"},\"c\":{\"pattern\":5},\"d\":{\"multipleOf\":\"2\"},\"e\":{\"multipleOf\":0},\"f\":{\"multipleOf\":-2},\"g\":{\"multipleOf\":0.01},\"h\":{\"multipleOf\":123456789012345678}}}"), &h_ret);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_p", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"pattern\":\"(?<=x)y\"},\"e\":{\"multipleOf\":0},\"f\":{\"multipleOf\":-2},\"g\":{\"multipleOf\":0.01},\"h\":{\"multipleOf\":123456789012345678}}}"), &h_ret);
     dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_ok", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"pattern\":\"^[a-z]+$\"},\"b\":{\"multipleOf\":5},\"c\":{\"multipleOf\":2.5e1}}}"), &h_ret);
-    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_pp", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"patternProperties\":{\"(?<=x)y\":{}},\"additionalProperties\":false},\"b\":{\"patternProperties\":[1]}}}"), &h_ret);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_pp", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"patternProperties\":{\"(?<=x)y\":{}},\"additionalProperties\":false}}}"), &h_ret);
     dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_ppok", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"patternProperties\":{\"^x\":{}},\"additionalProperties\":false}"), &h_ret);
     _lc_end();
     assert(_lc_find("pattern bote's engine does not take, for a lookbehind") != 0, "warn: a pattern the engine declines, and why");
-    assert(_lc_find("pattern bote's engine does not take, for an unterminated character class") != 0, "warn: ...one no client compiles");
-    assert(_lc_find("pattern that is no string") != 0, "warn: a pattern that is no string");
-    assert(_lc_find("multipleOf that is no number") != 0, "warn: a multipleOf that is no number");
+    # (3.8.14, from the 3.8.13 review) What the official client cannot compile registration
+    # refuses, where through 3.8.13 it warned: a pattern JavaScript refuses with the u flag,
+    # and a pattern, a multipleOf or a patternProperties of the wrong kind.
+    assert(_has(_why("{\"type\":\"object\",\"properties\":{\"b\":{\"pattern\":\"[\"}}}"), "names a pattern JavaScript refuses with the u flag, which the official client cannot compile: an unterminated character class") == 1, "register: a pattern no client compiles refused, where 3.8.13 warned");
+    assert(_has(_why("{\"type\":\"object\",\"properties\":{\"c\":{\"pattern\":5}}}"), "names pattern with a value of a kind the official client refuses (it takes a string)") == 1, "register: a pattern that is no string refused");
+    assert(_has(_why("{\"type\":\"object\",\"properties\":{\"d\":{\"multipleOf\":\"2\"}}}"), "names multipleOf with a value of a kind the official client refuses (it takes a number)") == 1, "register: a multipleOf that is no number refused");
+    assert(_has(_why("{\"type\":\"object\",\"properties\":{\"b\":{\"patternProperties\":[1]}}}"), "names patternProperties with a value of a kind the official client refuses (it takes an object)") == 1, "register: patternProperties that is no object refused");
     assert(_lc_find("multipleOf 0, which no number meets") != 0, "warn: 0");
     assert(_lc_find("multipleOf below 0") != 0, "warn: below 0");
     assert(_lc_find("multipleOf that is no integer") != 0, "warn: a fraction, which a client's doubles may judge otherwise");
@@ -303,7 +312,6 @@ fn main() {
     assert(_lc_find("keyword=pattern") == 0 && _lc_find("keyword=multipleOf") == 0, "warn: neither as unenforced");
     assert(_lc_find("a patternProperties pattern bote's engine does not take, for a lookbehind") != 0, "warn: patternProperties declining a pattern, and why (3.8.12)");
     assert(_lc_find("additionalProperties beside a pattern bote's engine does not take, which judges nothing") != 0, "warn: ...and additionalProperties beside it");
-    assert(_lc_find("patternProperties that is no object") != 0, "warn: patternProperties that is no object");
     assert(_lc_find("tool=w_ppok") == 0, "warn: none for patternProperties and additionalProperties both judged");
     # (3.8.13, from the 3.8.12 review) Two groups of one name, which Node before 23 refuses.
     _lc_begin();

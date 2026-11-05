@@ -405,16 +405,21 @@ fn main() {
     # ---- (3.8.6, from the 3.8.5 review) a keyword bote judges, with a value it cannot judge by ----
     _lc_begin();
     var wd2 = dispatcher_new(tool_registry_new());
-    dispatcher_register_tool(wd2, tool_def_with_output_schema(tool_def_new("w_bad", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"additionalProperties\":\"no\",\"minProperties\":-1,\"properties\":{\"n\":{\"type\":\"number\",\"minimum\":5,\"exclusiveMinimum\":true,\"maximum\":\"9\"},\"s\":{\"type\":\"string\",\"maxLength\":\"3\",\"minLength\":1.5},\"a\":{\"type\":\"array\",\"minItems\":-1}}}"), &h_ret);
+    dispatcher_register_tool(wd2, tool_def_with_output_schema(tool_def_new("w_bad", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"minProperties\":-1,\"properties\":{\"s\":{\"type\":\"string\",\"minLength\":1.5},\"a\":{\"type\":\"array\",\"minItems\":-1}}}"), &h_ret);
     dispatcher_register_tool(wd2, tool_def_with_output_schema(tool_def_new("w_good", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"additionalProperties\":true,\"properties\":{\"s\":{\"type\":\"string\",\"maxLength\":2.0,\"minLength\":0},\"o\":{\"type\":\"object\",\"additionalProperties\":{}},\"f\":{\"type\":\"object\",\"additionalProperties\":false},\"n\":{\"type\":\"number\",\"exclusiveMinimum\":-1e2}}}"), &h_ret);
     _lc_end();
-    assert(_lc_find("additionalProperties that is no boolean or object") != 0, "warn: additionalProperties a string");
-    assert(_lc_find("minProperties that is no non-negative integer") != 0, "warn: minProperties -1");
-    assert(_lc_find("exclusiveMinimum that is no number") != 0, "warn: draft-04's exclusiveMinimum true");
-    assert(_lc_find("maximum that is no number") != 0, "warn: maximum a string");
-    assert(_lc_find("maxLength that is no non-negative integer") != 0, "warn: maxLength a string");
-    assert(_lc_find("minLength that is no non-negative integer") != 0, "warn: minLength 1.5");
-    assert(_lc_find("minItems that is no non-negative integer") != 0, "warn: minItems -1");
+    # (3.8.14, from the 3.8.13 review) A count that is no non-negative integer is judged as the
+    # client compares it (tests/bote_schema_client.tcyr), and warned of still; one of another
+    # kind, and a bound or additionalProperties of another kind, the client cannot compile,
+    # and registration refuses.
+    assert(_lc_find("minProperties that is no non-negative integer, judged as the official client compares it") != 0, "warn: minProperties -1");
+    assert(_lc_find("minLength that is no non-negative integer, judged") != 0, "warn: minLength 1.5");
+    assert(_lc_find("minItems that is no non-negative integer, judged") != 0, "warn: minItems -1");
+    var wbw = tool_def_new("w_r", "d", schema_new("object", 0, vec_new()));
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wbw, "{\"type\":\"object\",\"additionalProperties\":\"no\"}")), "names additionalProperties with a value of a kind") == 1, "register: additionalProperties a string refused");
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wbw, "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"number\",\"minimum\":5,\"exclusiveMinimum\":true}}}")), "names exclusiveMinimum with a value of a kind") == 1, "register: draft-04's exclusiveMinimum true refused");
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wbw, "{\"type\":\"object\",\"properties\":{\"n\":{\"maximum\":\"9\"}}}")), "names maximum with a value of a kind") == 1, "register: maximum a string refused");
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wbw, "{\"type\":\"object\",\"properties\":{\"s\":{\"maxLength\":\"3\"}}}")), "names maxLength with a value of a kind") == 1, "register: maxLength a string refused");
     assert(_lc_find("w_good") == 0, "warn: none for 2.0, 0, true, false, {} and -1e2");
 
     # ---- (3.8.6, from the 3.8.5 review) a large schema's seen table given back ----

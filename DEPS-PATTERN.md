@@ -383,6 +383,23 @@ compile takes its lock, and a Regex is 40 bytes. The core bundle holds 15 module
 `src/format.cyr` after `src/regex.cyr`. A PropertyDef is 304 bytes; `prop_new` sets the new word,
 zeroed.
 
+(3.8.14) `$dynamicRef` and `$recursiveRef` are judged in 2019-09 and 2020-12, where the official
+client's Ajv and JSON Schema read them alike: a `$dynamicRef: "#name"` to the root's
+`$dynamicAnchor`, a `$recursiveRef: "#"` beside a root `$recursiveAnchor: true`, each naming the
+root. Registration refuses every other reachable one, each a schema the two read apart, and one
+beside other keywords under `not` or `if`. From the review of 3.8.13, registration refuses what the
+client's validator cannot compile: a keyword whose value is of a kind its engine refuses
+(`minLength: "5"`, `if: 5`), a `type` that is no JSON type, `nullable` with no type, `id`, a
+`required` or `dependentRequired` entry that is no string, a pattern JavaScript refuses, a format
+named for one of Object.prototype, an `$id` twice, a root anchor named twice. A schema that
+registered with a WARN through 3.8.13 for one of these is refused now. For an outputSchema whose
+root is no object, the form 2025-11-25 lists it in is checked too, and keeps the root's `$schema`
+inside `result`, as the SDK does. A result reads a name of Object.prototype (`toString`) as the
+client finds it on every object; arguments, by member. A count that is no non-negative integer is
+compared as JavaScript compares it (`maxLength: -1` refuses every string), where it judged nothing.
+A PropertyDef is 312 bytes, a CompiledSchema 136, a Regex 48; `prop_new` and `compiled_new` set the
+new words, zeroed.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`

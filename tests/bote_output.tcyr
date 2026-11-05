@@ -260,7 +260,7 @@ fn main() {
     _ase(_legacy_form("{\"properties\":{\"a\":{}}}"), "{\"type\":\"object\",\"properties\":{\"result\":{\"properties\":{\"a\":{}}}},\"required\":[\"result\"]}", "legacy form: a root with no type is wrapped, as the SDK reads it");
     assert_eq(_legacy_form("{\"type\":\"obj\\u0065ct\"}"), 0, "legacy form: an escaped \"object\" is an object");
     assert_eq(_legacy_form("{\"type\":\"object\",\"properties\":{}}"), 0, "legacy form: none for an object root");
-    _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"array\"}"), "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\"}},\"required\":[\"result\"]}", "legacy form: $schema moves to the wrapper");
+    _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"array\"}"), "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"result\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"array\"}},\"required\":[\"result\"]}", "legacy form: $schema copied to the wrapper and kept inside, as the SDK does (3.8.14; 3.8.13 left it out inside)");
     _ase(_legacy_conv("{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"},\"$defs\":{\"u\":{\"type\":\"object\",\"properties\":{\"$ref\":{\"type\":\"string\"},\"next\":{\"$ref\":\"#\"},\"o\":{\"$ref\":\"other.json#/a\"},\"n\":{\"$ref\":\"#anchor\"}}}},\"default\":{\"$ref\":\"#/x\"},\"enum\":[{\"$ref\":\"#/y\"}],\"anyOf\":[{\"$dynamicRef\":\"#/$defs/u\"}]}"),
       "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/$defs/u\"},\"$defs\":{\"u\":{\"type\":\"object\",\"properties\":{\"$ref\":{\"type\":\"string\"},\"next\":{\"$ref\":\"#/properties/result\"},\"o\":{\"$ref\":\"other.json#/a\"},\"n\":{\"$ref\":\"#anchor\"}}}},\"default\":{\"$ref\":\"#/x\"},\"enum\":[{\"$ref\":\"#/y\"}],\"anyOf\":[{\"$dynamicRef\":\"#/properties/result/$defs/u\"}]}},\"required\":[\"result\"]}",
       "legacy form: references to the document move under properties/result; names, data, anchors and other documents do not");
@@ -478,14 +478,14 @@ fn main() {
     _expect(rod, "t_int", "{\"content\":[],\"structuredContent\":{\"id\":1.5}}", e7, e7, "review: ...a fraction still is");
     # $recursiveRef, as the SDK converts it for 2019-09.
     var d19 = "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"object\",\"properties\":{\"result\":";
-    _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"kids\":{\"$recursiveRef\":\"#\"}}}}"),
-      _cat3(d19, "{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"kids\":{\"$ref\":\"#/properties/result\"}}}}", "},\"required\":[\"result\"]}"), "review: $recursiveRef becomes a $ref to the result");
+    _ase(_legacy_conv("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"kids\":{\"$recursiveRef\":\"#\"}}}}"),
+      "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"object\",\"properties\":{\"result\":{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"kids\":{\"$ref\":\"#/properties/result\"}}}}},\"required\":[\"result\"]}", "review: $recursiveRef becomes a $ref to the result");
     _ase(_legacy_conv("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema#\",\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\",\"$ref\":\"#/$defs/x\"}}"),
-      "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema#\",\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/$defs/x\",\"allOf\":[{\"$ref\":\"#/properties/result\"}]}}},\"required\":[\"result\"]}", "review: ...an allOf entry beside a $ref");
+      "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema#\",\"type\":\"object\",\"properties\":{\"result\":{\"$schema\":\"https://json-schema.org/draft/2019-09/schema#\",\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/$defs/x\",\"allOf\":[{\"$ref\":\"#/properties/result\"}]}}},\"required\":[\"result\"]}", "review: ...an allOf entry beside a $ref");
     _ase(_legacy_conv("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$ref\":\"#/a\",\"allOf\":[{\"type\":\"string\"}],\"$recursiveRef\":\"#\"}}"),
-      _cat3(d19, "{\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/a\",\"allOf\":[{\"type\":\"string\"},{\"$ref\":\"#/properties/result\"}]}}", "},\"required\":[\"result\"]}"), "review: ...the last of an allOf it already has");
+      "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"object\",\"properties\":{\"result\":{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/a\",\"allOf\":[{\"type\":\"string\"},{\"$ref\":\"#/properties/result\"}]}}},\"required\":[\"result\"]}", "review: ...the last of an allOf it already has");
     _ase(_legacy_conv("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$ref\":\"#/a\",\"allOf\":[],\"$recursiveRef\":\"#\"}}"),
-      _cat3(d19, "{\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/a\",\"allOf\":[{\"$ref\":\"#/properties/result\"}]}}", "},\"required\":[\"result\"]}"), "review: ...the only one of an empty allOf");
+      "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"object\",\"properties\":{\"result\":{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$ref\":\"#/properties/result/a\",\"allOf\":[{\"$ref\":\"#/properties/result\"}]}}},\"required\":[\"result\"]}", "review: ...the only one of an empty allOf");
     # (3.8.10) Each schema the converter was handed above, refused at registration.
     assert(registry_check_tool_def(_tool("t_conv0", "{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/u\"},\"$defs\":{\"u\":{\"type\":\"object\",\"properties\":{\"$ref\":{\"type\":\"string\"},\"next\":{\"$ref\":\"#\"},\"o\":{\"$ref\":\"other.json#/a\"},\"n\":{\"$ref\":\"#anchor\"}}}},\"default\":{\"$ref\":\"#/x\"},\"enum\":[{\"$ref\":\"#/y\"}],\"anyOf\":[{\"$dynamicRef\":\"#/$defs/u\"}]}")) != 0, "legacy form: ...the 0th refused at registration (3.8.10)");
     assert(registry_check_tool_def(_tool("t_conv1", "{\"type\":\"array\",\"items\":{\"properties\":{\"default\":{\"$ref\":\"#/$defs/d\"},\"$id\":{\"type\":\"string\"},\"x\":{\"$ref\":\"#/$defs/x\"}}}}")) != 0, "legacy form: ...the 1th refused at registration (3.8.10)");
@@ -497,21 +497,27 @@ fn main() {
     assert(registry_check_tool_def(_tool("t_conv7", "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$ref\":\"#/a\",\"allOf\":[],\"$recursiveRef\":\"#\"}}")) != 0, "legacy form: ...the 7th refused at registration (3.8.10)");
 
     _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"$recursiveAnchor\":true,\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\"}}"),
-      "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"object\",\"properties\":{\"result\":{\"$recursiveAnchor\":true,\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\"}}},\"required\":[\"result\"]}", "review: ...not under a root that is a $recursiveAnchor");
-    _ase(_legacy_form("{\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\"}}"),
+      "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"object\",\"properties\":{\"result\":{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"$recursiveAnchor\":true,\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\"}}},\"required\":[\"result\"]}", "review: ...not under a root that is a $recursiveAnchor");
+    _ase(_legacy_conv("{\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\"}}"),
       "{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\"}}},\"required\":[\"result\"]}", "review: ...nor in 2020-12, which has none");
-    _ase(_legacy_form("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#/x\"}}"),
-      _cat3(d19, "{\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#/x\"}}", "},\"required\":[\"result\"]}"), "review: ...nor one that is not \"#\"");
+    _ase(_legacy_conv("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#/x\"}}"),
+      "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"object\",\"properties\":{\"result\":{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#/x\"}}},\"required\":[\"result\"]}", "review: ...nor one that is not \"#\"");
+    # (3.8.14) The three above with no root $recursiveAnchor, or one that is not "#", refused at
+    # registration: the official client's Ajv and JSON Schema read each otherwise.
+    assert(_has(registry_check_tool_def(_tool("t_rr0", "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"kids\":{\"$recursiveRef\":\"#\"}}}}")), "with no $recursiveAnchor: true on its root") == 1, "review: ...a $recursiveRef with no root anchor refused at registration (3.8.14)");
+    assert(_has(registry_check_tool_def(_tool("t_rr1", "{\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#\"}}")), "with no $recursiveAnchor: true on its root") == 1, "review: ...in 2020-12 too, whose engine judges one (3.8.14)");
+    assert(_has(registry_check_tool_def(_tool("t_rr2", "{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"type\":\"array\",\"items\":{\"$recursiveRef\":\"#/x\"}}")), "holds a $recursiveRef other than #") == 1, "review: ...and one that is not \"#\" (3.8.14)");
     # The keywords now warned of.
     _lc_begin();
-    dispatcher_register_tool(rod, _tool("t_kw", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"i\":{\"type\":\"integer\",\"enum\":[1,2]},\"u\":{\"type\":\"strnig\"}}}"), &h_ret);
+    dispatcher_register_tool(rod, _tool("t_kw", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"i\":{\"type\":\"integer\",\"enum\":[1,2]}}}"), &h_ret);
     var kp = vec_new();
     vec_push(kp, schema_prop_new("m", "{\"type\":\"number\",\"exclusiveMinimum\":0}"));
     dispatcher_register_tool(rod, tool_def_new("t_kwin", "d", schema_new("object", kp, vec_new())), &h_ret);
     _lc_end();
     assert(_lc_find("keyword=additionalProperties") == 0, "review: additionalProperties is judged, and warned of no longer (3.8.5)");
     assert(_lc_find("enum on a type other than string") == 0, "review: an enum on an integer is judged, and warned of no longer (3.8.7)");
-    assert(_lc_find("property=outputSchema.u keyword=\"an unknown type\"") != 0, "review: an unknown type is warned of");
+    # (3.8.14, from the 3.8.13 review) An unknown type the client cannot compile: refused.
+    assert(_has(registry_check_tool_def(_tool("t_kwu", "{\"type\":\"object\",\"properties\":{\"u\":{\"type\":\"strnig\"}}}")), "names a type the official client refuses, as no JSON type: strnig") == 1, "review: an unknown type is refused, where through 3.8.13 it was warned of");
     assert(_lc_find("tool=t_kwin property=m keyword=exclusiveMinimum") == 0, "review: ...and exclusiveMinimum on the input side (3.8.5)");
 
     # ---- The heap ----

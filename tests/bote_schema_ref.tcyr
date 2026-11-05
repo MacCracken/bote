@@ -562,9 +562,13 @@ fn main() {
     vec_push(ok13, "{\"definitions\":{\"y\":{\"$id\":5,\"$dynamicAnchor\":5}},");
     vec_push(ok13, "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"$dynamicAnchor\":5,\"$recursiveAnchor\":\"x\",");
     vec_push(ok13, "{\"$recursiveAnchor\":true,");
+    # (3.8.14) With an object root, so the schema is listed as written: with any other, an `$id`
+    # naming no base and a `$ref` are refused, as the form 2025-11-25 lists them in cannot be
+    # compiled (tests/bote_schema_dyn.tcyr).
+    var rddo = "{\"type\":\"object\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"#/$defs/d\"}}}";
     var ok = 0;
     while (ok < vec_len(ok13)) {
-        _ase(_why(_cat(vec_get(ok13, ok), rdd + 1)), "(none)", _cat("uri: taken, as the client takes it: ", vec_get(ok13, ok)));
+        _ase(_why(_cat(vec_get(ok13, ok), rddo + 1)), "(none)", _cat("uri: taken, as the client takes it: ", vec_get(ok13, ok)));
         ok = ok + 1;
     }
     var gids = vec_new();
@@ -582,8 +586,11 @@ fn main() {
     vec_push(gids, "http://127.0.0.1/a/%41");
     vec_push(gids, "http://x:/a");
     var gi = 0;
+    # (3.8.14) With an object root, so each is listed as written: under the wrapper of the form
+    # 2025-11-25 lists, the client cannot compile those its resolver writes otherwise, and
+    # registration refuses them there (tests/bote_schema_dyn.tcyr).
     while (gi < vec_len(gids)) {
-        var gsch = _cat3("{\"$id\":\"", vec_get(gids, gi), "\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"#/$defs/d\"}}}");
+        var gsch = _cat3("{\"type\":\"object\",\"$id\":\"", vec_get(gids, gi), "\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"#/$defs/d\"}}}");
         _ase(_why(gsch), "(none)", _cat("uri: an $id taken, ", vec_get(gids, gi)));
         gi = gi + 1;
     }

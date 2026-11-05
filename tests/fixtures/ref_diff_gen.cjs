@@ -3,12 +3,32 @@
 // the Ajv it bundles, its engine for 2020-12 picked as the client picks it), so that bote's
 // registration (src/schema.cyr, _sch_refs_why) can be held to the client's reading of which
 // references are in the document: scripts/ref-diff.sh.
+// (3.8.14) For a root that is no object, the form 2025-11-25 lists it in is compiled too, made by
+// the SDK's own wrapOutputSchemaForLegacy from the client's bundle, as registration checks both.
 // Usage: node ref_diff_gen.cjs <the client's validators/ajv.cjs> <seed> <count> > cases.txt
-// Line format: C\t<schema as JSON>\t<1 the client compiles it, else 0>.
+// Line format: C\t<schema as JSON>\t<1 the client compiles it, else 0>\t<the same of its
+// 2025-11-25 form, or ->.
+const fs = require('fs');
+const npath = require('path');
 const mod = process.argv[2];
 let seed = Number(process.argv[3] || 1) >>> 0;
 const count = Number(process.argv[4] || 1000);
 const { AjvJsonSchemaValidator } = require(mod);
+const dist = npath.dirname(npath.dirname(mod));
+let wrapSrc = null;
+let dialects = null;
+for (const f of fs.readdirSync(dist)) {
+  if (!f.endsWith('.cjs')) continue;
+  const t = fs.readFileSync(npath.join(dist, f), 'utf8');
+  const a = t.indexOf('function isNonObjectJsonSchemaRoot(');
+  const b = t.indexOf('function wrapOutputSchemaForLegacy(');
+  if (a < 0 || b < 0) continue;
+  wrapSrc = t.slice(a, t.indexOf('//#endregion', b));
+  dialects = require(npath.join(dist, t.match(/const require_dialects = require\('\.\/([^']+)'\);/)[1]));
+}
+if (wrapSrc === null) { process.stderr.write('ref_diff_gen: no wrapOutputSchemaForLegacy in the client\n'); process.exit(1); }
+const { isNonObjectJsonSchemaRoot, wrapOutputSchemaForLegacy } =
+  new Function('require_dialects', wrapSrc + '\nreturn { isNonObjectJsonSchemaRoot, wrapOutputSchemaForLegacy };')(dialects);
 function rnd() { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed / 4294967296; }
 function r(n) { return Math.floor(rnd() * n); }
 function pick(a) { return a[r(a.length)]; }
@@ -108,6 +128,10 @@ for (let c = 0; c < count; c++) {
   let ok = 0;
   // A validator of its own for each: the client caches a schema by its $id.
   try { new AjvJsonSchemaValidator().getValidator(sch); ok = 1; } catch (e) { ok = 0; }
-  out.push('C\t' + JSON.stringify(JSON.stringify(sch)) + '\t' + ok);
+  let wok = '-';
+  if (isNonObjectJsonSchemaRoot(sch)) {
+    try { new AjvJsonSchemaValidator().getValidator(wrapOutputSchemaForLegacy(sch)); wok = 1; } catch (e) { wok = 0; }
+  }
+  out.push('C\t' + JSON.stringify(JSON.stringify(sch)) + '\t' + ok + '\t' + wok);
 }
 process.stdout.write(out.join('\n') + '\n');

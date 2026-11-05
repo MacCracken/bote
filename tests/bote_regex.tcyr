@@ -160,7 +160,7 @@ fn main() {
     _ase(_why("[\\P{Lu}]"), "a Unicode property escape", "decline: \\P in a class");
     _ase(_why("(a)\\1"), "a backreference", "decline: a backreference");
     _ase(_why("(?<n>a)\\k<n>"), "a named backreference", "decline: a named one");
-    _ase(_why("(?i:a)"), "an inline modifier or a group bote's engine does not take", "decline: a modifier");
+    _ase(_why("(?i:a)"), "an inline modifier", "decline: a modifier");
     _ase(_why("(?<\xc3\xa9>a)"), "a group name bote's engine does not take", "decline: a name past ASCII");
     _ase(_why("a{10001}"), "a quantifier past bote's bound", "decline: a bound past 10,000");
     _ase(_why("a{5000}"), "a program past bote's bound of 4,096 steps", "decline: a program past 4,096 steps");
@@ -198,7 +198,7 @@ fn main() {
     _ase(_why("\\u{}"), "a \\u{ not closed by hex digits and }", "syntax: \\u{}");
     _ase(_why("\\01"), "a \\0 followed by a digit, which the u flag refuses", "syntax: \\01");
     _ase(_why("[\\1]"), "a decimal escape in a class, which the u flag refuses", "syntax: [\\1]");
-    _ase(_why("(?x)"), "an inline modifier or a group bote's engine does not take", "syntax: (?x)");
+    _ase(_why("(?x)"), "a group the u flag refuses", "syntax: (?x)");
 
     # ---- what it takes ----
     var ok = vec_new();
@@ -418,6 +418,88 @@ fn main() {
     assert(bote_rx_test_a(bote_req_begin(), wide, wm, 0, strlen(wm), 0) == 1 && bote_rx_test_a(bote_req_begin(), wide, wg, 0, strlen(wg), 0) == 0, "class: ...one in the middle, and the code point after it");
     var wa = _rep("a", 20000);
     assert(_ns(wide, wa) < 6 * _ns(narrow, wa) + 1000000, "class: 4,000 members asked of 20,000 code points in a few times 4 members' time");
+
+    # ---- (3.8.14, from the 3.8.13 review) what JavaScript refuses, read through what bote declines ----
+    # Each row's verdict is `new RegExp(p, "u")`'s: 1 it compiles, 0 it throws. A construct bote's
+    # engine declines is read through, so what the u flag refuses after it or in it is found.
+    var rr = 0;
+    rr = bote_rx_compile("(?=a)*"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?=a)*");
+    rr = bote_rx_compile("(?=[z-a])"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?=[z-a])");
+    rr = bote_rx_compile("(?<=a)+"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?<=a)+");
+    rr = bote_rx_compile("(?=a)b("); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?=a)b(");
+    rr = bote_rx_compile("(a)\\1"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes (a)\\1");
+    rr = bote_rx_compile("\\2(a)(b)"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes \\2(a)(b)");
+    rr = bote_rx_compile("(a)\\2"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (a)\\2");
+    rr = bote_rx_compile("\\1"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses \\1");
+    rr = bote_rx_compile("(?<x>a)\\k<x>"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes (?<x>a)\\k<x>");
+    rr = bote_rx_compile("(?<x>a)\\k<y>"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?<x>a)\\k<y>");
+    rr = bote_rx_compile("\\k<x>(?<x>a)"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes \\k<x>(?<x>a)");
+    rr = bote_rx_compile("\\k"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses \\k");
+    rr = bote_rx_compile("\\k<>"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses \\k<>");
+    rr = bote_rx_compile("(?<1a>x)"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?<1a>x)");
+    rr = bote_rx_compile("(?<>x)"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?<>x)");
+    rr = bote_rx_compile("(?<$x>a)"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes (?<$x>a)");
+    rr = bote_rx_compile("(?<_é>a)"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes (?<_é>a)");
+    rr = bote_rx_compile("(?<\\u0061b>a)"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes (?<\\u0061b>a)");
+    rr = bote_rx_compile("(?<\\u00>a)"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?<\\u00>a)");
+    rr = bote_rx_compile("(?<a-b>x)"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?<a-b>x)");
+    rr = bote_rx_compile("(?<a"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?<a");
+    rr = bote_rx_compile("(?i:a)"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes (?i:a)");
+    rr = bote_rx_compile("(?-i:a)"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes (?-i:a)");
+    rr = bote_rx_compile("(?ims:a)"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes (?ims:a)");
+    rr = bote_rx_compile("(?m-s:a)"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes (?m-s:a)");
+    rr = bote_rx_compile("(?-:a)"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?-:a)");
+    rr = bote_rx_compile("(?ii:a)"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?ii:a)");
+    rr = bote_rx_compile("(?i-i:a)"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?i-i:a)");
+    rr = bote_rx_compile("(?x:a)"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?x:a)");
+    rr = bote_rx_compile("(?s)"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (?s)");
+    rr = bote_rx_compile("\\p{L}"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes \\p{L}");
+    rr = bote_rx_compile("\\pL"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses \\pL");
+    rr = bote_rx_compile("\\p{L"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses \\p{L");
+    rr = bote_rx_compile("\\p{=x}"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses \\p{=x}");
+    rr = bote_rx_compile("\\p{Script=Latin}"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes \\p{Script=Latin}");
+    rr = bote_rx_compile("\\p{}"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses \\p{}");
+    rr = bote_rx_compile("[\\p{L}]"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes [\\p{L}]");
+    rr = bote_rx_compile("[\\p{L}-z]"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses [\\p{L}-z]");
+    rr = bote_rx_compile("a{20000,10001}"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses a{20000,10001}");
+    rr = bote_rx_compile("a{10001,20000}"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes a{10001,20000}");
+    rr = bote_rx_compile("a{20000}"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes a{20000}");
+    rr = bote_rx_compile("a{0020001,20000}"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses a{0020001,20000}");
+    rr = bote_rx_compile("(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)\\10"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes (a)(b)(c)(d)(e)(f)(g)(h)(i)(j)\\10");
+    rr = bote_rx_compile("(a)(b)(c)(d)(e)(f)(g)(h)(i)\\10"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "refused: JavaScript refuses (a)(b)(c)(d)(e)(f)(g)(h)(i)\\10");
+    rr = bote_rx_compile("(?<a>x)|(?<a>y)\\k<a>"); assert(bote_rx_refused(rr) == 0, "refused: JavaScript takes (?<a>x)|(?<a>y)\\k<a>");
+    # Names as they decode: an escape or a character past ASCII names what it decodes to, so a
+    # backreference and a second group are judged by it (through 3.8.13 neither was looked at).
+    rr = bote_rx_compile("(?<\\u0061b>x)\\k<ab>"); assert(bote_rx_refused(rr) == 0, "names: JavaScript takes (?<\\u0061b>x)\\k<ab>");
+    rr = bote_rx_compile("(?<é>x)\\k<é>"); assert(bote_rx_refused(rr) == 0, "names: JavaScript takes (?<é>x)\\k<é>");
+    rr = bote_rx_compile("(?<é>x)\\k<e>"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "names: JavaScript refuses (?<é>x)\\k<e>");
+    rr = bote_rx_compile("(?<\\ud800>x)"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "names: JavaScript refuses (?<\\ud800>x)");
+    rr = bote_rx_compile("(?<a\\u{62}>x)\\k<ab>"); assert(bote_rx_refused(rr) == 0, "names: JavaScript takes (?<a\\u{62}>x)\\k<ab>");
+    rr = bote_rx_compile("(?<\\u0061>x)(?<a>y)"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "names: JavaScript refuses (?<\\u0061>x)(?<a>y)");
+    rr = bote_rx_compile("(?<\\u0061>x)|(?<a>y)"); assert(bote_rx_refused(rr) == 0, "names: JavaScript takes (?<\\u0061>x)|(?<a>y)");
+    rr = bote_rx_compile("(?<x>a)\\k<\\u0078>"); assert(bote_rx_refused(rr) == 0, "names: JavaScript takes (?<x>a)\\k<\\u0078>");
+    # A lookaround left open, a named group counted among the numbered, a name written as a surrogate pair.
+    rr = bote_rx_compile("(?=a"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "names: JavaScript refuses (?=a");
+    rr = bote_rx_compile("(?<=a|b"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "names: JavaScript refuses (?<=a|b");
+    rr = bote_rx_compile("(?!a(b)"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "names: JavaScript refuses (?!a(b)");
+    rr = bote_rx_compile("(?<n>a)\\1"); assert(bote_rx_refused(rr) == 0, "names: JavaScript takes (?<n>a)\\1");
+    rr = bote_rx_compile("(?<n>a)(b)\\2"); assert(bote_rx_refused(rr) == 0, "names: JavaScript takes (?<n>a)(b)\\2");
+    rr = bote_rx_compile("(?<n>a)\\2"); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 1, "names: JavaScript refuses (?<n>a)\\2");
+    rr = bote_rx_compile("(?<\\ud835\\udc9c>x)"); assert(bote_rx_refused(rr) == 0, "names: JavaScript takes (?<\\ud835\\udc9c>x)");
+    rr = bote_rx_compile("(?<\\ud835\\udc9c>x)\\k<\\u{1d49c}>"); assert(bote_rx_refused(rr) == 0, "names: JavaScript takes (?<\\ud835\\udc9c>x)\\k<\\u{1d49c}>");
+    # Groups nested past bote's bound: declined, and the parse stops there, so it is not refused.
+    var nest = _cat(_cat(_rep("(", 70), "a"), _rep(")", 70));
+    rr = bote_rx_compile(nest); assert(bote_rx_why(rr) != 0 && bote_rx_refused(rr) == 0, "names: JavaScript takes groups 70 deep, which bote declines");
+    assert(bote_rx_refused_of("(?=a)*") != 0 && bote_rx_refused_of("(?=a)a") == 0 && bote_rx_refused_of("^[a-z]+$") == 0, "refused: bote_rx_refused_of, the same without a Regex");
+    _ase(_why("(?=a)*"), "a quantifier on an assertion", "refused: why, past the lookahead it declines");
+    _ase(_why("(?<x>a)\\k<y>"), "a named backreference to no group, which the u flag refuses", "refused: why, a named backreference to no group");
+    _ase(_why("(a)\\2"), "a backreference to no group, which the u flag refuses", "refused: why, a numbered one");
+    _ase(_why("a{20000,10001}"), "a quantifier whose bounds are out of order", "refused: why, bounds past bote's compared as written");
+    _ase(_why("(a)\\1"), "a backreference", "decline: a backreference to a group, declined, not refused");
+    var hr = alloc_used();
+    var hk = 0;
+    while (hk < 20) { bote_rx_refused_of("(?=a)b|(?<x>c)\\k<x>"); bote_rx_refused_of("^[a-z]{1,20}$"); hk = hk + 1; }
+    assert_eq(alloc_used() - hr, 0, "refused: bote_rx_refused_of keeps nothing on the heap, a pattern taken or declined");
     return assert_summary();
 }
 

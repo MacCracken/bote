@@ -19,8 +19,10 @@
 # names only those after it, so no reference leads back. (3.8.12) `patternProperties` of three
 # of those patterns, `additionalProperties` beside them. (3.8.11) `multipleOf` of 2, 3 or 0.5,
 # judged by scaled integers, and five patterns, each judged by hand. (3.8.13) `format` of date,
-# ipv4 or int32, each judged by hand, strings in the pool that meet them. The reference judges
-# bayan's parse of both, a `$ref` by the definition it names. Exit codes:
+# ipv4 or int32, each judged by hand, strings in the pool that meet them. (3.8.14) A root
+# `$dynamicAnchor: "r"` and a `$dynamicRef: "#r"`, plainly or escaped, where a part of the value
+# is judged, so it never leads back. The reference judges bayan's parse of both, a `$ref` by the
+# definition it names and a `$dynamicRef` by the root. Exit codes:
 #
 #   10   a value bote passes the reference refuses, or the reverse;
 #   20   the rounds drew fewer than a thousand values passed or a thousand refused;
@@ -151,6 +153,18 @@ fn _kw_int(a, sb, kw, v, sep) {
 # d<_ref_n - 1>.
 var _ref_lo = 0;
 var _ref_n = 0;
+# (3.8.14) 1 when the root holds `$dynamicAnchor: "r"`, and 1 inside a subschema that judges a
+# part of the value (properties, patternProperties, items, prefixItems, contains), where a
+# `$dynamicRef: "#r"`, which names the root, cannot lead back to the value it judges.
+var _dyn_on = 0;
+var _dyn_ok = 0;
+fn _schema_part(a, sb, depth) {
+    var was = _dyn_ok;
+    _dyn_ok = 1;
+    _schema(a, sb, depth);
+    _dyn_ok = was;
+    return 0;
+}
 
 fn _schema(a, sb, depth) {
     _add(a, sb, "{");
@@ -162,6 +176,11 @@ fn _schema(a, sb, depth) {
         else { _add(a, sb, "\"$ref\":\"#/$defs/d"); }
         _addi(a, sb, _ref_lo + _r(_ref_n - _ref_lo));
         _add(a, sb, "\"");
+        sep = 1;
+    }
+    if (_dyn_on == 1 && _dyn_ok == 1 && _r(4) == 0) {
+        if (sep == 1) { _add(a, sb, ","); }
+        if (_r(3) == 0) { _add(a, sb, "\"$dynamicRef\":\"#\\u0072\""); } else { _add(a, sb, "\"$dynamicRef\":\"#r\""); }
         sep = 1;
     }
     var t = _r(8);
@@ -252,7 +271,7 @@ fn _schema(a, sb, depth) {
     if (depth < 2 && (t == 5 || _r(6) == 0)) {
         if (sep == 1) { _add(a, sb, ","); }
         _add(a, sb, "\"items\":");
-        _schema(a, sb, depth + 1);
+        _schema_part(a, sb, depth + 1);
         sep = 1;
     }
     # (3.8.9) Composition: allOf, anyOf or oneOf of one to three schemas, not, if with
@@ -287,14 +306,14 @@ fn _schema(a, sb, depth) {
         _add(a, sb, "\"prefixItems\":[");
         var npf = 1 + _r(2);
         var pfi = 0;
-        while (pfi < npf) { if (pfi > 0) { _add(a, sb, ","); } _schema(a, sb, depth + 1); pfi = pfi + 1; }
+        while (pfi < npf) { if (pfi > 0) { _add(a, sb, ","); } _schema_part(a, sb, depth + 1); pfi = pfi + 1; }
         _add(a, sb, "]");
         sep = 1;
     }
     if (depth < 2 && _r(6) == 0) {
         if (sep == 1) { _add(a, sb, ","); }
         _add(a, sb, "\"contains\":");
-        _schema(a, sb, depth + 1);
+        _schema_part(a, sb, depth + 1);
         sep = 1;
         if (_r(3) == 0) { sep = _kw_int(a, sb, "minContains", _r(3), sep); }
         if (_r(3) == 0) { sep = _kw_int(a, sb, "maxContains", _r(3), sep); }
@@ -321,7 +340,7 @@ fn _schema(a, sb, depth) {
                     _add(a, sb, "\"");
                     _add(a, sb, vec_get(_NAMES, nm));
                     _add(a, sb, "\":");
-                    _schema(a, sb, depth + 1);
+                    _schema_part(a, sb, depth + 1);
                 }
                 pi = pi + 1;
             }
@@ -361,7 +380,7 @@ fn _schema(a, sb, depth) {
                 # Two patterns are two of the three, never one twice: bayan refuses a key twice.
                 var ppk = (pp0 + ppi) % 3;
                 if (ppk == 0) { _add(a, sb, "\"^a\":"); } elif (ppk == 1) { _add(a, sb, "\"b$\":"); } else { _add(a, sb, "\"x\":"); }
-                if (depth < 2) { _schema(a, sb, depth + 1); } else { _add(a, sb, "{\"type\":\"string\"}"); }
+                if (depth < 2) { _schema_part(a, sb, depth + 1); } else { _add(a, sb, "{\"type\":\"string\"}"); }
                 ppi = ppi + 1;
             }
             _add(a, sb, "}");
@@ -655,6 +674,8 @@ fn _type_is(nm, inst) {
 var _ROOT = 0;
 
 fn _ok(sch, inst) {
+    # (3.8.14) The root a `$dynamicRef` names.
+    if (_member(sch, "$dynamicRef") != 0 && _ok(_ROOT, inst) == 0) { return 0; }
     # (3.8.10) The definition a `$ref` names.
     var rf = _member(sch, "$ref");
     if (rf != 0) {
@@ -1051,6 +1072,9 @@ fn main() {
         # (3.8.10) The definitions first, each naming only those after it, then the root,
         # naming any.
         _ref_n = _r(4);
+        _dyn_on = 0;
+        if (_r(3) == 0) { _dyn_on = 1; }
+        _dyn_ok = 0;
         var dsb = str_builder_new();
         var di = 0;
         while (di < _ref_n) {
@@ -1074,6 +1098,13 @@ fn main() {
             if (strlen(sch) > 2) { _add(sa, wsb, ","); }
             _add(sa, wsb, sch + 1);
             sch = str_data(str_builder_build(wsb));
+        }
+        if (_dyn_on == 1) {
+            var ysb = str_builder_new();
+            _add(sa, ysb, "{\"$dynamicAnchor\":\"r\"");
+            if (strlen(sch) > 2) { _add(sa, ysb, ","); }
+            _add(sa, ysb, sch + 1);
+            sch = str_data(str_builder_build(ysb));
         }
         var prop = parse_property(sch);
         var sv = bayan_json_v_parse_buf(sch, strlen(sch));

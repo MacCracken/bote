@@ -88,7 +88,12 @@ fn main() {
         var e = _line(txt, i, len);
         var t1 = _tab(txt, i + 2, e);
         var raw = _slice_cstr(default_alloc(), txt, i + 2, t1 - i - 2);
-        var flag = load8(txt + e - 1) - 48;
+        # (3.8.14) The client takes it when it compiles the schema and, where there is one, its
+        # 2025-11-25 form, which registration checks too.
+        var t2 = _tab(txt, t1 + 1, e);
+        var flag = load8(txt + t1 + 1) - 48;
+        var wf = load8(txt + t2 + 1);
+        if (wf == 48) { flag = 0; }
         var doc = _sch_str_dec_a(default_alloc(), raw);
         if (doc != 0) {
             n = n + 1;

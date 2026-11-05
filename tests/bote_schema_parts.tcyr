@@ -302,15 +302,17 @@ fn main() {
     # ---- registration's WARNs ----
     _lc_begin();
     var wd = dispatcher_new(tool_registry_new());
-    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_bad", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"prefixItems\":{}},\"b\":{\"contains\":5,\"minContains\":-1},\"c\":{\"propertyNames\":\"x\"},\"d\":{\"dependentRequired\":{\"x\":\"y\"}},\"e\":{\"dependentSchemas\":{\"x\":3}},\"f\":{\"maxContains\":\"2\"}}}"), &h_ret);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_bad", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"b\":{\"contains\":{},\"minContains\":-1},\"e\":{\"dependentSchemas\":{\"x\":3}}}}"), &h_ret);
     dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_good", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"prefixItems\":[{},true]},\"b\":{\"contains\":{},\"minContains\":0,\"maxContains\":3},\"c\":{\"propertyNames\":false},\"d\":{\"dependentRequired\":{\"x\":[\"y\"]}},\"e\":{\"dependentSchemas\":{\"x\":{}}}}}"), &h_ret);
     _lc_end();
-    assert(_lc_find("prefixItems that is no array") != 0, "warn: prefixItems an object");
-    assert(_lc_find("contains that is no schema") != 0, "warn: contains a number");
-    assert(_lc_find("minContains that is no non-negative integer") != 0, "warn: minContains -1");
-    assert(_lc_find("maxContains that is no non-negative integer") != 0, "warn: maxContains a string");
-    assert(_lc_find("propertyNames that is no schema") != 0, "warn: propertyNames a string");
-    assert(_lc_find("dependentRequired that is no object of arrays of names") != 0, "warn: dependentRequired with a string");
+    assert(_lc_find("minContains that is no non-negative integer, judged as the official client compares it") != 0, "warn: minContains -1, judged");
+    # (3.8.14, from the 3.8.13 review) What the client cannot compile, refused where 3.8.13 warned.
+    var wbp = tool_def_new("w_r", "d", schema_new("object", 0, vec_new()));
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wbp, "{\"type\":\"object\",\"properties\":{\"a\":{\"prefixItems\":{}}}}")), "names prefixItems with a value of a kind") == 1, "register: prefixItems an object refused");
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wbp, "{\"type\":\"object\",\"properties\":{\"b\":{\"contains\":5}}}")), "names contains with a value of a kind") == 1, "register: contains a number refused");
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wbp, "{\"type\":\"object\",\"properties\":{\"f\":{\"maxContains\":\"2\"}}}")), "names maxContains with a value of a kind") == 1, "register: maxContains a string refused");
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wbp, "{\"type\":\"object\",\"properties\":{\"c\":{\"propertyNames\":\"x\"}}}")), "names propertyNames with a value of a kind") == 1, "register: propertyNames a string refused");
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(wbp, "{\"type\":\"object\",\"properties\":{\"d\":{\"dependentRequired\":{\"x\":\"y\"}}}}")), "names in dependentRequired a value that is no array") == 1, "register: dependentRequired with a string refused");
     assert(_lc_find("dependentSchemas that is no object of schemas") != 0, "warn: dependentSchemas with a number");
     assert(_lc_find("w_good") == 0, "warn: none for each keyword well formed");
     assert(_lc_find("keyword=prefixItems") == 0 && _lc_find("keyword=contains") == 0 && _lc_find("keyword=propertyNames") == 0 && _lc_find("keyword=dependentRequired") == 0 && _lc_find("keyword=dependentSchemas") == 0, "warn: none of the five is warned of as unenforced");

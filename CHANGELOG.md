@@ -18,7 +18,263 @@ have per release.
 
 _(empty)_
 
+## [3.8.14] — 2026-11-05 · Dynamic references
+
+**`$dynamicRef` and `$recursiveRef` are judged** where the official client's validator and JSON Schema read them
+alike, and refused at registration where they do not. They read them differently:
+- **The client's Ajv** never resolves one as `$ref` is resolved. It calls the schema where an anchor of that name
+  was first met in this judgement (`$dynamicAnchor`, or `$recursiveAnchor: true` for `$recursiveRef: "#"`). With
+  none met, it calls the schema it is compiling as a function of its own. Both engines judge both keywords, its
+  2019-09 engine and its 2020-12 one; its draft-07 engine judges neither.
+- **JSON Schema** resolves one as `$ref` first, and follows the anchors met only when the schema it names holds one.
+
+They agree only where the root holds the anchor, which both then find first. So registration takes:
+- a `$dynamicRef: "#name"` whose name is the root's `$dynamicAnchor` and no other anchor's;
+- a `$recursiveRef: "#"` beside a root with `$recursiveAnchor: true`.
+
+Each names the root, in 2019-09 and 2020-12. In draft-07 and draft-06 neither is a keyword, to either reader.
+
+It refuses, each a schema the two read apart, the message saying how to write it:
+- a `$dynamicRef` of `#` alone, or of a JSON Pointer (JSON Schema reads either as `$ref`);
+- one whose anchor is not the root's: a plain `$anchor` (Ajv calls the schema it is compiling, JSON Schema the
+  anchor), or a `$dynamicAnchor` below the root (Ajv calls whichever the value met first);
+- a `$recursiveRef` other than `#`, which 2019-09 leaves undefined, and one with no root `$recursiveAnchor: true`;
+- either beside a schema below the root that names a resource of its own with `$id`, as for `$ref`;
+- either beside other keywords under `not` or `if` (see Fixed: Ajv judges such a schema without them).
+
+The client cannot compile a `$dynamicRef` or `$recursiveRef` that is no string, or no `#` fragment, and bote took
+both; it refuses them now.
+
+A `$dynamicRef` judges as a `$ref` does, beside one on the same schema. It counts against the depth and the
+budget, and a loop with no part of the value judged in between is refused at registration.
+
+**A fifth differential holds it to the client** (`scripts/dynref-diff.sh`, which needs the client
+`./scripts/conformance.sh` installs; not CI). It draws 100,000 random schemas built around references, static and
+dynamic, with their anchors and `$id`s, and eight values each. The client compiles each schema and, for a root
+that is no object, the form 2025-11-25 lists it in, made by the SDK's own `wrapOutputSchemaForLegacy`, taken from
+the client's bundle. The client judges each value against both forms. Of those:
+- none bote takes is one the client cannot compile, in either form;
+- bote's 2025-11-25 form is the SDK's for every schema;
+- 417,488 values are judged alike, on both forms;
+- 21,645 schemas bote refuses are ones the client compiles. Each reads apart as above, or holds a loop the client
+  would follow without end.
+
+**The form 2025-11-25 lists an outputSchema in is checked too.** For a root that is no object, that form is the
+schema as the property `result` of an object, and the client compiles that form. Its root is then no root, and
+registration now refuses what the client cannot compile there (see Fixed).
+
+**Eleven defects land beside it**: five an independent review of 3.8.13 found, and six older ones the
+differentials found, once ref-diff compiled the form 2025-11-25 lists a schema in and dynref-diff judged values.
+The worst is a denial of service: `format: url` took time quadratic in a string a client sends, 14.7 s for
+112 KB. See the correction notice in 3.8.13.
+
+The stated minimum cyrius (6.7.13) is unchanged.
+
+### Added
+
+- **Dynamic references in the schema** (`src/schema.cyr`):
+  - PropertyDef is 312 bytes, +304 the root a `$dynamicRef` or `$recursiveRef` names (`prop_dyn_ref`). It is judged
+    in `_sv_comp`, after `+272`.
+  - `_sch_kids` gives the root as the edge of either reference, for the reach, the compile walk and the cycle search.
+  - `_sch_reach_d` gathers the references.
+  - `_sch_dyn_why` holds registration's readings and `_sch_dyn_quiet_why` the `not` / `if` rule.
+- **`_sch_legacy_why`**: registration's check of the form 2025-11-25 lists an outputSchema in (Fixed below).
+- **`bote_rx_refused(rx)`** and **`bote_rx_refused_of(src)`** (`src/regex.cyr`): 1 / the reason when JavaScript's
+  `RegExp` refuses the pattern with the `u` flag, apart from one bote's engine only declines. Regex is 48 bytes,
+  +40 the flag.
+- **`scripts/dynref-diff.sh`**, with `tests/fixtures/dynref_diff_gen.cjs` and `tests/fixtures/dynref_diff.cyr`. CI's
+  "Differentials build" step builds its comparison program.
+- **`tests/bote.bcyr`**: `validate_dynamic_ref`, a call's arguments judged by a tree whose children are the root
+  again through a `$dynamicRef`, three levels down.
+
+### Fixed
+
+- **`format: url` took time quadratic in the string** (HIGH, from the review of 3.8.13). Each `@` is tried as the end
+  of the userinfo. Where the host after it parsed, the try looked through the rest of the string for white space
+  before it looked for the `/` that starts a path. Only the string's length was charged to the budget.
+  `"http://" + "x@a.bc/" × 16,000 + " "` (112 KB) took 14.7 s, and a valid `"http://" + "a@b.cc:12" × 8,000`
+  4.7 s. The last white space is now found once, and the `/` is looked for first. The 112 KB string takes 5.3 ms
+  and the valid one 4.5 ms, each twice its half's time.
+- **Registration took schemas the official client cannot compile** (MEDIUM, from the review). Its official
+  client compiles a tool's outputSchema before it calls the tool, and could not call such a tool at all. Refused
+  now, in every schema the dialect's engine compiles (`_sch_compiled_why`), each with what the client says:
+  - a keyword whose value is of a kind the engine refuses (Ajv's `schemaType`): `minLength: "5"`, `required: "a"`,
+    `enum: 5`, `allOf: {}`, `not: 5`, `if: 5` even beside no `then`, `uniqueItems: "x"`, and the rest of the table
+    for each dialect (`BOTE_SCH_KINDS_*`). Through 3.8.13 most of these were warned of and judged nothing;
+  - a `type` that is no JSON type (`"foo"`, `["string", 5]`), and `nullable` with no type or beside
+    `type: "null"` and `false`;
+  - the keyword `id`, which Ajv refuses in every dialect;
+  - a `required` entry that is no string (the client requires the property `"5"`) and a `dependentRequired`
+    value that is no array of strings;
+  - a `pattern`, or a `patternProperties` key, that JavaScript's `RegExp` refuses with the `u` flag. Through 3.8.13
+    a pattern bote declined was taken whatever followed: `(?=a)*` was declined as a lookahead and
+    `(?<x>a)\k<y>` as a backreference, and the client refuses both. The parser now reads through each construct
+    it declines, its every part, and checks each backreference against the groups the pattern has, by number and
+    by name, names decoded. Group names, inline modifiers and `\p{...}` are read as the `u` flag writes them, and
+    bounds past bote's are compared as written (`a{20000,10001}`).
+
+  What remains: a `\p{...}` whose name ECMA-262 does not know is taken. Bote reads no table of Unicode's
+  properties, and they grow with each Unicode version. regex-diff counts those apart (149 of 60,000 patterns).
+- **A result named for one of JavaScript's Object.prototype was judged otherwise** (LOW–MEDIUM, from the review).
+  The client's Ajv asks `data[name] !== undefined`, and finds `toString` or `constructor` on every object. In a
+  result, bote now reads these names as the client does:
+  - a `required` name among them is met;
+  - a `dependentRequired` or `dependentSchemas` key among them is present;
+  - a property of such a name the object lacks is judged as the prototype's function (`_sv_fn_ok`). A function
+    fails every `type`, `const` and `enum`, and passes every keyword of another kind.
+
+  `{}` passed `properties: {toString: {type: string}}` here, and the client refused it. In arguments only a
+  member meets a name, as JSON Schema has it: 3.8.13 met `required: ["__proto__"]` there, the looser reading. Each
+  name is flagged once, on its Watch (24 bytes, +16), so the walk no longer compares strings for it.
+- **A valid long uri was refused for work** (LOW, from the review). A uri's authority costs its expression about 41
+  steps a byte, past the 32 a byte the budget allows a value. A format's expression is bote's own and of fixed
+  size, so its steps are now charged a quarter each (`BOTE_FMT_STEP_SHARE`); a `pattern`'s are charged one each.
+  `"http://" + "a" × 20,000 + ".com"` is taken, as the client takes it.
+- **A format named for one of Object.prototype** (LOW, from the review). The client finds `valueOf` in its plain
+  object of formats and throws judging every string by it. `isPrototypeOf` refuses every string, and beside
+  `formatMinimum` none compiles. All twelve such names are refused at registration.
+- **A ToolSchema's listed form was checked only beside a format** (LOW, 3.8.13). A property with `$id: 5`, or any
+  kind refused above, was taken. Each ToolSchema with properties is checked now.
+- **A count that is no non-negative integer judged nothing** (LOW, older: 3.8.5). The client compares a count with
+  any number: `maxLength: -1` refuses every string, `minLength: 1.5` is 2, `minItems: 1e30` refuses every array,
+  `minContains: -1` asks for no match. Each is judged so now (`_sch_count_kw`, -2 a maximum below 0), and warned
+  of still. `multipleOf: 0` and below were already judged as the client judges them.
+- **A dynamic reference the client cannot compile was taken** (LOW, older): one that is no string, or no `#`
+  fragment.
+- **The form 2025-11-25 lists an outputSchema in was one the client cannot compile** (MEDIUM, older: 3.8.0). A
+  2025-11-25 client could call no such tool. ref-diff, compiling that form for the first time, counted 6,775 of
+  100,000. Where the root is no object, registration refuses (`_sch_legacy_why`):
+  - an `$id` that names no base (empty, `null`, `0`, `false`) beside any `$ref`: each reference resolves in the
+    wrapper, which holds none of them, and `#` is the wrapper;
+  - an `$id` the client's resolver, fast-uri, writes otherwise, beside any `$ref`: under the wrapper Ajv registers
+    the `$id` as written and resolves each reference against it as fast-uri writes it. That covers a capital in the
+    scheme or host, a default port, no path, a percent-encoded letter, an IPv6 literal, a character past ASCII, and
+    a `ws:` path of `/` alone (`_sch_id_plain`, read narrowly: an IPv6 literal, an empty query and an `https:` URI
+    with no authority are refused though the client takes them);
+  - a `$dynamicAnchor` or `$recursiveAnchor: true` beside the root's `$id`, with a relative `$ref` compiled with
+    it: Ajv compiles such a schema against the root's base, which is now the wrapper's;
+  - a root of `$id` and `$ref` with nothing beside them that Ajv judges, which it follows without end ("Maximum
+    call stack size exceeded");
+  - the root's `$id`, or its anchors, alike one below: under the wrapper both are registered.
+- **The form 2025-11-25 lists left out the root's `$schema` inside `result`** (LOW, older: 3.8.0). The SDK keeps it
+  there as well as on the wrapper. dynref-diff found 34,908 forms that differed from the SDK's, and none differ now.
+- **Two `$id`s alike were taken** (LOW, older: 3.8.10), below the root or one alike the root's. The client's Ajv
+  refuses the schema ("resolves to more than one schema", "already exists"). Refused now, beside the root's own
+  anchors named twice or named below, which JSON Schema reads as two anchors of one name in one resource.
+
+### Changed
+
+- **`BOTE_UNENFORCED`** loses `$dynamicRef` and `$recursiveRef`. In draft-07 and draft-06 each is warned of as a
+  keyword the dialect does not have. In 2020-12 `$recursiveRef`, and in 2019-09 `$dynamicRef`, is warned of as one
+  that dialect does not have and bote judges, as the client does.
+- **Registration's order for an inputSchema given as JSON**: its own fields are checked first
+  (`_reg_check_input_json`), and what the client's validator compiles of it after (`_reg_check_input_compiled`), so
+  each message says what it said.
+- **The count WARN** reads `that is no non-negative integer, judged as the official client compares it`.
+- **`tests/bote_schema_pattern.tcyr`, `bote_schema_comp.tcyr`, `bote_schema_eq.tcyr`, `bote_schema_parts.tcyr` and
+  `bote_schema_walk.tcyr`**: each WARN test whose schema the client cannot compile is now a refusal test. **ref-diff**
+  compiles the form 2025-11-25 lists a schema in, and takes a schema as the client's only where it compiles both.
+- **regex-diff** fails on a pattern JavaScript refuses that bote only declines. Its generator draws named
+  backreferences, group names and modifiers of every shape, `\p` forms, and bounds past bote's on a literal.
+
+### Tests
+
+- **`tests/bote_schema_dyn.tcyr`**, 127, new: dynamic references judged as the client judges them, every expected
+  verdict its own:
+  - recursion to the root in 2019-09 and 2020-12, and each dialect's other keyword, which the client judges;
+  - draft-07 and draft-06 judging neither;
+  - beside a `$ref`, in a definition, under `anyOf` and `not`, escaped, sixty levels down.
+
+  Registration: its refusals of what the client cannot compile, of each reading Ajv and JSON Schema do not share,
+  and of the form 2025-11-25 lists, each shape the differentials found among them; what it takes; each kind of
+  inputSchema; the WARNs by dialect. The dispatcher on a result of both revisions and on arguments. 0 heap bytes
+  for fifty refused calls; sixty levels in the arena's first chunk.
+- **`tests/bote_schema_client.tcyr`**, 133, new, from the review of 3.8.13:
+  - what the client's validator cannot compile, refused: a value of a kind each engine refuses, and what each
+    engine lacks it does not check; types and `nullable`; `id` in every dialect; `required` and
+    `dependentRequired` entries; patterns JavaScript refuses; below the root, through a `$ref`, and in each kind of
+    inputSchema;
+  - names of Object.prototype read in a result as the client finds them (23 rows, a function's verdict for each
+    kind of schema), and in arguments by member;
+  - counts that are no non-negative integer compared as JavaScript compares them (26 rows);
+  - the WARN and the heap.
+- **`tests/bote_regex.tcyr`**, 229, from 160: 62 patterns, each with `RegExp`'s own verdict: lookarounds quantified
+  or holding what the `u` flag refuses; backreferences to groups that are and are not there, by number and by name;
+  group names of each shape and as they decode, a surrogate pair among them; modifiers; `\p` forms; bounds past
+  bote's either way; a lookaround left open; groups nested past bote's bound.
+  `bote_rx_refused_of` keeps nothing.
+- **`tests/bote_format.tcyr`**, 372, from 350: url with a host after each of 16,000 `@`s, and a valid one of 8,000
+  `a@b.cc:12`, each in twice its half's time; a uri with a host of 20,000 characters taken within its budget; the
+  twelve formats named for Object.prototype refused.
+- **`tests/bote_output.tcyr`**, 267, from 264: the 2025-11-25 form's exact bytes, each the SDK's own output; a
+  `$recursiveRef` with no root anchor, or other than `#`, refused at registration.
+- **Five WARN tests turned to refusal tests**, in `bote_schema_pattern`, `_comp`, `_eq`, `_parts` and `_walk`, for
+  each schema the client cannot compile. `bote_schema_ref.tcyr`'s rows for `$id`s the client takes as written get an
+  object root, so they are not wrapped.
+- **`fuzz/schema_walk.fcyr`**: a root `$dynamicAnchor` and a `$dynamicRef` to it, plainly or escaped, wherever a
+  part of the value is judged, the reference judging it by the root.
+- **`scripts/ref-diff.sh`** compiles the form 2025-11-25 lists a schema in: none of 100,000 bote takes is one the
+  client cannot compile in either form, and 3,283 bote refuses it compiles in both. **`scripts/regex-diff.sh`**:
+  none of 60,000 patterns JavaScript refuses is only declined, but the 149 that hold a `\p{...}` name ECMA-262 does
+  not know. **`scripts/format-diff.sh`**, rerun: every value judged as before.
+- **101 mutants, 98 killed, one equivalent, and two showed code that did nothing.** Eleven survived the first run:
+  - eight were gaps, now tested: a `$dynamicRef` that is no fragment compiled alone; a lookaround left open; a
+    named group counted among the numbered; a name written as a surrogate pair; groups nested past bote's bound;
+    a function failing every `anyOf` branch; `maxItems` and `maxContains` below 0, against an item;
+  - two were lines that did nothing, now removed: a spent format budget charged again, and `false` refused just
+    before its tag refuses it;
+  - a minimum count compared with 0 by `<=` or by `<` is one comparison, as a fraction is never 0.
+
+  The fuzz harness alone kills a `$dynamicRef` compiled to nothing.
+
+### Performance
+
+3.8.13 against this release, 15 alternating rounds on one core, minimums (`ab`, on a quiet host;
+`validate_dynamic_ref` is new and runs here only). Every other row is within ±2.3%:
+
+| Bench | 3.8.13 | 3.8.14 | Δ |
+|-------|-------:|-------:|--:|
+| `validate_dynamic_ref` | — | 3,669 ns | new |
+| `schema_compile_simple` | 16,300 ns | 17,956 ns | +10.2% |
+| `schema_compile_nested` | 37,262 ns | 40,895 ns | +9.7% |
+| `validate_compiled_nested` | 1,130 ns | 1,167 ns | +3.3% |
+| `validate_compiled_simple` | 582 ns | 538 ns | −7.6% |
+| `jsonx_get_str_flat` | 168 ns | 156 ns | −7.1% |
+| `jsonx_get_raw_nested` | 426 ns | 440 ns | +3.3% |
+
+- **A tree three levels deep through a `$dynamicRef` is 3.7 µs** (`validate_dynamic_ref`: five nodes, each judged by
+  the root again).
+- **Registration compiles a schema 1.7 µs, or 3.6 µs, slower** (`schema_compile_*`). Each schema it compiles now
+  looks for `$dynamicRef` and `$recursiveRef`, and each property's name is flagged for the prototype's. That is paid
+  once per registration, never per call.
+- **A call's judgement is where it was.** `validate_compiled_nested`'s 37 ns is likely the object walk's read of its
+  root's mode, which the prototype's names need; not measured apart. The `__proto__` compare it replaced is gone. `jsonx_get_*` and
+  `validate_compiled_simple` run code this release does not touch, and moved both ways with where the code sits.
+- **`regex_slug` is 3.8.13's** (−0.1%), its 11 to 15% since 3.8.12 still unexplained (the watch list).
+
 ## [3.8.13] — 2026-11-04 · Formats
+
+> ⚠ **Corrected at 3.8.14.** These claims below were not true, found by an independent review of this release and
+> by two differentials.
+> - "Twice the string takes about twice the time for each format measured, and for `url` with 60,000 `@`s". That held
+>   only where the host after each `@` fails to parse. Where it parses, each try looked through the rest of the string
+>   for white space, and only the string's length was charged. `"http://" + "x@a.bc/" × 16,000 + " "`, 112 KB, took
+>   14.7 s.
+> - "Each format's reading is charged to the judgement's budget". A uri's authority costs about 41 steps a byte, past
+>   the 32 the budget allows, so a valid uri with a host of 20,000 characters was refused as too much work.
+> - "Registration refuses what the client cannot compile". It refused the shapes listed, and took many others the
+>   client cannot compile:
+>   - a keyword of the wrong kind (`minLength: "5"`);
+>   - an unknown `type`, or `nullable` with no type;
+>   - `id`;
+>   - a pattern JavaScript refuses after a construct bote's parser declined (`(?=a)*`);
+>   - a format named for one of JavaScript's Object.prototype, beside `formatMinimum`.
+> - "none of 100,000 bote takes is one it cannot compile". That held for ref-diff's grammar only, and for the schema
+>   as written. 6,775 of those 100,000, as an outputSchema with no object root, were listed for 2025-11-25 in a form
+>   the client cannot compile.
+> - "bote reads all three so now", of `__proto__`. True of those three readings. In a result, the other names of
+>   Object.prototype (`toString`, `constructor`) were read otherwise than the client reads them, and
+>   `required: ["__proto__"]` was met in arguments too, the looser reading.
 
 **`format` is judged**, as the official client's own validator judges it. The client validates with Ajv and
 ajv-formats 3.0.1 in its full mode, so a format ajv-formats knows is enforced and one it does not is ignored, and

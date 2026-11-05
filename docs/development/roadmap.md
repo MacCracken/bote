@@ -33,13 +33,14 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.14 — JSON Schema coverage, its ninth bite: `$recursiveRef` and `$dynamicRef`.** 2019-09's
-`$recursiveRef` with `$recursiveAnchor`, and 2020-12's `$dynamicRef` with `$dynamicAnchor`, resolved as the client's
-Ajv resolves them: by the dynamic scope a judgement passed through, which a static `$ref` does not keep. Then the
-`unevaluated*` keywords, which need to know what every other keyword judged; draft-07's array `items`,
-`additionalItems` and `dependencies`; and the `format*` limit keywords, which compare a date, a time or a date-time
-through JavaScript's `Date` and would need its parser for the strings `format` takes. `format: regex` stays
-unjudged until bote reads JavaScript's syntax without the `u` flag (Annex B), as the client checks it.
+**3.8.15 — JSON Schema coverage, its tenth bite: `unevaluatedProperties` and `unevaluatedItems`.** Each needs to
+know what every other keyword judged of the value, through composition and references, as the client's Ajv tracks
+it (its `evaluated` props and items, merged across `allOf`, `anyOf`, `oneOf`, `if` and `$ref`). Then draft-07's
+array `items`, `additionalItems` and `dependencies` (and `dependencies` in 2020-12, which the client's engine judges
+too); the `format*` limit keywords, which compare a date, a time or a date-time through JavaScript's `Date` and
+would need its parser for the strings `format` takes; and a `\p{...}` name in a pattern checked against ECMA-262's
+tables, which grow with each Unicode version, so a pattern naming one the client refuses is refused. `format: regex`
+stays unjudged until bote reads JavaScript's syntax without the `u` flag (Annex B), as the client checks it.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
@@ -57,18 +58,23 @@ stdio's) are each one connection's, and a worker per connection would need a hom
   3.8.9 composition, `allOf`, `anyOf`, `oneOf`, `not`, `if` / `then` / `else`, under a budget of work; since
   3.8.10 `$ref` within its document, under a depth; since 3.8.11 `pattern`, by an engine of bote's own held to
   JavaScript's, and `multipleOf`, exactly; since 3.8.12 `patternProperties`, with `additionalProperties` beside it;
-  since 3.8.13 `format`, each of ajv-formats' as it defines them but `regex`. It still warns at registration of what
-  it lists and does not judge: `$dynamicRef`, `$recursiveRef`, the `unevaluated*` keywords, draft-07's array
-  `items`, `additionalItems` and `dependencies`, the `format*` limit keywords and `format: regex` (each of which the
-  official client enforces). Numbers
+  since 3.8.13 `format`, each of ajv-formats' as it defines them but `regex`; since 3.8.14 `$dynamicRef` and
+  `$recursiveRef`, where the client's Ajv and JSON Schema read them alike, to the root that holds their anchor, the
+  rest refused at registration. It still warns at registration of what it lists and does not judge: the
+  `unevaluated*` keywords, draft-07's array `items`, `additionalItems` and `dependencies`, the `format*` limit
+  keywords and `format: regex` (each of which the official client enforces). What the client's validator cannot
+  compile, in either form a schema is listed in, registration refuses (3.8.13, 3.8.14), but a pattern's `\p{...}`
+  name, which it does not check. Numbers
   are compared exactly, where a client holding them as doubles may find two equal that bote does not: past 15
   significant digits or a double's range (`1e400`, `1e-400`), a result's `uniqueItems` array could be refused by a client and passed here. Enforce the
   rest in bites. The budget charges a value one and each byte a keyword reads one more (3.8.10); a refusal for
   work can turn on the order of a value's members, as a quiet judgement stops at its first violation. A
   reference into another document is refused at registration, as bote fetches nothing on a schema's word; inline
   it. So is an `$id` the client's resolver cannot read, and a few it can (a path with an empty segment or a `|`, a
-  URN with a `.` segment): `scripts/ref-diff.sh` counts 9,430 schemas of 100,000 bote refuses and the client takes,
-  each an odd spelling; narrow that by the differential, never past what the client compiles. An argument's integer
+  URN with a `.` segment, and, for a root that is no object, an IPv6 literal or an empty query): `scripts/ref-diff.sh`
+  counts 3,283 schemas of 100,000 bote refuses that the client compiles in both forms, each an odd spelling; narrow
+  that by the differential, never past what the client compiles. The dynamic references registration refuses are by
+  design: dynref-diff counts 21,645 of its 100,000, each one the two readings resolve apart or a loop. An argument's integer
   past a handler's range is refused wherever a schema types it as one, `contains` excepted: it counts a match that
   took the integer as any match, so `{"contains":{"type":"integer"}}` passes `[1e30]` to a handler. The warnings cover a schema's root and its properties, not what is nested below them. And the
   repeated-key check over a result's `structuredContent` (3.8.1) is a walk of its own, 240 µs of `libro_export`'s

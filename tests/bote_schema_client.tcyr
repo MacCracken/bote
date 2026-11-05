@@ -1,0 +1,290 @@
+# bote_schema_client.tcyr — what the official client's validator cannot compile, refused at
+# registration (3.8.14, from the 3.8.13 review): a keyword whose value is of a kind its engine
+# refuses (Ajv's schemaType), in each dialect; a type that is no JSON type; `nullable` with no
+# type; `id`; `required` and `dependentRequired` entries that are no string; a pattern
+# JavaScript refuses with the u flag. And what it reads otherwise than bote did: a name on
+# JavaScript's Object.prototype, which the client finds on every object, read so in a result
+# and as a member in arguments; and a count that is no non-negative integer, compared as
+# JavaScript compares it. Every expected verdict below is the client's own.
+#
+# Run: cyrius test tests/bote_schema_client.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/regex.cyr"
+include "src/format.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
+fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+fn _vs(schema, value) { return _sch_check_value_a(bote_req_begin(), parse_property(schema), "v", value); }
+fn _ok(schema, value) { if (_vs(schema, value) == 0) { return 1; } return 0; }
+# As arguments: an inputSchema given as JSON, judged as a call's arguments are.
+fn _aok(schema, value) {
+    var r = compiled_validate(compiled_compile(tool_schema_from_json(schema)), value);
+    if (r == 0 || vec_len(r) == 0) { return 1; }
+    return 0;
+}
+fn _why(os) {
+    var w = registry_check_tool_def(tool_def_with_output_schema(tool_def_new("t_why", "d", schema_new("object", 0, vec_new())), os));
+    if (w == 0) { return "(none)"; }
+    return w;
+}
+fn _iwhy(js) {
+    var w = registry_check_tool_def(tool_def_new("t_iwhy", "d", tool_schema_from_json(js)));
+    if (w == 0) { return "(none)"; }
+    return w;
+}
+fn _twhy(name, prop) {
+    var ps = vec_new();
+    vec_push(ps, schema_prop_new(name, prop));
+    var w = registry_check_tool_def(tool_def_new("t_twhy", "d", schema_new("object", ps, vec_new())));
+    if (w == 0) { return "(none)"; }
+    return w;
+}
+var _lc_all = 0;
+fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    var b = alloc(n + 1);
+    memcpy(b, msg, n);
+    store8(b + n, 0);
+    vec_push(_lc_all, b);
+    return 0;
+}
+fn _lc_begin() { _lc_all = vec_new(); sakshi_set_emit_hook(&_lc_hook); sakshi_set_level(SK_TRACE); return 0; }
+fn _lc_end() { sakshi_clear_emit_hook(); sakshi_set_level(SK_ERROR); return 0; }
+fn _lc_find(sub) {
+    var i = 0;
+    while (i < vec_len(_lc_all)) {
+        if (_has(vec_get(_lc_all, i), sub) == 1) { return vec_get(_lc_all, i); }
+        i = i + 1;
+    }
+    return 0;
+}
+fn h_ok(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+
+fn main() {
+    alloc_init();
+
+    # ---- a value of a kind the client's engine refuses (Ajv's schemaType) ----
+    assert(_has(_why("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"minLength\":\"5\"}}}"), "names minLength with a value of a kind the official client refuses (it takes a number)") == 1, "refuse: minLength that is no number, below the root");
+    assert(_has(_why("{\"required\":\"a\"}"), "names required with a value of a kind the official client refuses (it takes an array)") == 1, "refuse: required that is no array");
+    assert(_has(_why("{\"enum\":5}"), "names enum with a value of a kind") == 1, "refuse: enum that is no array");
+    assert(_has(_why("{\"allOf\":{}}"), "names allOf with a value of a kind the official client refuses (it takes an array)") == 1, "refuse: allOf that is no array");
+    assert(_has(_why("{\"items\":5}"), "names items with a value of a kind the official client refuses (it takes an object or a boolean)") == 1, "refuse: 2020-12 items that is no schema");
+    assert(_has(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"items\":5}"), "names items with a value of a kind the official client refuses (it takes an object, a boolean or an array)") == 1, "refuse: draft-07 items, which may be an array");
+    assert(_has(_why("{\"not\":5}"), "names not with a value of a kind") == 1, "refuse: not");
+    assert(_has(_why("{\"contains\":5}"), "names contains with a value of a kind") == 1, "refuse: contains");
+    assert(_has(_why("{\"propertyNames\":5}"), "names propertyNames with a value of a kind") == 1, "refuse: propertyNames");
+    assert(_has(_why("{\"prefixItems\":{}}"), "names prefixItems with a value of a kind") == 1, "refuse: prefixItems");
+    assert(_has(_why("{\"additionalProperties\":5}"), "names additionalProperties with a value of a kind") == 1, "refuse: additionalProperties");
+    assert(_has(_why("{\"if\":5}"), "names if with a value of a kind") == 1, "refuse: if alone, which the client checks though it compiles nothing under it");
+    assert(_has(_why("{\"then\":5}"), "names then with a value of a kind") == 1, "refuse: then alone");
+    assert(_has(_why("{\"maximum\":\"5\"}"), "names maximum with a value of a kind") == 1, "refuse: maximum");
+    assert(_has(_why("{\"multipleOf\":\"x\"}"), "names multipleOf with a value of a kind") == 1, "refuse: multipleOf");
+    assert(_has(_why("{\"uniqueItems\":\"x\"}"), "names uniqueItems with a value of a kind") == 1, "refuse: uniqueItems");
+    assert(_has(_why("{\"contains\":{},\"minContains\":\"x\"}"), "names minContains with a value of a kind") == 1, "refuse: minContains");
+    assert(_has(_why("{\"type\":5}"), "names type with a value of a kind the official client refuses (it takes a string or an array)") == 1, "refuse: type that is a number");
+    assert(_has(_why("{\"type\":null}"), "names type with a value of a kind") == 1, "refuse: type null (the value)");
+    assert(_has(_why("{\"type\":\"string\",\"nullable\":\"x\"}"), "names nullable with a value of a kind the official client refuses (it takes a boolean)") == 1, "refuse: nullable that is no boolean");
+    assert(_has(_why("{\"$ref\":5}"), "holds a $ref that is not a string") == 1, "refuse: $ref that is no string (refused, as through 3.8.13)");
+    assert(_has(_why("{\"properties\":[1]}"), "names properties with a value of a kind") == 1, "refuse: properties that is no object");
+    assert(_has(_why("{\"dependentRequired\":5}"), "names dependentRequired with a value of a kind") == 1, "refuse: dependentRequired");
+    assert(_has(_why("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"unevaluatedItems\":5}"), "names unevaluatedItems with a value of a kind") == 1, "refuse: 2019-09 unevaluatedItems");
+    assert(_has(_why("{\"formatMinimum\":5,\"format\":\"date\"}"), "formatMinimum that is no string") == 1, "refuse: formatMinimum, by 3.8.13's own message");
+    # ---- what each engine lacks it does not check ----
+    assert_streq(_why("{\"additionalItems\":5}"), "(none)", "take: 2020-12 has no additionalItems");
+    assert_streq(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"prefixItems\":5}"), "(none)", "take: draft-07 has no prefixItems");
+    assert_streq(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"dependentRequired\":5}"), "(none)", "take: ...nor dependentRequired");
+    assert_streq(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"unevaluatedItems\":5}"), "(none)", "take: ...nor unevaluatedItems");
+    assert_streq(_why("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"prefixItems\":5}"), "(none)", "take: 2019-09 has no prefixItems");
+    assert_streq(_why("{\"$comment\":5}"), "(none)", "take: $comment is checked by nothing");
+    assert_streq(_why("{\"properties\":{\"a\":{\"$anchor\":5}}}"), "(none)", "take: an $anchor that is no string is ignored");
+    assert_streq(_why("{\"$defs\":5}"), "(none)", "take: $defs is checked by nothing");
+    assert_streq(_why("{\"foo\":5}"), "(none)", "take: an unknown keyword");
+    assert_streq(_why("{\"contentMediaType\":\"application/json\",\"contentSchema\":5}"), "(none)", "take: contentSchema");
+    assert_streq(_why("{\"properties\":{\"a\":5}}"), "(none)", "take: a subschema that is no object or boolean is always valid");
+    assert_streq(_why("{\"allOf\":[5]}"), "(none)", "take: ...under allOf");
+    assert_streq(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"items\":[5]}"), "(none)", "take: ...in draft-07's array items");
+    assert_streq(_why("{\"dependencies\":{\"a\":5}}"), "(none)", "take: ...under dependencies");
+    assert_streq(_why("{\"if\":{\"minLength\":\"5\"}}"), "(none)", "take: an if beside no then or else compiles nothing under it");
+    # ---- types and nullable (Ajv's getSchemaTypes) ----
+    assert(_has(_why("{\"type\":\"foo\"}"), "names a type the official client refuses, as no JSON type: foo") == 1, "refuse: an unknown type name");
+    assert(_has(_why("{\"type\":\"Integer\"}"), "as no JSON type: Integer") == 1, "refuse: a type name in another case");
+    assert(_has(_why("{\"type\":[\"string\",\"foo\"]}"), "names in a type array something the official client refuses") == 1, "refuse: an unknown name in a type array");
+    assert(_has(_why("{\"type\":[\"string\",5]}"), "names in a type array something the official client refuses") == 1, "refuse: a type array holding a number");
+    assert_streq(_why("{\"type\":\"\"}"), "(none)", "take: type \"\", which names none");
+    assert_streq(_why("{\"type\":[]}"), "(none)", "take: type [], which names none");
+    assert_streq(_why("{\"type\":[\"string\",\"string\"]}"), "(none)", "take: a type named twice");
+    assert(_has(_why("{\"nullable\":true}"), "names nullable with no type") == 1, "refuse: nullable with no type");
+    assert(_has(_why("{\"nullable\":false}"), "names nullable with no type") == 1, "refuse: nullable: false with no type");
+    assert(_has(_why("{\"type\":\"\",\"nullable\":true}"), "names nullable with no type") == 1, "refuse: nullable beside a type that names none");
+    assert(_has(_why("{\"type\":\"null\",\"nullable\":false}"), "names type null beside nullable: false") == 1, "refuse: type null beside nullable: false");
+    assert(_has(_why("{\"type\":[\"string\",\"null\"],\"nullable\":false}"), "names type null beside nullable: false") == 1, "refuse: ...in a type array");
+    assert_streq(_why("{\"type\":\"string\",\"nullable\":true}"), "(none)", "take: nullable beside a type");
+    # ---- id, required, dependentRequired ----
+    assert(_has(_why("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"properties\":{\"a\":{\"id\":\"foo\"}}}"), "names the keyword id, which the official client refuses (write $id)") == 1, "refuse: id, in 2020-12");
+    assert(_has(_why("{\"$schema\":\"https://json-schema.org/draft/2019-09/schema\",\"properties\":{\"a\":{\"id\":\"foo\"}}}"), "names the keyword id, which the official client refuses (write $id)") == 1, "refuse: id, in 2019-09");
+    assert(_has(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"properties\":{\"a\":{\"id\":\"foo\"}}}"), "names the keyword id, which the official client refuses (write $id)") == 1, "refuse: id, in draft-07");
+    assert(_has(_why("{\"$schema\":\"http://json-schema.org/draft-06/schema#\",\"properties\":{\"a\":{\"id\":\"foo\"}}}"), "names the keyword id, which the official client refuses (write $id)") == 1, "refuse: id, in draft-06");
+    assert_streq(_why("{\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"), "(none)", "take: a property named id");
+    assert(_has(_why("{\"required\":[5]}"), "names in required something that is no string") == 1, "refuse: a required entry that is no string (the client requires \"5\")");
+    assert(_has(_why("{\"dependentRequired\":{\"a\":5}}"), "names in dependentRequired a value that is no array") == 1, "refuse: a dependentRequired value that is no array");
+    assert(_has(_why("{\"dependentRequired\":{\"a\":[5]}}"), "names in dependentRequired something that is no string") == 1, "refuse: a dependentRequired entry that is no string");
+    assert_streq(_why("{\"dependentRequired\":{\"a\":[]}}"), "(none)", "take: an empty dependentRequired entry");
+    # ---- patterns JavaScript refuses ----
+    assert(_has(_why("{\"type\":\"string\",\"pattern\":\"(\"}"), "names a pattern JavaScript refuses with the u flag, which the official client cannot compile") == 1, "refuse: the pattern (, an unterminated group");
+    assert(_has(_why("{\"type\":\"string\",\"pattern\":\"[z-a]\"}"), "names a pattern JavaScript refuses with the u flag, which the official client cannot compile") == 1, "refuse: the pattern [z-a], a range out of order");
+    assert(_has(_why("{\"type\":\"string\",\"pattern\":\"a{2,1}\"}"), "names a pattern JavaScript refuses with the u flag, which the official client cannot compile") == 1, "refuse: the pattern a{2,1}, bounds out of order");
+    assert(_has(_why("{\"type\":\"string\",\"pattern\":\"(?=a)*\"}"), "names a pattern JavaScript refuses with the u flag, which the official client cannot compile") == 1, "refuse: the pattern (?=a)*, a quantified lookahead");
+    assert(_has(_why("{\"type\":\"string\",\"pattern\":\"(?<x>a)\\\\k<y>\"}"), "names a pattern JavaScript refuses with the u flag, which the official client cannot compile") == 1, "refuse: the pattern (?<x>a)\\k<y>, a named backreference to no group");
+    assert(_has(_why("{\"patternProperties\":{\"(\":{}}}"), "names in patternProperties a pattern JavaScript refuses") == 1, "refuse: a patternProperties key JavaScript refuses");
+    assert_streq(_why("{\"type\":\"string\",\"pattern\":\"(?=a)a\"}"), "(none)", "take: a lookahead, which bote declines and JavaScript takes");
+    assert_streq(_why("{\"type\":\"string\",\"pattern\":\"\\\\p{L}+\"}"), "(none)", "take: a property escape, likewise");
+    # ---- below the root, through a $ref, and in each kind of inputSchema ----
+    assert(_has(_why("{\"properties\":{\"a\":{\"$ref\":\"#/$defs/d\"}},\"$defs\":{\"d\":{\"maxLength\":\"5\"}}}"), "names maxLength with a value of a kind") == 1, "refuse: a definition a $ref reaches");
+    assert_streq(_why("{\"$defs\":{\"d\":{\"maxLength\":\"5\"}}}"), "(none)", "take: a definition nothing reaches, which the client never compiles");
+    assert(_has(_iwhy("{\"type\":\"object\",\"properties\":{\"a\":{\"minLength\":\"5\"}}}"), "names minLength with a value of a kind") == 1, "refuse: an inputSchema given as JSON");
+    assert(_has(_twhy("a", "{\"minLength\":\"5\"}"), "names minLength with a value of a kind") == 1, "refuse: a ToolSchema's property, as listed (with no `$` or format in it)");
+    assert_streq(_twhy("a", "{\"type\":\"string\",\"minLength\":5}"), "(none)", "take: a ToolSchema's property the client compiles");
+
+    # ---- a result: names on JavaScript's Object.prototype, as the client finds them ----
+    assert_eq(_ok("{\"dependentRequired\":{\"__proto__\":[\"x\"]}}", "{}"), 0, "result: dependentRequired keyed on __proto__ requires its names of {}");
+    assert_eq(_ok("{\"dependentRequired\":{\"__proto__\":[\"x\"]}}", "{\"x\":1}"), 1, "result: ...and is met");
+    assert_eq(_ok("{\"dependentSchemas\":{\"__proto__\":{\"required\":[\"x\"]}}}", "{}"), 0, "result: dependentSchemas keyed on __proto__ applies to {}");
+    assert_eq(_ok("{\"dependentRequired\":{\"a\":[\"__proto__\"]}}", "{\"a\":1}"), 1, "result: a dependentRequired name __proto__ met");
+    assert_eq(_ok("{\"dependentRequired\":{\"toString\":[\"x\"]}}", "{}"), 0, "result: dependentRequired keyed on toString");
+    assert_eq(_ok("{\"dependentRequired\":{\"__proto__x\":[\"x\"]}}", "{}"), 1, "result: a name that is not one is no member");
+    assert_eq(_ok("{\"properties\":{\"toString\":{\"type\":\"string\"}}}", "{}"), 0, "result: an absent toString is the prototype's function, which no type is");
+    assert_eq(_ok("{\"properties\":{\"toString\":{\"type\":\"string\"}}}", "{\"toString\":\"x\"}"), 1, "result: ...a member of that name is judged");
+    assert_eq(_ok("{\"properties\":{\"toString\":{\"type\":\"string\"}}}", "{\"toString\":1}"), 0, "result: ...and refused for its kind");
+    assert_eq(_ok("{\"properties\":{\"constructor\":{\"minLength\":2}}}", "{}"), 1, "result: a function is no string, so minLength passes it");
+    assert_eq(_ok("{\"properties\":{\"constructor\":{\"not\":{\"type\":\"string\"}}}}", "{}"), 1, "result: not a string");
+    assert_eq(_ok("{\"properties\":{\"valueOf\":{\"const\":1}}}", "{}"), 0, "result: const refuses a function");
+    assert_eq(_ok("{\"properties\":{\"hasOwnProperty\":{\"anyOf\":[{\"type\":\"string\"},{\"minimum\":1}]}}}", "{}"), 1, "result: anyOf, one passing");
+    assert_eq(_ok("{\"properties\":{\"isPrototypeOf\":{\"oneOf\":[{\"minimum\":1},{\"maxLength\":1}]}}}", "{}"), 0, "result: oneOf, both passing");
+    assert_eq(_ok("{\"properties\":{\"toLocaleString\":false}}", "{}"), 0, "result: false");
+    assert_eq(_ok("{\"properties\":{\"toString\":{\"anyOf\":[{\"type\":\"string\"},{\"const\":1}]}}}", "{}"), 0, "result: anyOf, none passing");
+    assert_eq(_ok("{\"properties\":{\"toLocaleString\":true}}", "{}"), 1, "result: true");
+    assert_eq(_ok("{\"properties\":{\"constructor\":{\"if\":{\"type\":\"string\"},\"then\":{\"minLength\":1},\"else\":{\"type\":\"object\"}}}}", "{}"), 0, "result: if, its else");
+    assert_eq(_ok("{\"required\":[\"constructor\",\"toString\",\"__proto__\",\"valueOf\"]}", "{}"), 1, "result: required names on the prototype met");
+    assert_eq(_ok("{\"anyOf\":[{\"required\":[\"constructor\"]}]}", "{}"), 1, "result: ...under anyOf");
+    assert_eq(_ok("{\"required\":[\"constructor\"],\"properties\":{\"constructor\":{\"type\":\"string\"}}}", "{}"), 0, "result: a required constructor, absent: the client judges the function");
+    assert_eq(_ok("{\"required\":[\"constructor\"],\"properties\":{\"constructor\":{\"type\":\"string\"}}}", "{\"constructor\":\"Ferrari\"}"), 1, "result: ...present, judged");
+    assert_eq(_ok("{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{}}}", "{\"__proto__\":1}"), 0, "result: a member __proto__ is additional, as 3.8.13 read it");
+    # ---- arguments: a member only, as JSON Schema has it ----
+    assert_eq(_aok("{\"type\":\"object\",\"required\":[\"constructor\"]}", "{}"), 0, "arguments: required constructor is a member");
+    assert_eq(_aok("{\"type\":\"object\",\"required\":[\"__proto__\"]}", "{}"), 0, "arguments: ...and __proto__ (3.8.13 met it)");
+    assert_eq(_aok("{\"type\":\"object\",\"anyOf\":[{\"required\":[\"constructor\"]}]}", "{}"), 0, "arguments: ...under anyOf, which judges a result's way");
+    assert_eq(_aok("{\"type\":\"object\",\"properties\":{\"toString\":{\"type\":\"string\"}}}", "{}"), 1, "arguments: an absent toString is absent");
+    assert_eq(_aok("{\"type\":\"object\",\"dependentRequired\":{\"toString\":[\"x\"]}}", "{}"), 1, "arguments: a dependentRequired key on the prototype, absent");
+
+    # ---- counts, as JavaScript compares them ----
+    assert_eq(_ok("{\"maxLength\":-1}", "\"\""), 0, "result: maxLength -1 refuses every string");
+    assert_eq(_ok("{\"maxLength\":-1}", "\"a\""), 0, "result: ...every one");
+    assert_eq(_ok("{\"minLength\":1.5}", "\"a\""), 0, "result: minLength 1.5 is 2");
+    assert_eq(_ok("{\"minLength\":1.5}", "\"ab\""), 1, "result: ...met");
+    assert_eq(_ok("{\"maxLength\":1.5}", "\"a\""), 1, "result: maxLength 1.5 is 1");
+    assert_eq(_ok("{\"maxLength\":1.5}", "\"ab\""), 0, "result: ...past it");
+    assert_eq(_ok("{\"minItems\":1e+30}", "[1]"), 0, "result: minItems 1e30 refuses every array");
+    assert_eq(_ok("{\"maxItems\":1e+30}", "[1]"), 1, "result: maxItems 1e30 none");
+    assert_eq(_ok("{\"minLength\":-1}", "\"\""), 1, "result: minLength -1 none");
+    assert_eq(_ok("{\"maxProperties\":-1}", "{}"), 0, "result: maxProperties -1 refuses every object");
+    assert_eq(_ok("{\"minProperties\":0.5}", "{}"), 0, "result: minProperties 0.5 is 1");
+    assert_eq(_ok("{\"minProperties\":0.5}", "{\"a\":1}"), 1, "result: ...met");
+    assert_eq(_ok("{\"maxProperties\":0.5}", "{}"), 1, "result: maxProperties 0.5 is 0");
+    assert_eq(_ok("{\"maxProperties\":0.5}", "{\"a\":1}"), 0, "result: ...past it");
+    assert_eq(_ok("{\"contains\":{},\"minContains\":-1}", "[]"), 1, "result: minContains -1 asks for no match");
+    assert_eq(_ok("{\"contains\":{},\"minContains\":1.5}", "[1]"), 0, "result: minContains 1.5 is 2");
+    assert_eq(_ok("{\"contains\":{},\"minContains\":1.5}", "[1,2]"), 1, "result: ...met");
+    assert_eq(_ok("{\"contains\":{},\"maxContains\":-1}", "[]"), 0, "result: maxContains -1 refuses every array");
+    assert_eq(_ok("{\"contains\":{},\"maxContains\":-1}", "[1]"), 0, "result: ...one whose item matches");
+    assert_eq(_ok("{\"maxItems\":-1}", "[]"), 0, "result: maxItems -1 refuses every array");
+    assert_eq(_ok("{\"maxItems\":-1}", "[1]"), 0, "result: ...every one"); 
+    assert_eq(_ok("{\"contains\":{},\"maxContains\":1.5}", "[1]"), 1, "result: maxContains 1.5 is 1");
+    assert_eq(_ok("{\"contains\":{},\"maxContains\":1.5}", "[1,2]"), 0, "result: ...past it");
+    assert_eq(_ok("{\"contains\":{},\"minContains\":0}", "[]"), 1, "result: minContains 0");
+    assert_eq(_ok("{\"maxItems\":2.999}", "[1,2]"), 1, "result: maxItems 2.999 is 2");
+    assert_eq(_ok("{\"maxItems\":2.999}", "[1,2,3]"), 0, "result: ...past it");
+    assert_eq(_aok("{\"type\":\"object\",\"properties\":{\"a\":{\"maxLength\":-1}}}", "{\"a\":\"\"}"), 0, "counts: in arguments too");
+    # ---- the WARN ----
+    var wd = dispatcher_new(tool_registry_new());
+    _lc_begin();
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_c", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"maxLength\":-1},\"b\":{\"minItems\":1.5}}}"), &h_ok);
+    _lc_end();
+    assert(_lc_find("maxLength that is no non-negative integer, judged as the official client compares it") != 0, "warn: a count that is no non-negative integer, judged");
+    assert(_lc_find("minItems that is no non-negative integer, judged as the official client compares it") != 0, "warn: ...a fraction");
+
+    # ---- the heap ----
+    var hp = parse_property("{\"properties\":{\"toString\":{\"anyOf\":[{\"type\":\"string\"},{\"const\":1}]}},\"dependentRequired\":{\"constructor\":[\"x\"]}}");
+    _sch_check_value_a(bote_req_begin(), hp, "v", "{}");
+    var h0 = alloc_used();
+    var hi = 0;
+    while (hi < 50) { _sch_check_value_a(bote_req_begin(), hp, "v", "{}"); hi = hi + 1; }
+    assert_eq(alloc_used() - h0, 0, "heap: fifty results refused by the prototype's names keep nothing");
+
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit_group(rc);

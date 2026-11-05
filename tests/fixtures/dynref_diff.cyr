@@ -1,0 +1,189 @@
+# dynref_diff.cyr — bote's registration and its judgement of a result against the official
+# client's own validator, over schemas built around references (static and dynamic, their
+# anchors and `$id`s) and values, from what tests/fixtures/dynref_diff_gen.cjs wrote to
+# build/dynref-diff/cases.txt (scripts/dynref-diff.sh runs both). For each schema: registration's
+# verdict (registry_check_tool_def, as an outputSchema) against whether the client compiles it
+# and, for a root that is no object, the form 2025-11-25 lists it in; bote's 2025-11-25 form
+# against the SDK's own (wrapOutputSchemaForLegacy); and for each schema both take, each
+# value's verdict, bote's against the client's on both forms. It exits 1 on a schema bote
+# takes that the client cannot compile, a form that differs, or a verdict that differs; a
+# schema bote refuses and the client takes is counted, not failed: registration says why.
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/regex.cyr"
+include "src/format.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _line(txt, i, len) { var j = i; while (j < len && load8(txt + j) != 10) { j = j + 1; } return j; }
+fn _tab(txt, i, e) { var j = i; while (j < e && load8(txt + j) != 9) { j = j + 1; } return j; }
+# The JSON string field [s, e) of the line, decoded.
+fn _field(txt, s, e) { return _sch_str_dec_a(default_alloc(), _slice_cstr(default_alloc(), txt, s, e - s)); }
+fn main() {
+    alloc_init();
+    var lo[8];
+    var txt = file_read_whole("build/dynref-diff/cases.txt", &lo);
+    var len = load64(&lo);
+    if (txt == 0 || len == 0) { println("dynref_diff: no build/dynref-diff/cases.txt"); return 2; }
+    var ar = bote_req_arena_new();
+    var i = 0;
+    var n = 0; var both = 0; var neither = 0; var danger = 0; var strict = 0; var wdiff = 0;
+    var vals = 0; var alike = 0; var takes = 0; var refuses = 0; var thrown = 0; var wmean = 0;
+    var cur = 0;
+    var curdoc = 0;
+    var tk = str_builder_new();
+    # Why bote refuses what the client takes: each reason's first 60 bytes, counted.
+    var why_n = map_new();
+    var why_k = vec_new();
+    while (i < len) {
+        var e = _line(txt, i, len);
+        var t1 = _tab(txt, i + 2, e);
+        var t2 = _tab(txt, t1 + 1, e);
+        var t3 = _tab(txt, t2 + 1, e);
+        if (load8(txt + i) == 83) {
+            cur = 0;
+            n = n + 1;
+            var doc = _field(txt, i + 2, t1);
+            curdoc = doc;
+            var c0 = load8(txt + t1 + 1);
+            var c1 = load8(txt + t2 + 1);
+            var w = 0 - 1;
+            if (doc != 0) { w = registry_check_tool_def(tool_def_with_output_schema(tool_def_new("t_dyn", "d", schema_new("object", 0, vec_new())), doc)); }
+            var client = 1;
+            if (c0 != 49 || (c1 != 45 && c1 != 49)) { client = 0; }
+            if (w == 0 && client == 1) {
+                both = both + 1;
+                cur = parse_property(doc);
+                if (c1 != 45) {
+                    var sdk = _field(txt, t3 + 1, e);
+                    var mine = _reg_output_legacy(doc);
+                    var mk[16];
+                    bote_arena_mark(ar, &mk);
+                    if (sdk == 0 || _sv_eq(ar, mine, strlen(mine), 0, sdk, strlen(sdk), 0, 1) == 0) {
+                        wdiff = wdiff + 1;
+                        if (wdiff < 10) { println(_cat(_cat("FORM DIFFERS ", doc), _cat(" bote ", mine))); }
+                    }
+                    bote_arena_release(ar, &mk);
+                }
+            } elif (w == 0) {
+                danger = danger + 1;
+                if (danger < 25) { println(_cat("TAKEN, CLIENT CANNOT COMPILE ", doc)); }
+                str_builder_add_cstr(tk, doc);
+                str_builder_add_cstr(tk, "\n");
+            } elif (client == 1) {
+                strict = strict + 1;
+                var wk = _slice_cstr(default_alloc(), w, 0, 60);
+                if (strlen(w) < 60) { wk = w; }
+                if (map_has(why_n, wk) == 0) { vec_push(why_k, wk); map_set(why_n, wk, 0); }
+                map_set(why_n, wk, map_get(why_n, wk) + 1);
+                if (strict < 15) { println(_cat(_cat("REFUSED, CLIENT TAKES ", doc), _cat(" : ", w))); }
+            } else { neither = neither + 1; }
+        } elif (cur != 0) {
+            vals = vals + 1;
+            var v = _field(txt, i + 2, t1);
+            var v0 = load8(txt + t1 + 1) - 48;
+            var v1 = load8(txt + t2 + 1);
+            var mk2[16];
+            bote_arena_mark(ar, &mk2);
+            var r = _sch_check_value_a(ar, cur, "result", v);
+            var bv = 0;
+            if (r == 0 || vec_len(r) == 0) { bv = 1; }
+            bote_arena_release(ar, &mk2);
+            if (v0 == 2) {
+                thrown = thrown + 1;
+                if (thrown < 10) { println(_cat(_cat("CLIENT THROWS ", curdoc), _cat(" on ", v))); }
+            } elif (bv == v0) { alike = alike + 1; }
+            else {
+                if (bv == 1) { takes = takes + 1; } else { refuses = refuses + 1; }
+                if (takes + refuses < 25) { println(_cat(_cat(_cat("VERDICT ", curdoc), _cat(" on ", v)), _cat(" client=", _sch_itoa(v0)))); }
+            }
+            if (v1 != 45 && v1 - 48 != v0) {
+                wmean = wmean + 1;
+                if (wmean < 10) { println(_cat(_cat("THE 2025-11-25 FORM JUDGES OTHERWISE ", curdoc), _cat(" on ", v))); }
+            }
+        }
+        i = e + 1;
+    }
+    # Every schema bote takes and the client cannot compile, one a line, for a closer look.
+    var tkb = str_builder_build(tk);
+    file_write_all("build/dynref-diff/taken.txt", str_data(tkb), strlen(str_data(tkb)));
+    println(_cat("schemas ", _sch_itoa(n)));
+    println(_cat("both take ", _sch_itoa(both)));
+    println(_cat("both refuse ", _sch_itoa(neither)));
+    println(_cat("bote takes, the client cannot compile it ", _sch_itoa(danger)));
+    println(_cat("bote refuses, the client takes ", _sch_itoa(strict)));
+    println(_cat("2025-11-25 forms that differ from the SDK's ", _sch_itoa(wdiff)));
+    var wi = 0;
+    while (wi < vec_len(why_k)) {
+        println(_cat(_cat("  refused for ", _sch_itoa(map_get(why_n, vec_get(why_k, wi)))), _cat(": ", vec_get(why_k, wi))));
+        wi = wi + 1;
+    }
+    println(_cat("values judged ", _sch_itoa(vals)));
+    println(_cat("judged alike ", _sch_itoa(alike)));
+    println(_cat("bote takes, the client refuses ", _sch_itoa(takes)));
+    println(_cat("bote refuses, the client takes ", _sch_itoa(refuses)));
+    println(_cat("the client throws judging it ", _sch_itoa(thrown)));
+    println(_cat("the 2025-11-25 form judged otherwise by the client ", _sch_itoa(wmean)));
+    if (danger != 0 || wdiff != 0 || takes != 0 || refuses != 0 || thrown != 0 || wmean != 0) { return 1; }
+    return 0;
+}
+var rc = main();
+sys_exit_group(rc);

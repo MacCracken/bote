@@ -569,6 +569,9 @@ fn registry_check_tool_def(tool_def) {
             j = j + 1;
         }
     }
+    # (3.8.14) An inputSchema given as JSON, for what the client's validator compiles of it.
+    var cwhy = _reg_check_input_compiled(tool_schema_json(schema));
+    if (cwhy != 0) { return cwhy; }
     # (3.8.10) A ToolSchema's references, resolved in the inputSchema tools/list sends,
     # written out only where a property may hold one.
     if (tool_schema_json(schema) == 0 && _reg_props_may_ref(props) == 1) {
@@ -577,8 +580,10 @@ fn registry_check_tool_def(tool_def) {
         var irw = _sch_refs_why(str_data(str_builder_build(isb)));
         if (irw != 0) { return _dsp_named_msg("the inputSchema ", irw, 0); }
     }
-    # (3.8.13) And its formats, as the client's Ajv compiles them.
-    if (tool_schema_json(schema) == 0 && _reg_props_may_format(props) == 1) {
+    # (3.8.13) And its formats, as the client's Ajv compiles them; (3.8.14) and every keyword's
+    # kind, `$id`s, anchors and dynamic references, which through 3.8.13 were checked only
+    # beside a format.
+    if (tool_schema_json(schema) == 0 && props != 0 && vec_len(props) > 0) {
         var fsb = str_builder_new();
         _emit_schema(fsb, schema);
         var ifw = _sch_compiled_why(str_data(str_builder_build(fsb)));
@@ -601,6 +606,11 @@ fn registry_check_tool_def(tool_def) {
         if (orw != 0) { return _dsp_named_msg("the outputSchema ", orw, 0); }
         var ofw = _sch_compiled_why(os);
         if (ofw != 0) { return _dsp_named_msg("the outputSchema ", ofw, 0); }
+        # (3.8.14) And the form 2025-11-25 lists it in, where its root is no object.
+        if (_reg_output_root_object(os) == 0) {
+            var olw = _sch_legacy_why(os);
+            if (olw != 0) { return _dsp_named_msg("the outputSchema ", olw, 0); }
+        }
     }
     var dwhy = bote_display_check(tool_def_title(tool_def), tool_def_icons(tool_def));
     if (dwhy != 0) { return dwhy; }
@@ -629,18 +639,6 @@ fn _reg_props_may_ref(props) {
     return 0;
 }
 
-# 1 when a property of `props` may name a format (3.8.13), so its listed form is checked.
-fn _reg_props_may_format(props) {
-    if (props == 0) { return 0; }
-    var i = 0;
-    while (i < vec_len(props)) {
-        var v = schema_prop_value(vec_get(props, i));
-        if (v != 0 && (strstr(v, "ormat") >= 0 || strstr(v, "\\u") >= 0)) { return 1; }
-        i = i + 1;
-    }
-    return 0;
-}
-
 fn _reg_utf8_ok(s) {
     var i = 0;
     while (load8(s + i) != 0) {
@@ -661,6 +659,19 @@ fn _reg_utf8_ok(s) {
 # no key twice in one object, none and no string holding a NUL, and a dialect bote knows.
 # The rest is checked on what was read from it, as for any ToolSchema: its `type`, as it
 # decodes, must be "object".
+# (3.8.14) Why an inputSchema given as JSON cannot be registered for what the official client's
+# validator compiles of it, or 0: its references, each resolved within it (3.8.10), and every
+# compiled schema's keywords (_sch_compiled_why). Asked after the checks of its own fields, so
+# each of those says what it says.
+fn _reg_check_input_compiled(js) {
+    if (js == 0) { return 0; }
+    var rw = _sch_refs_why(js);
+    if (rw != 0) { return _dsp_named_msg("the inputSchema ", rw, 0); }
+    var fw = _sch_compiled_why(js);
+    if (fw != 0) { return _dsp_named_msg("the inputSchema ", fw, 0); }
+    return 0;
+}
+
 fn _reg_check_input_json(js) {
     if (js == 0) { return 0; }
     if (jsonx_valid(js, strlen(js)) == 0) { return "the inputSchema is not valid JSON"; }
@@ -671,11 +682,6 @@ fn _reg_check_input_json(js) {
     if (_reg_dialect_known(js) == 0) {
         return "the inputSchema's $schema names a dialect bote does not support (2020-12, 2019-09, draft-07, draft-06)";
     }
-    # (3.8.10) Its references, each resolved within it.
-    var rw = _sch_refs_why(js);
-    if (rw != 0) { return _dsp_named_msg("the inputSchema ", rw, 0); }
-    var fw = _sch_compiled_why(js);
-    if (fw != 0) { return _dsp_named_msg("the inputSchema ", fw, 0); }
     var pr = jsonx_get_raw(js, "properties");
     if (pr != 0 && _vp_first_nonws(pr) != 123) { return "the inputSchema's properties must be an object"; }
     var rq = jsonx_get_raw(js, "required");
@@ -768,7 +774,8 @@ fn _reg_warn_kw(tool, key, kw) {
 # (3.8.7) const and uniqueItems too. (3.8.8) prefixItems, contains, propertyNames,
 # dependentRequired and dependentSchemas. (3.8.9) allOf, anyOf, oneOf, not, if, then, else.
 # (3.8.10) $ref, within its document. (3.8.11) pattern and multipleOf. (3.8.12) patternProperties.
-var BOTE_UNENFORCED = "$dynamicRef $recursiveRef unevaluatedProperties unevaluatedItems additionalItems dependencies formatMinimum formatMaximum formatExclusiveMinimum formatExclusiveMaximum ";
+# (3.8.14) $dynamicRef and $recursiveRef, where they name the root.
+var BOTE_UNENFORCED = "unevaluatedProperties unevaluatedItems additionalItems dependencies formatMinimum formatMaximum formatExclusiveMinimum formatExclusiveMaximum ";
 
 # Every WARN the schema `v`, at `key` of tool `tool`, earns: each keyword in `kws` it
 # holds, a type bote does not know, alone or in a type array, and a keyword it judges with a
@@ -781,9 +788,9 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
     # or to a client, which picks its validator by `$schema`.
     var late = 0;
     if (d != 2020) { late = _reg_words("prefixItems "); }
-    if (d == 7) { late = _reg_words("prefixItems minContains maxContains dependentRequired dependentSchemas "); }
+    if (d == 7) { late = _reg_words("prefixItems minContains maxContains dependentRequired dependentSchemas $dynamicRef $recursiveRef "); }
     if (d == 2019) { late = _reg_words("prefixItems "); }
-    if (d == 6) { late = _reg_words("prefixItems minContains maxContains dependentRequired dependentSchemas "); }
+    if (d == 6) { late = _reg_words("prefixItems minContains maxContains dependentRequired dependentSchemas $dynamicRef $recursiveRef "); }
     if (late != 0) {
         var li = 0;
         while (li < vec_len(late)) {
@@ -801,6 +808,10 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
             ii = ii + 1;
         }
     }
+    # (3.8.14) The official client's engines for 2019-09 and 2020-12 judge both dynamic
+    # references, where JSON Schema gives each dialect one.
+    if (d == 2020 && jsonx_has(v, "$recursiveRef") == 1) { _reg_warn_kw(tool, key, "$recursiveRef, which 2020-12 does not have and bote judges, as the official client does"); }
+    if (d == 2019 && jsonx_has(v, "$dynamicRef") == 1) { _reg_warn_kw(tool, key, "$dynamicRef, which 2019-09 does not have and bote judges, as the official client does"); }
     var k = 0;
     while (k < vec_len(kws)) {
         if (jsonx_has(v, vec_get(kws, k)) == 1) { _reg_warn_kw(tool, key, vec_get(kws, k)); }
@@ -981,8 +992,8 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
     var ci = 0;
     while (ci < vec_len(counts)) {
         var ck = vec_get(counts, ci);
-        if (jsonx_has(v, ck) == 1 && _sch_count_kw(v, ck) < 0) {
-            _reg_warn_kw(tool, key, _dsp_named_msg(ck, " that is no non-negative integer", 0));
+        if (jsonx_has(v, ck) == 1 && _sch_count_plain(v, ck) == 0) {
+            _reg_warn_kw(tool, key, _dsp_named_msg(ck, " that is no non-negative integer, judged as the official client compares it", 0));
         }
         ci = ci + 1;
     }
@@ -1128,8 +1139,9 @@ var BOTE_RESULT_REF = "{\"$ref\":\"#/properties/result\"}";
 
 # `v`, a part of an outputSchema, into `sb` with every reference to the document
 # moved under properties/result. `mode` is 0 where `v` is in a keyword's place, 1
-# where it is a map from names to schemas (properties, $defs), and 2 at the root,
-# whose `$schema` the wrapper carries instead. A value that is data (const, enum,
+# where it is a map from names to schemas (properties, $defs), and 2 at the root, whose
+# `$schema` the wrapper carries too: (3.8.14) the SDK keeps it inside as well, and through
+# 3.8.13 bote left it out there. A value that is data (const, enum,
 # default, examples) is copied as it is, and so is a subschema that starts a new
 # base. The rules are the official SDK's (wrapOutputSchemaForLegacy). `kw` holds
 # the two keyword lists, data at +0 and name maps at +8, and at +16 whether a
@@ -1180,7 +1192,6 @@ fn _reg_rw_refs(sb, v, mode, kw) {
         i = i + 3;
         # A key that decodes to hold a NUL names no keyword.
         if (k == 0) { k = ""; }
-        if (mode == 2 && streq(k, "$schema") == 1) { continue; }
         if (conv == 1 && streq(k, "$recursiveRef") == 1 && _reg_is_hash(val) == 1) { continue; }
         if (sep == 1) { str_builder_add_cstr(sb, ","); }
         sep = 1;

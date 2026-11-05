@@ -541,6 +541,21 @@ fn main() {
 
     # ---- registration ----
     var rd = dispatcher_new(tool_registry_new());
+    # (3.8.14, from the 3.8.13 review) A format named for one of JavaScript's Object.prototype:
+    # the client finds it in its plain object of formats, and throws judging by `valueOf`,
+    # refuses every string by `isPrototypeOf`, and cannot compile one beside formatMinimum.
+    var pnames = vec_new();
+    vec_push(pnames, "__proto__"); vec_push(pnames, "constructor"); vec_push(pnames, "hasOwnProperty"); vec_push(pnames, "isPrototypeOf");
+    vec_push(pnames, "propertyIsEnumerable"); vec_push(pnames, "toLocaleString"); vec_push(pnames, "toString"); vec_push(pnames, "valueOf");
+    vec_push(pnames, "__defineGetter__"); vec_push(pnames, "__defineSetter__"); vec_push(pnames, "__lookupGetter__"); vec_push(pnames, "__lookupSetter__");
+    var pni = 0;
+    while (pni < vec_len(pnames)) {
+        var pos = _cat3("{\"type\":\"string\",\"format\":\"", vec_get(pnames, pni), "\"}");
+        assert(_has(registry_check_tool_def(tool_def_with_output_schema(tool_def_new("rp", "d", schema_new("object", 0, vec_new())), pos)), "which the official client finds on JavaScript's Object.prototype") == 1, _cat("register: the format ", vec_get(pnames, pni)));
+        pni = pni + 1;
+    }
+    assert(_has(registry_check_tool_def(tool_def_with_output_schema(tool_def_new("rp", "d", schema_new("object", 0, vec_new())), "{\"type\":\"string\",\"format\":\"toString\",\"formatMinimum\":\"a\"}")), "names the format toString") == 1, "register: ...beside formatMinimum");
+    assert(registry_check_tool_def(tool_def_with_output_schema(tool_def_new("rp", "d", schema_new("object", 0, vec_new())), "{\"type\":\"string\",\"format\":\"tostring\"}")) == 0, "register: a name in another case is no member, and taken");
     _ase(registry_check_tool_def(tool_def_with_output_schema(tool_def_new("r1", "d", schema_new("object", 0, vec_new())), "{\"type\":\"string\",\"format\":5}")), "the outputSchema names a format that is no string, which the official client refuses", "register: a format that is no string refused");
     _ase(registry_check_tool_def(tool_def_with_output_schema(tool_def_new("r2", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"format\":\"date\",\"formatMaximum\":5}}}")), "the outputSchema formatMaximum that is no string, which the official client refuses", "register: formatMaximum that is no string");
     _ase(registry_check_tool_def(tool_def_with_output_schema(tool_def_new("r3", "d", schema_new("object", 0, vec_new())), "{\"formatMinimum\":\"x\"}")), "the outputSchema formatMinimum with no format beside it, which the official client refuses", "register: formatMinimum with no format");
@@ -613,6 +628,30 @@ fn main() {
     var at2 = _cat3("\"http://", ats2 + 1, "");
     assert(_bfm_ns3(BOTE_FMT_URL, at2) < 3 * _bfm_ns3(BOTE_FMT_URL, at1) + 200000, "budget: url with 60,000 @s, twice 30,000's time");
     assert_eq(bote_format_test_a(bote_req_begin(), BOTE_FMT_URL, at1, 1, strlen(at1) - 1, 0), 1, "budget: ...and taken, the last @ ending the userinfo");
+    # (3.8.14, from the 3.8.13 review) A host that parses after each `@`: each try looked through
+    # the rest of the string for white space before it looked for the path's `/`, so 16,000
+    # `x@a.bc/` took 14.7 s; and a valid url of 8,000 `a@b.cc:12`, 4.7 s.
+    var hx1 = _cat3("\"http://", _qend(_qrep("x@a.bc/", 8000), " ") + 1, "");
+    var hx2 = _cat3("\"http://", _qend(_qrep("x@a.bc/", 16000), " ") + 1, "");
+    assert(_bfm_ns3(BOTE_FMT_URL, hx2) < 3 * _bfm_ns3(BOTE_FMT_URL, hx1) + 200000, "budget: url with a host after each of 16,000 @s, twice 8,000's time");
+    assert_eq(bote_format_test_a(bote_req_begin(), BOTE_FMT_URL, hx2, 1, strlen(hx2) - 1, 0), 0, "budget: ...and refused, for the space");
+    var hv1 = _cat3("\"http://", _qend(_qrep("a@b.cc:12", 4000), "") + 1, "");
+    var hv2 = _cat3("\"http://", _qend(_qrep("a@b.cc:12", 8000), "") + 1, "");
+    assert(_bfm_ns3(BOTE_FMT_URL, hv2) < 3 * _bfm_ns3(BOTE_FMT_URL, hv1) + 200000, "budget: a valid url of 8,000 a@b.cc:12, twice 4,000's time");
+    assert_eq(bote_format_test_a(bote_req_begin(), BOTE_FMT_URL, hv2, 1, strlen(hv2) - 1, 0), 1, "budget: ...and taken, as the client takes it");
+    # (3.8.14, from the 3.8.13 review) A format's steps are charged a quarter: a uri's authority
+    # is about 41 steps a byte, and a valid uri with a host of 20,000 was refused for work.
+    var lh = _cat3("\"http://", _qend(_qrep("a", 20000), ".com") + 1, "");
+    var lbud[64];
+    store64(&lbud, _sch_budget(strlen(lh)));
+    assert_eq(bote_format_test_a(bote_req_begin(), BOTE_FMT_URI, lh, 1, strlen(lh) - 1, &lbud), 1, "budget: a uri with a host of 20,000, taken within its budget");
+    var lh2 = _cat3("\"http://", _qend(_qrep("1", 20000), "") + 1, "");
+    store64(&lbud, _sch_budget(strlen(lh2)));
+    assert_eq(bote_format_test_a(bote_req_begin(), BOTE_FMT_URI, lh2, 1, strlen(lh2) - 1, &lbud), 1, "budget: ...of 20,000 digits");
+    var lh3 = _cat3("\"//", _qend(_qrep("a", 20000), "") + 1, "");
+    store64(&lbud, _sch_budget(strlen(lh3)));
+    assert_eq(bote_format_test_a(bote_req_begin(), BOTE_FMT_URI_REFERENCE, lh3, 1, strlen(lh3) - 1, &lbud), 1, "budget: a uri-reference with an authority of 20,000");
+    assert(_ok("{\"format\":\"uri\"}", lh) == 1, "budget: ...and through the walk, as a value");
     var bud[64];
     store64(&bud, 1000);
     assert_eq(bote_format_test_a(bote_req_begin(), BOTE_FMT_DATE, u1, 1, strlen(u1) - 1, &bud), 0 - 1, "budget: a string read by hand charges its bytes, -1 past it");

@@ -55,7 +55,7 @@ var BOTE_RX_MAX_COUNT = 10000;
 var BOTE_RX_SPARSE_FROM = 64;
 
 # ================================================================
-# Regex (40 bytes):
+# Regex (48 bytes):
 #   +0  insns     the program, 24 bytes a step: +0 the op, +8 and +16 its operands
 #                 (CHAR: the code point; CLASS: its ranges and 1 when negated; SPLIT: both
 #                 targets; JMP: the target)
@@ -63,25 +63,36 @@ var BOTE_RX_SPARSE_FROM = 64;
 #   +16 why       0 when it compiled, else why bote's engine does not take the pattern
 #   +24 anchored  1 when every match starts at the string's start (a leading `^`)
 #   +32 names     (3.8.13) 1 when two groups share a name, in two alternatives
+#   +40 refused   (3.8.14) 1 when `why` says JavaScript refuses the pattern with the u flag,
+#                 0 when bote's engine only declines one JavaScript takes
 #
 # A class's ranges are one array: +0 how many, then each range's first and last code point.
 # ================================================================
 
 fn bote_rx_why(rx) { return load64(rx + 16); }
+fn bote_rx_refused(rx) { return load64(rx + 40); }
 fn bote_rx_count(rx) { return load64(rx + 8); }
 
 # ---- Parsing --------------------------------------------------------------------------
 #
-# The parser's state (80 bytes): +0 the pattern's code points, +8 how many, +16 where it
+# The parser's state (112 bytes): +0 the pattern's code points, +8 how many, +16 where it
 # reads, +24 why it stopped, +32 how deep its groups are, +40 the named groups so far, each
 # name in the order it was given, +48 how many of each name's groups can take part in a match
 # with a group from here (a map), +56 1 once a name has been given twice at all, +64 the
 # allocator everything here comes from (the compile's arena), +72 the allocator a class's
-# ranges, which the program keeps, come from. A node (32 bytes): +0 its kind, +8 and +16 its
-# operands, +24 its child or its children's vec.
+# ranges, which the program keeps, come from; (3.8.14, from the 3.8.13 review) +80 why bote's
+# engine declines the pattern, which JavaScript takes, or 0, +88 how many capturing groups,
+# +96 each backreference, two words (its number, or 0 and its name), or 0 for none yet, +104
+# 1 when +24 is a decline that stopped the parse (groups nested past bote's bound). A node (32
+# bytes): +0 its kind, +8 and +16 its operands, +24 its child or its children's vec.
 #
-# (3.8.13, from the 3.8.12 review) A pattern is compiled on the calling thread's request
-# arena and only its program kept: `^p0.{0,2000}$` kept 382 KB of the heap for good, the code
+# (3.8.14, from the 3.8.13 review) A construct the engine declines is read through, every
+# part of it, so what JavaScript refuses after it, or in it, is found: through 3.8.13 the
+# parse stopped at a lookahead, and `(?=a)*`, which the u flag refuses, was declined as a
+# lookahead, and registration took it.
+#
+# (3.8.13, from the 3.8.12 review) A pattern is compiled on the heap forms' scratch and only
+# its program kept: `^p0.{0,2000}$` kept 382 KB of the heap for good, the code
 # generation's vec at each size it grew to beside the program's copy, and registration
 # compiled each pattern twice.
 #
@@ -103,6 +114,30 @@ fn _brx_node(ps, kind, a, b, c) {
 fn _brx_fail(ps, why) {
     if (load64(ps + 24) == 0) { store64(ps + 24, why); }
     return _brx_node(ps, BOTE_RXN_EMPTY, 0, 0, 0);
+}
+
+# A construct JavaScript takes and bote's engine does not (3.8.14): noted, and the parse goes
+# on, so what follows is read as the u flag reads it.
+fn _brx_decline(ps, why) {
+    if (load64(ps + 80) == 0) { store64(ps + 80, why); }
+    return _brx_node(ps, BOTE_RXN_EMPTY, 0, 0, 0);
+}
+
+# A decline the parse cannot go past: groups nested deeper than its stack is bounded for.
+fn _brx_stop_decline(ps, why) {
+    if (load64(ps + 24) == 0) { store8(ps + 104, 1); }
+    _brx_decline(ps, why);
+    return _brx_fail(ps, why);
+}
+
+# A backreference by number (`num`), or by name (`num` 0, `name`), checked once the pattern is
+# read: the u flag refuses one that names no group.
+fn _brx_backref(ps, num, name) {
+    var a = load64(ps + 64);
+    if (load64(ps + 96) == 0) { store64(ps + 96, vec_new_a(a)); }
+    vec_push_a(a, load64(ps + 96), num);
+    vec_push_a(a, load64(ps + 96), name);
+    return 0;
 }
 
 fn _brx_peek_at(ps, k) {
@@ -212,12 +247,44 @@ fn _brx_term(ps) {
     }
     if (c == 40 && c1 == 63) {
         var c2 = _brx_peek_at(ps, 2);
-        if (c2 == 61 || c2 == 33) { return _brx_fail(ps, "a lookahead"); }
-        if (c2 == 60 && (_brx_peek_at(ps, 3) == 61 || _brx_peek_at(ps, 3) == 33)) { return _brx_fail(ps, "a lookbehind"); }
+        var look = 0;
+        if (c2 == 61 || c2 == 33) { look = 3; }
+        elif (c2 == 60 && (_brx_peek_at(ps, 3) == 61 || _brx_peek_at(ps, 3) == 33)) { look = 4; }
+        if (look != 0) {
+            # (3.8.14) Read through: its alternatives, its close, and a quantifier after it,
+            # which the u flag refuses on any assertion.
+            if (look == 3) { _brx_decline(ps, "a lookahead"); }
+            else { _brx_decline(ps, "a lookbehind"); }
+            if (load64(ps + 32) >= BOTE_RX_MAX_DEPTH) { return _brx_stop_decline(ps, "groups nested past bote's bound"); }
+            store64(ps + 16, load64(ps + 16) + look);
+            store64(ps + 32, load64(ps + 32) + 1);
+            _brx_disj(ps);
+            store64(ps + 32, load64(ps + 32) - 1);
+            if (load64(ps + 24) != 0) { return _brx_node(ps, BOTE_RXN_EMPTY, 0, 0, 0); }
+            if (_brx_take(ps) != 41) { return _brx_fail(ps, "an unterminated group"); }
+            if (_brx_quant_next(ps) == 1) { return _brx_fail(ps, "a quantifier on an assertion"); }
+            return _brx_node(ps, BOTE_RXN_EMPTY, 0, 0, 0);
+        }
     }
     var atom = _brx_atom(ps);
     if (load64(ps + 24) != 0) { return atom; }
     return _brx_quant(ps, atom);
+}
+
+# The decimal digits at [s1, e1) of the pattern against those at [s2, e2), by value: below 0,
+# 0 or above 0.
+fn _brx_digits_cmp(ps, s1, e1, s2, e2) {
+    var cps = load64(ps);
+    while (s1 < e1 - 1 && load64(cps + s1 * 8) == 48) { s1 = s1 + 1; }
+    while (s2 < e2 - 1 && load64(cps + s2 * 8) == 48) { s2 = s2 + 1; }
+    if (e1 - s1 != e2 - s2) { return (e1 - s1) - (e2 - s2); }
+    while (s1 < e1) {
+        var d = load64(cps + s1 * 8) - load64(cps + s2 * 8);
+        if (d != 0) { return d; }
+        s1 = s1 + 1;
+        s2 = s2 + 1;
+    }
+    return 0;
 }
 
 # Digits at the parser as a number, held at BOTE_RX_MAX_COUNT + 1; -1 for none.
@@ -243,25 +310,33 @@ fn _brx_quant(ps, atom) {
     elif (c == 63) { _brx_take(ps); mx = 1; }
     elif (c == 123) {
         _brx_take(ps);
+        var ns = load64(ps + 16);
         mn = _brx_number(ps);
         if (mn < 0) { return _brx_fail(ps, "a { that begins no quantifier"); }
+        var ne = load64(ps + 16);
+        var xs = ns;
+        var xe = ne;
         mx = mn;
         if (_brx_peek(ps) == 44) {
             _brx_take(ps);
             if (_brx_peek(ps) == 125) { mx = 0 - 1; }
             else {
+                xs = load64(ps + 16);
                 mx = _brx_number(ps);
                 if (mx < 0) { return _brx_fail(ps, "a { that begins no quantifier"); }
+                xe = load64(ps + 16);
             }
         }
         if (_brx_peek(ps) != 125) { return _brx_fail(ps, "a { that begins no quantifier"); }
         _brx_take(ps);
-        if (mx >= 0 && mx < mn) { return _brx_fail(ps, "a quantifier whose bounds are out of order"); }
+        # (3.8.14) Past bote's bound each number is held at it, so two such are compared as
+        # written: `a{20000,10001}` the u flag refuses.
+        if (mx >= 0 && (mx < mn || (mn > BOTE_RX_MAX_COUNT && _brx_digits_cmp(ps, xs, xe, ns, ne) < 0))) { return _brx_fail(ps, "a quantifier whose bounds are out of order"); }
     } else { return atom; }
     # A lazy quantifier matches the same strings.
     if (_brx_peek(ps) == 63) { _brx_take(ps); }
     if (_brx_quant_next(ps) == 1) { return _brx_fail(ps, "a quantifier on a quantifier"); }
-    if (mn > BOTE_RX_MAX_COUNT || mx > BOTE_RX_MAX_COUNT) { return _brx_fail(ps, "a quantifier past bote's bound"); }
+    if (mn > BOTE_RX_MAX_COUNT || mx > BOTE_RX_MAX_COUNT) { return _brx_decline(ps, "a quantifier past bote's bound"); }
     if (load64(atom) == BOTE_RXN_EMPTY || mx == 0) { return _brx_node(ps, BOTE_RXN_EMPTY, 0, 0, 0); }
     return _brx_node(ps, BOTE_RXN_REP, mn, mx, atom);
 }
@@ -283,27 +358,26 @@ fn _brx_name_start(c) {
 }
 
 fn _brx_group(ps) {
-    if (load64(ps + 32) >= BOTE_RX_MAX_DEPTH) { return _brx_fail(ps, "groups nested past bote's bound"); }
+    if (load64(ps + 32) >= BOTE_RX_MAX_DEPTH) { return _brx_stop_decline(ps, "groups nested past bote's bound"); }
     if (_brx_peek(ps) == 63) {
         _brx_take(ps);
         var g = _brx_take(ps);
         if (g == 60) {
             # A named group, matched as any group is.
-            var ns = load64(ps + 16);
-            var nc = _brx_take(ps);
-            if (_brx_name_start(nc) == 0) { return _brx_fail(ps, "a group name bote's engine does not take"); }
-            nc = _brx_take(ps);
-            while (nc != 62) {
-                if (_brx_name_start(nc) == 0 && (nc < 48 || nc > 57)) { return _brx_fail(ps, "a group name bote's engine does not take"); }
-                nc = _brx_take(ps);
-            }
-            if (_brx_name_clash(ps, ns, load64(ps + 16) - 1 - ns) == 1) {
+            var gnm = _brx_group_name(ps);
+            if (load64(ps + 24) != 0) { return _brx_node(ps, BOTE_RXN_EMPTY, 0, 0, 0); }
+            store64(ps + 88, load64(ps + 88) + 1);
+            if (_brx_name_clash(ps, gnm) == 1) {
                 return _brx_fail(ps, "two groups named alike that can both match, which the u flag refuses");
             }
         } elif (g != 58) {
-            return _brx_fail(ps, "an inline modifier or a group bote's engine does not take");
+            # (3.8.14) An inline modifier, `(?ims-ims:...)` (ES2025), JavaScript takes, and
+            # bote's engine does not; any other `(?` the u flag refuses.
+            store64(ps + 16, load64(ps + 16) - 1);
+            if (_brx_modifiers(ps) == 0) { return _brx_fail(ps, "a group the u flag refuses"); }
+            _brx_decline(ps, "an inline modifier");
         }
-    }
+    } else { store64(ps + 88, load64(ps + 88) + 1); }
     store64(ps + 32, load64(ps + 32) + 1);
     var inner = _brx_disj(ps);
     store64(ps + 32, load64(ps + 32) - 1);
@@ -312,7 +386,115 @@ fn _brx_group(ps) {
     return inner;
 }
 
-# (3.8.12, from the 3.8.11 review) 1 when the name of `nl` code points at `ns` was given to
+# (3.8.14) A group's name after `(?<` or `\\k<`, through its `>`, as it decodes: a cstr of its
+# UTF-8 on the compile's arena, its `\\u` escapes read (a surrogate pair as one), or 0 with the
+# parser stopped (a syntax error) when the u flag refuses it: an empty name, an unterminated
+# one, an ASCII character no identifier holds, a first character that is a digit, an escape
+# that is no `\\u` escape, or a lone surrogate. Whether a character past ASCII is one an
+# identifier may hold bote does not read, and the name is declined.
+fn _brx_group_name(ps) {
+    var a = load64(ps + 64);
+    var room = (load64(ps + 8) - load64(ps + 16)) * 4 + 8;
+    var nm = alloc_via(a, room);
+    var o = 0;
+    var nc = _brx_take(ps);
+    if (nc == 62) { _brx_fail(ps, "an empty group name, which the u flag refuses"); return 0; }
+    var plain = 1;
+    var first = 1;
+    while (nc != 62) {
+        if (nc < 0) { _brx_fail(ps, "an unterminated group name"); return 0; }
+        var cp = nc;
+        if (nc == 92) {
+            if (_brx_take(ps) != 117) { _brx_fail(ps, "an escape in a group name the u flag refuses"); return 0; }
+            cp = _brx_name_escape(ps);
+            if (cp < 0) { return 0; }
+            if (cp >= 55296 && cp <= 56319 && _brx_peek(ps) == 92 && _brx_peek_at(ps, 1) == 117) {
+                var mark = load64(ps + 16);
+                _brx_take(ps);
+                _brx_take(ps);
+                var lo = _brx_name_escape(ps);
+                if (lo >= 56320 && lo <= 57343) { cp = 65536 + (cp - 55296) * 1024 + (lo - 56320); }
+                else {
+                    if (load64(ps + 24) != 0) { return 0; }
+                    store64(ps + 16, mark);
+                }
+            }
+        }
+        if (cp >= 55296 && cp <= 57343) { _brx_fail(ps, "a group name the u flag refuses"); return 0; }
+        if (cp >= 128) { plain = 0; }
+        elif (_brx_name_start(cp) == 0 && (first == 1 || cp < 48 || cp > 57)) {
+            _brx_fail(ps, "a group name the u flag refuses");
+            return 0;
+        }
+        o = _brx_put_utf8(nm, o, cp);
+        first = 0;
+        nc = _brx_take(ps);
+    }
+    store8(nm + o, 0);
+    if (plain == 0) { _brx_decline(ps, "a group name bote's engine does not take"); }
+    return nm;
+}
+
+# The code point of a `\\u` escape in a group name, after its `u`: four hex digits or `{hex}`,
+# or -1 with the parser stopped.
+fn _brx_name_escape(ps) {
+    if (_brx_peek(ps) == 123) {
+        _brx_take(ps);
+        var v = 0;
+        var nd = 0;
+        while (_brx_hex(_brx_peek(ps)) >= 0) {
+            v = v * 16 + _brx_hex(_brx_take(ps));
+            nd = nd + 1;
+            if (v > 1114111) { _brx_fail(ps, "an escape in a group name the u flag refuses"); return 0 - 1; }
+        }
+        if (nd == 0 || _brx_take(ps) != 125) { _brx_fail(ps, "an escape in a group name the u flag refuses"); return 0 - 1; }
+        return v;
+    }
+    var u = _brx_hex4(ps, 0);
+    if (u < 0) { _brx_fail(ps, "an escape in a group name the u flag refuses"); return 0 - 1; }
+    store64(ps + 16, load64(ps + 16) + 4);
+    return u;
+}
+
+# The code point `cp` as UTF-8 at buf[o], and where it ends.
+fn _brx_put_utf8(buf, o, cp) {
+    if (cp < 128) { store8(buf + o, cp); return o + 1; }
+    if (cp < 2048) { store8(buf + o, 192 | (cp >> 6)); store8(buf + o + 1, 128 | (cp & 63)); return o + 2; }
+    if (cp < 65536) { store8(buf + o, 224 | (cp >> 12)); store8(buf + o + 1, 128 | ((cp >> 6) & 63)); store8(buf + o + 2, 128 | (cp & 63)); return o + 3; }
+    store8(buf + o, 240 | (cp >> 18));
+    store8(buf + o + 1, 128 | ((cp >> 12) & 63));
+    store8(buf + o + 2, 128 | ((cp >> 6) & 63));
+    store8(buf + o + 3, 128 | (cp & 63));
+    return o + 4;
+}
+
+# (3.8.14) `(?` then flags and a `:` as an inline modifier is written (ES2025): `i`, `m` or
+# `s`, each once, perhaps a `-` and more, never none on both sides. 1 when it is one, read
+# through the `:`; 0 when it is not, the parser where it stopped.
+fn _brx_modifiers(ps) {
+    var seen = 0;
+    var on = 0;
+    var off = 0;
+    var neg = 0;
+    var c = _brx_take(ps);
+    while (c != 58) {
+        if (c == 45 && neg == 0) { neg = 1; }
+        else {
+            var b = 0;
+            if (c == 105) { b = 1; }
+            elif (c == 109) { b = 2; }
+            elif (c == 115) { b = 4; }
+            if (b == 0 || (seen & b) != 0) { return 0; }
+            seen = seen | b;
+            if (neg == 0) { on = on + 1; } else { off = off + 1; }
+        }
+        c = _brx_take(ps);
+    }
+    if (on == 0 && off == 0) { return 0; }
+    return 1;
+}
+
+# (3.8.12, from the 3.8.11 review) 1 when the name `nm` (3.8.14: decoded, _brx_group_name) was given to
 # a group before that can take part in the same match as this one, which ECMA-262 refuses
 # (MightBothParticipate): two groups may share a name only from two alternatives of one
 # disjunction. (3.8.13, from the 3.8.12 review) Each name keeps a count of its groups that
@@ -320,13 +502,8 @@ fn _brx_group(ps) {
 # its names out when the next begins and gives every one back when the disjunction ends
 # (_brx_names_seen), so a name costs one look, where through 3.8.12 each was compared with
 # every name before it, 13 s for 32,000 groups. The name is recorded.
-fn _brx_name_clash(ps, ns, nl) {
+fn _brx_name_clash(ps, nm) {
     var a = load64(ps + 64);
-    var cps = load64(ps);
-    var nm = alloc_via(a, nl + 1);
-    var k = 0;
-    while (k < nl) { store8(nm + k, load64(cps + (ns + k) * 8)); k = k + 1; }
-    store8(nm + nl, 0);
     var vis = load64(ps + 48);
     var clash = 0;
     if (map_has(vis, nm) == 1) {
@@ -409,6 +586,26 @@ fn _brx_char_escape(ps, c, cls) {
     return 0 - 1;
 }
 
+# (3.8.14) What follows `\\p` or `\\P`, as the u flag requires it written: `{`, a name of
+# letters and `_`, perhaps `=` and a value of letters, digits and `_`, and `}`. 1 when it is,
+# read through the `}`; 0 with the parser stopped. Whether the name is one ECMA-262 knows
+# bote does not read, and the escape is declined.
+fn _brx_property(ps) {
+    if (_brx_take(ps) != 123) { _brx_fail(ps, "a \\p not followed by {, which the u flag refuses"); return 0; }
+    var c = _brx_take(ps);
+    var n = 0;
+    while ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95) { n = n + 1; c = _brx_take(ps); }
+    if (n == 0) { _brx_fail(ps, "a Unicode property escape the u flag refuses"); return 0; }
+    if (c == 61) {
+        var m = 0;
+        c = _brx_take(ps);
+        while ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95) { m = m + 1; c = _brx_take(ps); }
+        if (m == 0) { _brx_fail(ps, "a Unicode property escape the u flag refuses"); return 0; }
+    }
+    if (c != 125) { _brx_fail(ps, "a Unicode property escape the u flag refuses"); return 0; }
+    return 1;
+}
+
 # Four hex digits `k` past the parser's place, or -1.
 fn _brx_hex4(ps, k) {
     var v = 0;
@@ -430,9 +627,29 @@ fn _brx_escape(ps) {
         _brx_builtin(ps, r, c);
         return _brx_node(ps, BOTE_RXN_CLASS, _brx_flat(ps, r), 0, 0);
     }
-    if (c == 112 || c == 80) { return _brx_fail(ps, "a Unicode property escape"); }
-    if (c == 107) { return _brx_fail(ps, "a named backreference"); }
-    if (c >= 49 && c <= 57) { return _brx_fail(ps, "a backreference"); }
+    if (c == 112 || c == 80) {
+        if (_brx_property(ps) == 0) { return _brx_node(ps, BOTE_RXN_EMPTY, 0, 0, 0); }
+        return _brx_decline(ps, "a Unicode property escape");
+    }
+    if (c == 107) {
+        # (3.8.14) `\\k<name>`, which the u flag requires to name a group of the pattern.
+        if (_brx_take(ps) != 60) { return _brx_fail(ps, "a \\k not followed by a group name, which the u flag refuses"); }
+        var knm = _brx_group_name(ps);
+        if (load64(ps + 24) != 0) { return _brx_node(ps, BOTE_RXN_EMPTY, 0, 0, 0); }
+        _brx_backref(ps, 0, knm);
+        return _brx_decline(ps, "a named backreference");
+    }
+    if (c >= 49 && c <= 57) {
+        # (3.8.14) A decimal escape, every digit of it, which the u flag requires to name a
+        # capturing group of the pattern.
+        var bn = c - 48;
+        while (_brx_peek(ps) >= 48 && _brx_peek(ps) <= 57) {
+            if (bn <= BOTE_RX_MAX_COUNT) { bn = bn * 10 + (_brx_peek(ps) - 48); }
+            _brx_take(ps);
+        }
+        _brx_backref(ps, bn, 0);
+        return _brx_decline(ps, "a backreference");
+    }
     if (c == 48) {
         var d = _brx_peek(ps);
         if (d >= 48 && d <= 57) { return _brx_fail(ps, "a \\0 followed by a digit, which the u flag refuses"); }
@@ -555,7 +772,11 @@ fn _brx_class_atom(ps, r) {
     var e = _brx_take(ps);
     if (e < 0) { _brx_fail(ps, "an unterminated character class"); return 0 - 1; }
     if (e == 100 || e == 68 || e == 115 || e == 83 || e == 119 || e == 87) { _brx_builtin(ps, r, e); return 0 - 2; }
-    if (e == 112 || e == 80) { _brx_fail(ps, "a Unicode property escape"); return 0 - 1; }
+    if (e == 112 || e == 80) {
+        if (_brx_property(ps) == 0) { return 0 - 1; }
+        _brx_decline(ps, "a Unicode property escape");
+        return 0 - 2;
+    }
     if (e == 48) {
         var d = _brx_peek(ps);
         if (d >= 48 && d <= 57) { _brx_fail(ps, "a \\0 followed by a digit, which the u flag refuses"); return 0 - 1; }
@@ -681,6 +902,33 @@ fn _brx_gen(cg, nd) {
     return 0;
 }
 
+# (3.8.14) Each backreference names a group of the pattern, as the u flag requires: a number
+# no larger than its capturing groups, and a name one of them is given (unless a name is one
+# bote does not read, when it cannot be sure).
+fn _brx_check_backrefs(ps) {
+    var br = load64(ps + 96);
+    if (br == 0) { return 0; }
+    var i = 0;
+    while (i < vec_len(br)) {
+        var num = vec_get(br, i);
+        var name = vec_get(br, i + 1);
+        if (num > 0 && num > load64(ps + 88)) { _brx_fail(ps, "a backreference to no group, which the u flag refuses"); return 0; }
+        if (num == 0 && _brx_name_given(ps, name) == 0) { _brx_fail(ps, "a named backreference to no group, which the u flag refuses"); return 0; }
+        i = i + 2;
+    }
+    return 0;
+}
+
+fn _brx_name_given(ps, name) {
+    var decls = load64(ps + 40);
+    var i = 0;
+    while (i < vec_len(decls)) {
+        if (streq(vec_get(decls, i), name) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # 1 when the tree's every match starts with `^`.
 fn _brx_anchored(nd) {
     var kind = load64(nd);
@@ -694,8 +942,8 @@ fn _brx_anchored(nd) {
 # src/schema.cyr, under its own lock, so a compile on any thread is safe) and given back; the
 # Regex, its program and its classes' ranges are on the heap.
 fn bote_rx_compile(src) {
-    var rx = alloc(40);
-    memset(rx, 0, 40);
+    var rx = alloc(48);
+    memset(rx, 0, 48);
     if (src == 0) { store64(rx + 16, "no pattern"); return rx; }
     var mk[16];
     var a = _sch_scratch_take(&mk);
@@ -718,15 +966,34 @@ fn bote_rx_why_of(src, names_out) {
     return why;
 }
 
+# (3.8.14) Why JavaScript's RegExp refuses the pattern `src` with the u flag, as the official
+# client compiles a `pattern` (Ajv: `new RegExp(p, "u")`), or 0 when it takes it, whether or
+# not bote's engine does. A compile that keeps nothing.
+fn bote_rx_refused_of(src) {
+    if (src == 0) { return 0; }
+    var refused[8];
+    store64(&refused, 0);
+    var mk[16];
+    var a = _sch_scratch_take(&mk);
+    var why = _brx_compile_r(a, a, src, 0, 0, &refused);
+    _sch_scratch_give(&mk);
+    if (why != 0 && load64(&refused) == 1) { return why; }
+    return 0;
+}
+
 # (3.8.13) 1 when two groups of the pattern share a name, in two alternatives: ECMA-262 takes
 # it since 2025, and JavaScript engines before that (Node before 23) refuse the pattern.
 fn bote_rx_names_twice(rx) { return load64(rx + 32); }
 
 # Compile `src` on `a`, its classes' ranges on `keep`, into `rx` (or nowhere, for 0): why it
 # is no pattern bote's engine takes, or 0; whether a name is given twice to *names_out.
-fn _brx_compile_on(a, keep, src, rx, names_out) {
-    var ps = alloc_via(a, 80);
-    memset(ps, 0, 80);
+fn _brx_compile_on(a, keep, src, rx, names_out) { return _brx_compile_r(a, keep, src, rx, names_out, 0); }
+
+# _brx_compile_on, with 1 written to *refused (when it is not 0) for a pattern JavaScript
+# refuses with the u flag (3.8.14).
+fn _brx_compile_r(a, keep, src, rx, names_out, refused) {
+    var ps = alloc_via(a, 112);
+    memset(ps, 0, 112);
     var nn[8];
     store64(ps, _brx_cps(a, src, &nn));
     store64(ps + 8, load64(&nn));
@@ -736,7 +1003,15 @@ fn _brx_compile_on(a, keep, src, rx, names_out) {
     store64(ps + 72, keep);
     var root = _brx_disj(ps);
     if (load64(ps + 24) == 0 && load64(ps + 16) < load64(ps + 8)) { _brx_fail(ps, "an unmatched )"); }
-    if (load64(ps + 24) != 0) { return load64(ps + 24); }
+    if (load64(ps + 24) == 0) { _brx_check_backrefs(ps); }
+    if (load64(ps + 24) != 0) {
+        if (load8(ps + 104) == 0) {
+            if (rx != 0) { store64(rx + 40, 1); }
+            if (refused != 0) { store64(refused, 1); }
+        }
+        return load64(ps + 24);
+    }
+    if (load64(ps + 80) != 0) { return load64(ps + 80); }
     if (names_out != 0) { store64(names_out, load64(ps + 56)); }
     var cg = alloc_via(a, 24);
     store64(cg, vec_new_a(a));
