@@ -50,17 +50,19 @@ enum BoteRxNode {
 var BOTE_RX_MAX_INSNS = 4096;
 var BOTE_RX_MAX_DEPTH = 64;
 var BOTE_RX_MAX_COUNT = 10000;
-# (3.8.12) How many of a match's marks, cleared, cost one of the budget.
-var BOTE_RX_CLEAR_WORDS = 8;
+# (3.8.13) The longest program whose steps seen are an array cleared at each match; a longer
+# one's are a sparse set.
+var BOTE_RX_SPARSE_FROM = 64;
 
 # ================================================================
-# Regex (32 bytes):
+# Regex (40 bytes):
 #   +0  insns     the program, 24 bytes a step: +0 the op, +8 and +16 its operands
 #                 (CHAR: the code point; CLASS: its ranges and 1 when negated; SPLIT: both
 #                 targets; JMP: the target)
 #   +8  count     how many steps
 #   +16 why       0 when it compiled, else why bote's engine does not take the pattern
 #   +24 anchored  1 when every match starts at the string's start (a leading `^`)
+#   +32 names     (3.8.13) 1 when two groups share a name, in two alternatives
 #
 # A class's ranges are one array: +0 how many, then each range's first and last code point.
 # ================================================================
@@ -70,13 +72,18 @@ fn bote_rx_count(rx) { return load64(rx + 8); }
 
 # ---- Parsing --------------------------------------------------------------------------
 #
-# The parser's state (72 bytes): +0 the pattern's code points, +8 how many, +16 where it
-# reads, +24 why it stopped, +32 how deep its groups are, +40 the alternatives it is in (a
-# vec of two words for each disjunction around the place it reads: the disjunction's number
-# and which of its alternatives), +48 the named groups so far (three words each: where the
-# name starts, its length, the alternatives it was in, copied), +56 the next disjunction's
-# number. A node (32 bytes): +0 its kind, +8 and +16 its operands, +24 its child or its
-# children's vec.
+# The parser's state (80 bytes): +0 the pattern's code points, +8 how many, +16 where it
+# reads, +24 why it stopped, +32 how deep its groups are, +40 the named groups so far, each
+# name in the order it was given, +48 how many of each name's groups can take part in a match
+# with a group from here (a map), +56 1 once a name has been given twice at all, +64 the
+# allocator everything here comes from (the compile's arena), +72 the allocator a class's
+# ranges, which the program keeps, come from. A node (32 bytes): +0 its kind, +8 and +16 its
+# operands, +24 its child or its children's vec.
+#
+# (3.8.13, from the 3.8.12 review) A pattern is compiled on the calling thread's request
+# arena and only its program kept: `^p0.{0,2000}$` kept 382 KB of the heap for good, the code
+# generation's vec at each size it grew to beside the program's copy, and registration
+# compiled each pattern twice.
 #
 # (3.8.12, from the 3.8.11 review) What matches only the empty string is one EMPTY node: a
 # concatenation leaves it out, a quantifier on it or with a bound of 0 is it, and so is an
@@ -84,8 +91,8 @@ fn bote_rx_count(rx) { return load64(rx + 8); }
 # quantifier's copies are bounded by the program's: `((a{0}){10000}){10000}` compiled each
 # of its 10^8 empty copies, and a third level would not end.
 
-fn _brx_node(kind, a, b, c) {
-    var n = alloc(32);
+fn _brx_node(ps, kind, a, b, c) {
+    var n = alloc_via(load64(ps + 64), 32);
     store64(n, kind);
     store64(n + 8, a);
     store64(n + 16, b);
@@ -95,7 +102,7 @@ fn _brx_node(kind, a, b, c) {
 
 fn _brx_fail(ps, why) {
     if (load64(ps + 24) == 0) { store64(ps + 24, why); }
-    return _brx_node(BOTE_RXN_EMPTY, 0, 0, 0);
+    return _brx_node(ps, BOTE_RXN_EMPTY, 0, 0, 0);
 }
 
 fn _brx_peek_at(ps, k) {
@@ -112,9 +119,9 @@ fn _brx_take(ps) {
 
 # The code points of the UTF-8 cstr `src` (text: _sch_str_dec_a decoded it), their number
 # at *out_n.
-fn _brx_cps(src, out_n) {
+fn _brx_cps(a, src, out_n) {
     var n = strlen(src);
-    var cps = alloc(n * 8 + 8);
+    var cps = alloc_via(a, n * 8 + 8);
     var i = 0;
     var k = 0;
     while (i < n) {
@@ -142,42 +149,45 @@ fn _brx_hex(c) {
 }
 
 fn _brx_disj(ps) {
-    var path = load64(ps + 40);
-    var id = load64(ps + 56);
-    store64(ps + 56, id + 1);
-    vec_push(path, id);
-    vec_push(path, 0);
+    var a = load64(ps + 64);
+    var decls = load64(ps + 40);
+    var dstart = vec_len(decls);
+    var astart = dstart;
     var first = _brx_alt(ps);
     var v = 0;
     var full = 0;
     if (load64(first) != BOTE_RXN_EMPTY) { full = 1; }
     if (_brx_peek(ps) == 124) {
-        v = vec_new();
-        vec_push(v, first);
+        v = vec_new_a(a);
+        vec_push_a(a, v, first);
         while (_brx_peek(ps) == 124 && load64(ps + 24) == 0) {
             _brx_take(ps);
-            vec_set(path, vec_len(path) - 1, vec_get(path, vec_len(path) - 1) + 1);
+            # The alternative just read: its names cannot take part with the next's.
+            _brx_names_seen(ps, astart, vec_len(decls), 0 - 1);
+            astart = vec_len(decls);
             var nx = _brx_alt(ps);
             if (load64(nx) != BOTE_RXN_EMPTY) { full = 1; }
-            vec_push(v, nx);
+            vec_push_a(a, v, nx);
         }
     }
-    vec_truncate(path, vec_len(path) - 2);
+    # Past the disjunction, every name in it can take part with what follows.
+    _brx_names_seen(ps, dstart, astart, 1);
     if (v == 0 || full == 0) { return first; }
-    return _brx_node(BOTE_RXN_ALT, 0, 0, v);
+    return _brx_node(ps, BOTE_RXN_ALT, 0, 0, v);
 }
 
 fn _brx_alt(ps) {
-    var v = vec_new();
+    var a = load64(ps + 64);
+    var v = vec_new_a(a);
     while (load64(ps + 24) == 0) {
         var c = _brx_peek(ps);
         if (c < 0 || c == 124 || c == 41) { break; }
         var t = _brx_term(ps);
-        if (load64(t) != BOTE_RXN_EMPTY) { vec_push(v, t); }
+        if (load64(t) != BOTE_RXN_EMPTY) { vec_push_a(a, v, t); }
     }
-    if (vec_len(v) == 0) { return _brx_node(BOTE_RXN_EMPTY, 0, 0, 0); }
+    if (vec_len(v) == 0) { return _brx_node(ps, BOTE_RXN_EMPTY, 0, 0, 0); }
     if (vec_len(v) == 1) { return vec_get(v, 0); }
-    return _brx_node(BOTE_RXN_CAT, 0, 0, v);
+    return _brx_node(ps, BOTE_RXN_CAT, 0, 0, v);
 }
 
 fn _brx_quant_next(ps) {
@@ -198,7 +208,7 @@ fn _brx_term(ps) {
     if (asrt != 0) {
         store64(ps + 16, load64(ps + 16) + adv);
         if (_brx_quant_next(ps) == 1) { return _brx_fail(ps, "a quantifier on an assertion"); }
-        return _brx_node(BOTE_RXN_ASSERT, asrt, 0, 0);
+        return _brx_node(ps, BOTE_RXN_ASSERT, asrt, 0, 0);
     }
     if (c == 40 && c1 == 63) {
         var c2 = _brx_peek_at(ps, 2);
@@ -252,19 +262,19 @@ fn _brx_quant(ps, atom) {
     if (_brx_peek(ps) == 63) { _brx_take(ps); }
     if (_brx_quant_next(ps) == 1) { return _brx_fail(ps, "a quantifier on a quantifier"); }
     if (mn > BOTE_RX_MAX_COUNT || mx > BOTE_RX_MAX_COUNT) { return _brx_fail(ps, "a quantifier past bote's bound"); }
-    if (load64(atom) == BOTE_RXN_EMPTY || mx == 0) { return _brx_node(BOTE_RXN_EMPTY, 0, 0, 0); }
-    return _brx_node(BOTE_RXN_REP, mn, mx, atom);
+    if (load64(atom) == BOTE_RXN_EMPTY || mx == 0) { return _brx_node(ps, BOTE_RXN_EMPTY, 0, 0, 0); }
+    return _brx_node(ps, BOTE_RXN_REP, mn, mx, atom);
 }
 
 fn _brx_atom(ps) {
     var c = _brx_take(ps);
-    if (c == 46) { return _brx_node(BOTE_RXN_ANY, 0, 0, 0); }
+    if (c == 46) { return _brx_node(ps, BOTE_RXN_ANY, 0, 0, 0); }
     if (c == 40) { return _brx_group(ps); }
     if (c == 91) { return _brx_class(ps); }
     if (c == 92) { return _brx_escape(ps); }
     if (c == 42 || c == 43 || c == 63) { return _brx_fail(ps, "a quantifier on nothing"); }
     if (c == 123 || c == 125 || c == 93) { return _brx_fail(ps, "a lone {, } or ], which the u flag refuses"); }
-    return _brx_node(BOTE_RXN_CHAR, c, 0, 0);
+    return _brx_node(ps, BOTE_RXN_CHAR, c, 0, 0);
 }
 
 fn _brx_name_start(c) {
@@ -305,47 +315,41 @@ fn _brx_group(ps) {
 # (3.8.12, from the 3.8.11 review) 1 when the name of `nl` code points at `ns` was given to
 # a group before that can take part in the same match as this one, which ECMA-262 refuses
 # (MightBothParticipate): two groups may share a name only from two alternatives of one
-# disjunction. The name is recorded, with the alternatives it is in.
+# disjunction. (3.8.13, from the 3.8.12 review) Each name keeps a count of its groups that
+# can take part with a group from where the parser reads: a disjunction's alternative takes
+# its names out when the next begins and gives every one back when the disjunction ends
+# (_brx_names_seen), so a name costs one look, where through 3.8.12 each was compared with
+# every name before it, 13 s for 32,000 groups. The name is recorded.
 fn _brx_name_clash(ps, ns, nl) {
+    var a = load64(ps + 64);
     var cps = load64(ps);
-    var path = load64(ps + 40);
-    var names = load64(ps + 48);
-    var clash = 0;
-    var i = 0;
-    while (i < vec_len(names) && clash == 0) {
-        var os = vec_get(names, i);
-        if (vec_get(names, i + 1) == nl && memeq(cps + os * 8, cps + ns * 8, nl * 8) == 1) {
-            if (_brx_both_match(vec_get(names, i + 2), path) == 1) { clash = 1; }
-        }
-        i = i + 3;
-    }
-    var pl = vec_len(path);
-    var snap = alloc(8 + pl * 8);
-    store64(snap, pl);
+    var nm = alloc_via(a, nl + 1);
     var k = 0;
-    while (k < pl) { store64(snap + 8 + k * 8, vec_get(path, k)); k = k + 1; }
-    vec_push(names, ns);
-    vec_push(names, nl);
-    vec_push(names, snap);
+    while (k < nl) { store8(nm + k, load64(cps + (ns + k) * 8)); k = k + 1; }
+    store8(nm + nl, 0);
+    var vis = load64(ps + 48);
+    var clash = 0;
+    if (map_has(vis, nm) == 1) {
+        store64(ps + 56, 1);
+        if (map_get(vis, nm) > 0) { clash = 1; }
+    }
+    map_set_a(a, vis, nm, map_get(vis, nm) + 1);
+    vec_push_a(a, load64(ps + 40), nm);
     return clash;
 }
 
-# 1 when a group in the alternatives `snap` (copied) and one in `path` can both match: unless
-# the two part in one disjunction, each in another of its alternatives.
-fn _brx_both_match(snap, path) {
-    var na = load64(snap);
-    var nb = vec_len(path);
-    var k = 0;
-    while (k < na && k < nb) {
-        if (load64(snap + 8 + k * 8) != vec_get(path, k)) {
-            # An even word is a disjunction's number: two inside one alternative. An odd one is
-            # the alternative: one disjunction, two of its alternatives.
-            if (k % 2 == 1) { return 0; }
-            return 1;
-        }
-        k = k + 1;
+# Add `d` to the count of each name given in [from, to) of the parser's named groups.
+fn _brx_names_seen(ps, from, to, d) {
+    var a = load64(ps + 64);
+    var decls = load64(ps + 40);
+    var vis = load64(ps + 48);
+    var i = from;
+    while (i < to) {
+        var nm = vec_get(decls, i);
+        map_set_a(a, vis, nm, map_get(vis, nm) + d);
+        i = i + 1;
     }
-    return 1;
+    return 0;
 }
 
 # A character escape after its backslash, `c` the character after it: the code point it
@@ -422,9 +426,9 @@ fn _brx_escape(ps) {
     var c = _brx_take(ps);
     if (c < 0) { return _brx_fail(ps, "a pattern that ends in a backslash"); }
     if (c == 100 || c == 68 || c == 115 || c == 83 || c == 119 || c == 87) {
-        var r = vec_new();
-        _brx_builtin(r, c);
-        return _brx_node(BOTE_RXN_CLASS, _brx_flat(r), 0, 0);
+        var r = vec_new_a(load64(ps + 64));
+        _brx_builtin(ps, r, c);
+        return _brx_node(ps, BOTE_RXN_CLASS, _brx_flat(ps, r), 0, 0);
     }
     if (c == 112 || c == 80) { return _brx_fail(ps, "a Unicode property escape"); }
     if (c == 107) { return _brx_fail(ps, "a named backreference"); }
@@ -432,48 +436,49 @@ fn _brx_escape(ps) {
     if (c == 48) {
         var d = _brx_peek(ps);
         if (d >= 48 && d <= 57) { return _brx_fail(ps, "a \\0 followed by a digit, which the u flag refuses"); }
-        return _brx_node(BOTE_RXN_CHAR, 0, 0, 0);
+        return _brx_node(ps, BOTE_RXN_CHAR, 0, 0, 0);
     }
     var cp = _brx_char_escape(ps, c, 0);
-    if (cp < 0) { return _brx_node(BOTE_RXN_EMPTY, 0, 0, 0); }
-    return _brx_node(BOTE_RXN_CHAR, cp, 0, 0);
+    if (cp < 0) { return _brx_node(ps, BOTE_RXN_EMPTY, 0, 0, 0); }
+    return _brx_node(ps, BOTE_RXN_CHAR, cp, 0, 0);
 }
 
 # The ranges of `\d`, `\w` or `\s` (the letter `e`, its capital the complement) pushed onto
 # `r`, two words each, in order. `\s` is ECMA-262's white space and line terminators.
-fn _brx_builtin(r, e) {
-    var b = vec_new();
-    if (e == 100 || e == 68) { vec_push(b, 48); vec_push(b, 57); }
+fn _brx_builtin(ps, r, e) {
+    var a = load64(ps + 64);
+    var b = vec_new_a(a);
+    if (e == 100 || e == 68) { vec_push_a(a, b, 48); vec_push_a(a, b, 57); }
     elif (e == 119 || e == 87) {
-        vec_push(b, 48); vec_push(b, 57);
-        vec_push(b, 65); vec_push(b, 90);
-        vec_push(b, 95); vec_push(b, 95);
-        vec_push(b, 97); vec_push(b, 122);
+        vec_push_a(a, b, 48); vec_push_a(a, b, 57);
+        vec_push_a(a, b, 65); vec_push_a(a, b, 90);
+        vec_push_a(a, b, 95); vec_push_a(a, b, 95);
+        vec_push_a(a, b, 97); vec_push_a(a, b, 122);
     } else {
-        vec_push(b, 9); vec_push(b, 13);
-        vec_push(b, 32); vec_push(b, 32);
-        vec_push(b, 160); vec_push(b, 160);
-        vec_push(b, 5760); vec_push(b, 5760);
-        vec_push(b, 8192); vec_push(b, 8202);
-        vec_push(b, 8232); vec_push(b, 8233);
-        vec_push(b, 8239); vec_push(b, 8239);
-        vec_push(b, 8287); vec_push(b, 8287);
-        vec_push(b, 12288); vec_push(b, 12288);
-        vec_push(b, 65279); vec_push(b, 65279);
+        vec_push_a(a, b, 9); vec_push_a(a, b, 13);
+        vec_push_a(a, b, 32); vec_push_a(a, b, 32);
+        vec_push_a(a, b, 160); vec_push_a(a, b, 160);
+        vec_push_a(a, b, 5760); vec_push_a(a, b, 5760);
+        vec_push_a(a, b, 8192); vec_push_a(a, b, 8202);
+        vec_push_a(a, b, 8232); vec_push_a(a, b, 8233);
+        vec_push_a(a, b, 8239); vec_push_a(a, b, 8239);
+        vec_push_a(a, b, 8287); vec_push_a(a, b, 8287);
+        vec_push_a(a, b, 12288); vec_push_a(a, b, 12288);
+        vec_push_a(a, b, 65279); vec_push_a(a, b, 65279);
     }
     var i = 0;
     if (e == 68 || e == 87 || e == 83) {
         # The complement over every code point.
         var at = 0;
         while (i < vec_len(b)) {
-            if (vec_get(b, i) > at) { vec_push(r, at); vec_push(r, vec_get(b, i) - 1); }
+            if (vec_get(b, i) > at) { vec_push_a(a, r, at); vec_push_a(a, r, vec_get(b, i) - 1); }
             at = vec_get(b, i + 1) + 1;
             i = i + 2;
         }
-        if (at <= 1114111) { vec_push(r, at); vec_push(r, 1114111); }
+        if (at <= 1114111) { vec_push_a(a, r, at); vec_push_a(a, r, 1114111); }
         return 0;
     }
-    while (i < vec_len(b)) { vec_push(r, vec_get(b, i)); i = i + 1; }
+    while (i < vec_len(b)) { vec_push_a(a, r, vec_get(b, i)); i = i + 1; }
     return 0;
 }
 
@@ -481,14 +486,15 @@ fn _brx_builtin(r, e) {
 # (3.8.12, from the 3.8.11 review) Sorted and merged, so a code point is looked for by
 # halving (_brx_in): a class of 4,000 members read each of them for each code point it was
 # asked of, and none of it was charged.
-fn _brx_flat(r) {
+fn _brx_flat(ps, r) {
     var k = vec_len(r) / 2;
-    var p = alloc(k * 16 + 16);
-    var tmp = alloc(k * 16 + 16);
+    var p = alloc_via(load64(ps + 64), k * 16 + 16);
+    var tmp = alloc_via(load64(ps + 64), k * 16 + 16);
     var i = 0;
     while (i < k * 2) { store64(p + i * 8, vec_get(r, i)); i = i + 1; }
     var srt = _brx_sort_ranges(p, tmp, k);
-    var a = alloc(8 + k * 16);
+    # The ranges the program keeps, on the allocator that keeps it.
+    var a = alloc_via(load64(ps + 72), 8 + k * 16);
     var n = 0;
     i = 0;
     while (i < k) {
@@ -548,7 +554,7 @@ fn _brx_class_atom(ps, r) {
     if (c != 92) { return c; }
     var e = _brx_take(ps);
     if (e < 0) { _brx_fail(ps, "an unterminated character class"); return 0 - 1; }
-    if (e == 100 || e == 68 || e == 115 || e == 83 || e == 119 || e == 87) { _brx_builtin(r, e); return 0 - 2; }
+    if (e == 100 || e == 68 || e == 115 || e == 83 || e == 119 || e == 87) { _brx_builtin(ps, r, e); return 0 - 2; }
     if (e == 112 || e == 80) { _brx_fail(ps, "a Unicode property escape"); return 0 - 1; }
     if (e == 48) {
         var d = _brx_peek(ps);
@@ -562,7 +568,8 @@ fn _brx_class_atom(ps, r) {
 fn _brx_class(ps) {
     var neg = 0;
     if (_brx_peek(ps) == 94) { _brx_take(ps); neg = 1; }
-    var r = vec_new();
+    var a = load64(ps + 64);
+    var r = vec_new_a(a);
     var go = 1;
     while (go == 1) {
         var c = _brx_peek(ps);
@@ -570,28 +577,28 @@ fn _brx_class(ps) {
         if (c == 93) { _brx_take(ps); go = 0; }
         else {
             var lo = _brx_class_atom(ps, r);
-            if (load64(ps + 24) != 0) { return _brx_node(BOTE_RXN_EMPTY, 0, 0, 0); }
+            if (load64(ps + 24) != 0) { return _brx_node(ps, BOTE_RXN_EMPTY, 0, 0, 0); }
             if (_brx_peek(ps) == 45 && _brx_peek_at(ps, 1) != 93 && _brx_peek_at(ps, 1) >= 0) {
                 _brx_take(ps);
                 var hi = _brx_class_atom(ps, r);
-                if (load64(ps + 24) != 0) { return _brx_node(BOTE_RXN_EMPTY, 0, 0, 0); }
+                if (load64(ps + 24) != 0) { return _brx_node(ps, BOTE_RXN_EMPTY, 0, 0, 0); }
                 if (lo == 0 - 2 || hi == 0 - 2) { return _brx_fail(ps, "a range with a class escape at an end, which the u flag refuses"); }
                 if (hi < lo) { return _brx_fail(ps, "a range out of order"); }
-                vec_push(r, lo);
-                vec_push(r, hi);
+                vec_push_a(a, r, lo);
+                vec_push_a(a, r, hi);
             } elif (lo >= 0) {
-                vec_push(r, lo);
-                vec_push(r, lo);
+                vec_push_a(a, r, lo);
+                vec_push_a(a, r, lo);
             }
         }
     }
-    return _brx_node(BOTE_RXN_CLASS, _brx_flat(r), neg, 0);
+    return _brx_node(ps, BOTE_RXN_CLASS, _brx_flat(ps, r), neg, 0);
 }
 
 # ---- Compiling ------------------------------------------------------------------------
 #
-# The compiler's state (16 bytes): +0 the program so far, a vec of three words a step, +8
-# why it stopped.
+# The compiler's state (24 bytes): +0 the program so far, a vec of three words a step, +8
+# why it stopped, +16 the allocator it grows on (the compile's arena).
 
 fn _brx_emit(cg, op, a, b) {
     var v = load64(cg);
@@ -600,9 +607,10 @@ fn _brx_emit(cg, op, a, b) {
         if (load64(cg + 8) == 0) { store64(cg + 8, "a program past bote's bound of 4,096 steps"); }
         return at;
     }
-    vec_push(v, op);
-    vec_push(v, a);
-    vec_push(v, b);
+    var ca = load64(cg + 16);
+    vec_push_a(ca, v, op);
+    vec_push_a(ca, v, a);
+    vec_push_a(ca, v, b);
     return at;
 }
 
@@ -629,13 +637,13 @@ fn _brx_gen(cg, nd) {
     if (kind == BOTE_RXN_ALT) {
         # SPLIT to each branch but the last, each ending in a JMP past the rest.
         var al = load64(nd + 24);
-        var jumps = vec_new();
+        var jumps = vec_new_a(load64(cg + 16));
         var k = 0;
         while (k < vec_len(al) - 1) {
             var sp = _brx_emit(cg, BOTE_RX_SPLIT, 0, 0);
             _brx_patch(cg, sp, 1, _brx_here(cg));
             _brx_gen(cg, vec_get(al, k));
-            vec_push(jumps, _brx_emit(cg, BOTE_RX_JMP, 0, 0));
+            vec_push_a(load64(cg + 16), jumps, _brx_emit(cg, BOTE_RX_JMP, 0, 0));
             _brx_patch(cg, sp, 2, _brx_here(cg));
             k = k + 1;
         }
@@ -658,11 +666,11 @@ fn _brx_gen(cg, nd) {
             _brx_patch(cg, top, 2, _brx_here(cg));
             return 0;
         }
-        var opts = vec_new();
+        var opts = vec_new_a(load64(cg + 16));
         while (r < mx && load64(cg + 8) == 0) {
             var os = _brx_emit(cg, BOTE_RX_SPLIT, 0, 0);
             _brx_patch(cg, os, 1, _brx_here(cg));
-            vec_push(opts, os);
+            vec_push_a(load64(cg + 16), opts, os);
             _brx_gen(cg, x);
             r = r + 1;
         }
@@ -682,27 +690,62 @@ fn _brx_anchored(nd) {
 }
 
 # Compile the pattern `src`, the UTF-8 text of a JSON Schema `pattern`. Always a Regex: one
-# bote_rx_why gives 0 for can be matched.
+# bote_rx_why gives 0 for can be matched. The work is done on the heap forms' scratch (in
+# src/schema.cyr, under its own lock, so a compile on any thread is safe) and given back; the
+# Regex, its program and its classes' ranges are on the heap.
 fn bote_rx_compile(src) {
-    var rx = alloc(32);
-    memset(rx, 0, 32);
+    var rx = alloc(40);
+    memset(rx, 0, 40);
     if (src == 0) { store64(rx + 16, "no pattern"); return rx; }
-    var ps = alloc(72);
-    memset(ps, 0, 72);
-    store64(ps + 40, vec_new());
-    store64(ps + 48, vec_new());
+    var mk[16];
+    var a = _sch_scratch_take(&mk);
+    var why = _brx_compile_on(a, default_alloc(), src, rx, 0);
+    _sch_scratch_give(&mk);
+    if (why != 0) { store64(rx + 16, why); }
+    return rx;
+}
+
+# Why the pattern `src` is no pattern bote's engine takes, or 0: a compile that keeps nothing,
+# for a check that needs only that (registration's WARN). Whether two groups share a name
+# goes to *names_out, when it is not 0.
+fn bote_rx_why_of(src, names_out) {
+    if (names_out != 0) { store64(names_out, 0); }
+    if (src == 0) { return "no pattern"; }
+    var mk[16];
+    var a = _sch_scratch_take(&mk);
+    var why = _brx_compile_on(a, a, src, 0, names_out);
+    _sch_scratch_give(&mk);
+    return why;
+}
+
+# (3.8.13) 1 when two groups of the pattern share a name, in two alternatives: ECMA-262 takes
+# it since 2025, and JavaScript engines before that (Node before 23) refuse the pattern.
+fn bote_rx_names_twice(rx) { return load64(rx + 32); }
+
+# Compile `src` on `a`, its classes' ranges on `keep`, into `rx` (or nowhere, for 0): why it
+# is no pattern bote's engine takes, or 0; whether a name is given twice to *names_out.
+fn _brx_compile_on(a, keep, src, rx, names_out) {
+    var ps = alloc_via(a, 80);
+    memset(ps, 0, 80);
     var nn[8];
-    store64(ps, _brx_cps(src, &nn));
+    store64(ps, _brx_cps(a, src, &nn));
     store64(ps + 8, load64(&nn));
+    store64(ps + 40, vec_new_a(a));
+    store64(ps + 48, map_new_a(a));
+    store64(ps + 64, a);
+    store64(ps + 72, keep);
     var root = _brx_disj(ps);
     if (load64(ps + 24) == 0 && load64(ps + 16) < load64(ps + 8)) { _brx_fail(ps, "an unmatched )"); }
-    if (load64(ps + 24) != 0) { store64(rx + 16, load64(ps + 24)); return rx; }
-    var cg = alloc(16);
-    store64(cg, vec_new());
+    if (load64(ps + 24) != 0) { return load64(ps + 24); }
+    if (names_out != 0) { store64(names_out, load64(ps + 56)); }
+    var cg = alloc_via(a, 24);
+    store64(cg, vec_new_a(a));
     store64(cg + 8, 0);
+    store64(cg + 16, a);
     _brx_gen(cg, root);
     _brx_emit(cg, BOTE_RX_MATCH, 0, 0);
-    if (load64(cg + 8) != 0) { store64(rx + 16, load64(cg + 8)); return rx; }
+    if (load64(cg + 8) != 0) { return load64(cg + 8); }
+    if (rx == 0) { return 0; }
     var v = load64(cg);
     var n = vec_len(v) / 3;
     var ins = alloc(n * 24);
@@ -711,7 +754,8 @@ fn bote_rx_compile(src) {
     store64(rx, ins);
     store64(rx + 8, n);
     store64(rx + 24, _brx_anchored(root));
-    return rx;
+    store64(rx + 32, load64(ps + 56));
+    return 0;
 }
 
 # ---- Matching -------------------------------------------------------------------------
@@ -853,27 +897,90 @@ fn _brx_add(ins, list, lc, mark, gen, st, pc, prev, cur, cnt) {
     return lc;
 }
 
+# _brx_add for a program past BOTE_RX_SPARSE_FROM steps (3.8.13, from the 3.8.12 review): the
+# steps seen a sparse set, which needs no clearing, `vs` (24 bytes): +0 where each step is in
+# +8, +8 the steps in the order seen, +16 how many, a step in it when the place it names holds
+# it. Through 3.8.12 every program's array was cleared at each match. Apart from _brx_add, as
+# one function choosing at each step cost a short pattern a fifth more (`regex_slug`), and
+# written out whole, as a call for each step would cost it too.
+fn _brx_add_s(ins, list, lc, vs, st, pc, prev, cur, cnt) {
+    store64(st, pc);
+    var sp = 1;
+    var seen = 0;
+    var sps = load64(vs);
+    var dns = load64(vs + 8);
+    var dc = load64(vs + 16);
+    while (sp > 0) {
+        sp = sp - 1;
+        var p = load64(st + sp * 8);
+        var si = load64(sps + p * 8);
+        if (si < 0 || si >= dc || load64(dns + si * 8) != p) {
+            store64(sps + p * 8, dc);
+            store64(dns + dc * 8, p);
+            dc = dc + 1;
+            seen = seen + 1;
+            var ip = ins + p * 24;
+            var op = load64(ip);
+            if (op == BOTE_RX_JMP) { store64(st + sp * 8, load64(ip + 8)); sp = sp + 1; }
+            elif (op == BOTE_RX_SPLIT) {
+                store64(st + sp * 8, load64(ip + 16));
+                store64(st + sp * 8 + 8, load64(ip + 8));
+                sp = sp + 2;
+            } elif (op == BOTE_RX_BOL) {
+                if (prev < 0) { store64(st + sp * 8, p + 1); sp = sp + 1; }
+            } elif (op == BOTE_RX_EOL) {
+                if (cur < 0) { store64(st + sp * 8, p + 1); sp = sp + 1; }
+            } elif (op == BOTE_RX_WORDB) {
+                if (_brx_word(prev) != _brx_word(cur)) { store64(st + sp * 8, p + 1); sp = sp + 1; }
+            } elif (op == BOTE_RX_NWORDB) {
+                if (_brx_word(prev) == _brx_word(cur)) { store64(st + sp * 8, p + 1); sp = sp + 1; }
+            } else {
+                store64(list + lc * 8, p);
+                lc = lc + 1;
+            }
+        }
+    }
+    store64(vs + 16, dc);
+    store64(cnt, load64(cnt) + seen);
+    return lc;
+}
+
 # 1 when `rx` matches somewhere in the JSON string body [s, e) of `buf`, 0 when it does not,
 # and -1 when the budget block `bud` (or 0 for none) was spent first: each step a thread
-# takes or a jump it follows costs one, and clearing the steps' marks one for every
-# BOTE_RX_CLEAR_WORDS of them. What it needs, four arrays as long as the program, it takes
-# from `a` and gives back; from the calling thread's request arena when `a` is no bote
+# takes or a jump it follows costs one. What it needs, arrays as long as the program, it takes
+# from `a` and gives back; from the heap forms' scratch, under its lock, when `a` is no bote
 # arena, which cannot give them back.
 fn bote_rx_test_a(a, rx, buf, s, e, bud) {
+    # (3.8.13, from the 3.8.12 review) A budget spent is -1 before anything is made ready:
+    # each of 64 patterns made its arrays ready for each key past the budget, 7.3 s for 209 KB.
+    if (bud != 0 && load64(bud) < 0) { return 0 - 1; }
     var n = load64(rx + 8);
+    if (n > BOTE_RX_SPARSE_FROM) { return _brx_test_s(a, rx, buf, s, e, bud); }
     var ins = load64(rx);
     var anch = load64(rx + 24);
     # (3.8.12, from the 3.8.11 review) On the heap a release does nothing: a dispatcher's plain
-    # form kept 128 KB for each string `^.{0,2000}$` was asked of.
-    if (_bote_ar_is(a) == 0) { a = bote_req_alloc(); }
+    # form kept 128 KB for each string `^.{0,2000}$` was asked of. (3.8.13) The scratch, not the
+    # calling thread's request arena, which on a thread no one armed is the process's own.
+    var sm[16];
+    var held = 0;
+    if (_bote_ar_is(a) == 0) {
+        a = _sch_scratch_take(&sm);
+        held = 1;
+    }
     var mk[16];
     bote_arena_mark(a, &mk);
     var cl = alloc_via(a, n * 8 + 8);
     var nl = alloc_via(a, n * 8 + 8);
-    var mark = alloc_via(a, n * 8 + 8);
     var st = alloc_via(a, n * 16 + 16);
+    # (3.8.13, from the 3.8.12 review) A short program's steps seen are an array cleared at each
+    # match, at most BOTE_RX_SPARSE_FROM words; a long one's a sparse set, cleared by nothing
+    # (_brx_test_s), whose extra reads would cost a short one a fifth more (`regex_slug`).
+    # Through 3.8.12 every program cleared its array and was charged an eighth of a step a word,
+    # so 300 strings `"ab"` against `^.{0,2000}$` (4,003 steps) were refused as too much to judge.
+    var mark = alloc_via(a, n * 8 + 8);
     var z = 0;
     while (z < n) { store64(mark + z * 8, 0); z = z + 1; }
+    var gen = 1;
     var cnt[8];
     store64(&cnt, 0);
     var cv[8];
@@ -881,16 +988,12 @@ fn bote_rx_test_a(a, rx, buf, s, e, bud) {
     var npos = s;
     if (s < e) { npos = _brx_cp(buf, s, e, &cv); c = load64(&cv); }
     var prev = 0 - 1;
-    var gen = 1;
     var cc = _brx_add(ins, cl, 0, mark, gen, st, 0, prev, c, &cnt);
     var res = 0 - 2;
-    # (3.8.12, from the 3.8.11 review) The marks cleared and the first turn's steps, charged
-    # before anything is decided by them: through 3.8.11 both were charged nothing for a string
-    # decided at once, and 20,000 empty strings asked of a 3,000-step alternation cleared 60
-    # million words and took 40 million steps free. A cleared word is a store, about an
-    # eighth of a step; a set that needs no clearing cost every short pattern a fifth more.
+    # (3.8.12, from the 3.8.11 review) The first turn's steps, charged before anything is
+    # decided by them: through 3.8.11 a string decided at once was charged nothing.
     if (bud != 0) {
-        store64(bud, load64(bud) - n / BOTE_RX_CLEAR_WORDS - load64(&cnt));
+        store64(bud, load64(bud) - load64(&cnt));
         store64(&cnt, 0);
         if (load64(bud) < 0) { res = 0 - 1; }
     }
@@ -935,5 +1038,89 @@ fn bote_rx_test_a(a, rx, buf, s, e, bud) {
         }
     }
     bote_arena_release(a, &mk);
+    if (held == 1) { _sch_scratch_give(&sm); }
+    return res;
+}
+
+# bote_rx_test_a for a program past BOTE_RX_SPARSE_FROM steps (3.8.13, from the 3.8.12 review):
+# the steps seen a sparse set, cleared by nothing. A matcher of its own, so a short program's
+# loop holds no choice between the two.
+fn _brx_test_s(a, rx, buf, s, e, bud) {
+    var n = load64(rx + 8);
+    var ins = load64(rx);
+    var anch = load64(rx + 24);
+    var sm[16];
+    var held = 0;
+    if (_bote_ar_is(a) == 0) {
+        a = _sch_scratch_take(&sm);
+        held = 1;
+    }
+    var mk[16];
+    bote_arena_mark(a, &mk);
+    var cl = alloc_via(a, n * 8 + 8);
+    var nl = alloc_via(a, n * 8 + 8);
+    var st = alloc_via(a, n * 16 + 16);
+    var vs[24];
+    store64(&vs, alloc_via(a, n * 8 + 8));
+    store64(&vs + 8, alloc_via(a, n * 8 + 8));
+    store64(&vs + 16, 0);
+    var cnt[8];
+    store64(&cnt, 0);
+    var cv[8];
+    var c = 0 - 1;
+    var npos = s;
+    if (s < e) { npos = _brx_cp(buf, s, e, &cv); c = load64(&cv); }
+    var prev = 0 - 1;
+    var cc = _brx_add_s(ins, cl, 0, &vs, st, 0, prev, c, &cnt);
+    var res = 0 - 2;
+    # (3.8.12, from the 3.8.11 review) The first turn's steps, charged before anything is
+    # decided by them: through 3.8.11 a string decided at once was charged nothing.
+    if (bud != 0) {
+        store64(bud, load64(bud) - load64(&cnt));
+        store64(&cnt, 0);
+        if (load64(bud) < 0) { res = 0 - 1; }
+    }
+    while (res == 0 - 2) {
+        var i = 0;
+        while (i < cc && res == 0 - 2) {
+            if (load64(ins + load64(cl + i * 8) * 24) == BOTE_RX_MATCH) { res = 1; }
+            i = i + 1;
+        }
+        if (res == 0 - 2 && (c < 0 || (anch == 1 && cc == 0))) { res = 0; }
+        if (res == 0 - 2) {
+            var nc = 0 - 1;
+            var nnpos = npos;
+            if (npos < e) { nnpos = _brx_cp(buf, npos, e, &cv); nc = load64(&cv); }
+            store64(&vs + 16, 0);
+            var ncount = 0;
+            i = 0;
+            while (i < cc) {
+                var p = load64(cl + i * 8);
+                var ip = ins + p * 24;
+                var op = load64(ip);
+                var ok = 0;
+                if (op == BOTE_RX_CHAR) { if (load64(ip + 8) == c) { ok = 1; } }
+                elif (op == BOTE_RX_ANY) { if (c != 10 && c != 13 && c != 8232 && c != 8233) { ok = 1; } }
+                elif (op == BOTE_RX_CLASS) { if (_brx_in(load64(ip + 8), c) != load64(ip + 16)) { ok = 1; } }
+                if (ok == 1) { ncount = _brx_add_s(ins, nl, ncount, &vs, st, p + 1, c, nc, &cnt); }
+                i = i + 1;
+            }
+            if (anch == 0) { ncount = _brx_add_s(ins, nl, ncount, &vs, st, 0, c, nc, &cnt); }
+            if (bud != 0) {
+                store64(bud, load64(bud) - load64(&cnt) - cc);
+                store64(&cnt, 0);
+                if (load64(bud) < 0) { res = 0 - 1; }
+            }
+            var t = cl;
+            cl = nl;
+            nl = t;
+            cc = ncount;
+            prev = c;
+            c = nc;
+            npos = nnpos;
+        }
+    }
+    bote_arena_release(a, &mk);
+    if (held == 1) { _sch_scratch_give(&sm); }
     return res;
 }

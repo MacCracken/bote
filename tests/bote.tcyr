@@ -33,6 +33,7 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/regex.cyr"
+include "src/format.cyr"
 include "src/registry.cyr"
 include "src/prompts.cyr"
 include "src/resources.cyr"
@@ -2733,14 +2734,15 @@ fn main() {
     var wprops = vec_new();
     # (3.8.5) maxLength is judged now; pattern is not. (3.8.7) Nor format; a type array is.
     # (3.8.11) pattern is judged now; patternProperties is not. (3.8.12) It is too; unevaluatedProperties is not.
+    # (3.8.13) format is judged; formatMaximum is not.
     vec_push(wprops, schema_prop_new("p", "{\"type\":\"object\",\"unevaluatedProperties\":false}"));
-    vec_push(wprops, schema_prop_new("q", "{\"type\":[\"string\",\"null\"],\"format\":\"email\"}"));
+    vec_push(wprops, schema_prop_new("q", "{\"type\":[\"string\",\"null\"],\"format\":\"date\",\"formatMaximum\":\"2020-01-01\"}"));
     var loose_reg = tool_registry_new();
     _lc_begin();
     registry_register(loose_reg, tool_def_new("loose", "l", schema_new("object", wprops, vec_new())));
     assert_eq(_lc_count, 2, "schema: one WARN per keyword it cannot enforce");
     assert_eq(_lc_level, SK_WARN, "schema: ...at WARN");
-    assert(_lc_has(_lc_buf, "keyword=format") == 1, "schema: ...naming the keyword");
+    assert(_lc_has(_lc_buf, "keyword=formatMaximum") == 1, "schema: ...naming the keyword");
     _lc_begin();
     registry_register(loose_reg, tool_def_new("tight", "t", schema_new("object", _strict_props(), vec_new())));
     assert_eq(_lc_count, 0, "schema: a schema it can enforce logs nothing");

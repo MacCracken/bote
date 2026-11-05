@@ -1,0 +1,677 @@
+# bote_format.tcyr — `format` (3.8.13): each format ajv-formats defines, judged as the official
+# client's own validator judges it, row by row (every expected verdict below is the client's,
+# but for five numbers bote reads exactly where the client reads a double); names and kinds;
+# through the walk, the dispatcher and a result; registration's refusals of what the client
+# cannot compile, and its WARNs; the budget, linear in the string; the heap and the arena; the
+# expressions' compile published once across threads. scripts/format-diff.sh holds the same
+# to the client over half a million values.
+#
+# Run: cyrius test tests/bote_format.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/regex.cyr"
+include "src/format.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+fn h_tool(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+var _ret = 0;
+fn h_ret(args, claims) { return _ret; }
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
+fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+fn _vs(schema, value) { return _sch_check_value_a(bote_req_begin(), parse_property(schema), "v", value); }
+fn _ok(schema, value) { if (_vs(schema, value) == 0) { return 1; } return 0; }
+fn _n(schema, value) {
+    var v = _vs(schema, value);
+    if (v == 0) { return 0; }
+    return vec_len(v);
+}
+fn _v0(schema, value) {
+    var v = _vs(schema, value);
+    if (v == 0) { return "(none)"; }
+    return _cat(vec_get(v, 0), "");
+}
+fn _ase(got, want, name) {
+    if (got == 0 || want == 0) { return assert(got == want, name); }
+    return assert_streq(got, want, name);
+}
+fn _msg(method, params) {
+    return _cat3(_cat3("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"", method, "\",\"params\":{"), params, "}}");
+}
+fn _call(d, tool, args) {
+    return codec_process_message(_msg("tools/call", _cat3(_cat3("\"name\":\"", tool, "\",\"arguments\":"), args, "")), d, 0);
+}
+# An array of n items, each `item`.
+fn _many(n, item) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "[");
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, item);
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]");
+    return str_data(str_builder_build(sb));
+}
+
+var _lc_all = 0;
+fn _rep_s(x, n) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < n) { str_builder_add_cstr(sb, x); i = i + 1; }
+    return str_data(str_builder_build(sb));
+}
+fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    var b = alloc(n + 1);
+    memcpy(b, msg, n);
+    store8(b + n, 0);
+    vec_push(_lc_all, b);
+    return 0;
+}
+fn _lc_begin() { _lc_all = vec_new(); sakshi_set_emit_hook(&_lc_hook); sakshi_set_level(SK_TRACE); return 0; }
+fn _lc_end() { sakshi_clear_emit_hook(); sakshi_set_level(SK_ERROR); return 0; }
+fn _lc_find(sub) {
+    var i = 0;
+    while (i < vec_len(_lc_all)) {
+        if (_has(vec_get(_lc_all, i), sub) == 1) { return vec_get(_lc_all, i); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# (3.8.10) The fewest nanoseconds of three judgements of `value` by `prop`, and of three calls
+# of `tool`: a bound on a judgement's time is a multiple of one of these, measured in the same
+# process, so it holds under emulation as on the host.
+fn _ns3(prop, value) {
+    var best = 0;
+    var i = 0;
+    while (i < 3) {
+        var t = clock_now_ns();
+        _sch_check_value_a(bote_req_begin(), prop, "v", value);
+        var dt = clock_now_ns() - t;
+        if (i == 0 || dt < best) { best = dt; }
+        i = i + 1;
+    }
+    return best;
+}
+fn _call_ns3(d, msg) {
+    var best = 0;
+    var i = 0;
+    while (i < 3) {
+        var t = clock_now_ns();
+        codec_process_message_a(bote_req_begin(), msg, d, 0);
+        var dt = clock_now_ns() - t;
+        if (i == 0 || dt < best) { best = dt; }
+        i = i + 1;
+    }
+    return best;
+}
+
+
+# A string format's verdict on the JSON string `json` (its quotes included), against the client's.
+fn _fs(f, json, want) {
+    var id = bote_format_id(f);
+    var got = bote_format_test_a(bote_req_begin(), id, json, 1, strlen(json) - 1, 0);
+    return assert_eq(got, want, _cat3(_cat3("format ", f, ": "), json, ""));
+}
+# A number format's verdict on the JSON number `t`.
+fn _fn(f, t, want) {
+    return assert_eq(bote_format_number(bote_format_id(f), t), want, _cat3(_cat3("format ", f, ": "), t, ""));
+}
+# One the client's double takes and bote, exact, refuses.
+fn _fnx(f, t) {
+    return assert_eq(bote_format_number(bote_format_id(f), t), 0, _cat3(_cat3("format ", f, ": "), t, " refused exactly, which the client's double takes"));
+}
+fn _bfm_ns3(id, json) {
+    var best = 0;
+    var i = 0;
+    while (i < 3) {
+        var t = clock_now_ns();
+        bote_format_test_a(bote_req_begin(), id, json, 1, strlen(json) - 1, 0);
+        var dt = clock_now_ns() - t;
+        if (i == 0 || dt < best) { best = dt; }
+        i = i + 1;
+    }
+    return best;
+}
+fn _qrep(x, n) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\"");
+    var i = 0;
+    while (i < n) { str_builder_add_cstr(sb, x); i = i + 1; }
+    return sb;
+}
+fn _qend(sb, tail) {
+    str_builder_add_cstr(sb, tail);
+    str_builder_add_cstr(sb, "\"");
+    return str_data(str_builder_build(sb));
+}
+var _th_rx = 0;
+fn _th_ready(arg) {
+    store64(arg, _bfm_rx(BOTE_FMT_IPV6));
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # ---- names and kinds ----
+    var id = 1;
+    var named = 1;
+    while (id <= BOTE_FMT_COUNT) {
+        if (bote_format_id(bote_format_name(id)) != id) { named = 0; }
+        id = id + 1;
+    }
+    assert(named == 1, "names: each of the 26 formats by its name");
+    assert(bote_format_id("idn-email") == 0 && bote_format_id("iri") == 0 && bote_format_id("Email") == 0 && bote_format_id("") == 0 && bote_format_id(0) == 0, "names: one the client does not know, or a name in another case, is none");
+    assert(bote_format_kind(BOTE_FMT_REGEX) == 0 && bote_format_kind(0) == 0, "kinds: regex judges nothing here");
+    assert(bote_format_kind(BOTE_FMT_INT32) == 2 && bote_format_kind(BOTE_FMT_DOUBLE) == 2 && bote_format_kind(BOTE_FMT_EMAIL) == 1 && bote_format_kind(BOTE_FMT_BINARY) == 1, "kinds: numbers and strings");
+    assert(bote_format_ordered(BOTE_FMT_DATE) == 1 && bote_format_ordered(BOTE_FMT_ISO_DATE_TIME) == 1 && bote_format_ordered(BOTE_FMT_DURATION) == 0 && bote_format_ordered(BOTE_FMT_EMAIL) == 0, "kinds: the dates and times have an order");
+
+    # ---- each format, as the client judges it ----
+    _fs("date", "\"2020-01-31\"", 1);
+    _fs("date", "\"2020-02-29\"", 1);
+    _fs("date", "\"2019-02-29\"", 0);
+    _fs("date", "\"1900-02-29\"", 0);
+    _fs("date", "\"2000-02-29\"", 1);
+    _fs("date", "\"2021-04-31\"", 0);
+    _fs("date", "\"2021-13-01\"", 0);
+    _fs("date", "\"2021-00-10\"", 0);
+    _fs("date", "\"2021-01-00\"", 0);
+    _fs("date", "\"0000-01-01\"", 1);
+    _fs("date", "\"2020-1-01\"", 0);
+    _fs("date", "\"2020-01-01 \"", 0);
+    _fs("date", "\"２０２０-01-01\"", 0);
+    _fs("time", "\"12:34:56Z\"", 1);
+    _fs("time", "\"23:00:60+00:01\"", 0);
+    _fs("time", "\"00:00:60-00:01\"", 0);
+    _fs("time", "\"23:59:60+00:00\"", 1);
+    _fs("time", "\"00:00:60+00:01\"", 1);
+    _fs("time", "\"23:58:60-00:01\"", 1);
+    _fs("time", "\"12:00:60+12:01\"", 1);
+    _fs("time", "\"11:59:60-12:00\"", 1);
+    _fs("time", "\"12:34:56z\"", 1);
+    _fs("time", "\"12:34:56\"", 0);
+    _fs("time", "\"23:59:60Z\"", 1);
+    _fs("time", "\"23:59:60.999Z\"", 1);
+    _fs("time", "\"23:59:61Z\"", 0);
+    _fs("time", "\"22:59:60-01:00\"", 1);
+    _fs("time", "\"00:59:60+01:00\"", 1);
+    _fs("time", "\"12:00:60Z\"", 0);
+    _fs("time", "\"24:00:00Z\"", 0);
+    _fs("time", "\"12:60:00Z\"", 0);
+    _fs("time", "\"12:00:00+24:00\"", 0);
+    _fs("time", "\"12:00:00+23:60\"", 0);
+    _fs("time", "\"12:00:00+0530\"", 1);
+    _fs("time", "\"12:00:00+05\"", 1);
+    _fs("time", "\"12:00:00+05:\"", 0);
+    _fs("time", "\"12:00:00+5:00\"", 0);
+    _fs("time", "\"12:00:59.9999999999999999Z\"", 0);
+    _fs("time", "\"12:00:59.999999999999996Z\"", 1);
+    _fs("time", "\"23:59:60.999999999999996447286321199499070644378662109375Z\"", 0);
+    _fs("time", "\"23:59:60.999999999999996447286321199499070644378662109374Z\"", 1);
+    _fs("time", "\"12:00:00.Z\"", 0);
+    _fs("time", "\"12:00:00.1Z\"", 1);
+    _fs("date-time", "\"2020-01-01T12:00:00Z\"", 1);
+    _fs("date-time", "\"2020-01-01t12:00:00z\"", 1);
+    _fs("date-time", "\"2020-01-01 12:00:00Z\"", 1);
+    _fs("date-time", "\"2020-01-01　12:00:00Z\"", 1);
+    _fs("date-time", "\"2020-01-01 12:00:00Z\"", 1);
+    _fs("date-time", "\"2020-01-01TT12:00:00Z\"", 0);
+    _fs("date-time", "\"2020-01-01T12:00:00\"", 0);
+    _fs("date-time", "\"2016-12-31T23:59:60Z\"", 1);
+    _fs("date-time", "\"2020-02-30T00:00:00Z\"", 0);
+    _fs("date-time", "\"T\"", 0);
+    _fs("date-time", "\"2020-01-01T12:00:00Z \"", 0);
+    _fs("date-time", "\"2020-01-01 12:00:00Z\"", 1);
+    _fs("iso-time", "\"12:34:56\"", 1);
+    _fs("iso-time", "\"12:34:56Z\"", 1);
+    _fs("iso-time", "\"23:59:60\"", 1);
+    _fs("iso-time", "\"23:59:60+00:00\"", 1);
+    _fs("iso-time", "\"12:34\"", 0);
+    _fs("iso-date-time", "\"2020-01-01T12:00:00\"", 1);
+    _fs("iso-date-time", "\"2020-01-01 12:00:00Z\"", 1);
+    _fs("iso-date-time", "\"2020-01-01t00:00:00.1\"", 1);
+    _fs("iso-date-time", "\"2020-01-01T25:00:00\"", 0);
+    _fs("duration", "\"P1Y2M3DT4H5M6S\"", 1);
+    _fs("duration", "\"P1W\"", 1);
+    _fs("duration", "\"P1W1D\"", 0);
+    _fs("duration", "\"P1WT1H\"", 0);
+    _fs("duration", "\"P1Wx\"", 0);
+    _fs("duration", "\"P12W\"", 1);
+    _fs("duration", "\"PT1H\"", 1);
+    _fs("duration", "\"P1D\"", 1);
+    _fs("duration", "\"PT1M30S\"", 1);
+    _fs("duration", "\"P\"", 0);
+    _fs("duration", "\"PT\"", 0);
+    _fs("duration", "\"P1\"", 0);
+    _fs("duration", "\"PT1\"", 0);
+    _fs("duration", "\"P1Y1W\"", 0);
+    _fs("duration", "\"P1D1Y\"", 0);
+    _fs("duration", "\"p1y\"", 0);
+    _fs("duration", "\"P1YT\"", 0);
+    _fs("duration", "\"PT1H1H\"", 0);
+    _fs("duration", "\"P1M1M\"", 0);
+    _fs("duration", "\"PW\"", 0);
+    _fs("duration", "\"P1.5Y\"", 0);
+    _fs("duration", "\"PT1S1M\"", 0);
+    _fs("uri", "\"http://example.com/a?b#c\"", 1);
+    _fs("uri", "\"urn:isbn:123\"", 1);
+    _fs("uri", "\"a:b\"", 1);
+    _fs("uri", "\"http:/host\"", 1);
+    _fs("uri", "\"a:\"", 0);
+    _fs("uri", "\"a:?q\"", 0);
+    _fs("uri", "\"http://[::1]:8080/x\"", 1);
+    _fs("uri", "\"http://[v1.x]/\"", 1);
+    _fs("uri", "\"http://[::g]/\"", 0);
+    _fs("uri", "\"1a:b\"", 0);
+    _fs("uri", "\"HTTP://EXAMPLE.COM\"", 1);
+    _fs("uri", "\"http://ex ample.com\"", 0);
+    _fs("uri", "\"http://é.com\"", 0);
+    _fs("uri", "\"http://%41/\"", 1);
+    _fs("uri", "\"http://%4/\"", 0);
+    _fs("uri", "\"//x\"", 0);
+    _fs("uri", "\"x\"", 0);
+    _fs("uri", "\"h:/\"", 1);
+    _fs("uri-reference", "\"\"", 1);
+    _fs("uri-reference", "\"//example.com\"", 1);
+    _fs("uri-reference", "\"/a/b\"", 1);
+    _fs("uri-reference", "\"a/b\"", 1);
+    _fs("uri-reference", "\"?q\"", 1);
+    _fs("uri-reference", "\"#f\"", 1);
+    _fs("uri-reference", "\"../a\"", 1);
+    _fs("uri-reference", "\"a b\"", 0);
+    _fs("uri-reference", "\"%zz\"", 0);
+    _fs("uri-reference", "\"#a#b\"", 0);
+    _fs("uri-reference", "\"http://[::1\"", 0);
+    _fs("uri-template", "\"http://example.com/{id}\"", 1);
+    _fs("uri-template", "\"/a{/b,c}{?q*}\"", 1);
+    _fs("uri-template", "\"{+x:3}\"", 1);
+    _fs("uri-template", "\"{x:0}\"", 0);
+    _fs("uri-template", "\"{x:10000}\"", 0);
+    _fs("uri-template", "\"{}\"", 0);
+    _fs("uri-template", "\"{a b}\"", 0);
+    _fs("uri-template", "\"%20\"", 1);
+    _fs("uri-template", "\"%2\"", 0);
+    _fs("uri-template", "\"a{\"", 0);
+    _fs("uri-template", "\"é\"", 1);
+    _fs("uri-template", "\"{a,}\"", 0);
+    _fs("url", "\"http://example.com\"", 1);
+    _fs("url", "\"https://a.b.co/x?y\"", 1);
+    _fs("url", "\"ftp://1.2.3.4:21/f\"", 1);
+    _fs("url", "\"http://user:pass@host.com:8080/p\"", 1);
+    _fs("url", "\"http://a@b@c.de/\"", 1);
+    _fs("url", "\"http://10.0.0.1\"", 0);
+    _fs("url", "\"http://127.0.0.1\"", 0);
+    _fs("url", "\"http://169.254.1.1\"", 0);
+    _fs("url", "\"http://192.168.1.1\"", 0);
+    _fs("url", "\"http://172.16.0.1\"", 0);
+    _fs("url", "\"http://172.31.0.1\"", 0);
+    _fs("url", "\"http://172.32.0.1\"", 1);
+    _fs("url", "\"http://172.15.0.1\"", 1);
+    _fs("url", "\"http://100.1.2.3\"", 1);
+    _fs("url", "\"http://1.2.3.255\"", 0);
+    _fs("url", "\"http://1.2.3.254\"", 1);
+    _fs("url", "\"http://224.1.1.1\"", 0);
+    _fs("url", "\"http://223.1.1.1\"", 1);
+    _fs("url", "\"http://0.1.1.1\"", 0);
+    _fs("url", "\"http://a.b-c.de\"", 1);
+    _fs("url", "\"http://a.b--c.de\"", 0);
+    _fs("url", "\"http://-a.de\"", 0);
+    _fs("url", "\"http://a.d\"", 0);
+    _fs("url", "\"http://a.d1\"", 0);
+    _fs("url", "\"http://例子.测试\"", 1);
+    _fs("url", "\"httſ://a.bc\"", 0);
+    _fs("url", "\"httpſ://a.bc\"", 1);
+    _fs("url", "\"HTTPſ://a.bc\"", 1);
+    _fs("url", "\"http://a.Kb\"", 1);
+    _fs("url", "\"ftp://a.bc\"", 1);
+    _fs("url", "\"fTp://a.bc\"", 1);
+    _fs("url", "\"httpſſ://a.bc\"", 0);
+    _fs("url", "\"http://a.bc:8\"", 0);
+    _fs("url", "\"http://a.bc:123456\"", 0);
+    _fs("url", "\"http://a.bc/ x\"", 0);
+    _fs("url", "\"http://a　b.cd\"", 1);
+    _fs("url", "\"http://a b.cd\"", 0);
+    _fs("url", "\"http://a b@c.de\"", 0);
+    _fs("url", "\"mailto:a@b.co\"", 0);
+    _fs("url", "\"http://a.bc?x\"", 0);
+    _fs("url", "\"http://a.bc#x\"", 0);
+    _fs("url", "\"HTTPS://A.BC\"", 1);
+    _fs("email", "\"a@b.co\"", 1);
+    _fs("email", "\"a.b+c@d-e.f.gh\"", 1);
+    _fs("email", "\".a@b.co\"", 0);
+    _fs("email", "\"a.@b.co\"", 0);
+    _fs("email", "\"a..b@c.de\"", 0);
+    _fs("email", "\"a@b\"", 0);
+    _fs("email", "\"a@-b.co\"", 0);
+    _fs("email", "\"a@b-.co\"", 0);
+    _fs("email", "\"a@b.c\"", 1);
+    _fs("email", "\"A@B.C\"", 1);
+    _fs("email", "\"a@b.co.\"", 0);
+    _fs("email", "\"é@b.co\"", 0);
+    _fs("hostname", "\"example.com\"", 1);
+    _fs("hostname", "\"a\"", 1);
+    _fs("hostname", "\"a.\"", 1);
+    _fs("hostname", "\"a..\"", 0);
+    _fs("hostname", "\".a\"", 0);
+    _fs("hostname", "\"-a.com\"", 0);
+    _fs("hostname", "\"a-.com\"", 0);
+    _fs("hostname", "\"a_b.com\"", 0);
+    _fs("hostname", "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", 1);
+    _fs("hostname", "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", 0);
+    _fs("hostname", "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", 1);
+    _fs("hostname", "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", 0);
+    _fs("hostname", "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.\"", 1);
+    _fs("hostname", "\"1.2.3.4\"", 1);
+    _fs("hostname", "\"A-B.C\"", 1);
+    _fs("ipv4", "\"1.2.3.4\"", 1);
+    _fs("ipv4", "\"255.255.255.255\"", 1);
+    _fs("ipv4", "\"256.1.1.1\"", 0);
+    _fs("ipv4", "\"01.2.3.4\"", 0);
+    _fs("ipv4", "\"1.2.3\"", 0);
+    _fs("ipv4", "\"1.2.3.4.5\"", 0);
+    _fs("ipv4", "\"0.0.0.0\"", 1);
+    _fs("ipv4", "\"1.2.3.04\"", 0);
+    _fs("ipv6", "\"::1\"", 1);
+    _fs("ipv6", "\"1:2:3:4:5:6:7:8\"", 1);
+    _fs("ipv6", "\"1:2:3:4:5:6:7:8:9\"", 0);
+    _fs("ipv6", "\"::ffff:1.2.3.4\"", 1);
+    _fs("ipv6", "\"fe80::1\"", 1);
+    _fs("ipv6", "\"1::\"", 1);
+    _fs("ipv6", "\"1:2:3:4:5:6:7::\"", 1);
+    _fs("ipv6", "\"::\"", 1);
+    _fs("ipv6", "\"ABCD::ef\"", 1);
+    _fs("ipv6", "\":::\"", 0);
+    _fs("ipv6", "\"1:::2\"", 0);
+    _fs("ipv6", "\"g::1\"", 0);
+    _fs("ipv6", "\"::1.2.3.256\"", 0);
+    _fs("uuid", "\"123e4567-e89b-12d3-a456-426614174000\"", 1);
+    _fs("uuid", "\"urn:uuid:123e4567-e89b-12d3-a456-426614174000\"", 1);
+    _fs("uuid", "\"URN:UUID:123E4567-E89B-12D3-A456-426614174000\"", 1);
+    _fs("uuid", "\"123e4567e89b12d3a456426614174000\"", 0);
+    _fs("uuid", "\"123e4567-e89b-12d3-a456-42661417400\"", 0);
+    _fs("uuid", "\"g23e4567-e89b-12d3-a456-426614174000\"", 0);
+    _fs("json-pointer", "\"\"", 1);
+    _fs("json-pointer", "\"/\"", 1);
+    _fs("json-pointer", "\"/a/b\"", 1);
+    _fs("json-pointer", "\"/a~0b~1c\"", 1);
+    _fs("json-pointer", "\"/a~2\"", 0);
+    _fs("json-pointer", "\"a\"", 0);
+    _fs("json-pointer", "\"/é/😀\"", 1);
+    _fs("json-pointer", "\"/~\"", 0);
+    _fs("json-pointer-uri-fragment", "\"#\"", 1);
+    _fs("json-pointer-uri-fragment", "\"#/a/%20\"", 1);
+    _fs("json-pointer-uri-fragment", "\"#/~0\"", 1);
+    _fs("json-pointer-uri-fragment", "\"#/A/b\"", 1);
+    _fs("json-pointer-uri-fragment", "\"#/a b\"", 0);
+    _fs("json-pointer-uri-fragment", "\"#/%2\"", 0);
+    _fs("json-pointer-uri-fragment", "\"/a\"", 0);
+    _fs("relative-json-pointer", "\"0\"", 1);
+    _fs("relative-json-pointer", "\"1/a\"", 1);
+    _fs("relative-json-pointer", "\"2#\"", 1);
+    _fs("relative-json-pointer", "\"0/~1\"", 1);
+    _fs("relative-json-pointer", "\"10\"", 1);
+    _fs("relative-json-pointer", "\"01\"", 0);
+    _fs("relative-json-pointer", "\"0#/a\"", 0);
+    _fs("relative-json-pointer", "\"-1\"", 0);
+    _fs("byte", "\"\"", 1);
+    _fs("byte", "\"QUJD\"", 1);
+    _fs("byte", "\"QQ==\"", 1);
+    _fs("byte", "\"QUI=\"", 1);
+    _fs("byte", "\"QUJ\"", 0);
+    _fs("byte", "\"Q===\"", 0);
+    _fs("byte", "\"!!!\"", 0);
+    _fs("byte", "\"!!!\\n\"", 1);
+    _fs("byte", "\"ab\\r\\ncd\"", 1);
+    _fs("byte", "\" \"", 1);
+    _fs("byte", "\"QUJD\\nQQ\"", 1);
+    _fs("byte", "\"=QQQ\"", 0);
+    _fs("password", "\"x\"", 1);
+    _fs("password", "\"\"", 1);
+    _fs("binary", "\"\"", 1);
+    _fs("binary", "\"é\"", 1);
+    _fn("int32", "0", 1);
+    _fn("int32", "-0", 1);
+    _fn("int32", "2147483647", 1);
+    _fn("int32", "2147483648", 0);
+    _fn("int32", "-2147483648", 1);
+    _fn("int32", "-2147483649", 0);
+    _fn("int32", "1.5", 0);
+    _fn("int32", "1e9", 1);
+    _fn("int32", "2.147483647e9", 1);
+    _fnx("int32", "2147483647.0000001");
+    _fnx("int32", "5.0000000000000001");
+    _fnx("int32", "1e-400");
+    _fn("int64", "0", 1);
+    _fn("int64", "9007199254740993", 1);
+    _fnx("int64", "9007199254740993.5");
+    _fn("int64", "1e400", 0);
+    _fn("int64", "1.7976931348623157e308", 1);
+    _fnx("int64", "1.7976931348623158e308");
+    _fn("int64", "1.5", 0);
+    _fn("int64", "-1e300", 1);
+    _fn("float", "1.5", 1);
+    _fn("float", "1e400", 1);
+    _fn("double", "-0.1", 1);
+
+    # ---- through the walk ----
+    assert(_ok("{\"format\":\"email\"}", "5") == 1 && _ok("{\"format\":\"int32\"}", "\"x\"") == 1, "walk: a string format passes a number, a number format a string");
+    _ase(_v0("{\"type\":\"string\",\"format\":\"date\"}", "\"2020-13-01\""), "v: does not match the format date", "walk: refused, naming the format");
+    _ase(_v0("{\"format\":\"int32\"}", "4294967296"), "v: does not match the format int32", "walk: a number refused");
+    assert(_ok("{\"format\":\"date\"}", "\"2020-02-29\"") == 1 && _ok("{\"format\":\"d\\u0061te\"}", "\"2020-02-30\"") == 0, "walk: the format's name read as it decodes");
+    assert(_ok("{\"format\":\"regex\"}", "\"[\"") == 1 && _ok("{\"format\":\"idn-email\"}", "\"x\"") == 1, "walk: regex and a format the client does not know judge nothing");
+    assert(_ok("{\"anyOf\":[{\"format\":\"ipv4\"},{\"format\":\"ipv6\"}]}", "\"::1\"") == 1 && _ok("{\"anyOf\":[{\"format\":\"ipv4\"},{\"format\":\"ipv6\"}]}", "\"1.2.3\"") == 0, "walk: under anyOf");
+    assert(_ok("{\"type\":\"object\",\"properties\":{\"at\":{\"format\":\"date-time\"}}}", "{\"at\":\"2020-01-01T00:00:00Z\"}") == 1, "walk: a property");
+    _ase(_v0("{\"type\":\"array\",\"items\":{\"format\":\"uuid\"}}", "[\"123e4567-e89b-12d3-a456-426614174000\",\"x\"]"), "v[1]: does not match the format uuid", "walk: an array's item, at its path");
+    assert(_ok("{\"not\":{\"format\":\"email\"}}", "\"a@b.co\"") == 0 && _ok("{\"not\":{\"format\":\"email\"}}", "\"x\"") == 1, "walk: under not, quietly");
+    assert(_ok("{\"format\":\"date\",\"maxLength\":3}", "\"2020-01-01\"") == 0, "walk: beside another keyword, each judged");
+    var d = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(d, tool_def_new("t_fmt", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\",\"format\":\"email\"},\"n\":{\"type\":\"integer\",\"format\":\"int32\"}},\"required\":[\"to\"]}")), &h_tool);
+    assert(_has(_call(d, "t_fmt", "{\"to\":\"a@b.co\",\"n\":5}"), "\"text\":\"ok\"") == 1, "dispatcher: arguments met");
+    assert(_has(_call(d, "t_fmt", "{\"to\":\"a@b\"}"), "to: does not match the format email") == 1, "dispatcher: ...and refused");
+    assert(_has(_call(d, "t_fmt", "{\"to\":\"a@b.co\",\"n\":2147483648}"), "n: does not match the format int32") == 1, "dispatcher: an integer past int32 refused");
+    dispatcher_register_tool(d, tool_def_with_output_schema(tool_def_new("t_fout", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"at\":{\"type\":\"string\",\"format\":\"date-time\"}}}"), &h_ret);
+    _ret = "{\"content\":[],\"structuredContent\":{\"at\":\"2020-01-01T00:00:00Z\"}}";
+    assert(_has(_call(d, "t_fout", "{}"), "isError") == 0, "result: a date-time met");
+    _ret = "{\"content\":[],\"structuredContent\":{\"at\":\"yesterday\"}}";
+    assert(_has(_call(d, "t_fout", "{}"), "structuredContent.at: does not match the format date-time") == 1, "result: ...and refused as a tool error");
+
+    # ---- registration ----
+    var rd = dispatcher_new(tool_registry_new());
+    _ase(registry_check_tool_def(tool_def_with_output_schema(tool_def_new("r1", "d", schema_new("object", 0, vec_new())), "{\"type\":\"string\",\"format\":5}")), "the outputSchema names a format that is no string, which the official client refuses", "register: a format that is no string refused");
+    _ase(registry_check_tool_def(tool_def_with_output_schema(tool_def_new("r2", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"format\":\"date\",\"formatMaximum\":5}}}")), "the outputSchema formatMaximum that is no string, which the official client refuses", "register: formatMaximum that is no string");
+    _ase(registry_check_tool_def(tool_def_with_output_schema(tool_def_new("r3", "d", schema_new("object", 0, vec_new())), "{\"formatMinimum\":\"x\"}")), "the outputSchema formatMinimum with no format beside it, which the official client refuses", "register: formatMinimum with no format");
+    _ase(registry_check_tool_def(tool_def_with_output_schema(tool_def_new("r4", "d", schema_new("object", 0, vec_new())), "{\"items\":{\"format\":\"email\",\"formatExclusiveMaximum\":\"x\"}}")), "the outputSchema formatExclusiveMaximum beside the format email, which has no order, so the official client refuses it", "register: beside a format with no order, under items");
+    _ase(registry_check_tool_def(tool_def_with_output_schema(tool_def_new("r5", "d", schema_new("object", 0, vec_new())), "{\"format\":\"regex\",\"formatExclusiveMinimum\":\"x\"}")), "the outputSchema formatExclusiveMinimum beside the format regex, which has no order, so the official client refuses it", "register: beside regex");
+    var okd = vec_new();
+    vec_push(okd, "{\"format\":\"date\",\"formatMaximum\":\"2020-01-01\"}");
+    vec_push(okd, "{\"format\":\"password\",\"formatMaximum\":\"x\"}");
+    vec_push(okd, "{\"format\":\"no-such\",\"formatMaximum\":\"x\"}");
+    vec_push(okd, "{\"$defs\":{\"x\":{\"format\":5}}}");
+    vec_push(okd, "{\"x-unknown\":{\"format\":5}}");
+    vec_push(okd, "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"format\":\"email\"}");
+    var oi = 0;
+    while (oi < vec_len(okd)) {
+        assert(registry_check_tool_def(tool_def_with_output_schema(tool_def_new("rk", "d", schema_new("object", 0, vec_new())), vec_get(okd, oi))) == 0, _cat("register: taken, as the client compiles it: ", vec_get(okd, oi)));
+        oi = oi + 1;
+    }
+    _ase(registry_check_tool_def(tool_def_with_output_schema(tool_def_new("r6", "d", schema_new("object", 0, vec_new())), "{\"$defs\":{\"x\":{\"format\":5}},\"properties\":{\"a\":{\"$ref\":\"#/$defs/x\"}}}")), "the outputSchema names a format that is no string, which the official client refuses", "register: ...but one a $ref reaches refused");
+    _ase(registry_check_tool_def(tool_def_new("r7", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"a\":{\"format\":[\"date\"]}}}"))), "the inputSchema names a format that is no string, which the official client refuses", "register: an inputSchema given as JSON");
+    var tp = vec_new();
+    vec_push(tp, schema_prop_new("a", "{\"type\":\"string\",\"format\":true}"));
+    _ase(registry_check_tool_def(tool_def_new("r8", "d", schema_new("object", tp, vec_new()))), "the inputSchema names a format that is no string, which the official client refuses", "register: a ToolSchema's property, as listed");
+    _lc_begin();
+    dispatcher_register_tool(rd, tool_def_with_output_schema(tool_def_new("w_fr", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"format\":\"regex\"},\"b\":{\"format\":\"idn-hostname\"},\"c\":{\"format\":\"date\",\"formatMaximum\":\"2020-01-01\"}}}"), &h_ret);
+    dispatcher_register_tool(rd, tool_def_with_output_schema(tool_def_new("w_fok", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"format\":\"email\"},\"b\":{\"format\":\"int64\"},\"c\":{\"format\":\"password\"}}}"), &h_ret);
+    _lc_end();
+    assert(_lc_find("format regex, which the official client judges by JavaScript's syntax and bote does not") != 0, "warn: regex");
+    assert(_lc_find("a format the official client does not know, which neither judges") != 0, "warn: a format the client does not know");
+    assert(_has(_lc_find("keyword=formatMaximum"), "schema keyword not enforced") == 1, "warn: formatMaximum, which the client judges and bote does not");
+    assert(_lc_find("tool=w_fok") == 0, "warn: none for formats bote judges");
+    assert(_lc_find("keyword=format ") == 0, "warn: format warned of as unenforced no longer");
+
+    # ---- (3.8.13, from the 3.8.12 review) __proto__, as the client's Ajv reads it ----
+    assert(_ok("{\"properties\":{\"__proto__\":{\"type\":\"string\"}}}", "{\"__proto__\":5}") == 1, "proto: a property named __proto__ judges nothing");
+    assert(_ok("{\"properties\":{\"__proto__\":{\"type\":\"string\"}},\"additionalProperties\":false}", "{\"__proto__\":\"s\"}") == 0, "proto: ...and its member is additional");
+    assert(_ok("{\"patternProperties\":{\"__proto__\":{\"type\":\"string\"}}}", "{\"x__proto__x\":5}") == 1, "proto: a pattern named __proto__ judges nothing");
+    assert(_ok("{\"required\":[\"__proto__\"]}", "{}") == 1, "proto: required __proto__ is always met, as the client's data.__proto__ is the prototype");
+    assert(_ok("{\"properties\":{\"\\u005f\\u005fproto\\u005f\\u005f\":{\"type\":\"string\"}}}", "{\"__proto__\":5}") == 1, "proto: ...the name read as it decodes");
+    assert(_ok("{\"dependentRequired\":{\"__proto__\":[\"a\"]}}", "{\"__proto__\":1}") == 0 && _ok("{\"maxProperties\":0}", "{\"__proto__\":1}") == 0, "proto: dependentRequired and the counts read it as a member, as the client does");
+
+    # ---- the budget ----
+    # A string's reading is linear in it: twice the string, about twice the time.
+    var u1 = _qend(_qrep("a", 30000), "");
+    var u2 = _qend(_qrep("a", 60000), "");
+    var ux1 = _cat3("\"http://a.bc/", u1 + 1, "");
+    var ux2 = _cat3("\"http://a.bc/", u2 + 1, "");
+    var ids = vec_new();
+    vec_push(ids, BOTE_FMT_URI);
+    vec_push(ids, BOTE_FMT_URI_REFERENCE);
+    vec_push(ids, BOTE_FMT_URL);
+    vec_push(ids, BOTE_FMT_JSON_POINTER);
+    vec_push(ids, BOTE_FMT_URI_TEMPLATE);
+    vec_push(ids, BOTE_FMT_BYTE);
+    var li = 0;
+    while (li < vec_len(ids)) {
+        var lid = vec_get(ids, li);
+        var s1 = ux1;
+        var s2 = ux2;
+        if (lid == BOTE_FMT_JSON_POINTER || lid == BOTE_FMT_URI_TEMPLATE || lid == BOTE_FMT_BYTE) { s1 = u1; s2 = u2; }
+        var t1 = _bfm_ns3(lid, s1);
+        var t2 = _bfm_ns3(lid, s2);
+        assert(t2 < 3 * t1 + 200000, _cat("budget: twice the string, under three times the time, ", bote_format_name(lid)));
+        li = li + 1;
+    }
+    # url with an `@` every other character: each is tried as the userinfo's end, and each try
+    # stops at the next one.
+    var ats = _qend(_qrep("a@", 30000), "b.cd");
+    var ats2 = _qend(_qrep("a@", 60000), "b.cd");
+    var at1 = _cat3("\"http://", ats + 1, "");
+    var at2 = _cat3("\"http://", ats2 + 1, "");
+    assert(_bfm_ns3(BOTE_FMT_URL, at2) < 3 * _bfm_ns3(BOTE_FMT_URL, at1) + 200000, "budget: url with 60,000 @s, twice 30,000's time");
+    assert_eq(bote_format_test_a(bote_req_begin(), BOTE_FMT_URL, at1, 1, strlen(at1) - 1, 0), 1, "budget: ...and taken, the last @ ending the userinfo");
+    var bud[64];
+    store64(&bud, 1000);
+    assert_eq(bote_format_test_a(bote_req_begin(), BOTE_FMT_DATE, u1, 1, strlen(u1) - 1, &bud), 0 - 1, "budget: a string read by hand charges its bytes, -1 past it");
+    store64(&bud, 1000);
+    assert_eq(bote_format_test_a(bote_req_begin(), BOTE_FMT_URI, ux1, 1, strlen(ux1) - 1, &bud), 0 - 1, "budget: ...and an expression its steps");
+    var alt = str_builder_new();
+    str_builder_add_cstr(alt, "{\"anyOf\":[");
+    var ai = 0;
+    while (ai < 256) { if (ai > 0) { str_builder_add_cstr(alt, ","); } str_builder_add_cstr(alt, "{\"format\":\"uri\",\"maxLength\":"); str_builder_add_int(alt, ai); str_builder_add_cstr(alt, "}"); ai = ai + 1; }
+    str_builder_add_cstr(alt, "]}");
+    var ap = parse_property(str_data(str_builder_build(alt)));
+    var av = _sch_check_value_a(bote_req_begin(), ap, "v", ux2);
+    assert(av != 0 && streq(vec_get(av, vec_len(av) - 1), "v: more work to judge than its size allows") == 1, "budget: 256 uri alternatives over 60 KB refused as too much to judge");
+    assert(_ns3(ap, ux2) < 64 * _ns3(parse_property("{\"anyOf\":[{\"format\":\"uri\",\"maxLength\":0}]}"), ux2), "budget: ...in under 64 times one alternative's time");
+
+    # ---- the heap and the arena ----
+    var hm = _msg("tools/call", "\"name\":\"t_fmt\",\"arguments\":{\"to\":\"a@b\"}");
+    codec_process_message_a(bote_req_begin(), hm, d, 0);
+    var h0 = alloc_used();
+    var wi = 0;
+    while (wi < 50) { codec_process_message_a(bote_req_begin(), hm, d, 0); wi = wi + 1; }
+    assert_eq(alloc_used() - h0, 0, "heap: fifty calls refused by a format keep nothing");
+    var fa = bote_req_arena_new();
+    var fb = bote_req_arena_bytes(fa);
+    assert(_sch_check_value_a(fa, parse_property("{\"type\":\"array\",\"items\":{\"format\":\"date-time\"}}"), "v", _many(3000, "\"2020-01-01T00:00:00Z\"")) == 0, "arena: 3,000 date-times, each decoded");
+    assert(_sch_check_value_a(fa, parse_property("{\"type\":\"array\",\"items\":{\"format\":\"uri\"}}"), "v", _many(3000, "\"http://a.bc/d\"")) == 0, "arena: 3,000 uris through the expression");
+    assert_eq(bote_req_arena_bytes(fa), fb, "arena: ...each one's code points and arrays given back, the first chunk");
+    var hp = parse_property("{\"type\":\"array\",\"items\":{\"format\":\"url\"}}");
+    var hv = _many(1000, "\"http://a.bc/d\"");
+    _sch_check_value_a(default_alloc(), hp, "v", hv);
+    var hh = alloc_used();
+    wi = 0;
+    while (wi < 5) { _sch_check_value_a(default_alloc(), hp, "v", hv); wi = wi + 1; }
+    assert_eq(alloc_used() - hh, 0, "heap root: 1,000 urls handed the heap keep nothing");
+    var hu = "\"http://a.bc/d\"";
+    bote_format_test_a(default_alloc(), BOTE_FMT_URL, hu, 1, strlen(hu) - 1, 0);
+    hh = alloc_used();
+    wi = 0;
+    while (wi < 100) { bote_format_test_a(default_alloc(), BOTE_FMT_URL, hu, 1, strlen(hu) - 1, 0); bote_format_test_a(default_alloc(), BOTE_FMT_EMAIL, hu, 1, strlen(hu) - 1, 0); wi = wi + 1; }
+    assert_eq(alloc_used() - hh, 0, "heap: bote_format_test_a handed the heap, 200 judgements keep nothing (the request arena's, given back)");
+
+    # ---- one compile, across threads ----
+#ifndef CYRIUS_TARGET_AGNOS
+    var keep = _bfm_rx(BOTE_FMT_IPV6);
+    store64(&_bfm_rx_tab + BOTE_FMT_IPV6 * 8, 0);
+    var outs[64];
+    var ths = vec_new();
+    var ti = 0;
+    while (ti < 8) { store64(&outs + ti * 8, 0); vec_push(ths, thread_create(&_th_ready, &outs + ti * 8)); ti = ti + 1; }
+    ti = 0;
+    while (ti < 8) { thread_join(vec_get(ths, ti)); ti = ti + 1; }
+    var one = 1;
+    ti = 1;
+    while (ti < 8) { if (load64(&outs + ti * 8) != load64(&outs)) { one = 0; } ti = ti + 1; }
+    assert(one == 1 && load64(&outs) == load64(&_bfm_rx_tab + BOTE_FMT_IPV6 * 8) && load64(&outs) != 0, "threads: eight compiling at once keep one program");
+    assert(keep != 0, "threads: (the program before)");
+#endif
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit_group(rc);

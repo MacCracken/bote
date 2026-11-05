@@ -124,6 +124,7 @@ src/
 ├── protocol.cyr            — JsonRpcRequest / Response / Error data types
 ├── jsonx.cyr               — nested-aware JSON extractor + jsonx_valid (RFC 8259 syntax check) + bote_json_escape
 ├── regex.cyr               — (3.8.11) ECMA-262 patterns under the u flag, a Thompson machine linear in the string
+├── format.cyr              — (3.8.13) `format`, as the official client's ajv-formats defines each
 ├── registry.cyr            — ToolDef (+profile tags), ToolSchema (or its own JSON, 3.8.3), ToolAnnotations, ToolRegistry
 ├── prompts.cyr             — PromptDef / PromptArgument / PromptRegistry (prompts/list + get)
 ├── resources.cyr           — ResourceDef / ResourceRegistry (resources/list + read;
@@ -205,9 +206,10 @@ tests/
 ├── bote_schema_eq.tcyr        — 92 (3.8.7: const, enum of any value, uniqueItems and type arrays, by JSON Schema's equality)
 ├── bote_schema_parts.tcyr     — 77 (3.8.8: prefixItems, contains, propertyNames, dependentRequired and dependentSchemas)
 ├── bote_schema_comp.tcyr      — 135 (3.8.9: allOf, anyOf, oneOf, not, if / then / else, the budget, keywords by dialect)
-├── bote_schema_ref.tcyr       — 240 (3.8.10: $ref within its document, registration's refusals, the depth; 3.8.12: $id and URIs as the client reads them, not and if typing)
-├── bote_regex.tcyr            — 146 (3.8.11: the pattern engine, matching as JavaScript does, linear time; 3.8.12: compile bounded, names, classes by halving)
-├── bote_schema_pattern.tcyr   — 147 (3.8.11: pattern and multipleOf through the schema; 3.8.12: patternProperties, the heap-handed roots)
+├── bote_schema_ref.tcyr       — 266 (3.8.10: $ref within its document, registration's refusals, the depth; 3.8.12: $id and URIs as the client reads them, not and if typing)
+├── bote_regex.tcyr            — 160 (3.8.11: the pattern engine, matching as JavaScript does, linear time; 3.8.12: compile bounded, names, classes by halving)
+├── bote_schema_pattern.tcyr   — 157 (3.8.11: pattern and multipleOf through the schema; 3.8.12: patternProperties, the heap-handed roots)
+├── bote_format.tcyr           — 350 (3.8.13: every format, as the client's own validator judges it)
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 64 (streamable HTTP / SSE)

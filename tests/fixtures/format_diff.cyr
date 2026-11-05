@@ -1,0 +1,122 @@
+# format_diff.cyr — bote's `format` (src/format.cyr) against the official client's own validator,
+# from what tests/fixtures/format_diff_gen.cjs wrote to build/format-diff/cases.txt
+# (scripts/format-diff.sh runs both). It exits 1 on any value of a string format the two judge
+# apart, and on any number bote takes that the client refuses. A number bote refuses and the
+# client takes is counted, not failed: int32 and int64 are judged exactly, where the client
+# reads a double (5.0000000000000001 is 5 to it).
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/regex.cyr"
+include "src/format.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
+fn _line(txt, i, len) { var j = i; while (j < len && load8(txt + j) != 10) { j = j + 1; } return j; }
+fn _tab(txt, i, e) { var j = i; while (j < e && load8(txt + j) != 9) { j = j + 1; } return j; }
+fn main() {
+    alloc_init();
+    var lo[8];
+    var txt = file_read_whole("build/format-diff/cases.txt", &lo);
+    var len = load64(&lo);
+    if (txt == 0 || len == 0) { println("format_diff: no build/format-diff/cases.txt"); return 2; }
+    var i = 0;
+    var n = 0; var same = 0; var lenient = 0; var strict = 0; var nstrict = 0; var unknown = 0;
+    while (i < len) {
+        var e = _line(txt, i, len);
+        var kind = load8(txt + i);
+        var t1 = _tab(txt, i + 2, e);
+        var name = _slice_cstr(default_alloc(), txt, i + 2, t1 - i - 2);
+        var t2 = _tab(txt, t1 + 1, e);
+        var raw = _slice_cstr(default_alloc(), txt, t1 + 1, t2 - t1 - 1);
+        var flag = load8(txt + e - 1) - 48;
+        var id = bote_format_id(name);
+        if (id == 0) { unknown = unknown + 1; }
+        else {
+            n = n + 1;
+            var got = 0;
+            if (kind == 70) { got = bote_format_test_a(bote_req_begin(), id, raw, 1, strlen(raw) - 1, 0); }
+            else { got = bote_format_number(id, raw); }
+            if (got == flag) { same = same + 1; }
+            elif (got == 1) {
+                lenient = lenient + 1;
+                if (lenient < 30) { println(_cat3(_cat3("LENIENT ", name, " "), raw, " (the client refuses it)")); }
+            } elif (kind == 78) {
+                nstrict = nstrict + 1;
+                if (nstrict < 10) { println(_cat3(_cat3("EXACT ", name, " "), raw, " (the client's double takes it)")); }
+            } else {
+                strict = strict + 1;
+                if (strict < 30) { println(_cat3(_cat3("STRICT ", name, " "), raw, " (the client takes it)")); }
+            }
+        }
+        i = e + 1;
+    }
+    println(_cat("values ", _sch_itoa(n)));
+    println(_cat("judged alike ", _sch_itoa(same)));
+    println(_cat("bote takes, the client refuses ", _sch_itoa(lenient)));
+    println(_cat("bote refuses a string the client takes ", _sch_itoa(strict)));
+    println(_cat("bote refuses a number exactly that the client's double takes ", _sch_itoa(nstrict)));
+    if (unknown != 0) { println(_cat("formats bote does not know ", _sch_itoa(unknown))); }
+    if (lenient != 0 || strict != 0 || unknown != 0) { return 1; }
+    return 0;
+}
+var rc = main();
+sys_exit_group(rc);

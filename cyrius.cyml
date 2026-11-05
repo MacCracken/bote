@@ -22,8 +22,8 @@ output = "build/bote"
 #
 # log.cyr is FIRST in both profiles: every other module may log through it.
 #
-#   cyrius distlib       → dist/bote.cyr       (this profile, 40 modules)
-#   cyrius distlib core  → dist/bote-core.cyr  ([lib.core], 14 modules)
+#   cyrius distlib       → dist/bote.cyr       (this profile, 41 modules)
+#   cyrius distlib core  → dist/bote-core.cyr  ([lib.core], 15 modules)
 [lib]
 modules = [
     "src/log.cyr",
@@ -31,6 +31,7 @@ modules = [
     "src/protocol.cyr",
     "src/jsonx.cyr",
     "src/regex.cyr",
+    "src/format.cyr",
     "src/registry.cyr",
     "src/prompts.cyr",
     "src/resources.cyr",
@@ -87,6 +88,7 @@ modules = [
     "src/protocol.cyr",
     "src/jsonx.cyr",
     "src/regex.cyr",
+    "src/format.cyr",
     "src/registry.cyr",
     "src/prompts.cyr",
     "src/resources.cyr",

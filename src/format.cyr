@@ -1,0 +1,697 @@
+# bote::format — JSON Schema's `format`, as the official MCP client judges it (3.8.13).
+#
+# The client validates with Ajv and ajv-formats 3.0.1 in its full mode (`addFormats(ajv)`), so
+# a format ajv-formats knows is enforced and one it does not is ignored. Each is judged here
+# as ajv-formats defines it, and held to the client's own validator by scripts/format-diff.sh:
+#
+# - by the client's own regular expression, compiled once by src/regex.cyr: uri,
+#   uri-reference, uri-template, email, hostname (its length as a check of its own, the
+#   expression's lookahead), ipv4, ipv6, uuid, json-pointer, json-pointer-uri-fragment,
+#   relative-json-pointer. Each was written for JavaScript's RegExp with the `i` flag and
+#   without `u`; its letters are folded here (`a-z` written `a-zA-Z`), and with ASCII
+#   classes, or `[^...]` ones naming no letter, code points and UTF-16 units give one verdict;
+# - by hand, where the definition is code, a lookahead or a multiline expression: date, time,
+#   date-time, iso-time, iso-date-time, duration, url, byte;
+# - numbers: int32 and int64 exactly, where the client holds a double (`int32` takes
+#   5.0000000000000001, whose double is 5; bote refuses it, the stricter side), and float and
+#   double take every number;
+# - password and binary take every string.
+#
+# Not judged: `regex`, which the client checks with JavaScript's own syntax without the `u`
+# flag (Annex B), not the one src/regex.cyr reads; registration warns of it. Nor the format
+# keywords ajv-formats adds, formatMinimum and its kin, which compare through JavaScript's Date.
+#
+# A string format judges strings and a number format numbers, whatever `type` says, as Ajv
+# applies a format to the values of its own type.
+
+enum BoteFormat {
+    BOTE_FMT_DATE = 1;
+    BOTE_FMT_TIME = 2;
+    BOTE_FMT_DATE_TIME = 3;
+    BOTE_FMT_ISO_TIME = 4;
+    BOTE_FMT_ISO_DATE_TIME = 5;
+    BOTE_FMT_DURATION = 6;
+    BOTE_FMT_URI = 7;
+    BOTE_FMT_URI_REFERENCE = 8;
+    BOTE_FMT_URI_TEMPLATE = 9;
+    BOTE_FMT_URL = 10;
+    BOTE_FMT_EMAIL = 11;
+    BOTE_FMT_HOSTNAME = 12;
+    BOTE_FMT_IPV4 = 13;
+    BOTE_FMT_IPV6 = 14;
+    BOTE_FMT_REGEX = 15;
+    BOTE_FMT_UUID = 16;
+    BOTE_FMT_JSON_POINTER = 17;
+    BOTE_FMT_JSON_POINTER_URI_FRAGMENT = 18;
+    BOTE_FMT_RELATIVE_JSON_POINTER = 19;
+    BOTE_FMT_BYTE = 20;
+    BOTE_FMT_INT32 = 21;
+    BOTE_FMT_INT64 = 22;
+    BOTE_FMT_FLOAT = 23;
+    BOTE_FMT_DOUBLE = 24;
+    BOTE_FMT_PASSWORD = 25;
+    BOTE_FMT_BINARY = 26;
+}
+
+var BOTE_FMT_COUNT = 26;
+
+# The client's expressions, from ajv-formats 3.0.1 as the client bundles it, their letters
+# folded for the `i` flag. Generated from that source; see the module's head.
+var _BOTE_FMT_RX_URI = "^(?:[a-zA-Z][a-zA-Z0-9+\\-.]*:)(?:\\/?\\/(?:(?:[a-zA-Z0-9\\-._~!$&'()*+,;=:]|%[0-9a-fA-F]{2})*@)?(?:\\[(?:(?:(?:(?:[0-9a-fA-F]{1,4}:){6}|::(?:[0-9a-fA-F]{1,4}:){5}|(?:[0-9a-fA-F]{1,4})?::(?:[0-9a-fA-F]{1,4}:){4}|(?:(?:[0-9a-fA-F]{1,4}:){0,1}[0-9a-fA-F]{1,4})?::(?:[0-9a-fA-F]{1,4}:){3}|(?:(?:[0-9a-fA-F]{1,4}:){0,2}[0-9a-fA-F]{1,4})?::(?:[0-9a-fA-F]{1,4}:){2}|(?:(?:[0-9a-fA-F]{1,4}:){0,3}[0-9a-fA-F]{1,4})?::[0-9a-fA-F]{1,4}:|(?:(?:[0-9a-fA-F]{1,4}:){0,4}[0-9a-fA-F]{1,4})?::)(?:[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}|(?:(?:25[0-5]|2[0-4]\\d|[01]?\\d\\d?)\\.){3}(?:25[0-5]|2[0-4]\\d|[01]?\\d\\d?))|(?:(?:[0-9a-fA-F]{1,4}:){0,5}[0-9a-fA-F]{1,4})?::[0-9a-fA-F]{1,4}|(?:(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4})?::)|[Vv][0-9a-fA-F]+\\.[a-zA-Z0-9\\-._~!$&'()*+,;=:]+)\\]|(?:(?:25[0-5]|2[0-4]\\d|[01]?\\d\\d?)\\.){3}(?:25[0-5]|2[0-4]\\d|[01]?\\d\\d?)|(?:[a-zA-Z0-9\\-._~!$&'()*+,;=]|%[0-9a-fA-F]{2})*)(?::\\d*)?(?:\\/(?:[a-zA-Z0-9\\-._~!$&'()*+,;=:@]|%[0-9a-fA-F]{2})*)*|\\/(?:(?:[a-zA-Z0-9\\-._~!$&'()*+,;=:@]|%[0-9a-fA-F]{2})+(?:\\/(?:[a-zA-Z0-9\\-._~!$&'()*+,;=:@]|%[0-9a-fA-F]{2})*)*)?|(?:[a-zA-Z0-9\\-._~!$&'()*+,;=:@]|%[0-9a-fA-F]{2})+(?:\\/(?:[a-zA-Z0-9\\-._~!$&'()*+,;=:@]|%[0-9a-fA-F]{2})*)*)(?:\\?(?:[a-zA-Z0-9\\-._~!$&'()*+,;=:@/?]|%[0-9a-fA-F]{2})*)?(?:#(?:[a-zA-Z0-9\\-._~!$&'()*+,;=:@/?]|%[0-9a-fA-F]{2})*)?$";
+var _BOTE_FMT_RX_URI_REFERENCE = "^(?:[a-zA-Z][a-zA-Z0-9+\\-.]*:)?(?:\\/?\\/(?:(?:[a-zA-Z0-9\\-._~!$&'()*+,;=:]|%[0-9a-fA-F]{2})*@)?(?:\\[(?:(?:(?:(?:[0-9a-fA-F]{1,4}:){6}|::(?:[0-9a-fA-F]{1,4}:){5}|(?:[0-9a-fA-F]{1,4})?::(?:[0-9a-fA-F]{1,4}:){4}|(?:(?:[0-9a-fA-F]{1,4}:){0,1}[0-9a-fA-F]{1,4})?::(?:[0-9a-fA-F]{1,4}:){3}|(?:(?:[0-9a-fA-F]{1,4}:){0,2}[0-9a-fA-F]{1,4})?::(?:[0-9a-fA-F]{1,4}:){2}|(?:(?:[0-9a-fA-F]{1,4}:){0,3}[0-9a-fA-F]{1,4})?::[0-9a-fA-F]{1,4}:|(?:(?:[0-9a-fA-F]{1,4}:){0,4}[0-9a-fA-F]{1,4})?::)(?:[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}|(?:(?:25[0-5]|2[0-4]\\d|[01]?\\d\\d?)\\.){3}(?:25[0-5]|2[0-4]\\d|[01]?\\d\\d?))|(?:(?:[0-9a-fA-F]{1,4}:){0,5}[0-9a-fA-F]{1,4})?::[0-9a-fA-F]{1,4}|(?:(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4})?::)|[Vv][0-9a-fA-F]+\\.[a-zA-Z0-9\\-._~!$&'()*+,;=:]+)\\]|(?:(?:25[0-5]|2[0-4]\\d|[01]?\\d\\d?)\\.){3}(?:25[0-5]|2[0-4]\\d|[01]?\\d\\d?)|(?:[a-zA-Z0-9\\-._~!$&'\"()*+,;=]|%[0-9a-fA-F]{2})*)(?::\\d*)?(?:\\/(?:[a-zA-Z0-9\\-._~!$&'\"()*+,;=:@]|%[0-9a-fA-F]{2})*)*|\\/(?:(?:[a-zA-Z0-9\\-._~!$&'\"()*+,;=:@]|%[0-9a-fA-F]{2})+(?:\\/(?:[a-zA-Z0-9\\-._~!$&'\"()*+,;=:@]|%[0-9a-fA-F]{2})*)*)?|(?:[a-zA-Z0-9\\-._~!$&'\"()*+,;=:@]|%[0-9a-fA-F]{2})+(?:\\/(?:[a-zA-Z0-9\\-._~!$&'\"()*+,;=:@]|%[0-9a-fA-F]{2})*)*)?(?:\\?(?:[a-zA-Z0-9\\-._~!$&'\"()*+,;=:@/?]|%[0-9a-fA-F]{2})*)?(?:#(?:[a-zA-Z0-9\\-._~!$&'\"()*+,;=:@/?]|%[0-9a-fA-F]{2})*)?$";
+var _BOTE_FMT_RX_URI_TEMPLATE = "^(?:(?:[^\\x00-\\x20\"'<>%\\\\^`{|}]|%[0-9a-fA-F]{2})|\\{[+#./;?&=,!@|]?(?:[a-zA-Z0-9_]|%[0-9a-fA-F]{2})+(?::[1-9][0-9]{0,3}|\\*)?(?:,(?:[a-zA-Z0-9_]|%[0-9a-fA-F]{2})+(?::[1-9][0-9]{0,3}|\\*)?)*\\})*$";
+var _BOTE_FMT_RX_EMAIL = "^[a-zA-Z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[a-zA-Z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$";
+var _BOTE_FMT_RX_HOSTNAME = "^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[-0-9a-zA-Z]{0,61}[0-9a-zA-Z])?)*\\.?$";
+var _BOTE_FMT_RX_IPV4 = "^(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)$";
+var _BOTE_FMT_RX_IPV6 = "^((([0-9a-fA-F]{1,4}:){7}([0-9a-fA-F]{1,4}|:))|(([0-9a-fA-F]{1,4}:){6}(:[0-9a-fA-F]{1,4}|((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3})|:))|(([0-9a-fA-F]{1,4}:){5}(((:[0-9a-fA-F]{1,4}){1,2})|:((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3})|:))|(([0-9a-fA-F]{1,4}:){4}(((:[0-9a-fA-F]{1,4}){1,3})|((:[0-9a-fA-F]{1,4})?:((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}))|:))|(([0-9a-fA-F]{1,4}:){3}(((:[0-9a-fA-F]{1,4}){1,4})|((:[0-9a-fA-F]{1,4}){0,2}:((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}))|:))|(([0-9a-fA-F]{1,4}:){2}(((:[0-9a-fA-F]{1,4}){1,5})|((:[0-9a-fA-F]{1,4}){0,3}:((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}))|:))|(([0-9a-fA-F]{1,4}:){1}(((:[0-9a-fA-F]{1,4}){1,6})|((:[0-9a-fA-F]{1,4}){0,4}:((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}))|:))|(:(((:[0-9a-fA-F]{1,4}){1,7})|((:[0-9a-fA-F]{1,4}){0,5}:((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}))|:)))$";
+var _BOTE_FMT_RX_UUID = "^(?:[uU][rR][nN]:[uU][uU][iI][dD]:)?[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$";
+var _BOTE_FMT_RX_JSON_POINTER = "^(?:\\/(?:[^~/]|~0|~1)*)*$";
+var _BOTE_FMT_RX_JSON_POINTER_URI_FRAGMENT = "^#(?:\\/(?:[a-zA-Z0-9_\\-.!$&'()*+,;:=@]|%[0-9a-fA-F]{2}|~0|~1)*)*$";
+var _BOTE_FMT_RX_RELATIVE_JSON_POINTER = "^(?:0|[1-9][0-9]*)(?:#|(?:\\/(?:[^~/]|~0|~1)*)*)$";
+
+# Each format's name, as the client knows it.
+fn bote_format_name(id) {
+    if (id == BOTE_FMT_DATE) { return "date"; }
+    if (id == BOTE_FMT_TIME) { return "time"; }
+    if (id == BOTE_FMT_DATE_TIME) { return "date-time"; }
+    if (id == BOTE_FMT_ISO_TIME) { return "iso-time"; }
+    if (id == BOTE_FMT_ISO_DATE_TIME) { return "iso-date-time"; }
+    if (id == BOTE_FMT_DURATION) { return "duration"; }
+    if (id == BOTE_FMT_URI) { return "uri"; }
+    if (id == BOTE_FMT_URI_REFERENCE) { return "uri-reference"; }
+    if (id == BOTE_FMT_URI_TEMPLATE) { return "uri-template"; }
+    if (id == BOTE_FMT_URL) { return "url"; }
+    if (id == BOTE_FMT_EMAIL) { return "email"; }
+    if (id == BOTE_FMT_HOSTNAME) { return "hostname"; }
+    if (id == BOTE_FMT_IPV4) { return "ipv4"; }
+    if (id == BOTE_FMT_IPV6) { return "ipv6"; }
+    if (id == BOTE_FMT_REGEX) { return "regex"; }
+    if (id == BOTE_FMT_UUID) { return "uuid"; }
+    if (id == BOTE_FMT_JSON_POINTER) { return "json-pointer"; }
+    if (id == BOTE_FMT_JSON_POINTER_URI_FRAGMENT) { return "json-pointer-uri-fragment"; }
+    if (id == BOTE_FMT_RELATIVE_JSON_POINTER) { return "relative-json-pointer"; }
+    if (id == BOTE_FMT_BYTE) { return "byte"; }
+    if (id == BOTE_FMT_INT32) { return "int32"; }
+    if (id == BOTE_FMT_INT64) { return "int64"; }
+    if (id == BOTE_FMT_FLOAT) { return "float"; }
+    if (id == BOTE_FMT_DOUBLE) { return "double"; }
+    if (id == BOTE_FMT_PASSWORD) { return "password"; }
+    if (id == BOTE_FMT_BINARY) { return "binary"; }
+    return 0;
+}
+
+# The format a name names, or 0 for one the client does not know.
+fn bote_format_id(name) {
+    if (name == 0) { return 0; }
+    var id = 1;
+    while (id <= BOTE_FMT_COUNT) {
+        if (streq(bote_format_name(id), name) == 1) { return id; }
+        id = id + 1;
+    }
+    return 0;
+}
+
+# What a format judges: 1 strings, 2 numbers, 0 nothing here (`regex`, and an unknown one).
+fn bote_format_kind(id) {
+    if (id <= 0 || id > BOTE_FMT_COUNT || id == BOTE_FMT_REGEX) { return 0; }
+    if (id >= BOTE_FMT_INT32 && id <= BOTE_FMT_DOUBLE) { return 2; }
+    return 1;
+}
+
+# 1 when the client's ajv-formats gives the format an order, which formatMinimum and its kin
+# compare by: the dates and times. Beside a format it knows that has none, those keywords
+# make the client refuse the schema.
+fn bote_format_ordered(id) {
+    if (id >= BOTE_FMT_DATE && id <= BOTE_FMT_ISO_DATE_TIME) { return 1; }
+    return 0;
+}
+
+# A violation's text, for each format a value can fail.
+fn _bfm_msg(id) {
+    if (id == BOTE_FMT_DATE) { return "does not match the format date"; }
+    if (id == BOTE_FMT_TIME) { return "does not match the format time"; }
+    if (id == BOTE_FMT_DATE_TIME) { return "does not match the format date-time"; }
+    if (id == BOTE_FMT_ISO_TIME) { return "does not match the format iso-time"; }
+    if (id == BOTE_FMT_ISO_DATE_TIME) { return "does not match the format iso-date-time"; }
+    if (id == BOTE_FMT_DURATION) { return "does not match the format duration"; }
+    if (id == BOTE_FMT_URI) { return "does not match the format uri"; }
+    if (id == BOTE_FMT_URI_REFERENCE) { return "does not match the format uri-reference"; }
+    if (id == BOTE_FMT_URI_TEMPLATE) { return "does not match the format uri-template"; }
+    if (id == BOTE_FMT_URL) { return "does not match the format url"; }
+    if (id == BOTE_FMT_EMAIL) { return "does not match the format email"; }
+    if (id == BOTE_FMT_HOSTNAME) { return "does not match the format hostname"; }
+    if (id == BOTE_FMT_IPV4) { return "does not match the format ipv4"; }
+    if (id == BOTE_FMT_IPV6) { return "does not match the format ipv6"; }
+    if (id == BOTE_FMT_UUID) { return "does not match the format uuid"; }
+    if (id == BOTE_FMT_JSON_POINTER) { return "does not match the format json-pointer"; }
+    if (id == BOTE_FMT_JSON_POINTER_URI_FRAGMENT) { return "does not match the format json-pointer-uri-fragment"; }
+    if (id == BOTE_FMT_RELATIVE_JSON_POINTER) { return "does not match the format relative-json-pointer"; }
+    if (id == BOTE_FMT_BYTE) { return "does not match the format byte"; }
+    if (id == BOTE_FMT_INT32) { return "does not match the format int32"; }
+    if (id == BOTE_FMT_INT64) { return "does not match the format int64"; }
+    return "does not match the format";
+}
+
+fn _bfm_rx_src(id) {
+    if (id == BOTE_FMT_URI) { return _BOTE_FMT_RX_URI; }
+    if (id == BOTE_FMT_URI_REFERENCE) { return _BOTE_FMT_RX_URI_REFERENCE; }
+    if (id == BOTE_FMT_URI_TEMPLATE) { return _BOTE_FMT_RX_URI_TEMPLATE; }
+    if (id == BOTE_FMT_EMAIL) { return _BOTE_FMT_RX_EMAIL; }
+    if (id == BOTE_FMT_HOSTNAME) { return _BOTE_FMT_RX_HOSTNAME; }
+    if (id == BOTE_FMT_IPV4) { return _BOTE_FMT_RX_IPV4; }
+    if (id == BOTE_FMT_IPV6) { return _BOTE_FMT_RX_IPV6; }
+    if (id == BOTE_FMT_UUID) { return _BOTE_FMT_RX_UUID; }
+    if (id == BOTE_FMT_JSON_POINTER) { return _BOTE_FMT_RX_JSON_POINTER; }
+    if (id == BOTE_FMT_JSON_POINTER_URI_FRAGMENT) { return _BOTE_FMT_RX_JSON_POINTER_URI_FRAGMENT; }
+    if (id == BOTE_FMT_RELATIVE_JSON_POINTER) { return _BOTE_FMT_RX_RELATIVE_JSON_POINTER; }
+    return 0;
+}
+
+# Each expression compiled, a word for each format, published by compare-and-swap: a schema
+# compiled on two threads at once compiles one twice and keeps the first.
+var _bfm_rx_tab[216];
+
+fn _bfm_rx(id) {
+    var slot = &_bfm_rx_tab + id * 8;
+    var rx = load64(slot);
+    if (rx != 0) { return rx; }
+    var src = _bfm_rx_src(id);
+    if (src == 0) { return 0; }
+    rx = bote_rx_compile(src);
+    if (atomic_cas(slot, 0, rx) == 0) { rx = load64(slot); }
+    return rx;
+}
+
+# Ready the format `id` for judging: its expression compiled, at registration, so no
+# request compiles it.
+fn bote_format_ready(id) {
+    _bfm_rx(id);
+    return id;
+}
+
+# ---- By hand ------------------------------------------------------------------------
+
+fn _bfm_digit(c) {
+    if (c >= 48 && c <= 57) { return 1; }
+    return 0;
+}
+
+# Two digits at cps[i] as their number, or -1.
+fn _bfm_num2(cps, i) {
+    var a = load64(cps + i * 8);
+    var b = load64(cps + i * 8 + 8);
+    if (_bfm_digit(a) == 0 || _bfm_digit(b) == 0) { return 0 - 1; }
+    return (a - 48) * 10 + (b - 48);
+}
+
+fn _bfm_at(cps, i) { return load64(cps + i * 8); }
+
+# 1 for a code point JavaScript's `\s` takes: white space and the line terminators.
+fn _bfm_space(c) {
+    if ((c >= 9 && c <= 13) || c == 32 || c == 160 || c == 5760 || (c >= 8192 && c <= 8202)) { return 1; }
+    if (c == 8232 || c == 8233 || c == 8239 || c == 8287 || c == 12288 || c == 65279) { return 1; }
+    return 0;
+}
+
+# date: `^(\d\d\d\d)-(\d\d)-(\d\d)$`, a month from 1 to 12 and a day it has, February's 29th
+# in a leap year (ajv-formats' date).
+fn _bfm_date(cps, s, e) {
+    if (e - s != 10) { return 0; }
+    var k = 0;
+    while (k < 10) {
+        var c = _bfm_at(cps, s + k);
+        if (k == 4 || k == 7) { if (c != 45) { return 0; } }
+        elif (_bfm_digit(c) == 0) { return 0; }
+        k = k + 1;
+    }
+    var y = _bfm_num2(cps, s) * 100 + _bfm_num2(cps, s + 2);
+    var m = _bfm_num2(cps, s + 5);
+    var d = _bfm_num2(cps, s + 8);
+    if (m < 1 || m > 12 || d < 1) { return 0; }
+    var dim = 31;
+    if (m == 4 || m == 6 || m == 9 || m == 11) { dim = 30; }
+    if (m == 2) {
+        dim = 28;
+        if (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) { dim = 29; }
+    }
+    if (d > dim) { return 0; }
+    return 1;
+}
+
+# 1 when the fraction digits cps[fs..fs+fl) round a second of 32 to 63 up to the next whole
+# one as a double: from 1 - 2^-48, a tie rounding to the even, which is the next. The client
+# reads a second as a double (`+"59.9999999999999999"` is 60).
+var _BOTE_FMT_ROUNDS_UP = "999999999999996447286321199499070644378662109375";
+
+fn _bfm_rounds_up(cps, fs, fl) {
+    var k = 0;
+    while (k < fl || k < 48) {
+        var d = 48;
+        if (k < fl) { d = _bfm_at(cps, fs + k); }
+        var t = 48;
+        if (k < 48) { t = load8(_BOTE_FMT_ROUNDS_UP + k); }
+        if (d > t) { return 1; }
+        if (d < t) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+# time, and iso-time with `strict` 0 (ajv-formats' getTime): `^(\d\d):(\d\d):(\d\d(?:\.\d+)?)
+# (z|([+-])(\d\d)(?::?(\d\d))?)?$` in any case, an offset to 23:59, and a time to 23:59:59,
+# or a leap second, 23:59:60 in UTC, read as the client reads it.
+fn _bfm_time(cps, s, e, strict) {
+    if (e - s < 8) { return 0; }
+    var hr = _bfm_num2(cps, s);
+    var mn = _bfm_num2(cps, s + 3);
+    var ss = _bfm_num2(cps, s + 6);
+    if (hr < 0 || mn < 0 || ss < 0 || _bfm_at(cps, s + 2) != 58 || _bfm_at(cps, s + 5) != 58) { return 0; }
+    var i = s + 8;
+    var fs = 0;
+    var fl = 0;
+    if (i < e && _bfm_at(cps, i) == 46) {
+        var j = i + 1;
+        while (j < e && _bfm_digit(_bfm_at(cps, j)) == 1) { j = j + 1; }
+        if (j == i + 1) { return 0; }
+        fs = i + 1;
+        fl = j - i - 1;
+        i = j;
+    }
+    var tz = 0;
+    var sign = 1;
+    var tzh = 0;
+    var tzm = 0;
+    if (i < e) {
+        var c = _bfm_at(cps, i);
+        if (c == 122 || c == 90) { tz = 1; i = i + 1; }
+        elif (c == 43 || c == 45) {
+            if (c == 45) { sign = 0 - 1; }
+            if (i + 3 > e) { return 0; }
+            tzh = _bfm_num2(cps, i + 1);
+            if (tzh < 0) { return 0; }
+            tz = 1;
+            i = i + 3;
+            if (i < e) {
+                if (_bfm_at(cps, i) == 58) { i = i + 1; }
+                if (i + 2 > e) { return 0; }
+                tzm = _bfm_num2(cps, i);
+                if (tzm < 0) { return 0; }
+                i = i + 2;
+            }
+        } else { return 0; }
+    }
+    if (i != e) { return 0; }
+    if (tzh > 23 || tzm > 59 || (strict == 1 && tz == 0)) { return 0; }
+    var lt60 = 0;
+    if (ss < 59 || (ss == 59 && _bfm_rounds_up(cps, fs, fl) == 0)) { lt60 = 1; }
+    if (hr <= 23 && mn <= 59 && lt60 == 1) { return 1; }
+    var umin = mn - tzm * sign;
+    var uhr = hr - tzh * sign;
+    if (umin < 0) { uhr = uhr - 1; }
+    var lt61 = 0;
+    if (ss < 60 || (ss == 60 && _bfm_rounds_up(cps, fs, fl) == 0)) { lt61 = 1; }
+    if ((uhr == 23 || uhr == 0 - 1) && (umin == 59 || umin == 0 - 1) && lt61 == 1) { return 1; }
+    return 0;
+}
+
+# date-time, and iso-date-time with `strict` 0: split at `t`, `T` or a space JavaScript's
+# `\s` takes, into a date and a time, exactly two parts.
+fn _bfm_date_time(cps, n, strict) {
+    var sep = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        var c = _bfm_at(cps, i);
+        if (c == 116 || c == 84 || _bfm_space(c) == 1) {
+            if (sep >= 0) { return 0; }
+            sep = i;
+        }
+        i = i + 1;
+    }
+    if (sep < 0) { return 0; }
+    if (_bfm_date(cps, 0, sep) == 0) { return 0; }
+    return _bfm_time(cps, sep + 1, n, strict);
+}
+
+# A run of digits from cps[i], to where it ends.
+fn _bfm_digits(cps, i, n) {
+    while (i < n && _bfm_digit(_bfm_at(cps, i)) == 1) { i = i + 1; }
+    return i;
+}
+
+# duration: `^P(?!$)((\d+Y)?(\d+M)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?|(\d+W)?)$`, its
+# letters capitals only: years, months and days in that order, each perhaps, then perhaps a
+# `T` and hours, minutes and seconds, at least one; or a number of weeks alone.
+fn _bfm_duration(cps, n) {
+    if (n < 2 || _bfm_at(cps, 0) != 80) { return 0; }
+    var w = _bfm_digits(cps, 1, n);
+    if (w > 1 && w == n - 1 && _bfm_at(cps, w) == 87) { return 1; }
+    var i = 1;
+    var stage = 0;
+    while (i < n && _bfm_at(cps, i) != 84) {
+        var j = _bfm_digits(cps, i, n);
+        if (j == i || j >= n) { return 0; }
+        var l = _bfm_at(cps, j);
+        if (l == 89 && stage < 1) { stage = 1; }
+        elif (l == 77 && stage < 2) { stage = 2; }
+        elif (l == 68 && stage < 3) { stage = 3; }
+        else { return 0; }
+        i = j + 1;
+    }
+    if (i < n) {
+        i = i + 1;
+        if (i >= n || _bfm_digit(_bfm_at(cps, i)) == 0) { return 0; }
+        var ts = 0;
+        while (i < n) {
+            var tj = _bfm_digits(cps, i, n);
+            if (tj == i || tj >= n) { return 0; }
+            var tl = _bfm_at(cps, tj);
+            if (tl == 72 && ts < 1) { ts = 1; }
+            elif (tl == 77 && ts < 2) { ts = 2; }
+            elif (tl == 83 && ts < 3) { ts = 3; }
+            else { return 0; }
+            i = tj + 1;
+        }
+    }
+    return 1;
+}
+
+# One line of byte's expression: `(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?`.
+fn _bfm_b64(c) {
+    if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 43 || c == 47) { return 1; }
+    return 0;
+}
+
+fn _bfm_b64_line(cps, s, e) {
+    var len = e - s;
+    var pad = 0;
+    if (len >= 1 && _bfm_at(cps, e - 1) == 61) {
+        pad = 1;
+        if (len >= 2 && _bfm_at(cps, e - 2) == 61) { pad = 2; }
+    }
+    var body = len - pad;
+    var k = s;
+    while (k < s + body) {
+        if (_bfm_b64(_bfm_at(cps, k)) == 0) { return 0; }
+        k = k + 1;
+    }
+    if (pad == 0 && body % 4 == 0) { return 1; }
+    if (pad == 1 && body % 4 == 3) { return 1; }
+    if (pad == 2 && body % 4 == 2) { return 1; }
+    return 0;
+}
+
+# byte: that expression with the `m` flag, which ajv-formats gives it, so it matches when any
+# line does, an empty one too: "" and "!!!\n" pass, "!!!" does not.
+fn _bfm_byte(cps, n) {
+    var ls = 0;
+    var i = 0;
+    while (i <= n) {
+        var c = 0 - 1;
+        if (i < n) { c = _bfm_at(cps, i); }
+        if (i == n || c == 10 || c == 13 || c == 8232 || c == 8233) {
+            if (_bfm_b64_line(cps, ls, i) == 1) { return 1; }
+            ls = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# url's letters under its `iu` flags: an ASCII letter in either case, and the two code points
+# that fold to one (U+017F to s, U+212A to k).
+fn _bfm_lower(c) {
+    if (c >= 65 && c <= 90) { return c + 32; }
+    if (c == 383) { return 115; }
+    if (c == 8490) { return 107; }
+    return c;
+}
+
+# A code point of url's `[a-z0-9\u{00a1}-\u{ffff}]` (`digits` 1) or `[a-z\u{00a1}-\u{ffff}]`.
+fn _bfm_url_ch(c, digits) {
+    var l = _bfm_lower(c);
+    if (l >= 97 && l <= 122) { return 1; }
+    if (digits == 1 && c >= 48 && c <= 57) { return 1; }
+    if (c >= 161 && c <= 65535) { return 1; }
+    return 0;
+}
+
+# An octet's digits cps[s..e) by url's three alternations: `which` 1 the first,
+# `[1-9]\d?|1\d\d|2[01]\d|22[0-3]`; 2 the middle, `1?\d{1,2}|2[0-4]\d|25[0-5]`; 3 the last,
+# `[1-9]\d?|1\d\d|2[0-4]\d|25[0-4]`.
+fn _bfm_url_octet(cps, s, e, which) {
+    var len = e - s;
+    if (len < 1 || len > 3) { return 0; }
+    var k = s;
+    while (k < e) { if (_bfm_digit(_bfm_at(cps, k)) == 0) { return 0; } k = k + 1; }
+    var a = _bfm_at(cps, s) - 48;
+    if (which == 2) {
+        if (len <= 2) { return 1; }
+        var v2 = a * 100 + (_bfm_at(cps, s + 1) - 48) * 10 + (_bfm_at(cps, s + 2) - 48);
+        if (a == 1 || (v2 >= 200 && v2 <= 255)) { return 1; }
+        return 0;
+    }
+    if (a == 0) { return 0; }
+    if (len <= 2) { return 1; }
+    var v = a * 100 + (_bfm_at(cps, s + 1) - 48) * 10 + (_bfm_at(cps, s + 2) - 48);
+    if (which == 1) { if (v <= 223) { return 1; } return 0; }
+    if (v <= 254) { return 1; }
+    return 0;
+}
+
+# 1 when the n code points at cps[s] are the digits `lit`.
+fn _bfm_is(cps, s, e, lit) {
+    var n = strlen(lit);
+    if (e - s != n) { return 0; }
+    var k = 0;
+    while (k < n) { if (_bfm_at(cps, s + k) != load8(lit + k)) { return 0; } k = k + 1; }
+    return 1;
+}
+
+# url's host cps[s..e): a dotted quad its four octet rules take and its lookaheads do not
+# refuse (10.*, 127.*, 169.254.*, 192.168.*, 172.16 to 172.31.*), or a domain: labels of
+# url's letters, digits and code points from U+00A1 to U+FFFF, single hyphens between their
+# runs, and a last label of at least two letters or such code points.
+fn _bfm_url_host(cps, s, e) {
+    # Dots and digits alone: the dotted quad, or nothing (a domain's last label has no digit).
+    var dots = 0;
+    var quad = 1;
+    var k = s;
+    while (k < e) {
+        var c = _bfm_at(cps, k);
+        if (c == 46) { dots = dots + 1; }
+        elif (_bfm_digit(c) == 0) { quad = 0; }
+        k = k + 1;
+    }
+    if (quad == 1) {
+        if (dots != 3) { return 0; }
+        var p[32];
+        var pe[32];
+        var o = 0;
+        var at = s;
+        k = s;
+        while (k <= e) {
+            if (k == e || _bfm_at(cps, k) == 46) {
+                store64(&p + o * 8, at);
+                store64(&pe + o * 8, k);
+                o = o + 1;
+                at = k + 1;
+            }
+            k = k + 1;
+        }
+        if (_bfm_url_octet(cps, load64(&p), load64(&pe), 1) == 0) { return 0; }
+        if (_bfm_url_octet(cps, load64(&p + 8), load64(&pe + 8), 2) == 0) { return 0; }
+        if (_bfm_url_octet(cps, load64(&p + 16), load64(&pe + 16), 2) == 0) { return 0; }
+        if (_bfm_url_octet(cps, load64(&p + 24), load64(&pe + 24), 3) == 0) { return 0; }
+        var a1 = load64(&p);
+        var b1 = load64(&pe);
+        if (_bfm_is(cps, a1, b1, "10") == 1 || _bfm_is(cps, a1, b1, "127") == 1) { return 0; }
+        var a2 = load64(&p + 8);
+        var b2 = load64(&pe + 8);
+        if (_bfm_is(cps, a1, b1, "169") == 1 && _bfm_is(cps, a2, b2, "254") == 1) { return 0; }
+        if (_bfm_is(cps, a1, b1, "192") == 1 && _bfm_is(cps, a2, b2, "168") == 1) { return 0; }
+        if (_bfm_is(cps, a1, b1, "172") == 1 && b2 - a2 == 2) {
+            var o2 = (_bfm_at(cps, a2) - 48) * 10 + (_bfm_at(cps, a2 + 1) - 48);
+            if (o2 >= 16 && o2 <= 31) { return 0; }
+        }
+        return 1;
+    }
+    # A domain.
+    if (dots < 1) { return 0; }
+    var ls = s;
+    var labels = 0;
+    k = s;
+    while (k <= e) {
+        if (k == e || _bfm_at(cps, k) == 46) {
+            if (k == ls) { return 0; }
+            labels = labels + 1;
+            if (k == e) {
+                # The last: two at least, no digit, no hyphen.
+                if (k - ls < 2) { return 0; }
+                var t = ls;
+                while (t < k) { if (_bfm_url_ch(_bfm_at(cps, t), 0) == 0) { return 0; } t = t + 1; }
+            } else {
+                if (_bfm_at(cps, ls) == 45 || _bfm_at(cps, k - 1) == 45) { return 0; }
+                var u = ls;
+                while (u < k) {
+                    var lc = _bfm_at(cps, u);
+                    if (lc == 45) { if (_bfm_at(cps, u + 1) == 45) { return 0; } }
+                    elif (_bfm_url_ch(lc, 1) == 0) { return 0; }
+                    u = u + 1;
+                }
+            }
+            ls = k + 1;
+        }
+        k = k + 1;
+    }
+    if (labels < 2) { return 0; }
+    return 1;
+}
+
+# url (ajv-formats' expression under `iu`): `http`, `https` or `ftp` and `://`, perhaps a
+# userinfo of anything but white space ending at an `@`, a host, perhaps a port of two to five
+# digits, and perhaps a path of anything but white space from a `/`. The userinfo may hold an
+# `@`, so each one is tried as its end, the host after it running to a `:` or a `/`. Each
+# start costs at most the code points to the next `@`, so the whole is linear.
+fn _bfm_url(cps, n) {
+    var k = 0;
+    if (n >= 7 && _bfm_lower(_bfm_at(cps, 0)) == 102 && _bfm_lower(_bfm_at(cps, 1)) == 116 && _bfm_lower(_bfm_at(cps, 2)) == 112) { k = 3; }
+    elif (n >= 7 && _bfm_lower(_bfm_at(cps, 0)) == 104 && _bfm_lower(_bfm_at(cps, 1)) == 116 && _bfm_lower(_bfm_at(cps, 2)) == 116 && _bfm_lower(_bfm_at(cps, 3)) == 112) {
+        k = 4;
+        if (_bfm_lower(_bfm_at(cps, 4)) == 115) { k = 5; }
+    } else { return 0; }
+    if (k + 3 > n || _bfm_at(cps, k) != 58 || _bfm_at(cps, k + 1) != 47 || _bfm_at(cps, k + 2) != 47) { return 0; }
+    k = k + 3;
+    # Each start the host may have: with no userinfo, and after each `@` that ends one, a
+    # userinfo of one character at least and no white space. The host's own classes take
+    # code points from U+00A1, U+3000 and U+FEFF among them, so white space is refused only in
+    # the userinfo and the path.
+    var h = k;
+    var q = k;
+    var go = 1;
+    while (go == 1) {
+        var he = h;
+        var at = 0;
+        while (he < n && _bfm_at(cps, he) != 58 && _bfm_at(cps, he) != 47) {
+            if (_bfm_at(cps, he) == 64) { at = 1; }
+            he = he + 1;
+            if (at == 1) { he = n; }
+        }
+        if (at == 0 && he > h && _bfm_url_host(cps, h, he) == 1) {
+            var r = he;
+            var ok = 1;
+            if (r < n && _bfm_at(cps, r) == 58) {
+                var pd = _bfm_digits(cps, r + 1, n);
+                if (pd - r - 1 < 2 || pd - r - 1 > 5) { ok = 0; }
+                r = pd;
+            }
+            if (ok == 1 && r < n) {
+                # A path: `/`, then anything but white space.
+                var pi = r + 1;
+                while (pi < n && ok == 1) { if (_bfm_space(_bfm_at(cps, pi)) == 1) { ok = 0; } pi = pi + 1; }
+                if (_bfm_at(cps, r) != 47) { ok = 0; }
+            }
+            if (ok == 1) { return 1; }
+        }
+        # The next `@` past the userinfo's first character, with no white space before it.
+        if (q == k) {
+            if (k >= n || _bfm_space(_bfm_at(cps, k)) == 1) { go = 0; }
+            q = k + 1;
+        }
+        while (go == 1 && q < n && _bfm_at(cps, q) != 64) {
+            if (_bfm_space(_bfm_at(cps, q)) == 1) { go = 0; }
+            q = q + 1;
+        }
+        if (go == 1) {
+            if (q >= n) { go = 0; }
+            else {
+                h = q + 1;
+                q = q + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+# The code points of the JSON string body [s, e) of `buf` (src/regex.cyr's reading), on `a`,
+# their number at *out_n.
+fn _bfm_cps_a(a, buf, s, e, out_n) {
+    var cps = alloc_via(a, (e - s) * 8 + 8);
+    var cv[8];
+    var n = 0;
+    var i = s;
+    while (i < e) {
+        i = _brx_cp(buf, i, e, &cv);
+        store64(cps + n * 8, load64(&cv));
+        n = n + 1;
+    }
+    store64(out_n, n);
+    return cps;
+}
+
+# 1 when the JSON string body [s, e) of `buf` matches the string format `id`, 0 when it
+# does not, -1 when the budget block `bud` (0 for none) was spent first. What it reads it
+# charges: an expression's steps, or (by hand) a step for each byte, and the code points it
+# decodes are on `a`, given back; on the heap forms' scratch, under its lock, when `a` is no
+# bote arena, as src/regex.cyr's are.
+fn bote_format_test_a(a, id, buf, s, e, bud) {
+    if (id == BOTE_FMT_PASSWORD || id == BOTE_FMT_BINARY) { return 1; }
+    if (bote_format_kind(id) != 1) { return 1; }
+    var rx = _bfm_rx(id);
+    if (_bote_ar_is(a) == 0) {
+        var sm[16];
+        var sa = _sch_scratch_take(&sm);
+        var r0 = _bfm_test_on(sa, id, rx, buf, s, e, bud);
+        _sch_scratch_give(&sm);
+        return r0;
+    }
+    return _bfm_test_on(a, id, rx, buf, s, e, bud);
+}
+
+fn _bfm_test_on(a, id, rx, buf, s, e, bud) {
+    if (rx != 0 && id != BOTE_FMT_HOSTNAME) { return bote_rx_test_a(a, rx, buf, s, e, bud); }
+    if (bud != 0) {
+        store64(bud, load64(bud) - (e - s));
+        if (load64(bud) < 0) { return 0 - 1; }
+    }
+    var mk[16];
+    bote_arena_mark(a, &mk);
+    var nn[8];
+    var cps = _bfm_cps_a(a, buf, s, e, &nn);
+    var n = load64(&nn);
+    var r = 0;
+    if (id == BOTE_FMT_DATE) { r = _bfm_date(cps, 0, n); }
+    elif (id == BOTE_FMT_TIME) { r = _bfm_time(cps, 0, n, 1); }
+    elif (id == BOTE_FMT_ISO_TIME) { r = _bfm_time(cps, 0, n, 0); }
+    elif (id == BOTE_FMT_DATE_TIME) { r = _bfm_date_time(cps, n, 1); }
+    elif (id == BOTE_FMT_ISO_DATE_TIME) { r = _bfm_date_time(cps, n, 0); }
+    elif (id == BOTE_FMT_DURATION) { r = _bfm_duration(cps, n); }
+    elif (id == BOTE_FMT_URL) { r = _bfm_url(cps, n); }
+    elif (id == BOTE_FMT_BYTE) { r = _bfm_byte(cps, n); }
+    elif (id == BOTE_FMT_HOSTNAME) {
+        # The expression's lookahead, `(?=.{1,253}\.?$)`: 1 to 253 characters, or 254 ending
+        # in a dot (any other character is no hostname's).
+        if (n >= 1 && (n <= 253 || (n == 254 && _bfm_at(cps, 253) == 46))) { r = 1; }
+    }
+    bote_arena_release(a, &mk);
+    if (id == BOTE_FMT_HOSTNAME && r == 1) { return bote_rx_test_a(a, rx, buf, s, e, bud); }
+    return r;
+}
+
+# 1 when the JSON number at `v` meets the number format `id`: int32 an integer from -2^31 to
+# 2^31 - 1, int64 an integer a double holds as one (to 1.7976931348623157e308 either way),
+# float and double any number. Exact, where the client reads a double: a value whose double
+# is an integer and itself is not (5.0000000000000001, 1e-400) the client takes and bote does
+# not. An integer past a double's largest (1.8e308, which the client reads as infinite) int64
+# refuses.
+fn bote_format_number(id, v) {
+    if (id != BOTE_FMT_INT32 && id != BOTE_FMT_INT64) { return 1; }
+    var o[64];
+    if (_sch_num_norm(v, &o) == 0) { return 0; }
+    if (load64(&o) != 0 && load64(&o + 8) < load64(&o + 56) - load64(&o + 48)) { return 0; }
+    if (id == BOTE_FMT_INT32) {
+        if (_sch_num_cmp(v, "2147483647") > 0 || _sch_num_cmp(v, "-2147483648") < 0) { return 0; }
+        return 1;
+    }
+    if (_sch_num_cmp(v, "1.7976931348623157e308") > 0 || _sch_num_cmp(v, "-1.7976931348623157e308") < 0) { return 0; }
+    return 1;
+}

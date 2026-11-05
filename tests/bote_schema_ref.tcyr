@@ -38,6 +38,7 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/regex.cyr"
+include "src/format.cyr"
 include "src/registry.cyr"
 include "src/prompts.cyr"
 include "src/resources.cyr"
@@ -381,6 +382,9 @@ fn main() {
     _ase(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"if\":{\"$ref\":\"#\"},\"then\":{\"dependentRequired\":{}}}"), "(none)", "draft-07: a then of dependentRequired, no keyword there, can never fail");
     _ase(_why("{\"if\":{\"$ref\":\"#\"},\"then\":{\"dependentRequired\":{}}}"), cyc, "2020-12: a then of dependentRequired can fail: a loop");
     _ase(_why("{\"if\":{\"$ref\":\"#\"},\"then\":{\"additionalItems\":false}}"), "(none)", "2020-12: additionalItems is no keyword: no loop");
+    # (3.8.13, from the 3.8.12 review) The four keywords the client's addFormats adds can fail.
+    _ase(_why("{\"if\":{\"$ref\":\"#\"},\"then\":{\"format\":\"date\",\"formatMinimum\":\"2020-01-01\"}}"), cyc, "if beside a then of formatMinimum, which the client compiles: a loop");
+    _ase(_why("{\"if\":{\"$ref\":\"#\"},\"then\":{\"formatMinimum\":\"a\"}}"), cyc, "if beside a then of formatMinimum alone, which can fail too: a loop");
     assert_eq(_ok("{\"if\":{\"$ref\":\"#\"}}", "5"), 1, "if beside no then: every value passes, as the client's");
     assert_eq(_ok("{\"if\":{\"$ref\":\"#\"},\"then\":{\"title\":\"t\"}}", "[1,{\"a\":2}]"), 1, "if beside a then of annotations: passes, not too deep");
     _ase(_why("{\"if\":{},\"then\":{\"$ref\":\"#\"}}"), cyc, "cycle: through then");
@@ -482,7 +486,7 @@ fn main() {
     var nr = "the outputSchema holds a $ref that does not resolve within its document: ";
     _ase(_why("{\"$id\":\"http://x/a\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"a/b/..#/$defs/d\"}}}"), _cat(nr, "a/b/..#/$defs/d"), "uri: a/b/.. is /a/, not /a (it was taken)");
     _ase(_why("{\"$id\":\"http://x/a/\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"b/..#/$defs/d\"}}}"), "(none)", "uri: ...which /a/ is");
-    _ase(_why("{\"$id\":\"http://x/a/.\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"http://x/a/#/$defs/d\"}}}"), _cat(nr, "http://x/a/#/$defs/d"), "uri: an $id is compared as written, a spelling the client folds refused (bote's stricter side)");
+    _ase(_why("{\"$id\":\"http://x/a/.\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"http://x/a/#/$defs/d\"}}}"), "the outputSchema names in $id a URI the official client's resolver does not take", "uri: an $id with a dot segment refused, a spelling the client folds (bote's stricter side, 3.8.13)");
     _ase(_why("{\"$id\":\"http://x/y\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"http://x/a?b/../../y#/$defs/d\"}}}"), _cat(nr, "http://x/a?b/../../y#/$defs/d"), "uri: a query's slashes are no segments (it was read as /y)");
     _ase(_why("{\"$id\":\"http://x/a?q/../r\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"http://x/a?q/../r#/$defs/d\"}}}"), "(none)", "uri: ...the query kept as it is");
     _ase(_why("{\"$id\":\"http://x/b/\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"/b/c/..?#/$defs/d\"}}}"), _cat(nr, "/b/c/..?#/$defs/d"), "uri: a query after a last ..");
@@ -526,6 +530,43 @@ fn main() {
     }
     _ase(_why("{\"$id\":\"urn:x\",\"type\":\"object\"}"), bid, "uri: ...with no $ref too, which the client compiles none of");
     _ase(_why("{\"$id\":\"http://x/a\",\"properties\":{\"p\":{\"$id\":\"//x y/\"}}}"), bid, "uri: ...one below the root, which the client resolves");
+    # (3.8.13, from the 3.8.12 review) What the client refuses on a schema it compiles: an `$id`
+    # that is truthy and no string, a `$dynamicAnchor` that is no string, a `$recursiveAnchor`
+    # that is no boolean; a `.` or `..` segment in an `$id`, which fast-uri takes out of a `ws:`
+    # URI, or one with no authority, otherwise than of the references beside it; and an empty
+    # `$id`, which is none.
+    var rdd = "{\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"#/$defs/d\"}}}";
+    var bad13 = vec_new();
+    vec_push(bad13, "{\"$id\":5,"); vec_push(bad13, "the outputSchema names an $id that is no string, which the official client refuses");
+    vec_push(bad13, "{\"$id\":true,"); vec_push(bad13, "the outputSchema names an $id that is no string, which the official client refuses");
+    vec_push(bad13, "{\"$id\":[],"); vec_push(bad13, "the outputSchema names an $id that is no string, which the official client refuses");
+    vec_push(bad13, "{\"$dynamicAnchor\":5,"); vec_push(bad13, "the outputSchema names a $dynamicAnchor that is no string, which the official client refuses");
+    vec_push(bad13, "{\"$recursiveAnchor\":\"x\","); vec_push(bad13, "the outputSchema names a $recursiveAnchor that is no boolean, which the official client refuses");
+    vec_push(bad13, "{\"$id\":\"wss://x/a/..\","); vec_push(bad13, bid);
+    vec_push(bad13, "{\"$id\":\"ws://x/.\","); vec_push(bad13, bid);
+    vec_push(bad13, "{\"$id\":\"HTTP:.\","); vec_push(bad13, bid);
+    var bk = 0;
+    while (bk < vec_len(bad13)) {
+        _ase(_why(_cat(vec_get(bad13, bk), rdd + 1)), vec_get(bad13, bk + 1), _cat("uri: refused, as the client refuses it: ", vec_get(bad13, bk)));
+        bk = bk + 2;
+    }
+    _ase(_why(_cat("{\"$id\":\"http://x/a/%2E%2e\",", rdd + 1)), bid, "uri: a dot segment written %2E%2e refused too, which the client takes for http (bote's stricter side)");
+    _ase(_why("{\"$defs\":{\"d\":{\"$id\":{},\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"#/$defs/d\"}}}"), "the outputSchema names an $id that is no string, which the official client refuses", "uri: ...an $id that is no string on a schema a $ref reaches");
+    _ase(_why("{\"$defs\":{\"d\":{\"$dynamicAnchor\":null,\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"#/$defs/d\"}}}"), "the outputSchema names a $dynamicAnchor that is no string, which the official client refuses", "uri: ...and a $dynamicAnchor of null there");
+    _ase(_why("{\"$id\":\"\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"A/..#/$defs/d\"}}}"), "the outputSchema holds a $ref that does not resolve within its document: A/..#/$defs/d", "uri: an empty $id is none, so a relative reference resolves to nothing");
+    var ok13 = vec_new();
+    vec_push(ok13, "{\"$id\":0,");
+    vec_push(ok13, "{\"$id\":false,");
+    vec_push(ok13, "{\"$id\":null,");
+    vec_push(ok13, "{\"$id\":\"\",");
+    vec_push(ok13, "{\"definitions\":{\"y\":{\"$id\":5,\"$dynamicAnchor\":5}},");
+    vec_push(ok13, "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"$dynamicAnchor\":5,\"$recursiveAnchor\":\"x\",");
+    vec_push(ok13, "{\"$recursiveAnchor\":true,");
+    var ok = 0;
+    while (ok < vec_len(ok13)) {
+        _ase(_why(_cat(vec_get(ok13, ok), rdd + 1)), "(none)", _cat("uri: taken, as the client takes it: ", vec_get(ok13, ok)));
+        ok = ok + 1;
+    }
     var gids = vec_new();
     vec_push(gids, "urn:ab:c");
     vec_push(gids, "urn:a:b");
@@ -630,6 +671,14 @@ fn main() {
     assert(_has(_call(od, "t_ie", "{\"nz\":1e30}"), rng) == 1, "range: not of oneOf met by none, one refusing the integer, refused");
     assert(_has(_call(od, "t_ie", "{\"nz\":5}"), "\"text\":\"ok\"") == 1, "range: ...5 taken");
     assert(_ok("{\"not\":{\"not\":{\"type\":\"integer\"}}}", "1e30") == 1 && _ok("{\"if\":{\"type\":\"integer\"},\"then\":true,\"else\":false}", "1e30") == 1, "range: a result's 1e30 is an integer, as JSON Schema types it");
+    # (3.8.13, from the 3.8.12 review) contains counted a refusal by the integer (3) as a match.
+    dispatcher_register_tool(od, tool_def_new("t_ic", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"array\",\"contains\":{\"allOf\":[{\"not\":{\"type\":\"integer\"}},{\"type\":\"string\"}]}},\"b\":{\"type\":\"array\",\"contains\":{\"not\":{\"type\":\"integer\"}}},\"c\":{\"type\":\"array\",\"contains\":{\"if\":{\"type\":\"integer\"},\"then\":false}},\"k\":{\"type\":\"object\",\"propertyNames\":{\"not\":{\"maxLength\":1}}}}}")), &h_tool);
+    var noc = "no item matches contains";
+    assert(_has(_call(od, "t_ic", "{\"a\":[1e30,2]}"), noc) == 1, "range: contains of allOf of not an integer and a string, [1e30,2] refused (3.8.12 took it)");
+    assert(_has(_call(od, "t_ic", "{\"b\":[1e30]}"), noc) == 1, "range: contains of not an integer, [1e30] refused");
+    assert(_has(_call(od, "t_ic", "{\"c\":[1e30]}"), noc) == 1, "range: contains of if an integer then false, [1e30] refused");
+    assert(_has(_call(od, "t_ic", "{\"b\":[1e30,\"s\"]}"), "\"text\":\"ok\"") == 1, "range: ...a string item met");
+    assert(_has(_call(od, "t_ic", "{\"k\":{\"ab\":1}}"), "\"text\":\"ok\"") == 1 && _has(_call(od, "t_ic", "{\"k\":{\"a\":1}}"), "property name") == 1, "range: propertyNames of not, a key judged");
 
     # ---- (3.8.11, from the 3.8.10 review) an inputSchema root's const and enum ----
     dispatcher_register_tool(od, tool_def_new("t_rc", "d", tool_schema_from_json("{\"type\":\"object\",\"const\":{\"a\":1}}")), &h_tool);

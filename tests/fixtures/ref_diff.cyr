@@ -1,5 +1,6 @@
-# ref_diff.cyr — bote's reading of which `$ref`s are in their document (src/schema.cyr,
-# _sch_refs_why, through registration's own resolver) against the official client's own validator,
+# ref_diff.cyr — bote's reading of which `$ref`s are in their document, and of the `$id`s and
+# anchors beside them (registration's own verdict, registry_check_tool_def, on each schema as an
+# outputSchema) against the official client's own validator,
 # from what tests/fixtures/ref_diff_gen.cjs wrote to build/ref-diff/cases.txt
 # (scripts/ref-diff.sh runs both). It exits 1 on any schema bote takes and the client
 # cannot compile, the reading that leaves a tool's results unjudgeable by the client; one
@@ -37,6 +38,7 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/regex.cyr"
+include "src/format.cyr"
 include "src/registry.cyr"
 include "src/prompts.cyr"
 include "src/resources.cyr"
@@ -90,7 +92,8 @@ fn main() {
         var doc = _sch_str_dec_a(default_alloc(), raw);
         if (doc != 0) {
             n = n + 1;
-            var w = _sch_refs_why(doc);
+            # Registration's own verdict on the schema as an outputSchema: every check it makes.
+            var w = registry_check_tool_def(tool_def_with_output_schema(tool_def_new("t_ref", "d", schema_new("object", 0, vec_new())), doc));
             if (w == 0 && flag == 1) { both = both + 1; }
             elif (w != 0 && flag == 0) { neither = neither + 1; }
             elif (w == 0) {

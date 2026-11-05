@@ -39,6 +39,7 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/regex.cyr"
+include "src/format.cyr"
 include "src/registry.cyr"
 include "src/prompts.cyr"
 include "src/resources.cyr"
@@ -273,9 +274,10 @@ fn main() {
     # ---- What registration warns of ----
     _lc_begin();
     # (3.8.11) pattern and multipleOf are judged now; format and unevaluatedProperties are not.
-    dispatcher_register_tool(d, _tool("t_warn", "{\"type\":\"string\",\"format\":\"email\",\"properties\":{\"n\":{\"type\":\"number\",\"unevaluatedProperties\":false,\"const\":4},\"k\":{\"type\":[\"string\",\"null\"]}}}"), &h_ret);
+    # (3.8.13) format is too; formatMaximum is not.
+    dispatcher_register_tool(d, _tool("t_warn", "{\"type\":\"string\",\"format\":\"date\",\"formatMaximum\":\"2020-01-01\",\"properties\":{\"n\":{\"type\":\"number\",\"unevaluatedProperties\":false,\"const\":4},\"k\":{\"type\":[\"string\",\"null\"]}}}"), &h_ret);
     _lc_end();
-    assert(_has(_lc_find("property=outputSchema keyword=format"), "schema keyword not enforced") == 1, "warn: a keyword at the root");
+    assert(_has(_lc_find("property=outputSchema keyword=formatMaximum"), "schema keyword not enforced") == 1, "warn: a keyword at the root");
     assert(_lc_find("property=outputSchema.n keyword=unevaluatedProperties") != 0, "warn: a keyword on a property");
     assert(_lc_find("keyword=const") == 0, "warn: const is judged, and warned of no longer (3.8.7)");
     assert(_lc_find("property=outputSchema.k keyword=") == 0, "warn: a type array is judged, and warned of no longer (3.8.7)");
@@ -814,7 +816,7 @@ fn main() {
     _lc_begin();
     dispatcher_register_tool(r2, _tool("t_w7", "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"m\":{\"type\":\"string\",\"format\":\"email\"},\"a\":{\"type\":\"array\",\"items\":[{\"type\":\"string\"}],\"additionalItems\":false},\"o\":{\"type\":\"object\",\"dependencies\":{\"x\":[\"y\"]}}}}"), &h_ret);
     _lc_end();
-    assert(_lc_find("property=outputSchema.m keyword=format") != 0, "review 3.8.1: warn: format");
+    assert(_lc_find("property=outputSchema.m keyword=") == 0, "review 3.8.1: format email, judged since 3.8.13, warned of no longer");
     assert(_lc_find("property=outputSchema.a keyword=\"items as an array\"") != 0, "review 3.8.1: warn: an array items");
     assert(_lc_find("property=outputSchema.a keyword=additionalItems") != 0, "review 3.8.1: warn: additionalItems");
     assert(_lc_find("property=outputSchema.o keyword=dependencies") != 0, "review 3.8.1: warn: dependencies");

@@ -33,13 +33,13 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.13 — JSON Schema coverage, its eighth bite: `format`.** The official client registers ajv-formats in
-its full mode, so a `format` it knows is enforced and one it does not is ignored; that list (`date`, `time`,
-`date-time`, `duration`, `uri`, `uri-reference`, `uri-template`, `email`, `hostname`, `ipv4`, `ipv6`, `regex`,
-`uuid`, the JSON Pointers, the numeric and binary ones) and its definitions are the ones to match, each as its own
-checker, a byte at a time and charged to the budget. `regex` is 3.8.11's engine; `hostname` and `email` follow
-the RFCs ajv-formats reads. A format bote does not judge is warned of, as now. Then `$recursiveRef` /
-`$dynamicRef`, and the `unevaluated*` keywords, which need to know what every other keyword judged.
+**3.8.14 — JSON Schema coverage, its ninth bite: `$recursiveRef` and `$dynamicRef`.** 2019-09's
+`$recursiveRef` with `$recursiveAnchor`, and 2020-12's `$dynamicRef` with `$dynamicAnchor`, resolved as the client's
+Ajv resolves them: by the dynamic scope a judgement passed through, which a static `$ref` does not keep. Then the
+`unevaluated*` keywords, which need to know what every other keyword judged; draft-07's array `items`,
+`additionalItems` and `dependencies`; and the `format*` limit keywords, which compare a date, a time or a date-time
+through JavaScript's `Date` and would need its parser for the strings `format` takes. `format: regex` stays
+unjudged until bote reads JavaScript's syntax without the `u` flag (Annex B), as the client checks it.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
@@ -56,10 +56,11 @@ stdio's) are each one connection's, and a worker per connection would need a hom
   `prefixItems`, `contains` with its counts, `propertyNames`, `dependentRequired` and `dependentSchemas`; since
   3.8.9 composition, `allOf`, `anyOf`, `oneOf`, `not`, `if` / `then` / `else`, under a budget of work; since
   3.8.10 `$ref` within its document, under a depth; since 3.8.11 `pattern`, by an engine of bote's own held to
-  JavaScript's, and `multipleOf`, exactly; since 3.8.12 `patternProperties`, with `additionalProperties` beside it. It still
-  warns at registration of what it lists and does not judge: `$dynamicRef`, `$recursiveRef`, `format` (which the
-  official client enforces), the `unevaluated*`
-  keywords, draft-07's array `items`, `additionalItems` and `dependencies`. Numbers
+  JavaScript's, and `multipleOf`, exactly; since 3.8.12 `patternProperties`, with `additionalProperties` beside it;
+  since 3.8.13 `format`, each of ajv-formats' as it defines them but `regex`. It still warns at registration of what
+  it lists and does not judge: `$dynamicRef`, `$recursiveRef`, the `unevaluated*` keywords, draft-07's array
+  `items`, `additionalItems` and `dependencies`, the `format*` limit keywords and `format: regex` (each of which the
+  official client enforces). Numbers
   are compared exactly, where a client holding them as doubles may find two equal that bote does not: past 15
   significant digits or a double's range (`1e400`, `1e-400`), a result's `uniqueItems` array could be refused by a client and passed here. Enforce the
   rest in bites. The budget charges a value one and each byte a keyword reads one more (3.8.10); a refusal for
@@ -153,6 +154,11 @@ stdio's) are each one connection's, and a worker per connection would need a hom
 
 Not tasks. Things that have bitten once and are checked, not assumed:
 
+- **The regex engine's short-pattern match, 11 to 15% slower since 3.8.13, unexplained.** `regex_slug` is 2.28 µs
+  on 3.8.12 and 2.61 µs here, on a quiet host; `validate_compiled_text` follows it by the same 300 ns. The program and the functions on the match's path are 3.8.12's, step for step.
+  Code position, the program's address, the arena, the stack, the names and dead-code elimination are each ruled
+  out. 3.8.12 stays fast with the new sparse functions pasted in uncalled, and is slow with either the new matcher or
+  the new compile alone. Find it with a profiler (`perf` was not on the release host); it is a cost, not a defect.
 - **A stdlib upgrade can change what a parser accepts.** bayan 1.11.1 refused repeated JSON keys and made
   its base64 decoders stricter, and bote's tests stayed green over both. At a pin move, read the fold's
   own changelog for what its parsers now refuse.

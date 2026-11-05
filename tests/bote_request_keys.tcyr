@@ -35,6 +35,7 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/regex.cyr"
+include "src/format.cyr"
 include "src/registry.cyr"
 include "src/prompts.cyr"
 include "src/resources.cyr"
@@ -407,6 +408,26 @@ fn main() {
         ri = ri + 1;
     }
     assert(alloc_used() - ra0 < 8388608, "heap: a ramp of 100 refused messages, each a little longer, keeps under 8 MB");
+    # (3.8.13, from the 3.8.12 review) The plain form walks for a key twice on the calling
+    # thread's request arena: through 3.8.12 its table for 2,000 keys, 98 KB, stayed on the
+    # heap each call.
+    var pkd = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(pkd, tool_def_new("t_pk", "d", schema_new("object", 0, vec_new())), &h_rec);
+    var pks = str_builder_new();
+    str_builder_add_cstr(pks, "{\"name\":\"t_pk\",\"arguments\":{");
+    var pki = 0;
+    while (pki < 2000) { if (pki > 0) { str_builder_add_cstr(pks, ","); } str_builder_add_cstr(pks, "\"k"); str_builder_add_int(pks, pki); str_builder_add_cstr(pks, "\":1"); pki = pki + 1; }
+    str_builder_add_cstr(pks, "}}");
+    var pkreq = req_with_params(req_new("1", "tools/call"), str_data(str_builder_build(pks)));
+    dispatcher_dispatch(pkd, pkreq, 0);
+    # Forty calls with no begin between them: the walk's table is given back each time, so
+    # neither the heap nor the request arena (whose chunks are the heap's) grows by it.
+    var pkh = alloc_used();
+    pki = 0;
+    while (pki < 40) { dispatcher_dispatch(pkd, pkreq, 0); pki = pki + 1; }
+    assert((alloc_used() - pkh) / 40 < 40000, "plain form: 2,000 keys checked for one twice keep no table on the heap or the arena (98 KB a call through 3.8.12)");
+    var dupreq = req_with_params(req_new("2", "tools/call"), "{\"name\":\"t_pk\",\"name\":\"t_pk\"}");
+    assert(_has(codec_serialize_response(dispatcher_dispatch(pkd, dupreq, 0)), "-32600") == 1, "plain form: ...and a key twice still refused");
     return assert_summary();
 }
 

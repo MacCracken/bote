@@ -37,6 +37,7 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/regex.cyr"
+include "src/format.cyr"
 include "src/registry.cyr"
 include "src/prompts.cyr"
 include "src/resources.cyr"
@@ -304,6 +305,23 @@ fn main() {
     assert(_lc_find("additionalProperties beside a pattern bote's engine does not take, which judges nothing") != 0, "warn: ...and additionalProperties beside it");
     assert(_lc_find("patternProperties that is no object") != 0, "warn: patternProperties that is no object");
     assert(_lc_find("tool=w_ppok") == 0, "warn: none for patternProperties and additionalProperties both judged");
+    # (3.8.13, from the 3.8.12 review) Two groups of one name, which Node before 23 refuses.
+    _lc_begin();
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_dn", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"pattern\":\"(?<y>\\\\d{4})|(?<y>\\\\d{2})\"},\"b\":{\"patternProperties\":{\"(?<k>x)|(?<k>y)\":{}}},\"c\":{\"pattern\":\"(?<y>a)(?<z>b)\"}}}"), &h_ret);
+    _lc_end();
+    assert(_has(_lc_find("property=outputSchema.a"), "pattern naming two groups alike, which Node before 23 refuses whole") == 1, "warn: a pattern naming two groups alike");
+    assert(_has(_lc_find("property=outputSchema.b"), "patternProperties pattern naming two groups alike") == 1, "warn: ...as a patternProperties pattern");
+    assert(_lc_find("property=outputSchema.c") == 0, "warn: none for two names");
+    # Registration keeps a pattern's program once: 100 of 4,005 steps.
+    var rhb = str_builder_new();
+    str_builder_add_cstr(rhb, "{\"type\":\"object\",\"patternProperties\":{");
+    var rhi = 0;
+    while (rhi < 100) { if (rhi > 0) { str_builder_add_cstr(rhb, ","); } str_builder_add_cstr(rhb, "\"^p"); str_builder_add_int(rhb, rhi); str_builder_add_cstr(rhb, ".{0,2000}$\":{}"); rhi = rhi + 1; }
+    str_builder_add_cstr(rhb, "}}");
+    var rhs = str_data(str_builder_build(rhb));
+    var rh0 = alloc_used();
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_big", "d", schema_new("object", 0, vec_new())), rhs), &h_ret);
+    assert(alloc_used() - rh0 < 12000000, "register: 100 patterns of 4,005 steps keep about their programs, under 12 MB (74 MB through 3.8.12)");
     # (3.8.12, from the 3.8.11 review) An integer multipleOf a double holds inexactly, or not at all.
     _lc_begin();
     dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_m53", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"multipleOf\":1e20}}}"), &h_ret);
@@ -325,7 +343,9 @@ fn main() {
     vec_push(msz, "1e15"); vec_push(msz, 0);
     vec_push(msz, "1e308"); vec_push(msz, 1);
     vec_push(msz, "1.7976931348623157e308"); vec_push(msz, 1);
-    vec_push(msz, "1.7976931348623158e308"); vec_push(msz, 2);
+    vec_push(msz, "1.7976931348623158e308"); vec_push(msz, 1);
+    vec_push(msz, "1.7976931348623159e308"); vec_push(msz, 2);
+    vec_push(msz, "17976931348623158e292"); vec_push(msz, 1);
     vec_push(msz, "1e309"); vec_push(msz, 2);
     vec_push(msz, "17"); vec_push(msz, 0);
     vec_push(msz, "0.5"); vec_push(msz, 0);
@@ -407,6 +427,56 @@ fn main() {
     var bvv = _sch_check_value_a(bote_req_begin(), bpp1, "v", bpv);
     assert(bvv != 0 && streq(vec_get(bvv, vec_len(bvv) - 1), "v: more work to judge than its size allows") == 1, "patternProperties: 100 long keys against 64 patterns refused as too much to judge");
     assert(_ns3(bpp1, bpv) < 64 * _ns3(parse_property("{\"patternProperties\":{\"^(a|aa)*c\":{}}}"), bpv), "patternProperties: ...in under 64 times one pattern's time");
+    # (3.8.13, from the 3.8.12 review) 64 patterns of 4,005 steps each, `^p<i>.{0,2000}$`, over
+    # 4,000 short keys none matches: each made its steps' array ready for each key, 4,005 words,
+    # uncharged, 1.8 s for 49 KB. The steps seen are a sparse set now, so it costs what 64
+    # patterns of four steps do.
+    var bigp = str_builder_new();
+    var smlp = str_builder_new();
+    str_builder_add_cstr(bigp, "{\"patternProperties\":{");
+    str_builder_add_cstr(smlp, "{\"patternProperties\":{");
+    var gi = 0;
+    while (gi < 64) {
+        if (gi > 0) { str_builder_add_cstr(bigp, ","); str_builder_add_cstr(smlp, ","); }
+        str_builder_add_cstr(bigp, "\"^p");
+        str_builder_add_int(bigp, gi);
+        str_builder_add_cstr(bigp, ".{0,2000}$\":{}");
+        str_builder_add_cstr(smlp, "\"^p");
+        str_builder_add_int(smlp, gi);
+        str_builder_add_cstr(smlp, "x$\":{}");
+        gi = gi + 1;
+    }
+    str_builder_add_cstr(bigp, "}}");
+    str_builder_add_cstr(smlp, "}}");
+    var bigpp = parse_property(str_data(str_builder_build(bigp)));
+    var smlpp = parse_property(str_data(str_builder_build(smlp)));
+    var kk = str_builder_new();
+    str_builder_add_cstr(kk, "{");
+    gi = 0;
+    while (gi < 4000) { if (gi > 0) { str_builder_add_cstr(kk, ","); } str_builder_add_cstr(kk, "\"k"); str_builder_add_int(kk, gi); str_builder_add_cstr(kk, "\":0"); gi = gi + 1; }
+    str_builder_add_cstr(kk, "}");
+    var kkv = str_data(str_builder_build(kk));
+    assert(_sch_check_value_a(bote_req_begin(), bigpp, "v", kkv) == 0, "patternProperties: 4,000 keys against 64 patterns of 4,005 steps, none matched");
+    assert(_ns3(bigpp, kkv) < 8 * _ns3(smlpp, kkv) + 2000000, "patternProperties: ...in a few times what 64 patterns of four steps take (36 times through 3.8.12)");
+    # And a budget spent stops the patterns, each with a first turn of 2,000 steps (1,000
+    # alternatives): past the budget each was still made ready and its first turn taken, a
+    # thousand million steps uncharged for these 8,000 keys.
+    var alts = _rep_s("x|", 1000);
+    var allp = str_builder_new();
+    str_builder_add_cstr(allp, "{\"patternProperties\":{");
+    gi = 0;
+    while (gi < 64) { if (gi > 0) { str_builder_add_cstr(allp, ","); } str_builder_add_cstr(allp, "\"^(?:"); str_builder_add_cstr(allp, alts); str_builder_add_cstr(allp, "k)"); str_builder_add_int(allp, gi); str_builder_add_cstr(allp, "?\":{\"type\":\"integer\"}"); gi = gi + 1; }
+    str_builder_add_cstr(allp, "}}");
+    var allpp = parse_property(str_data(str_builder_build(allp)));
+    var kk2 = str_builder_new();
+    str_builder_add_cstr(kk2, "{");
+    gi = 0;
+    while (gi < 8000) { if (gi > 0) { str_builder_add_cstr(kk2, ","); } str_builder_add_cstr(kk2, "\"k"); str_builder_add_int(kk2, gi); str_builder_add_cstr(kk2, "\":0"); gi = gi + 1; }
+    str_builder_add_cstr(kk2, "}");
+    var kkv2 = str_data(str_builder_build(kk2));
+    var kr = _sch_check_value_a(bote_req_begin(), allpp, "v", kkv2);
+    assert(kr != 0 && streq(vec_get(kr, vec_len(kr) - 1), "v: more work to judge than its size allows") == 1, "patternProperties: 8,000 keys each matched by 64 patterns, refused as too much to judge");
+    assert(_ns3(allpp, kkv2) < 3 * _ns3(allpp, kkv) + 2000000, "patternProperties: ...in about the time 4,000 of them take: no pattern tried past the budget");
 
     # ---- the heap and the arena ----
     var hm = _msg("tools/call", "\"name\":\"t_pat\",\"arguments\":{\"slug\":\"A--b\"}");

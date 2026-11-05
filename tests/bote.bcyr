@@ -24,6 +24,7 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/regex.cyr"
+include "src/format.cyr"
 include "src/registry.cyr"
 include "src/prompts.cyr"
 include "src/resources.cyr"
@@ -268,6 +269,14 @@ var _b_pp_params = "{\"id\":3,\"x-region\":\"eu-west\",\"x-tier\":\"gold\"}";
 fn b_validate_pattern_props() { return vec_len(compiled_validate(_b_compiled_pp, _b_pp_params)); }
 # -- end 3.8.12 --
 
+# -- 3.8.13 --
+# A call's arguments judged by four formats: an email and a uri by the client's expressions,
+# a date-time by hand, an int32.
+var _b_compiled_fmt = 0;
+var _b_fmt_params = "{\"to\":\"ops@example.com\",\"at\":\"2026-11-04T09:30:00Z\",\"link\":\"https://example.com/a/b?c=1\",\"n\":42}";
+fn b_validate_formats() { return vec_len(compiled_validate(_b_compiled_fmt, _b_fmt_params)); }
+# -- end 3.8.13 --
+
 fn b_schema_compile_simple() {
     return compiled_compile(_b_schema_simple);
 }
@@ -476,6 +485,9 @@ fn _bench_setup() {
     # -- 3.8.12 --
     _b_compiled_pp = _compile_object_body("{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}},\"patternProperties\":{\"^x-\":{\"type\":\"string\"}},\"additionalProperties\":false}");
     # -- end 3.8.12 --
+    # -- 3.8.13 --
+    _b_compiled_fmt = _compile_object_body("{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\",\"format\":\"email\"},\"at\":{\"type\":\"string\",\"format\":\"date-time\"},\"link\":{\"type\":\"string\",\"format\":\"uri\"},\"n\":{\"type\":\"integer\",\"format\":\"int32\"}}}");
+    # -- end 3.8.13 --
 
     # Fresh (uncompiled) schemas for the schema_compile bench. Built
     # once at setup so the bench callback measures pure compile cost
@@ -742,6 +754,11 @@ fn main() {
     bench_run(b51, &b_validate_pattern_props, 10000);
     vec_push(benches, b51);
     # -- end 3.8.12 --
+    # -- 3.8.13 --
+    var b52 = bench_new("validate_formats");
+    bench_run(b52, &b_validate_formats, 10000);
+    vec_push(benches, b52);
+    # -- end 3.8.13 --
     bote_req_begin();
     bote_conn_arm();
     thread_join(thread_create(&_b_thread_nop, 0));

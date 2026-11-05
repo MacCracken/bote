@@ -24,7 +24,7 @@ enum SchemaTypeTag {
 }
 
 # ================================================================
-# PropertyDef (296 bytes):
+# PropertyDef (304 bytes):
 #   +0  type_tag         i64
 #   +8  description      cstr or 0
 #   +16 enum_values      vec of cstrs (string only) or 0
@@ -66,6 +66,8 @@ enum SchemaTypeTag {
 #   +280 pattern        (3.8.11) the `pattern` compiled (src/regex.cyr), or 0 for none or
 #                       one bote's engine does not take
 #   +288 multiple_of    (3.8.11) the `multipleOf` as bote judges it (_sch_multiple_of), or 0
+#   +296 format         (3.8.13) the `format` as src/format.cyr names it, or 0 for none, one
+#                       the official client does not know, or `regex`, which bote does not judge
 #
 # (3.8.5) Each keyword applies to a value of its kind whatever the schema's `type`, as in
 # JSON Schema: `{"maxLength":3}` judges a string and passes a number. The type is a check of
@@ -73,7 +75,7 @@ enum SchemaTypeTag {
 # ================================================================
 
 fn prop_new(tag) {
-    var p = alloc(296);
+    var p = alloc(304);
     store64(p, tag);
     var k = 8;
     while (k < 96) { store64(p + k, 0); k = k + 8; }
@@ -82,7 +84,7 @@ fn prop_new(tag) {
     store64(p + 192, 0 - 1);
     store64(p + 200, 0 - 1);
     k = 208;
-    while (k < 296) { store64(p + k, 0); k = k + 8; }
+    while (k < 304) { store64(p + k, 0); k = k + 8; }
     return p;
 }
 
@@ -123,6 +125,7 @@ fn prop_composes(p) { return load64(p + 264); }
 fn prop_ref(p) { return load64(p + 272); }
 fn prop_pattern(p) { return load64(p + 280); }
 fn prop_multiple_of(p) { return load64(p + 288); }
+fn prop_format(p) { return load64(p + 296); }
 
 # ================================================================
 # CompiledSchema (128 bytes):
@@ -206,7 +209,10 @@ fn _sch_watch(c, name) {
     return w;
 }
 
+# (3.8.13, from the 3.8.12 review) A property named `__proto__` is none, as Ajv reads one
+# (allSchemaProperties): it judges no member, and a member of that name is additional.
 fn compiled_add_property(c, name, prop) {
+    if (name != 0 && streq(name, "__proto__") == 1) { return 0; }
     map_set(compiled_properties(c), name, prop);
     vec_push(compiled_names(c), name);
     if (name != 0) { store64(_sch_watch(c, name) + 8, prop); }
@@ -359,7 +365,8 @@ fn _sch_num_parse(v, val_out) {
 # value is 0.d1d2... x 10^E, o+16 and o+24 where the integer digits start and how many,
 # o+32 and o+40 the fraction's, o+48 the index of the first significant digit among
 # those, o+56 one past the last. 0 when v does not begin with a number, else 1. The
-# grammar is _sch_num_parse's; an exponent of more than 15 digits is held there.
+# grammar is _sch_num_parse's; an exponent is read while it is under 10^15, so to 16 digits,
+# and one longer is held there.
 # (3.8.12, from the 3.8.11 review) It stopped at 100000, so one of seven digits or more was
 # read as its first six: 1e1000000 equalled 1e100000.
 fn _sch_num_norm(v, o) {
@@ -746,6 +753,13 @@ fn _sch_fill(p, raw_json, cx) {
         if (bote_rx_why(rx) == 0) { store64(p + 280, rx); }
     }
     store64(p + 288, _sch_multiple_of(jsonx_get_raw(raw_json, "multipleOf")));
+    # (3.8.13) `format`, as the official client's ajv-formats judges it; its expression, if it
+    # has one, compiled now, so no request compiles it.
+    var fmt = _sch_kw_str(raw_json, "format");
+    if (fmt != 0) {
+        var fid = bote_format_id(fmt);
+        if (bote_format_kind(fid) != 0) { store64(p + 296, bote_format_ready(fid)); }
+    }
     store64(p + 112, _sch_count_kw(raw_json, "minItems"));
     store64(p + 120, _sch_count_kw(raw_json, "maxItems"));
     var items_raw = jsonx_get_raw(raw_json, "items");
@@ -955,6 +969,8 @@ fn _compile_object_body_c(raw_json, cx) {
         var pv = vec_new();
         var pmi = 0;
         while (pmi < vec_len(pmem)) {
+            # (3.8.13, from the 3.8.12 review) Ajv leaves out a pattern named `__proto__`.
+            if (streq(vec_get(pmem, pmi), "__proto__") == 1) { pmi = pmi + 2; continue; }
             var prx = bote_rx_compile(vec_get(pmem, pmi));
             if (bote_rx_why(prx) == 0) {
                 vec_push(pv, prx);
@@ -1089,6 +1105,9 @@ fn _sch_ref_target(cx, ref) {
 fn _sch_base(root) {
     var id = _sch_kw_str(root, "$id");
     if (id == 0) { return 0; }
+    # (3.8.13, from the 3.8.12 review) An empty `$id` is none: the client resolves a relative
+    # reference against it otherwise than bote did (`A/..` taken here, refused there).
+    if (load8(id) == 0) { return 0; }
     var h = strchr(id, 35);
     if (h == 0) { return 0; }
     if (h > 0) { store8(id + h, 0); }
@@ -1599,7 +1618,33 @@ fn _sch_id_ok(u) {
         if (load8(u + q) == 47 && load8(u + q + 1) == 47) { return 0; }
         q = q + 1;
     }
+    # (3.8.13, from the 3.8.12 review) A `.` or `..` segment, written so or as `%2e`: fast-uri
+    # takes them out of a `ws:` or `wss:` URI, and of one with no authority, otherwise than
+    # it does of the references beside them, and the client resolves none of those references.
+    var ss = at;
+    q = at;
+    while (q <= pe) {
+        if (q == pe || load8(u + q) == 47) {
+            if (_sch_dot_segment(u + ss, q - ss) == 1) { return 0; }
+            ss = q + 1;
+        }
+        q = q + 1;
+    }
     return 1;
+}
+
+# 1 when the `n` bytes at `p` are `.` or `..`, each dot perhaps written `%2e` in either case.
+fn _sch_dot_segment(p, n) {
+    var dots = 0;
+    var i = 0;
+    while (i < n) {
+        if (load8(p + i) == 46) { i = i + 1; }
+        elif (i + 2 < n && load8(p + i) == 37 && load8(p + i + 1) == 50 && (load8(p + i + 2) | 32) == 101) { i = i + 3; }
+        else { return 0; }
+        dots = dots + 1;
+    }
+    if (dots == 1 || dots == 2) { return 1; }
+    return 0;
 }
 
 # 1 when `s`, what follows `urn:`, is a URN the client's resolver reads one way: a name of
@@ -1716,8 +1761,9 @@ fn _sch_kids_kw(out, ptr, raw, kw, how) {
 }
 
 # The keywords Ajv 8 compiles code for (RULES.all) in each dialect bote reads: a schema
-# naming none of them, or `{}`, or `true`, never fails (alwaysValidSchema).
-var BOTE_SCH_RULES_07 = "$comment $ref additionalItems additionalProperties allOf anyOf const contains dependencies else enum exclusiveMaximum exclusiveMinimum format id if items maxItems maxLength maxProperties maximum minItems minLength minProperties minimum multipleOf not nullable oneOf pattern patternProperties properties propertyNames required then type uniqueItems ";
+# naming none of them, or `{}`, or `true`, never fails (alwaysValidSchema). (3.8.13, from the
+# 3.8.12 review) With the four the client's addFormats adds, formatMinimum and its kin.
+var BOTE_SCH_RULES_07 = "$comment $ref additionalItems additionalProperties allOf anyOf const contains dependencies else enum exclusiveMaximum exclusiveMinimum format formatExclusiveMaximum formatExclusiveMinimum formatMaximum formatMinimum id if items maxItems maxLength maxProperties maximum minItems minLength minProperties minimum multipleOf not nullable oneOf pattern patternProperties properties propertyNames required then type uniqueItems ";
 var BOTE_SCH_RULES_2019 = "$dynamicAnchor $dynamicRef $recursiveAnchor $recursiveRef dependentRequired dependentSchemas maxContains minContains unevaluatedItems unevaluatedProperties ";
 
 # 1 when the schema `raw` (or 0, none) can fail a value in the dialect `d`, as Ajv reads it.
@@ -1737,6 +1783,100 @@ fn _sch_can_fail(d, raw) {
         }
         if (_sch_from_2019(d) == 1 && (_sch_in_words(r19, k) == 1 || (d == 2020 && streq(k, "prefixItems") == 1))) { return 1; }
         i = i + 2;
+    }
+    return 0;
+}
+
+# Why the document `doc` cannot be registered for what its compiled schemas hold (3.8.13), or
+# 0: of the schemas the dialect's engine compiles from the root (_sch_kids, as _sch_reach walks
+# them), one whose `format` is no string; whose formatMinimum, formatMaximum,
+# formatExclusiveMinimum or formatExclusiveMaximum is no string, has no `format` beside it, or
+# sits beside a format the client knows that has no order (anything but the dates and times,
+# `password` and `binary`); (from the 3.8.12 review) whose `$id` is neither a string nor
+# false, null or 0, which the client calls `.replace` on; or, in 2019-09 and 2020-12, whose
+# `$dynamicAnchor` is no string or `$recursiveAnchor` no boolean. The client's validator
+# refuses each such schema whole.
+var BOTE_SCH_FORMAT_LIMITS = "formatMinimum formatMaximum formatExclusiveMinimum formatExclusiveMaximum ";
+
+fn _sch_compiled_why(doc) {
+    if (doc == 0) { return 0; }
+    if (strstr(doc, "ormat") < 0 && strstr(doc, "$id") < 0 && strstr(doc, "nchor") < 0 && strstr(doc, "\\u") < 0) { return 0; }
+    var cx = _sch_cx_new(doc, _sch_dialect(doc));
+    _sch_cx_anchors(cx);
+    var lims = _reg_words(BOTE_SCH_FORMAT_LIMITS);
+    var seen = map_new();
+    var todo = vec_new();
+    map_set(seen, "", 1);
+    vec_push(todo, "");
+    while (vec_len(todo) > 0) {
+        var ptr = vec_pop(todo);
+        var raw = _sch_ptr_raw(cx, ptr);
+        if (raw != 0 && _vp_first_nonws(raw) == 123) {
+            var w = _sch_format_node_why(raw, lims);
+            if (w == 0) { w = _sch_id_node_why(raw, load64(cx)); }
+            if (w != 0) { return w; }
+            var kids = _sch_kids(cx, ptr, raw, 0);
+            var k = 0;
+            while (k < vec_len(kids)) {
+                var kp = vec_get(kids, k);
+                if (map_has(seen, kp) == 0) { map_set(seen, kp, 1); vec_push(todo, kp); }
+                k = k + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+fn _sch_id_node_why(raw, d) {
+    var id = jsonx_get_raw(raw, "$id");
+    if (id != 0 && _sch_is_string(id) == 0 && _sch_js_falsy(id) == 0) { return "names an $id that is no string, which the official client refuses"; }
+    if (_sch_from_2019(d) == 1) {
+        var da = jsonx_get_raw(raw, "$dynamicAnchor");
+        if (da != 0 && _sch_is_string(da) == 0) { return "names a $dynamicAnchor that is no string, which the official client refuses"; }
+        var ra = jsonx_get_raw(raw, "$recursiveAnchor");
+        if (ra != 0) {
+            var rc = _vp_first_nonws(ra);
+            if (rc != 116 && rc != 102) { return "names a $recursiveAnchor that is no boolean, which the official client refuses"; }
+        }
+    }
+    return 0;
+}
+
+# 1 for a JSON value JavaScript reads as false: false, null, a number that is zero, "".
+fn _sch_js_falsy(v) {
+    var c = _vp_first_nonws(v);
+    if (c == 102 || c == 110) { return 1; }
+    if (_sch_is_number_text(v) == 1) {
+        var o[64];
+        if (_sch_num_norm(v, &o) == 1 && load64(&o) == 0) { return 1; }
+        return 0;
+    }
+    if (c == 34) {
+        var k = 0;
+        while (load8(v + k) == 32 || load8(v + k) == 9 || load8(v + k) == 10 || load8(v + k) == 13) { k = k + 1; }
+        if (load8(v + k + 1) == 34) { return 1; }
+    }
+    return 0;
+}
+
+fn _sch_format_node_why(raw, lims) {
+    var fr = jsonx_get_raw(raw, "format");
+    if (fr != 0 && _sch_is_string(fr) == 0) { return "names a format that is no string, which the official client refuses"; }
+    var fid = 0;
+    if (fr != 0) { fid = bote_format_id(_sch_str_dec_a(default_alloc(), fr)); }
+    var i = 0;
+    while (i < vec_len(lims)) {
+        var kw = vec_get(lims, i);
+        var lr = jsonx_get_raw(raw, kw);
+        if (lr != 0) {
+            if (_sch_is_string(lr) == 0) { return _cat_a(default_alloc(), kw, " that is no string, which the official client refuses"); }
+            if (fr == 0) { return _cat_a(default_alloc(), kw, " with no format beside it, which the official client refuses"); }
+            if (fid != 0 && fid != BOTE_FMT_PASSWORD && fid != BOTE_FMT_BINARY && bote_format_ordered(fid) == 0) {
+                var h = default_alloc();
+                return _cat_a(h, _cat_a(h, _cat_a(h, kw, " beside the format "), bote_format_name(fid)), ", which has no order, so the official client refuses it");
+            }
+        }
+        i = i + 1;
     }
     return 0;
 }
@@ -2891,6 +3031,12 @@ fn _sv_comp(slot, f, buf, n, vs, ve, prop) {
 # at the first violation and builds nothing, so `contains` and `propertyNames` ask of every
 # item and key what they need and keep nothing of it. The slot judges as `slot` does, a
 # result's integers as a result's; what the judgement takes of the arena is given back.
+# 1 when what _sv_matches returned is no match: 0, or 3, a refusal by an integer (3.8.13).
+fn _sch_no_match(m) {
+    if (m == 0 || m == 3) { return 1; }
+    return 0;
+}
+
 fn _sv_matches(slot, buf, n, s, e, prop) {
     var a = _vs_alloc(slot);
     var mk[16];
@@ -3014,11 +3160,24 @@ fn _sv_string(slot, f, buf, vs, ve, prop) {
     if (rx != 0 && bote_rx_test_a(_vs_alloc(slot), rx, buf, vs + 1, ve - 1, load64(slot + 40)) == 0) {
         _sv_violation(slot, f, "does not match the pattern");
     }
+    # (3.8.13) `format`, a string format's reading charged to the budget.
+    var fid = prop_format(prop);
+    if (fid != 0 && bote_format_kind(fid) == 1 && _vs_full(slot) == 0) {
+        if (bote_format_test_a(_vs_alloc(slot), fid, buf, vs + 1, ve - 1, load64(slot + 40)) == 0) {
+            _sv_violation(slot, f, _bfm_msg(fid));
+        }
+    }
     return 0;
 }
 
 fn _sv_number(slot, f, buf, vs, ve, prop) {
     var v = buf + vs;
+    # (3.8.13) A number format, its digits read once and charged.
+    var nfid = prop_format(prop);
+    if (nfid != 0 && bote_format_kind(nfid) == 2) {
+        _sv_charge(slot, ve - vs);
+        if (bote_format_number(nfid, v) == 0) { _sv_violation(slot, f, _bfm_msg(nfid)); }
+    }
     # (3.8.11) `multipleOf`, exactly, its digits read once and charged.
     var mo = prop_multiple_of(prop);
     if (mo != 0) {
@@ -3085,7 +3244,11 @@ fn _sv_array(slot, f, buf, n, vs, ve, prop) {
         if (ip != 0 && _vs_full(slot) == 0) {
             _sv_value(slot, _sv_frame(&fr, f, 3, 0, count), buf, n, es, ee, ip);
         }
-        if (cn != 0 && _sv_matches(slot, buf, n, es, ee, cn) >= 1) { matched = matched + 1; }
+        # (3.8.13, from the 3.8.12 review) A match is 1 or 2; 3 is a refusal, by an integer.
+        if (cn != 0) {
+            var cm = _sv_matches(slot, buf, n, es, ee, cn);
+            if (cm == 1 || cm == 2) { matched = matched + 1; }
+        }
         count = count + 1;
         i = _jx_skip_ws(buf, n, ee);
         if (i < ve && load8(buf + i) == 44) { i = _jx_skip_ws(buf, n, i + 1); }
@@ -3210,7 +3373,7 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
             }
         }
         # (3.8.8) Every key, each time it is written, a string `propertyNames` judges.
-        if (pnames != 0 && _vs_full(slot) == 0 && _sv_matches(slot, buf, n, kp - buf - 1, ke, pnames) == 0) {
+        if (pnames != 0 && _vs_full(slot) == 0 && _sch_no_match(_sv_matches(slot, buf, n, kp - buf - 1, ke, pnames)) == 1) {
             _sv_violation(slot, _sv_frame(&fr, f, kind, key, dl), "property name does not meet propertyNames");
         }
         var first = 1;
@@ -3231,7 +3394,9 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
             var pmatched = 0;
             if (pats != 0) {
                 var pk = 0;
-                while (pk < vec_len(pats) && _vs_full(slot) == 0) {
+                # (3.8.13, from the 3.8.12 review) No further once the budget is spent.
+                var pbud = load64(slot + 40);
+                while (pk < vec_len(pats) && _vs_full(slot) == 0 && (pbud == 0 || load64(pbud) >= 0)) {
                     if (bote_rx_test_a(a, vec_get(pats, pk), buf, kp - buf, kp - buf + kl, load64(slot + 40)) == 1) {
                         pmatched = 1;
                         _sv_value(slot, _sv_frame(&fr, f, kind, key, dl), buf, n, mvs, mve, vec_get(pats, pk + 1));
@@ -3259,7 +3424,12 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
         while (ri < vec_len(req)) {
             var rkey = vec_get(req, ri);
             var met = 0;
-            if (rkey != 0) {
+            # (3.8.13, from the 3.8.12 review) `__proto__` is always met to the client, whose
+            # `data.__proto__` is the object's prototype when it has no member of that name. Its
+            # first byte is looked at first: streq measures both strings, for each name of each
+            # object judged.
+            if (rkey != 0 && load8(rkey) == 95 && streq(rkey, "__proto__") == 1) { met = 1; }
+            elif (rkey != 0) {
                 if (ri * 2 + 1 < vec_len(reqw) && vec_get(reqw, ri * 2) == rkey) {
                     var rw = vec_get(reqw, ri * 2 + 1);
                     if (rw != 0 && (load8(seen + (load64(rw) - 1) / 8) & (1 << ((load64(rw) - 1) % 8))) != 0) { met = 1; }

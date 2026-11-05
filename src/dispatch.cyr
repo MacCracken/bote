@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.8.12"; }
+fn _bote_server_version() { return "3.8.13"; }
 
 # ================================================================
 # Tool name validation
@@ -2197,10 +2197,24 @@ var BOTE_REQ_KEYS_MSG = "invalid request: a key named twice, or one that is no t
 fn dispatcher_dispatch_a(a, d, request, claims) {
     if (req_is_notification(request) == 1) { return 0; }
     var params = req_params(request);
-    if (params != 0 && _jx_valid_keys_a(a, params, strlen(params)) == 2) {
+    if (params != 0 && _dsp_keys_twice(a, params) == 1) {
         return resp_error_a(a, req_id(request), 0 - 32600, BOTE_REQ_KEYS_MSG);
     }
     return _dsp_dispatch_admitted_a(a, d, request, claims);
+}
+
+# 1 when `params` name a key twice, or one that is no text (_jx_valid_keys_a). (3.8.13, from
+# the 3.8.12 review) Handed an allocator that is no bote arena, the heap a plain form passes,
+# it walks on the calling thread's request arena, and keeps nothing there either: the syntax
+# walk allocates nothing and the exact walker (_jx_repeats_n_a) gives back what it takes.
+# Through 3.8.12 the walk's table for 2,000 keys, 98 KB, stayed on the heap for each call. Not
+# the heap forms' scratch, whose lock every plain dispatch would take: a dispatch reads and
+# writes the calling thread's request state already.
+fn _dsp_keys_twice(a, params) {
+    var w = a;
+    if (_bote_ar_is(a) == 0) { w = bote_req_alloc(); }
+    if (_jx_valid_keys_a(w, params, strlen(params)) == 2) { return 1; }
+    return 0;
 }
 
 # dispatcher_dispatch_a for a request the codec admitted (`_cdc_admit_l_a`), which has

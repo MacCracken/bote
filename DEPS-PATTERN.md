@@ -368,6 +368,21 @@ neither `properties` nor a pattern names: a schema with both refuses members it 
 3.8.11. Beside a pattern bote's engine declines, `additionalProperties` still judges nothing. A
 CompiledSchema is 128 bytes; `compiled_new` sets the new words, zeroed.
 
+(3.8.13) `format` is judged, each of the formats the official client's ajv-formats knows as it
+defines them but `regex`, so a schema that names one refuses what it passed through 3.8.12. A
+string format judges strings and a number format numbers, whatever `type` says. Registration
+refuses a `format` that is no string, and a formatMinimum, formatMaximum, formatExclusiveMinimum or
+formatExclusiveMaximum that is no string, has no `format` beside it, or sits beside a format with
+no order: the client's validator refuses each such schema whole. From the review of 3.8.12 it
+also refuses, on a schema the client compiles, an `$id` that is no string (and is not false, null
+or 0), a `$dynamicAnchor` that is no string and a `$recursiveAnchor` that is no boolean; and an
+`$id` with a `.` or `..` segment anywhere, which the client takes for `http:`. An empty `$id` is
+none. A property, a pattern or a `required` name `__proto__` is read as the client's Ajv reads it:
+no property, no pattern, always met. A pattern is compiled on the heap forms' scratch, so a
+compile takes its lock, and a Regex is 40 bytes. The core bundle holds 15 modules,
+`src/format.cyr` after `src/regex.cyr`. A PropertyDef is 304 bytes; `prop_new` sets the new word,
+zeroed.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`
@@ -412,7 +427,7 @@ transports. The same jump unblocked folding bote's own three
 per-transport binaries back into one; that is still in place and
 is a 3.4.x roadmap item. The bundles are unaffected either way.
 
-## What lives in the core 14?
+## What lives in the core 15?
 
 | #  | File                  | Role                                          |
 |----|-----------------------|-----------------------------------------------|
@@ -421,20 +436,23 @@ is a 3.4.x roadmap item. The bundles are unaffected either way.
 | 2  | `src/protocol.cyr`    | `JsonRpcRequest` / `Response` / `Error`       |
 | 3  | `src/jsonx.cyr`       | JSON helpers                                  |
 | 4  | `src/regex.cyr`       | `pattern`'s regular expressions (3.8.11)      |
-| 5  | `src/registry.cyr`    | `ToolRegistry`                                |
-| 6  | `src/prompts.cyr`     | `PromptRegistry` (MCP prompts capability)     |
-| 7  | `src/resources.cyr`   | `ResourceRegistry` (MCP resources capability) |
-| 8  | `src/events.cyr`      | `EventSink`                                   |
-| 9  | `src/audit.cyr`       | `AuditLogger` / `AuditSink`                   |
-| 10 | `src/dispatch.cyr`    | `Dispatcher` (2.0 handler ABI)                |
-| 11 | `src/codec.cyr`       | Encoder / decoder                             |
-| 12 | `src/schema.cyr`      | Schema compile                                |
-| 13 | `src/content.cyr`     | Typed MCP content blocks + annotations        |
+| 5  | `src/format.cyr`      | `format`, as the client's ajv-formats (3.8.13)|
+| 6  | `src/registry.cyr`    | `ToolRegistry`                                |
+| 7  | `src/prompts.cyr`     | `PromptRegistry` (MCP prompts capability)     |
+| 8  | `src/resources.cyr`   | `ResourceRegistry` (MCP resources capability) |
+| 9  | `src/events.cyr`      | `EventSink`                                   |
+| 10 | `src/audit.cyr`       | `AuditLogger` / `AuditSink`                   |
+| 11 | `src/dispatch.cyr`    | `Dispatcher` (2.0 handler ABI)                |
+| 12 | `src/codec.cyr`       | Encoder / decoder                             |
+| 13 | `src/schema.cyr`      | Schema compile                                |
+| 14 | `src/content.cyr`     | Typed MCP content blocks + annotations        |
 
 (The core profile grew 9 → 11 at 3.0.0, when the MCP prompts and
 resources capabilities landed, 11 → 12 at **3.3.6** with
-`content.cyr`, 12 → 13 at **3.4.0** with `log.cyr`, listed first, and 13 → 14 at **3.8.11**
-with `regex.cyr`, after `jsonx.cyr`, which `schema.cyr`'s `pattern` needs and which adds no stdlib leaf:
+`content.cyr`, 12 → 13 at **3.4.0** with `log.cyr`, listed first, 13 → 14 at **3.8.11**
+with `regex.cyr`, after `jsonx.cyr`, which `schema.cyr`'s `pattern` needs and which adds no stdlib leaf,
+and 14 → 15 at **3.8.13** with `format.cyr`, after `regex.cyr`, whose engine it uses, adding none either.
+`log.cyr` matters most of them here:
 `codec.cyr` emits a DEBUG line per request through it, so a core
 consumer that sets sakshi to DEBUG sees its dispatch traffic. bote
 never configures sakshi from library code — the consumer's
@@ -461,7 +479,7 @@ core through `jsonx.cyr`; since 3.4.6 an alias of the public
 it appends a cstr as a JSON string body, escaping every control byte as
 RFC 8259 §7 requires.
 
-Stdlib footprint of the 14 modules: `string`, `fmt`, `alloc`,
+Stdlib footprint of the 15 modules: `string`, `fmt`, `alloc`,
 `vec`, `str`, `tagged`, `assert`, `fnptr`, `hashmap`, `bayan`,
 `chrono`, `freelist`, `sakshi`. `sakshi` is not on the sidecar: distlib's
 verify finds it already in scope through `lib/patra.cyr`'s own include

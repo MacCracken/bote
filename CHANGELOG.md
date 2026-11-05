@@ -18,7 +18,287 @@ have per release.
 
 _(empty)_
 
+## [3.8.13] — 2026-11-04 · Formats
+
+**`format` is judged**, as the official client's own validator judges it. The client validates with Ajv and
+ajv-formats 3.0.1 in its full mode, so a format ajv-formats knows is enforced and one it does not is ignored, and
+bote does the same. Each of its 26 formats is judged as ajv-formats defines it, but `regex`. A string format judges
+strings and a number format numbers, whatever `type` says, as Ajv applies one. Through 3.8.12 `format` was warned
+of and judged nothing.
+
+How each format is judged:
+- **By the client's own expression**, compiled once by 3.8.11's engine: `uri`, `uri-reference`, `uri-template`,
+  `email`, `hostname`, `ipv4`, `ipv6`, `uuid`, `json-pointer`, `json-pointer-uri-fragment` and
+  `relative-json-pointer`. Each was written for JavaScript's `RegExp` with the `i` flag and without `u`. Its letters
+  are folded here (`a-z` written `a-zA-Z`), and its classes are ASCII or name no letter, so code points and UTF-16
+  units give one verdict.
+- **By hand**, where ajv-formats' definition is code, a lookahead or a multiline expression:
+  - `date`, a day the month has, February's 29th in a leap year;
+  - `time` and `iso-time`, a leap second read in UTC. A second is read as a double, as the client reads it, so
+    `12:00:59.9999999999999999Z` is 60 seconds and refused;
+  - `date-time` and `iso-date-time`, split at `t`, `T` or any space JavaScript's `\s` takes, U+3000 among them;
+  - `duration`, its parts in order, `T` followed by one at least, or weeks alone;
+  - `url`: its `iu` flags fold `ſ` to `s` (`httpſ://a.bc` is a url) and `K` to `k`. Its lookaheads refuse the
+    private dotted quads (10, 127, 169.254, 192.168, 172.16 to 172.31). Each `@` is tried as the userinfo's end,
+    each try stopping at the next one, so the whole is linear;
+  - `byte`, with the `m` flag ajv-formats gives it, so a string passes when any line does: `""` and `"!!!\n"` pass,
+    `"!!!"` does not;
+  - `hostname`'s length, its expression's lookahead: 253 characters, or 254 ending in a dot.
+- **Numbers**: `int32` and `int64` exactly, `float` and `double` any number. Where the client reads a double,
+  bote is the stricter. `int32` refuses `5.0000000000000001`, `2147483647.0000001` and `1e-400`, each of whose
+  doubles is an integer to the client. `int64` refuses `9007199254740993.5`, and `1.7976931348623158e308`, which
+  is past the largest double though the client rounds it down to it.
+- **`password` and `binary`** take every string.
+
+Each format's reading is charged to the judgement's budget, step by step or a step a byte, and is linear in the
+string. Twice the string takes about twice the time for each format measured, and for `url` with 60,000 `@`s.
+
+**A third differential holds it to the client** (`scripts/format-diff.sh`, which needs the client that
+`./scripts/conformance.sh` installs; not CI). Strings near each format's edges are drawn: the client's own
+examples mutated, and strings over each format's alphabet. Numbers are drawn at every bound. Each is judged by the
+client's `AjvJsonSchemaValidator` and by bote. Of 504,138 values:
+- every string is judged alike;
+- no number bote takes is one the client refuses;
+- 40 numbers bote refuses exactly are ones the client's double takes, the five kinds above.
+
+**Registration refuses what the client cannot compile.** The client's validator throws on each of these, and
+compiles nothing of the schema:
+- a `format` that is no string;
+- a `formatMinimum`, `formatMaximum`, `formatExclusiveMinimum` or `formatExclusiveMaximum` that is no string;
+- one of those with no `format` beside it;
+- one of those beside a format the client knows that has no order. Only the dates and times have one, and
+  `password` and `binary` are let pass.
+
+It warns of a `format` it does not judge: `regex`, which the client checks with JavaScript's own syntax, and a name
+the client does not know (`idn-email`, `iri`), which neither judges. The four `format*` limit keywords, which the
+client compares through JavaScript's `Date`, are warned of as not enforced.
+
+**Twelve defects in 3.8.12 land beside it**, from an independent review of that release. The worst is a denial of
+service in `patternProperties`: each pattern made its arrays ready for each key past the budget, uncharged, 7.3 s for
+209 KB. See the correction notice in 3.8.12.
+
+The stated minimum cyrius (6.7.13) is unchanged.
+
+### Added
+
+- **`src/format.cyr`** (core, after `src/regex.cyr` in both profiles: the core bundle has 15 modules, the full one
+  41):
+  - `bote_format_id(name)` and `bote_format_name(id)` (`BOTE_FMT_*`);
+  - `bote_format_kind(id)`: 1 strings, 2 numbers, 0 nothing (`regex`, and an unknown name);
+  - `bote_format_ordered(id)`;
+  - `bote_format_test_a(a, id, buf, s, e, bud)` on a JSON string body: 1, 0, or -1 for the budget spent. What it
+    decodes is on `a` and given back, on the calling thread's request arena when `a` is no bote arena;
+  - `bote_format_number(id, v)`.
+
+  The expressions are compiled once, published by compare-and-swap and readied at registration. Private names are
+  `_bfm_*`, as lib/bench.cyr already has `_fmt_time`.
+- **`format` in the schema** (`src/schema.cyr`): PropertyDef is 304 bytes, +296 the format. A violation reads
+  `does not match the format email`.
+- **`_sch_compiled_why`**, registration's refusals above, over every schema the dialect's engine compiles, as
+  `_sch_refs_why` walks them. It checks an outputSchema, an inputSchema given as JSON, and a ToolSchema's listed
+  form when a property may name a format.
+- **`scripts/format-diff.sh`**, with `tests/fixtures/format_diff_gen.cjs` and `tests/fixtures/format_diff.cyr`. CI's
+  "Differentials build" step builds its comparison program.
+- **`tests/bote.bcyr`**: `validate_formats`, a call's arguments judged by an email, a date-time, a uri and an int32.
+
+### Fixed
+
+- **A pattern made its arrays ready past the budget** (HIGH). Each of 64 patterns `^p<i>.{0,2000}$` cleared its
+  4,005 marks for each key, uncharged, 1.8 s for 49 KB of keys and 7.3 s for 209 KB.
+  - A program past `BOTE_RX_SPARSE_FROM` (64) steps keeps the steps seen as a sparse set, which needs no clearing.
+    A shorter one clears an array of at most 64 words, where a sparse set's extra reads would cost it a fifth more.
+  - `bote_rx_test_a` returns -1 before anything is made ready when the budget is spent.
+  - The patterns of `patternProperties` stop being tried once it is spent.
+
+  The 64 patterns over 4,000 keys now take a few times what 64 patterns of four steps take.
+- **`contains` counted a refusal by an integer as a match** (MEDIUM, from 3.8.12's new `_sv_matches` 3).
+  `{"contains":{"not":{"type":"integer"}}}` passed `[1e30]` to a handler. A match is 1 or 2, as `anyOf` and `oneOf`
+  read it, and `propertyNames` reads 3 as no match too (`_sch_no_match`).
+- **Registration kept 382 KB of the heap for each large pattern, and compiled each twice** (MEDIUM). 100 patterns
+  `^p<i>.{0,2000}$` kept 74 MB.
+  - A pattern is compiled on the heap forms' scratch, under its lock, and only its program and its classes' ranges
+    are kept: 96 KB for 4,005 steps.
+  - Registration's WARN compiles with `bote_rx_why_of(src, names_out)`, which keeps nothing.
+
+  The 100 patterns keep under 12 MB.
+- **The clearing charge refused small inputs** (LOW–MEDIUM). Charged by the program and not by the input, it refused
+  300 strings `"ab"` against `^.{0,2000}$`. No program clears more than 64 words now, and none of it is charged.
+- **The duplicate-name check was quadratic** (LOW–MEDIUM): 32,000 groups took 13 s.
+  - Each name keeps a count of the groups that can take part with one from where the parser reads.
+  - A disjunction's alternative takes its names out when the next begins, and gives them all back when the
+    disjunction ends.
+
+  So a name costs one look, and 32,000 groups take about twice 16,000's time.
+- **Registration took schemas the client cannot compile** (LOW), found by a wider grammar in `scripts/ref-diff.sh`:
+  1,503 of 100,000. Over the schemas the dialect's engine compiles, it refuses (`_sch_compiled_why`, which holds
+  3.8.13's format checks too):
+  - an `$id` that is no string and that JavaScript reads as true (`5`, `true`, `{}`; the client calls `.replace`
+    on it);
+  - in 2019-09 and 2020-12, a `$dynamicAnchor` that is no string, and a `$recursiveAnchor` that is no boolean.
+
+  `_sch_id_ok` refuses an `$id` with a `.` or `..` segment, written so or as `%2e`. fast-uri takes those out of a
+  `ws:` URI, or one with no authority, otherwise than of the references beside it; refusing them everywhere is the
+  stricter side, as the client takes them for `http:`. An empty `$id` is none, so a relative reference beside one
+  resolves to nothing. Against the client: none of 100,000 bote takes is one it cannot compile, and 11,914 bote
+  refuses it takes.
+- **`formatMinimum` and its kin were missing from Ajv's rule list** (LOW), which decides whether an `if` beside a
+  `then` of one is compiled.
+- **Two groups of one name are warned of** (LOW): `pattern naming two groups alike, which Node before 23 refuses
+  whole`. The engine takes them, as ECMA-262 does since 2025 (`bote_rx_names_twice`, Regex 40 bytes, +32).
+- **The plain form kept the repeated-key check's table** (LOW, older: 3.8.6). `dispatcher_dispatch` with 2,000 keys
+  kept 98 KB a call. Handed the heap, the walk is on the calling thread's request arena (`_dsp_keys_twice`), whose
+  exact walker gives back what it takes. Not the heap forms' scratch: every plain dispatch would take its lock.
+- **`__proto__`** (LOW, older). The client's Ajv leaves a property or pattern of that name out, so a member named
+  `__proto__` is additional, and `required: ["__proto__"]` is always met to it, its `data.__proto__` the prototype.
+  bote reads all three so now.
+- **The `multipleOf` WARN's double bound** is where a double turns infinite (just past 1.7976931348623158e308), not
+  the largest double. And an exponent is read to 16 digits, where the comment said 15.
+
+Not fixed, and documented:
+- A refusal by an integer (`_sv_matches` 3) means a refusal inside used the integer, not that the outcome depends on
+  it. So `{"not":{"allOf":[{"not":{"type":"integer"}},{"type":"string"}]}}` refuses `1e30`, which it passes under
+  either reading. That is the stricter side.
+- Registration's WARNs cover a schema's root and its top-level properties, so a declined pattern nested deeper
+  registers silently.
+
+### Changed
+
+- `BOTE_UNENFORCED` loses `format` and gains the four `format*` limit keywords.
+- `tests/bote.tcyr` and `tests/bote_output.tcyr` take `formatMaximum` as their example of a keyword bote does not
+  judge, and `format: email` as one it does.
+
+### Tests
+
+- **`tests/bote_format.tcyr`**, 350, new:
+  - Each format by name and kind.
+  - 280 rows whose expected verdicts are the client's own validator's. They cover:
+    - leap seconds through offsets with minutes;
+    - a second rounded as a double;
+    - date-time's separators;
+    - duration's order, and weeks alone;
+    - url's userinfo, ports, private quads, ſ and K;
+    - hostname's 253;
+    - byte's lines;
+    - ipv6's quirks (`1:2:3:4:5:6:7::`).
+  - Five numbers bote judges exactly where the client's double takes them.
+  - Through the walk: strings and numbers apart, under `anyOf` and `not`, a property, an item at its path.
+  - Arguments through the dispatcher, and a result.
+  - Registration's refusals of what the client cannot compile, through a `$ref` and in each kind of inputSchema,
+    and six schemas it takes.
+  - The WARNs.
+  - The budget, linear in the string for six formats and for url with 60,000 `@`s, and 256 alternatives over 60 KB
+    refused in time.
+  - 0 heap bytes for fifty refused calls and for the heap handed in; the arena's first chunk.
+  - Eight threads compiling one program at once.
+- **`fuzz/schema_walk.fcyr`**: `format` of `date`, `ipv4` or `int32`, judged by hand in another form, with strings
+  in the pool that meet each.
+- **52 mutants, 52 killed.** One survived the first run, weeks followed by anything (`P1W1D`), now a row.
+- **`tests/bote_regex.tcyr`**, 160, from 146, the review of 3.8.12:
+  - an empty string against 4,001 steps costing its first step, and 2,000 of them a few times a one-step program's
+    time;
+  - a spent budget returning at once;
+  - programs either side of the sparse set's bound;
+  - a compile keeping only its program, and twenty why-only compiles keeping nothing;
+  - names flagged when given twice, 32,000 named groups in about twice 16,000's time, and 1,001 alternatives of one
+    name.
+- **`tests/bote_schema_pattern.tcyr`**, 157, from 147, the review of 3.8.12:
+  - 64 patterns of 4,005 steps over 4,000 keys in a few times 64 four-step patterns' time;
+  - 8,000 keys each matched by 64 patterns whose first turn is 2,000 steps, refused in about 4,000's time;
+  - the names WARN;
+  - 100 large patterns registered under 12 MB;
+  - the `multipleOf` bound.
+- **`tests/bote_schema_ref.tcyr`**, 266, from 240, the review of 3.8.12:
+  - `contains` of a refusal by the integer, three ways;
+  - every `$id` and anchor the client refuses, checked against it, and seven it takes;
+  - an empty `$id`;
+  - `formatMinimum` in an `if`'s `then`, with a format and alone.
+- **`tests/bote_format.tcyr`**, `__proto__` read as the client reads it.
+- **`tests/bote_request_keys.tcyr`**, 94, from 92: the plain form's heap.
+- **`tests/bote_schema_parts.tcyr`**, 79, from 78: `propertyNames` takes `format: regex` as its example of a keyword
+  bote does not judge, and judges `format: email` on each key.
+- **34 mutants of the review's fixes, 32 killed, one equivalent, and one showed code that did nothing.** The
+  `patternProperties` loop's own budget check survives: `bote_rx_test_a` already returns -1 at once past the
+  budget, so the check saves only the calls. The plain form's mark and release around its walk survived too: the
+  exact walker gives back what it takes, so the pair was removed. Two survived the first run, each a gap now
+  tested: the why-only compile keeping a class's ranges on the heap (its patterns had no class), and the rule
+  list's `format*` keywords (its `then` held a `format` beside them). Four were of the matcher's split into an
+  array and a sparse set: one never taking the sparse path, its bound moved, its set not reset, its steps
+  uncharged. Two were of the plain form's walk: handed the heap, and the release above. One was of the first byte
+  `required: ["__proto__"]` is looked for by (the Performance section).
+- **`scripts/ref-diff.sh`**: the reviewer's wider grammar, and `$id`s and anchors that are no string. Its comparison
+  takes registration's own verdict (`registry_check_tool_def`), where it took `_sch_refs_why` alone.
+
+### Performance
+
+3.8.12 against this release, 15 alternating rounds on one core, minimums (`ab`, on a quiet host; `validate_formats`
+is new and runs here only). Every other row is within ±3.6%:
+
+| Bench | 3.8.12 | 3.8.13 | Δ |
+|-------|-------:|-------:|--:|
+| `validate_formats` | — | 13,009 ns | new |
+| `regex_slug` | 2,283 ns | 2,609 ns | +14.3% |
+| `validate_compiled_text` | 2,804 ns | 3,111 ns | +10.9% |
+| `validate_pattern_props` | 1,535 ns | 1,609 ns | +4.8% |
+| `validate_compiled_nested` | 1,110 ns | 1,131 ns | +1.9% |
+| `schema_compile_nested` | 36,199 ns | 37,301 ns | +3.0% |
+| `dispatch_initialize` | 2,004 ns | 2,049 ns | +2.2% |
+| `dispatch_tools_list` | 1,716 ns | 1,803 ns | +5.1% |
+| `codec_serialize_response` | 178 ns | 190 ns | +6.7% |
+| `fetch_in_child_empty` | 188.5 µs | 175.4 µs | −6.9% |
+
+- **The engine's short match is about 330 ns slower, and nobody knows why yet** (`regex_slug`). The program and the
+  functions on its path are 3.8.12's, step for step, and code position, the program's address, the arena, the stack,
+  the names and dead-code elimination are each ruled out (the watch list). `validate_compiled_text`'s 307 ns is the
+  same cost: its pattern runs on the engine. `validate_pattern_props` runs it on short keys. The sparse set, which
+  the making-ready fix needs past 64 steps, is a separate matcher, so a short program never reads it.
+- **Four formats on one call's arguments are 13.0 µs** (`validate_formats`: an email, a date-time, a uri and an
+  int32). The email and the uri run the client's own expressions on the engine.
+- **A required name costs a byte's look more** (`validate_compiled_nested`). `required: ["__proto__"]` is always met,
+  as the client meets it. Through `streq`, which measures both strings, the check took this row to +5.9% in the first
+  A/B. It now looks at the first byte first.
+- **Registration compiles an object about a microsecond slower** (`schema_compile_nested`). It reads `format` and
+  leaves a property named `__proto__` out. That is paid once per registration, never per call.
+- **A plain dispatch with params walks for a key twice on the request arena** (`dispatch_initialize`, about 45 ns
+  of its 2.2%). `dispatch_tools_call` carries params too and is +0.1%.
+- **`dispatch_tools_list`'s and `codec_serialize_response`'s rows are where the code now sits, not work.** A list
+  request has no params and reaches none of the new code, and the serializer did not change. With 3.8.12's tree and
+  only this release's `src/dispatch.cyr`, unchanged rows moved by up to 13% (`session_validate`).
+- **The first two A/Bs, on a loaded host, moved unchanged rows by up to 24%** (`jwt_cached_es256_sourced`,
+  `jwt_cached_es256`, `session_validate`, each +19 to +24% in one and −10 to +1% in the other). On a quiet host
+  they are within ±0.4%.
+
 ## [3.8.12] — 2026-11-04 · Pattern properties
+
+> ⚠ **Corrected at 3.8.13.** These claims below were not true, found by an independent review of this release.
+> - "Each key's match against each pattern is charged to the judgement's budget". The budget did not bound the
+>   work. Each pattern made its arrays ready for each key past the budget, clearing as many words as its program has
+>   steps, and none of that readying was charged. 64 patterns `^p<i>.{0,2000}$` over 49 KB of short keys took
+>   1.8 s, and over 209 KB 7.3 s.
+> - "100 short strings against `^.{0,2000}$`, a common bound, are judged". The clearing was charged an eighth of a
+>   step a word for each match, a cost by the program and not by the input. So 300 strings `"ab"`, 1.5 KB, were
+>   refused as too much to judge, and the client takes them.
+> - "none bote takes is one the client cannot compile". Against a wider grammar, 1,503 of 100,000 schemas were
+>   taken that the client cannot compile:
+>   - an `ws:` or `wss:` `$id` with a `.` or `..` segment;
+>   - an `http:` one with no authority and a dot path;
+>   - an empty `$id` beside a relative reference;
+>   - an `$id` that is no string;
+>   - a `$dynamicAnchor` that is no string.
+> - "`contains` still counts a match that took the integer as any match". It also counted a refusal by the integer,
+>   `_sv_matches`' new 3, as a match. `{"contains":{"not":{"type":"integer"}}}` passed `[1e30]` to a handler, which
+>   3.8.11 refused.
+> - "`dispatcher_dispatch` ... keeps its reply". It also kept the repeated-key check's table, 98 KB for 2,000 keys
+>   a call, older than this release (3.8.6).
+> - "`(?<a>x)|(?<a>y)` is still taken", as ECMA-262 has taken it since 2025. But Node before 23 refuses such a
+>   pattern whole, and the client runs on Node 20 and later, so there it can compile none of a schema holding one.
+> - "`_sch_can_fail`, from Ajv's own `RULES.all`". The client's `addFormats` adds four keywords to that list,
+>   `formatMinimum` and its kin, which were missing.
+> - The duplicate-name check compared each named group with every one before it: 32,000 groups took 13 s.
+> - Registration kept 382 KB of the heap for each `^.{0,2000}$` and compiled each pattern twice: 100 such patterns
+>   kept 74 MB. The 3.8.11 claim "A pattern compiles once, at registration" did not hold either.
+> - "`_sch_num_norm` reads 15 digits of them". It reads 16.
+> - "past a double's range" was warned of for `1.7976931348623158e308`, which a double reads as its largest.
+> - A property or pattern named `__proto__`, which the client's Ajv leaves out, was judged. Older than this release.
 
 **`patternProperties` is judged**, by 3.8.11's engine: a member whose key matches a pattern, anywhere in the key and
 by the code points it decodes to, is judged by that pattern's schema. Every pattern it matches judges it, and so

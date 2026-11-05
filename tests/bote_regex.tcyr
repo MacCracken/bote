@@ -39,6 +39,7 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/regex.cyr"
+include "src/format.cyr"
 include "src/registry.cyr"
 include "src/prompts.cyr"
 include "src/resources.cyr"
@@ -100,6 +101,21 @@ fn _ns(rx, s) {
     while (i < 3) {
         var t = clock_now_ns();
         bote_rx_test_a(bote_req_begin(), rx, s, 0, strlen(s), 0);
+        var dt = clock_now_ns() - t;
+        if (i == 0 || dt < best) { best = dt; }
+        i = i + 1;
+    }
+    return best;
+}
+# The best of three runs of `k` matches of `rx` against `s`, in ns.
+fn _ns_many(rx, s, k) {
+    var best = 0;
+    var i = 0;
+    var a = bote_req_begin();
+    while (i < 3) {
+        var t = clock_now_ns();
+        var j = 0;
+        while (j < k) { bote_rx_test_a(a, rx, s, 0, strlen(s), 0); j = j + 1; }
         var dt = clock_now_ns() - t;
         if (i == 0 || dt < best) { best = dt; }
         i = i + 1;
@@ -275,6 +291,17 @@ fn main() {
     assert_eq(bote_req_arena_bytes(fa), used, "arena: a large program's arrays given back for the next");
     assert(used - bb < 200000, "arena: ...about 190 KB for 4,001 steps");
 
+    # ---- (3.8.13, from the 3.8.12 review) a compile keeps its program and nothing more ----
+    var ch0 = alloc_used();
+    var crx = bote_rx_compile("^p0.{0,2000}$");
+    var ckept = alloc_used() - ch0;
+    assert(bote_rx_count(crx) > 4000 && ckept < bote_rx_count(crx) * 24 + 4096, "compile: ^p0.{0,2000}$ keeps its 4,005 steps, 96 KB, and no more (382 KB through 3.8.12)");
+    ch0 = alloc_used();
+    var cwi = 0;
+    while (cwi < 20) { bote_rx_why_of("^p0.{0,2000}$", 0); bote_rx_why_of("[z-a]", 0); bote_rx_why_of("^[a-z]{3}[\\d_]+\\w$", 0); cwi = cwi + 1; }
+    assert_eq(alloc_used() - ch0, 0, "compile: twenty compiles that keep nothing keep nothing");
+    assert(bote_rx_why_of("[z-a]", 0) != 0 && bote_rx_why_of("^a{2}$", 0) == 0, "compile: ...and say why");
+
     # ---- (3.8.12, from the 3.8.11 review) handed the heap ----
     bote_rx_test_a(default_alloc(), big, "aaaa", 0, 4, 0);
     var hh = alloc_used();
@@ -283,15 +310,24 @@ fn main() {
     assert_eq(alloc_used() - hh, 0, "heap: handed the heap, 100 matches of 4,001 steps keep nothing (the request arena's, given back)");
     assert_eq(bote_rx_test_a(default_alloc(), big, "aaaa", 0, 4, 0), 1, "heap: ...and still match");
 
-    # ---- (3.8.12, from the 3.8.11 review) making ready, charged ----
-    # An empty string asked of 4,001 steps: their marks cleared, 500 of the budget, and its one
-    # first step.
+    # ---- (3.8.13, from the 3.8.12 review) making ready: nothing cleared for a long program ----
+    # An empty string asked of 4,001 steps costs its one first step: the steps seen are a sparse
+    # set, which needs no clearing. Through 3.8.12 the clearing was charged an eighth of a step a
+    # word, and 300 strings "ab" against `^.{0,2000}$` were refused as too much to judge.
     var xr = bote_rx_compile(_rep("x", 4000));
-    store64(&bud, 450);
-    assert_eq(bote_rx_test_a(bote_req_begin(), xr, "", 0, 0, &bud), 0 - 1, "budget: an empty string asked of 4,001 steps is charged their clearing, -1");
-    store64(&bud, 600);
-    assert_eq(bote_rx_test_a(bote_req_begin(), xr, "", 0, 0, &bud), 0, "budget: ...within it, no match");
-    assert(load64(&bud) <= 600 - 501 && load64(&bud) > 0, "budget: ...an eighth of a step a mark, and the first step");
+    store64(&bud, 10);
+    assert_eq(bote_rx_test_a(bote_req_begin(), xr, "", 0, 0, &bud), 0, "budget: an empty string asked of 4,001 steps costs its first step, no match");
+    assert_eq(load64(&bud), 9, "budget: ...one");
+    var xr1 = bote_rx_compile("x");
+    assert(_ns_many(xr, "", 2000) < 4 * _ns_many(xr1, "", 2000) + 200000, "budget: ...and 2,000 of them take a few times a one-step program's time");
+    store64(&bud, 0 - 1);
+    assert_eq(bote_rx_test_a(bote_req_alloc(), xr, "x", 0, 1, &bud), 0 - 1, "budget: spent before the match, -1 at once");
+    assert_eq(load64(&bud), 0 - 1, "budget: ...charging nothing more");
+    var lng = bote_rx_compile(_cat("^", _rep("[a-c]?", 70)));
+    var sht = bote_rx_compile(_cat("^", _rep("[a-c]?", 20)));
+    assert(bote_rx_count(lng) > BOTE_RX_SPARSE_FROM && bote_rx_count(sht) <= BOTE_RX_SPARSE_FROM, "budget: (a program past the sparse set's bound, and one under it)");
+    assert(_m(_cat3("^", _rep("[a-c]?", 70), "$"), _rep("abc", 23)) == 1 && _m(_cat3("^", _rep("[a-c]?", 70), "$"), _rep("abc", 24)) == 0, "sparse: a long program matches as an array's does, to its bound and past it");
+    assert(_m(_cat3("^(?:", _rep("a|", 40), "b)+$"), _rep("ab", 50)) == 1 && _m(_cat3("^(?:", _rep("a|", 40), "b)+$"), _cat(_rep("ab", 50), "c")) == 0, "sparse: 80 alternatives, steps seen again each turn");
     var ea = bote_rx_compile(_rep("a|", 1000));
     var ean = bote_rx_count(ea);
     assert(ean > 2000, "budget: (1,001 alternatives, the last empty)");
@@ -336,6 +372,28 @@ fn main() {
     _ase(_why("(?<ab>x)(?<ac>y)"), "(none)", "names: two names of one length");
     _ase(_why("(?<a>x){2}"), "(none)", "names: one group repeated is one");
     assert(_m("(?<a>x)|(?<a>y)", "y") == 1 && _m("(?<a>x)|(?<a>y)", "z") == 0, "names: two alternatives match each");
+    # (3.8.13, from the 3.8.12 review) A name given twice, in two alternatives, is flagged: Node
+    # before 23 refuses such a pattern whole, and registration warns.
+    assert(bote_rx_names_twice(bote_rx_compile("(?<a>x)|(?<a>y)")) == 1 && bote_rx_names_twice(bote_rx_compile("(?<a>x)|(?<b>y)")) == 0 && bote_rx_names_twice(bote_rx_compile("(?<ab>x)(?<a>y)")) == 0, "names: two groups of one name flagged, two names not");
+    var ntw[8];
+    assert(bote_rx_why_of("(?:(?<a>x)|(?<a>y))z", &ntw) == 0 && load64(&ntw) == 1, "names: ...through the compile that keeps nothing");
+    _ase(bote_rx_why_of("(?<a>x)(?<a>y)", &ntw), dup, "names: ...which refuses as the compile does");
+    # Each name one look: 32,000 groups in twice 16,000's time (13 s through 3.8.12).
+    var g1 = str_builder_new();
+    var g2 = str_builder_new();
+    var gk = 0;
+    while (gk < 32000) {
+        if (gk < 16000) { str_builder_add_cstr(g1, "(?<n"); str_builder_add_int(g1, gk); str_builder_add_cstr(g1, ">x)"); }
+        str_builder_add_cstr(g2, "(?<n");
+        str_builder_add_int(g2, gk);
+        str_builder_add_cstr(g2, ">x)");
+        gk = gk + 1;
+    }
+    var gs1 = str_data(str_builder_build(g1));
+    var gs2 = str_data(str_builder_build(g2));
+    assert(_cns(gs2) < 3 * _cns(gs1) + 2000000, "names: 32,000 named groups compile in about twice 16,000's time");
+    assert(bote_rx_why_of(_cat3("(?:", _rep("(?<a>x)|", 1000), "(?<a>y))"), 0) == 0, "names: 1,001 alternatives of one name taken");
+    _ase(bote_rx_why_of(_cat3("(?:", _rep("(?<a>x)|", 1000), "(?<a>y))(?<a>z)"), 0), dup, "names: ...and one after them refused");
 
     # ---- (3.8.12, from the 3.8.11 review) a class's members, sorted and merged ----
     assert(_m("^[a-zc-d]$", "n") == 1 && _m("^[c-da-z]$", "n") == 1 && _m("^[c-da-z]$", "{") == 0, "class: overlapping ranges merged, n in a-z beside c-d");

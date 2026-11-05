@@ -577,6 +577,13 @@ fn registry_check_tool_def(tool_def) {
         var irw = _sch_refs_why(str_data(str_builder_build(isb)));
         if (irw != 0) { return _dsp_named_msg("the inputSchema ", irw, 0); }
     }
+    # (3.8.13) And its formats, as the client's Ajv compiles them.
+    if (tool_schema_json(schema) == 0 && _reg_props_may_format(props) == 1) {
+        var fsb = str_builder_new();
+        _emit_schema(fsb, schema);
+        var ifw = _sch_compiled_why(str_data(str_builder_build(fsb)));
+        if (ifw != 0) { return _dsp_named_msg("the inputSchema ", ifw, 0); }
+    }
     var os = tool_def_output_schema(tool_def);
     if (os != 0) {
         if (jsonx_valid(os, strlen(os)) == 0) { return "the outputSchema is not valid JSON"; }
@@ -592,6 +599,8 @@ fn registry_check_tool_def(tool_def) {
         # (3.8.10) Its references, each resolved within it.
         var orw = _sch_refs_why(os);
         if (orw != 0) { return _dsp_named_msg("the outputSchema ", orw, 0); }
+        var ofw = _sch_compiled_why(os);
+        if (ofw != 0) { return _dsp_named_msg("the outputSchema ", ofw, 0); }
     }
     var dwhy = bote_display_check(tool_def_title(tool_def), tool_def_icons(tool_def));
     if (dwhy != 0) { return dwhy; }
@@ -615,6 +624,18 @@ fn _reg_props_may_ref(props) {
     while (i < vec_len(props)) {
         var v = schema_prop_value(vec_get(props, i));
         if (v != 0 && (strchr(v, 36) >= 0 || strstr(v, "\\u") >= 0)) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 when a property of `props` may name a format (3.8.13), so its listed form is checked.
+fn _reg_props_may_format(props) {
+    if (props == 0) { return 0; }
+    var i = 0;
+    while (i < vec_len(props)) {
+        var v = schema_prop_value(vec_get(props, i));
+        if (v != 0 && (strstr(v, "ormat") >= 0 || strstr(v, "\\u") >= 0)) { return 1; }
         i = i + 1;
     }
     return 0;
@@ -653,6 +674,8 @@ fn _reg_check_input_json(js) {
     # (3.8.10) Its references, each resolved within it.
     var rw = _sch_refs_why(js);
     if (rw != 0) { return _dsp_named_msg("the inputSchema ", rw, 0); }
+    var fw = _sch_compiled_why(js);
+    if (fw != 0) { return _dsp_named_msg("the inputSchema ", fw, 0); }
     var pr = jsonx_get_raw(js, "properties");
     if (pr != 0 && _vp_first_nonws(pr) != 123) { return "the inputSchema's properties must be an object"; }
     var rq = jsonx_get_raw(js, "required");
@@ -705,11 +728,14 @@ fn _reg_multiple_size(mm) {
     var digits = nd + p;
     if (digits > 309) { return 2; }
     if (digits == 309) {
-        # Its first 17 digits against the largest double's, 1.7976931348623157e308.
+        # Its first 17 digits against where a double turns infinite, 2^1024 - 2^970, just past
+        # 1.7976931348623158e308: (3.8.13, from the 3.8.12 review) through 3.8.12 the largest
+        # double's 1.7976931348623157e308, so 1.7976931348623158e308, which a double reads as that
+        # largest, was warned of as infinite.
         var lead = d;
         var k = nd;
         while (k < 17) { lead = lead * 10; k = k + 1; }
-        if (lead > 17976931348623157) { return 2; }
+        if (lead > 17976931348623158) { return 2; }
         return 1;
     }
     if (digits > 16) { return 1; }
@@ -742,7 +768,7 @@ fn _reg_warn_kw(tool, key, kw) {
 # (3.8.7) const and uniqueItems too. (3.8.8) prefixItems, contains, propertyNames,
 # dependentRequired and dependentSchemas. (3.8.9) allOf, anyOf, oneOf, not, if, then, else.
 # (3.8.10) $ref, within its document. (3.8.11) pattern and multipleOf. (3.8.12) patternProperties.
-var BOTE_UNENFORCED = "$dynamicRef $recursiveRef unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
+var BOTE_UNENFORCED = "$dynamicRef $recursiveRef unevaluatedProperties unevaluatedItems additionalItems dependencies formatMinimum formatMaximum formatExclusiveMinimum formatExclusiveMaximum ";
 
 # Every WARN the schema `v`, at `key` of tool `tool`, earns: each keyword in `kws` it
 # holds, a type bote does not know, alone or in a type array, and a keyword it judges with a
@@ -793,8 +819,12 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
         if (_sch_is_string(pr) == 1) { pt = _sch_str_dec_a(default_alloc(), pr); }
         if (pt == 0) { _reg_warn_kw(tool, key, "pattern that is no string, or no text"); }
         else {
-            var pw = bote_rx_why(bote_rx_compile(pt));
+            # (3.8.13, from the 3.8.12 review) A compile that keeps nothing: this one kept its
+            # program on the heap beside the schema's own, 382 KB for `^.{0,2000}$`.
+            var pnt[8];
+            var pw = bote_rx_why_of(pt, &pnt);
             if (pw != 0) { _reg_warn_kw(tool, key, _dsp_named_msg("pattern bote's engine does not take, for ", pw, 0)); }
+            elif (load64(&pnt) == 1) { _reg_warn_kw(tool, key, "pattern naming two groups alike, which Node before 23 refuses whole"); }
         }
     }
     var mr = jsonx_get_raw(v, "multipleOf");
@@ -811,6 +841,16 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
             if (mw == 2) { _reg_warn_kw(tool, key, "multipleOf past a double's range, which a client holding doubles reads as infinite"); }
             elif (mw == 1) { _reg_warn_kw(tool, key, "multipleOf past 2^53, judged exactly here and perhaps not by a client holding doubles"); }
         }
+    }
+    # (3.8.13) A `format` bote does not judge: `regex`, which the client checks with
+    # JavaScript's own syntax, and one the client's ajv-formats does not know, which neither
+    # judges.
+    var fr = jsonx_get_raw(v, "format");
+    if (fr != 0 && _sch_is_string(fr) == 1) {
+        var fname = _sch_str_dec_a(default_alloc(), fr);
+        var fid = bote_format_id(fname);
+        if (fid == BOTE_FMT_REGEX) { _reg_warn_kw(tool, key, "format regex, which the official client judges by JavaScript's syntax and bote does not"); }
+        elif (fid == 0) { _reg_warn_kw(tool, key, "a format the official client does not know, which neither judges"); }
     }
     var ty = jsonx_get_str_dec_a(default_alloc(), v, "type");
     if (ty != 0 && _reg_type_known(ty) == 0) { _reg_warn_kw(tool, key, "an unknown type"); }
@@ -920,7 +960,9 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
             var ppi = 0;
             var ppd = 0;
             while (ppi < vec_len(ppm)) {
-                var ppw = bote_rx_why(bote_rx_compile(vec_get(ppm, ppi)));
+                var ppnt[8];
+                var ppw = bote_rx_why_of(vec_get(ppm, ppi), &ppnt);
+                if (ppw == 0 && load64(&ppnt) == 1) { _reg_warn_kw(tool, key, "patternProperties pattern naming two groups alike, which Node before 23 refuses whole"); }
                 if (ppw != 0) {
                     ppd = 1;
                     _reg_warn_kw(tool, key, _dsp_named_msg("a patternProperties pattern bote's engine does not take, for ", ppw, 0));

@@ -20,6 +20,7 @@ include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
 include "src/regex.cyr"
+include "src/format.cyr"
 include "src/registry.cyr"
 # prompts + resources: dispatch routes prompts/* and resources/* to these,
 # so codec_process reaches them even though codec_parse does not. Their
