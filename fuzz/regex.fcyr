@@ -1,0 +1,409 @@
+# Fuzz: the regular-expression engine (3.8.11) against a reference that shares none of it.
+#
+# A pattern is drawn as a tree (characters, `.`, classes with ranges and `\d \w \s` and their
+# complements, concatenation, alternation, every quantifier, groups of each kind, `^ $ \b \B`)
+# and written out in the `u` flag's syntax, each character spelled raw, as `\u`, `\u{...}`,
+# `\x` or escaped as JavaScript needs it. A string is drawn from an alphabet of ASCII, accented
+# and astral letters, a line feed and U+2028, and written as a JSON string body, raw or escaped.
+# The reference judges the string by the tree, as sets of where each part can end. Exit codes:
+#
+#   10   bote matched where the reference did not, or the reverse;
+#   11   bote declined a pattern the grammar drew, for a reason other than its size;
+#   20   the rounds drew fewer than a thousand matches or a thousand misses;
+#   30   matching left bytes on the heap.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/regex.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+
+alloc_init();
+
+var _rng = 1618033988749894848;
+fn _rand() {
+    _rng = _rng ^ (_rng << 13);
+    _rng = _rng ^ ((_rng >> 7) & 144115188075855871);
+    _rng = _rng ^ (_rng << 17);
+    return _rng & 9223372036854775807;
+}
+fn _r(n) { return _rand() % n; }
+
+# The alphabet, as code points.
+var _AL = 0;
+fn _alpha() {
+    _AL = vec_new();
+    vec_push(_AL, 97); vec_push(_AL, 98); vec_push(_AL, 99); vec_push(_AL, 120);
+    vec_push(_AL, 233); vec_push(_AL, 128512); vec_push(_AL, 49); vec_push(_AL, 95);
+    vec_push(_AL, 32); vec_push(_AL, 10); vec_push(_AL, 45); vec_push(_AL, 46);
+    vec_push(_AL, 40); vec_push(_AL, 42); vec_push(_AL, 92); vec_push(_AL, 47);
+    vec_push(_AL, 93); vec_push(_AL, 8232); vec_push(_AL, 34); vec_push(_AL, 65);
+    return 0;
+}
+fn _pick_cp() { return vec_get(_AL, _r(vec_len(_AL))); }
+
+# A node (32 bytes): +0 kind, +8 a, +16 b, +24 c.
+#   1 char (a cp)  2 any  3 class (a: vec of lo,hi; b: neg; c: vec of builtin letters)
+#   4 cat (c: vec)  5 alt (c: vec)  6 rep (c: child, a: min, b: max or -1)
+#   7 bol  8 eol  9 \b  10 \B
+fn _nd(k, a, b, c) {
+    var n = alloc(32);
+    store64(n, k);
+    store64(n + 8, a);
+    store64(n + 16, b);
+    store64(n + 24, c);
+    return n;
+}
+
+fn _gen(depth) {
+    var k = _r(20);
+    if (depth >= 3 && k >= 13) { k = _r(13); }
+    if (k <= 5) { return _nd(1, _pick_cp(), 0, 0); }
+    if (k == 6) { return _nd(2, 0, 0, 0); }
+    if (k <= 8) {
+        var rg = vec_new();
+        var bl = vec_new();
+        var ni = 1 + _r(3);
+        var i = 0;
+        while (i < ni) {
+            var w = _r(4);
+            if (w == 0) {
+                var b = _r(6);
+                if (b == 0) { vec_push(bl, 100); } elif (b == 1) { vec_push(bl, 68); } elif (b == 2) { vec_push(bl, 119); }
+                elif (b == 3) { vec_push(bl, 87); } elif (b == 4) { vec_push(bl, 115); } else { vec_push(bl, 83); }
+            } else {
+                var x = _pick_cp();
+                var y = x;
+                if (w == 1) { y = _pick_cp(); }
+                if (y < x) { var t = x; x = y; y = t; }
+                vec_push(rg, x);
+                vec_push(rg, y);
+            }
+            i = i + 1;
+        }
+        return _nd(3, rg, _r(4) == 0, bl);
+    }
+    if (k == 9) { return _nd(7, 0, 0, 0); }
+    if (k == 10) { return _nd(8, 0, 0, 0); }
+    if (k == 11) { if (_r(2) == 0) { return _nd(9, 0, 0, 0); } return _nd(10, 0, 0, 0); }
+    if (k == 12) {
+        var mn = _r(3);
+        var mx = 0 - 1;
+        var q = _r(4);
+        if (q == 1) { mx = mn; } elif (q == 2) { mx = mn + _r(3); } elif (q == 3) { mn = 0; mx = 1; }
+        return _nd(6, mn, mx, _gen(depth + 1));
+    }
+    if (k <= 16) {
+        var cv = vec_new();
+        var nc = 2 + _r(3);
+        var ci = 0;
+        while (ci < nc) { vec_push(cv, _gen(depth + 1)); ci = ci + 1; }
+        return _nd(4, 0, 0, cv);
+    }
+    var av = vec_new();
+    var na = 2 + _r(2);
+    var ai = 0;
+    while (ai < na) { vec_push(av, _gen(depth + 1)); ai = ai + 1; }
+    return _nd(5, 0, 0, av);
+}
+
+# ---- writing a tree in the u flag's syntax ----
+
+fn _utf8(sb, cp) {
+    if (cp < 128) { str_builder_add_byte(sb, cp); }
+    elif (cp < 2048) { str_builder_add_byte(sb, 192 + cp / 64); str_builder_add_byte(sb, 128 + cp % 64); }
+    elif (cp < 65536) { str_builder_add_byte(sb, 224 + cp / 4096); str_builder_add_byte(sb, 128 + (cp / 64) % 64); str_builder_add_byte(sb, 128 + cp % 64); }
+    else { str_builder_add_byte(sb, 240 + cp / 262144); str_builder_add_byte(sb, 128 + (cp / 4096) % 64); str_builder_add_byte(sb, 128 + (cp / 64) % 64); str_builder_add_byte(sb, 128 + cp % 64); }
+    return 0;
+}
+fn _hex(sb, v, w) {
+    var hx = "0123456789ABCDEF";
+    var k = w - 1;
+    while (k >= 0) {
+        var sh = k * 4;
+        str_builder_add_byte(sb, load8(hx + ((v >> sh) & 15)));
+        k = k - 1;
+    }
+    return 0;
+}
+# A code point in a pattern, `cls` 1 inside a class.
+fn _pchar(sb, cp, cls) {
+    var syn = "^$\\.*+?()[]{}|/";
+    var i = 0;
+    var is_syn = 0;
+    while (load8(syn + i) != 0) { if (load8(syn + i) == cp) { is_syn = 1; } i = i + 1; }
+    if (cls == 1 && cp == 45) { is_syn = 1; }
+    var w = _r(5);
+    if (is_syn == 1 && w <= 1) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, cp); return 0; }
+    if (w == 2 && cp < 65536) { str_builder_add_cstr(sb, "\\u"); _hex(sb, cp, 4); return 0; }
+    if (w == 3) { str_builder_add_cstr(sb, "\\u{"); _hex(sb, cp, 5); str_builder_add_cstr(sb, "}"); return 0; }
+    if (w == 4 && cp < 256) { str_builder_add_cstr(sb, "\\x"); _hex(sb, cp, 2); return 0; }
+    if (cp >= 65536 && w == 2) {
+        var v = cp - 65536;
+        str_builder_add_cstr(sb, "\\u"); _hex(sb, 55296 + v / 1024, 4);
+        str_builder_add_cstr(sb, "\\u"); _hex(sb, 56320 + v % 1024, 4);
+        return 0;
+    }
+    if (is_syn == 1) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, cp); return 0; }
+    if (cp == 10) { str_builder_add_cstr(sb, "\\n"); return 0; }
+    _utf8(sb, cp);
+    return 0;
+}
+fn _atomic(k) { if (k == 1 || k == 2 || k == 3) { return 1; } return 0; }
+fn _write(sb, nd) {
+    var k = load64(nd);
+    if (k == 1) { _pchar(sb, load64(nd + 8), 0); }
+    elif (k == 2) { str_builder_add_cstr(sb, "."); }
+    elif (k == 3) {
+        str_builder_add_cstr(sb, "[");
+        if (load64(nd + 16) == 1) { str_builder_add_cstr(sb, "^"); }
+        var bl = load64(nd + 24);
+        var bi = 0;
+        while (bi < vec_len(bl)) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, vec_get(bl, bi)); bi = bi + 1; }
+        var rg = load64(nd + 8);
+        var ri = 0;
+        while (ri < vec_len(rg)) {
+            _pchar(sb, vec_get(rg, ri), 1);
+            if (vec_get(rg, ri + 1) != vec_get(rg, ri)) { str_builder_add_cstr(sb, "-"); _pchar(sb, vec_get(rg, ri + 1), 1); }
+            ri = ri + 2;
+        }
+        str_builder_add_cstr(sb, "]");
+    }
+    elif (k == 4) {
+        var cv = load64(nd + 24);
+        var ci = 0;
+        while (ci < vec_len(cv)) {
+            var ch = vec_get(cv, ci);
+            if (load64(ch) == 5) { str_builder_add_cstr(sb, "(?:"); _write(sb, ch); str_builder_add_cstr(sb, ")"); }
+            else { _write(sb, ch); }
+            ci = ci + 1;
+        }
+    }
+    elif (k == 5) {
+        var av = load64(nd + 24);
+        var ai = 0;
+        while (ai < vec_len(av)) { if (ai > 0) { str_builder_add_cstr(sb, "|"); } _write(sb, vec_get(av, ai)); ai = ai + 1; }
+    }
+    elif (k == 6) {
+        var x = load64(nd + 24);
+        if (_atomic(load64(x)) == 1 && _r(3) != 0) { _write(sb, x); }
+        else {
+            var g = _r(3);
+            if (g == 0) { str_builder_add_cstr(sb, "("); } elif (g == 1) { str_builder_add_cstr(sb, "(?:"); } else { str_builder_add_cstr(sb, "(?<g"); str_builder_add_int(sb, _r(1000)); str_builder_add_cstr(sb, ">"); }
+            _write(sb, x);
+            str_builder_add_cstr(sb, ")");
+        }
+        var mn = load64(nd + 8);
+        var mx = load64(nd + 16);
+        if (mn == 0 && mx < 0 && _r(2) == 0) { str_builder_add_cstr(sb, "*"); }
+        elif (mn == 1 && mx < 0 && _r(2) == 0) { str_builder_add_cstr(sb, "+"); }
+        elif (mn == 0 && mx == 1 && _r(2) == 0) { str_builder_add_cstr(sb, "?"); }
+        else {
+            str_builder_add_cstr(sb, "{");
+            str_builder_add_int(sb, mn);
+            if (mx != mn) { str_builder_add_cstr(sb, ","); if (mx >= 0) { str_builder_add_int(sb, mx); } }
+            str_builder_add_cstr(sb, "}");
+        }
+        if (_r(4) == 0) { str_builder_add_cstr(sb, "?"); }
+    }
+    elif (k == 7) { str_builder_add_cstr(sb, "^"); }
+    elif (k == 8) { str_builder_add_cstr(sb, "$"); }
+    elif (k == 9) { str_builder_add_cstr(sb, "\\b"); }
+    else { str_builder_add_cstr(sb, "\\B"); }
+    return 0;
+}
+
+# ---- the reference: where a part can end, a bit for each position ----
+
+fn _word(c) {
+    if ((c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95) { return 1; }
+    return 0;
+}
+fn _lt(c) { if (c == 10 || c == 13 || c == 8232 || c == 8233) { return 1; } return 0; }
+fn _space(c) {
+    if ((c >= 9 && c <= 13) || c == 32 || c == 160 || c == 5760 || (c >= 8192 && c <= 8202) || c == 8232 || c == 8233 || c == 8239 || c == 8287 || c == 12288 || c == 65279) { return 1; }
+    return 0;
+}
+fn _builtin(b, c) {
+    if (b == 100) { if (c >= 48 && c <= 57) { return 1; } return 0; }
+    if (b == 68) { if (c >= 48 && c <= 57) { return 0; } return 1; }
+    if (b == 119) { return _word(c); }
+    if (b == 87) { return 1 - _word(c); }
+    if (b == 115) { return _space(c); }
+    return 1 - _space(c);
+}
+fn _in(nd, c) {
+    var hit = 0;
+    var rg = load64(nd + 8);
+    var ri = 0;
+    while (ri < vec_len(rg)) { if (c >= vec_get(rg, ri) && c <= vec_get(rg, ri + 1)) { hit = 1; } ri = ri + 2; }
+    var bl = load64(nd + 24);
+    var bi = 0;
+    while (bi < vec_len(bl)) { if (_builtin(vec_get(bl, bi), c) == 1) { hit = 1; } bi = bi + 1; }
+    if (load64(nd + 16) == 1) { return 1 - hit; }
+    return hit;
+}
+fn _at(s, n, i) { if (i < 0 || i >= n) { return 0 - 1; } return load64(s + i * 8); }
+fn _step(nd, s, n, from) {
+    var out = 0;
+    var p = 0;
+    while (p <= n) {
+        if ((from & (1 << p)) != 0) { out = out | _ends(nd, s, n, p); }
+        p = p + 1;
+    }
+    return out;
+}
+fn _ends(nd, s, n, pos) {
+    var k = load64(nd);
+    var c = _at(s, n, pos);
+    if (k == 1) { if (c == load64(nd + 8)) { return 1 << (pos + 1); } return 0; }
+    if (k == 2) { if (c >= 0 && _lt(c) == 0) { return 1 << (pos + 1); } return 0; }
+    if (k == 3) { if (c >= 0 && _in(nd, c) == 1) { return 1 << (pos + 1); } return 0; }
+    if (k == 7) { if (pos == 0) { return 1 << pos; } return 0; }
+    if (k == 8) { if (pos == n) { return 1 << pos; } return 0; }
+    if (k == 9 || k == 10) {
+        var bd = 0;
+        if (_word(_at(s, n, pos - 1)) != _word(c)) { bd = 1; }
+        if ((k == 9 && bd == 1) || (k == 10 && bd == 0)) { return 1 << pos; }
+        return 0;
+    }
+    if (k == 4) {
+        var cur = 1 << pos;
+        var cv = load64(nd + 24);
+        var ci = 0;
+        while (ci < vec_len(cv) && cur != 0) { cur = _step(vec_get(cv, ci), s, n, cur); ci = ci + 1; }
+        return cur;
+    }
+    if (k == 5) {
+        var u = 0;
+        var av = load64(nd + 24);
+        var ai = 0;
+        while (ai < vec_len(av)) { u = u | _ends(vec_get(av, ai), s, n, pos); ai = ai + 1; }
+        return u;
+    }
+    # A repetition: its minimum exactly, then up to its maximum, or until nothing new.
+    var mn = load64(nd + 8);
+    var mx = load64(nd + 16);
+    var x = load64(nd + 24);
+    var fr = 1 << pos;
+    var i = 0;
+    while (i < mn && fr != 0) { fr = _step(x, s, n, fr); i = i + 1; }
+    var res = fr;
+    if (mx < 0) {
+        var go = 1;
+        while (go == 1 && fr != 0) {
+            var nx = _step(x, s, n, fr) & (0 - 1 - res);
+            if (nx == 0) { go = 0; }
+            res = res | nx;
+            fr = nx;
+        }
+        return res;
+    }
+    while (i < mx && fr != 0) { fr = _step(x, s, n, fr); res = res | fr; i = i + 1; }
+    return res;
+}
+
+# A string as a JSON body: each code point raw or escaped, as JSON must have a quote, a
+# backslash and a line feed.
+fn _jchar(sb, cp) {
+    var w = _r(3);
+    if (cp == 34) { str_builder_add_cstr(sb, "\\\""); return 0; }
+    if (cp == 92) { str_builder_add_cstr(sb, "\\\\"); return 0; }
+    if (cp == 10) { if (w == 0) { str_builder_add_cstr(sb, "\\u000a"); } else { str_builder_add_cstr(sb, "\\n"); } return 0; }
+    if (w == 0 && cp < 65536) { str_builder_add_cstr(sb, "\\u"); _hex(sb, cp, 4); return 0; }
+    if (w == 0) {
+        var v = cp - 65536;
+        str_builder_add_cstr(sb, "\\u"); _hex(sb, 55296 + v / 1024, 4);
+        str_builder_add_cstr(sb, "\\u"); _hex(sb, 56320 + v % 1024, 4);
+        return 0;
+    }
+    _utf8(sb, cp);
+    return 0;
+}
+
+fn main() {
+    _alpha();
+    var big = bote_req_begin();
+    alloc_via(big, 8388608);
+    var matched = 0;
+    var missed = 0;
+    var skipped = 0;
+    var heap = 0;
+    var round = 0;
+    while (round < 20000) {
+        var tree = _gen(0);
+        var psb = str_builder_new();
+        _write(psb, tree);
+        var pat = str_data(str_builder_build(psb));
+        var rx = bote_rx_compile(pat);
+        var why = bote_rx_why(rx);
+        if (why != 0) {
+            if (strstr(why, "bound") < 0) { println(pat); println(why); return 11; }
+            skipped = skipped + 1;
+        } else {
+            var k = 0;
+            while (k < 8) {
+                var n = _r(11);
+                var s = alloc(n * 8 + 8);
+                var jsb = str_builder_new();
+                var i = 0;
+                while (i < n) { var cp = _pick_cp(); store64(s + i * 8, cp); _jchar(jsb, cp); i = i + 1; }
+                var body = str_data(str_builder_build(jsb));
+                var want = 0;
+                var p = 0;
+                while (p <= n && want == 0) { if (_ends(tree, s, n, p) != 0) { want = 1; } p = p + 1; }
+                var a = bote_req_begin();
+                var h0 = alloc_used();
+                var got = bote_rx_test_a(a, rx, body, 0, strlen(body), 0);
+                heap = heap + alloc_used() - h0;
+                if (got != want) { println(pat); println(body); println_int(got); return 10; }
+                if (got == 1) { matched = matched + 1; } else { missed = missed + 1; }
+                k = k + 1;
+            }
+        }
+        round = round + 1;
+    }
+    if (matched < 1000 || missed < 1000) { println_int(matched); println_int(missed); return 20; }
+    if (heap != 0) { println_int(heap); return 30; }
+    println("regex: every string judged as the reference judges it by the tree, 0 heap bytes");
+    println_int(matched);
+    println_int(missed);
+    println_int(skipped);
+    return 0;
+}
+
+var rc = main();
+sys_exit_group(rc);

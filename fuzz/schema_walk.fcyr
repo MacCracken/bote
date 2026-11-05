@@ -16,8 +16,9 @@
 # `dependentRequired` and `dependentSchemas`. (3.8.9) `allOf`, `anyOf`, `oneOf`, `not` and
 # `if` / `then` / `else`. (3.8.10) Up to three definitions in the root's `$defs`, and a `$ref`
 # to one anywhere, written plainly, percent-encoded or under an escaped key; a definition
-# names only those after it, so no reference leads back. The reference judges bayan's parse
-# of both, a `$ref` by the definition it names. Exit codes:
+# names only those after it, so no reference leads back. (3.8.11) `multipleOf` of 2, 3 or 0.5,
+# judged by scaled integers, and five patterns, each judged by hand. The reference judges
+# bayan's parse of both, a `$ref` by the definition it names. Exit codes:
 #
 #   10   a value bote passes the reference refuses, or the reverse;
 #   20   the rounds drew fewer than a thousand values passed or a thousand refused;
@@ -56,6 +57,7 @@ include "src/log.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
+include "src/regex.cyr"
 include "src/registry.cyr"
 include "src/prompts.cyr"
 include "src/resources.cyr"
@@ -213,6 +215,23 @@ fn _schema(a, sb, depth) {
     if (_r(5) == 0) { sep = _kw_int(a, sb, "maximum", _r(7) - 3, sep); }
     if (_r(5) == 0) { sep = _kw_int(a, sb, "exclusiveMinimum", _r(7) - 3, sep); }
     if (_r(5) == 0) { sep = _kw_int(a, sb, "exclusiveMaximum", _r(7) - 3, sep); }
+    # (3.8.11) multipleOf and pattern.
+    if (_r(8) == 0) {
+        if (sep == 1) { _add(a, sb, ","); }
+        var mk = _r(3);
+        if (mk == 0) { _add(a, sb, "\"multipleOf\":2"); } elif (mk == 1) { _add(a, sb, "\"multipleOf\":3"); } else { _add(a, sb, "\"multipleOf\":0.5"); }
+        sep = 1;
+    }
+    if (_r(8) == 0) {
+        if (sep == 1) { _add(a, sb, ","); }
+        var pk = _r(5);
+        if (pk == 0) { _add(a, sb, "\"pattern\":\"^a\""); }
+        elif (pk == 1) { _add(a, sb, "\"pattern\":\"b$\""); }
+        elif (pk == 2) { _add(a, sb, "\"pattern\":\"^[a-c]*$\""); }
+        elif (pk == 3) { _add(a, sb, "\"pattern\":\"x\""); }
+        else { _add(a, sb, "\"pattern\":\"^.{2}$\""); }
+        sep = 1;
+    }
     if (_r(5) == 0) { sep = _kw_int(a, sb, "minItems", _r(4), sep); }
     if (_r(5) == 0) { sep = _kw_int(a, sb, "maxItems", _r(4), sep); }
     if (depth < 2 && (t == 5 || _r(6) == 0)) {
@@ -668,6 +687,18 @@ fn _ok(sch, inst) {
         if (_s_is(bayan_json_v_str(t), "array") == 1 && bayan_json_v_is_arr(inst) == 0) { return 0; }
         if (_s_is(bayan_json_v_str(t), "object") == 1 && bayan_json_v_is_obj(inst) == 0) { return 0; }
     }
+    # (3.8.11) multipleOf, the value and the multiple times four: the values drawn are
+    # integers and 1.5, the multiples 2, 3 and 0.5.
+    var mof = _member(sch, "multipleOf");
+    if (mof != 0 && (bayan_json_v_is_int(inst) == 1 || bayan_json_v_is_float(inst) == 1)) {
+        var m4 = 2;
+        if (bayan_json_v_is_int(mof) == 1) { m4 = 4 * bayan_json_v_int(mof); }
+        var v4 = 6;
+        if (bayan_json_v_is_int(inst) == 1) { v4 = 4 * bayan_json_v_int(inst); }
+        if (v4 % m4 != 0) { return 0; }
+    }
+    var pat = _member(sch, "pattern");
+    if (pat != 0 && bayan_json_v_is_str(inst) == 1 && _pat_ok(bayan_json_v_str(pat), bayan_json_v_str(inst)) == 0) { return 0; }
     if (bayan_json_v_is_str(inst) == 1) {
         var cp = _cps(bayan_json_v_str(inst));
         var mnl = _int_kw(sch, "minLength");
@@ -847,6 +878,34 @@ fn _cat_d(c) {
     store8(o + 1, c);
     store8(o + 2, 0);
     return o;
+}
+
+# (3.8.11) Each pattern the grammar draws, judged by hand on the string as a client holds it.
+fn _pat_ok(p, st) {
+    var d = str_data(st);
+    var n = str_len(st);
+    if (_s_is(p, "^a") == 1) { if (n > 0 && load8(d) == 97) { return 1; } return 0; }
+    if (_s_is(p, "b$") == 1) { if (n > 0 && load8(d + n - 1) == 98) { return 1; } return 0; }
+    if (_s_is(p, "x") == 1) {
+        var i = 0;
+        while (i < n) { if (load8(d + i) == 120) { return 1; } i = i + 1; }
+        return 0;
+    }
+    if (_s_is(p, "^[a-c]*$") == 1) {
+        var j = 0;
+        while (j < n) { var c = load8(d + j); if (c < 97 || c > 99) { return 0; } j = j + 1; }
+        return 1;
+    }
+    # ^.{2}$: two code points, neither a line terminator.
+    var k = 0;
+    while (k < n) {
+        var b = load8(d + k);
+        if (b == 10 || b == 13) { return 0; }
+        if (b == 226 && k + 2 < n && load8(d + k + 1) == 128 && (load8(d + k + 2) == 168 || load8(d + k + 2) == 169)) { return 0; }
+        k = k + 1;
+    }
+    if (_cps(st) == 2) { return 1; }
+    return 0;
 }
 
 # 1 when the object `inst` has a member keyed `k` (a bayan Str).

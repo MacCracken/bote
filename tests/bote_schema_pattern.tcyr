@@ -1,0 +1,324 @@
+# bote_schema_pattern.tcyr — `pattern` and `multipleOf` judged (3.8.11): a pattern on a
+# string, decoded as JSON decodes it, one bote's engine declines judging nothing, under
+# composition and `propertyNames`, through the dispatcher and a result; `multipleOf` exactly,
+# as decimals, past 2^64 and a double's range, zero, negative, too many digits; the budget,
+# each step a match takes and each digit read charged; the WARNs; the heap and the arena.
+#
+# Run: cyrius test tests/bote_schema_pattern.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/regex.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+fn h_tool(args, claims) { return "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"; }
+var _ret = 0;
+fn h_ret(args, claims) { return _ret; }
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
+fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+fn _vs(schema, value) { return _sch_check_value_a(bote_req_begin(), parse_property(schema), "v", value); }
+fn _ok(schema, value) { if (_vs(schema, value) == 0) { return 1; } return 0; }
+fn _n(schema, value) {
+    var v = _vs(schema, value);
+    if (v == 0) { return 0; }
+    return vec_len(v);
+}
+fn _v0(schema, value) {
+    var v = _vs(schema, value);
+    if (v == 0) { return "(none)"; }
+    return _cat(vec_get(v, 0), "");
+}
+fn _ase(got, want, name) {
+    if (got == 0 || want == 0) { return assert(got == want, name); }
+    return assert_streq(got, want, name);
+}
+fn _msg(method, params) {
+    return _cat3(_cat3("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"", method, "\",\"params\":{"), params, "}}");
+}
+fn _call(d, tool, args) {
+    return codec_process_message(_msg("tools/call", _cat3(_cat3("\"name\":\"", tool, "\",\"arguments\":"), args, "")), d, 0);
+}
+# An array of n items, each `item`.
+fn _many(n, item) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "[");
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, item);
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]");
+    return str_data(str_builder_build(sb));
+}
+
+var _lc_all = 0;
+fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
+    var n = msg_len;
+    if (n > 1023) { n = 1023; }
+    var b = alloc(n + 1);
+    memcpy(b, msg, n);
+    store8(b + n, 0);
+    vec_push(_lc_all, b);
+    return 0;
+}
+fn _lc_begin() { _lc_all = vec_new(); sakshi_set_emit_hook(&_lc_hook); sakshi_set_level(SK_TRACE); return 0; }
+fn _lc_end() { sakshi_clear_emit_hook(); sakshi_set_level(SK_ERROR); return 0; }
+fn _lc_find(sub) {
+    var i = 0;
+    while (i < vec_len(_lc_all)) {
+        if (_has(vec_get(_lc_all, i), sub) == 1) { return vec_get(_lc_all, i); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# (3.8.10) The fewest nanoseconds of three judgements of `value` by `prop`, and of three calls
+# of `tool`: a bound on a judgement's time is a multiple of one of these, measured in the same
+# process, so it holds under emulation as on the host.
+fn _ns3(prop, value) {
+    var best = 0;
+    var i = 0;
+    while (i < 3) {
+        var t = clock_now_ns();
+        _sch_check_value_a(bote_req_begin(), prop, "v", value);
+        var dt = clock_now_ns() - t;
+        if (i == 0 || dt < best) { best = dt; }
+        i = i + 1;
+    }
+    return best;
+}
+fn _call_ns3(d, msg) {
+    var best = 0;
+    var i = 0;
+    while (i < 3) {
+        var t = clock_now_ns();
+        codec_process_message_a(bote_req_begin(), msg, d, 0);
+        var dt = clock_now_ns() - t;
+        if (i == 0 || dt < best) { best = dt; }
+        i = i + 1;
+    }
+    return best;
+}
+
+
+fn main() {
+    alloc_init();
+
+    # ---- pattern ----
+    var pa = "{\"pattern\":\"^a\"}";
+    assert(_ok(pa, "\"ab\"") == 1, "pattern: a string it matches");
+    _ase(_v0(pa, "\"ba\""), "v: does not match the pattern", "pattern: one it does not");
+    assert(_ok(pa, "5") == 1 && _ok(pa, "{}") == 1 && _ok(pa, "null") == 1, "pattern: judges strings only");
+    assert(_ok("{\"pattern\":\"^\\\\d+$\"}", "\"123\"") == 1 && _ok("{\"pattern\":\"^\\\\d+$\"}", "\"12a\"") == 0, "pattern: its escapes decoded as JSON first");
+    assert(_ok("{\"pattern\":\"^\\u00e9$\"}", "\"\\u00e9\"") == 1, "pattern: ...a \\u in the JSON, and in the value");
+    assert(_ok("{\"pattern\":\"b\"}", "\"abc\"") == 1 && _ok("{\"pattern\":\"^b$\"}", "\"abc\"") == 0, "pattern: anywhere, as JSON Schema has it");
+    assert(_ok("{\"pattern\":\"^.{3}$\"}", "\"\xc3\xa9t\xc3\xa9\"") == 1, "pattern: code points, as the client's u flag reads them");
+    assert(_ok("{\"pattern\":\"(?=a)\"}", "\"b\"") == 1, "pattern: one bote's engine declines judges nothing");
+    assert(_ok("{\"pattern\":\"[\"}", "\"b\"") == 1, "pattern: ...nor one no client can compile");
+    assert(_ok("{\"pattern\":5}", "\"b\"") == 1, "pattern: ...nor one that is no string");
+    assert(_ok("{\"type\":\"string\",\"pattern\":\"^x\",\"maxLength\":2}", "\"yyy\"") == 0, "pattern: beside the lengths");
+    assert_eq(_n("{\"type\":\"string\",\"pattern\":\"^x\",\"maxLength\":2}", "\"yyy\""), 2, "pattern: ...each its own violation");
+    var an = "{\"anyOf\":[{\"pattern\":\"^[0-9]+$\"},{\"pattern\":\"^[a-z]+$\"}]}";
+    assert(_ok(an, "\"123\"") == 1 && _ok(an, "\"abc\"") == 1 && _ok(an, "\"a1\"") == 0, "pattern: under anyOf, quietly");
+    assert(_ok("{\"not\":{\"pattern\":\"x\"}}", "\"axb\"") == 0 && _ok("{\"not\":{\"pattern\":\"x\"}}", "\"ab\"") == 1, "pattern: under not");
+    var pn = "{\"propertyNames\":{\"pattern\":\"^[a-z_]+$\"}}";
+    assert(_ok(pn, "{\"ab_c\":1}") == 1 && _ok(pn, "{\"Ab\":1}") == 0, "pattern: on propertyNames, each key");
+    assert(_ok(pn, "{\"a\\u0062\":1}") == 1, "pattern: ...a key as it decodes");
+    var d = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(d, tool_def_new("t_pat", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"slug\":{\"type\":\"string\",\"pattern\":\"^[a-z0-9]+(?:-[a-z0-9]+)*$\"}},\"required\":[\"slug\"]}")), &h_tool);
+    assert(_has(_call(d, "t_pat", "{\"slug\":\"a-b-1\"}"), "\"text\":\"ok\"") == 1, "pattern: an argument met, through the dispatcher");
+    assert(_has(_call(d, "t_pat", "{\"slug\":\"a--b\"}"), "slug: does not match the pattern") == 1, "pattern: ...and refused");
+    dispatcher_register_tool(d, tool_def_with_output_schema(tool_def_new("t_pout", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"id\":{\"pattern\":\"^id-\\\\d+$\"}}}"), &h_ret);
+    _ret = "{\"content\":[],\"structuredContent\":{\"id\":\"id-7\"}}";
+    assert(_has(_call(d, "t_pout", "{}"), "isError") == 0, "pattern: a result met");
+    _ret = "{\"content\":[],\"structuredContent\":{\"id\":\"id-x\"}}";
+    assert(_has(_call(d, "t_pout", "{}"), "structuredContent.id: does not match the pattern") == 1, "pattern: ...and refused");
+
+    # ---- multipleOf, exactly ----
+    var mv = vec_new();
+    vec_push(mv, "19.99"); vec_push(mv, "0.01"); vec_push(mv, "1");
+    vec_push(mv, "0.3"); vec_push(mv, "0.1"); vec_push(mv, "1");
+    vec_push(mv, "7"); vec_push(mv, "2"); vec_push(mv, "0");
+    vec_push(mv, "10"); vec_push(mv, "4"); vec_push(mv, "0");
+    vec_push(mv, "20"); vec_push(mv, "4"); vec_push(mv, "1");
+    vec_push(mv, "123456789012345678901234567890"); vec_push(mv, "10"); vec_push(mv, "1");
+    vec_push(mv, "123456789012345678901234567890"); vec_push(mv, "9"); vec_push(mv, "1");
+    vec_push(mv, "123456789012345678901234567891"); vec_push(mv, "9"); vec_push(mv, "0");
+    vec_push(mv, "1e-5"); vec_push(mv, "1e-6"); vec_push(mv, "1");
+    vec_push(mv, "1e-6"); vec_push(mv, "1e-5"); vec_push(mv, "0");
+    vec_push(mv, "-6"); vec_push(mv, "3"); vec_push(mv, "1");
+    vec_push(mv, "2.5"); vec_push(mv, "0.5"); vec_push(mv, "1");
+    vec_push(mv, "2.5"); vec_push(mv, "2"); vec_push(mv, "0");
+    vec_push(mv, "0.0075"); vec_push(mv, "0.0025"); vec_push(mv, "1");
+    vec_push(mv, "1.0000000000000000001"); vec_push(mv, "0.0000000000000000001"); vec_push(mv, "1");
+    vec_push(mv, "99999999999999999"); vec_push(mv, "99999999999999999"); vec_push(mv, "1");
+    vec_push(mv, "3e30"); vec_push(mv, "1.5"); vec_push(mv, "1");
+    vec_push(mv, "1e400"); vec_push(mv, "2"); vec_push(mv, "1");
+    vec_push(mv, "1e400"); vec_push(mv, "3"); vec_push(mv, "0");
+    vec_push(mv, "0"); vec_push(mv, "7"); vec_push(mv, "1");
+    vec_push(mv, "-0.0"); vec_push(mv, "7"); vec_push(mv, "1");
+    vec_push(mv, "5"); vec_push(mv, "2.5e0"); vec_push(mv, "1");
+    vec_push(mv, "6"); vec_push(mv, "1e1"); vec_push(mv, "0");
+    vec_push(mv, "60"); vec_push(mv, "1E1"); vec_push(mv, "1");
+    vec_push(mv, "1e-400"); vec_push(mv, "1"); vec_push(mv, "0");
+    vec_push(mv, "1e30"); vec_push(mv, "1048576"); vec_push(mv, "1");
+    vec_push(mv, "1e70"); vec_push(mv, "72057594037927936"); vec_push(mv, "1");
+    vec_push(mv, "1e55"); vec_push(mv, "72057594037927936"); vec_push(mv, "0");
+    vec_push(mv, "1"); vec_push(mv, "99999999999999999"); vec_push(mv, "0");
+    var mi = 0;
+    while (mi < vec_len(mv)) {
+        var ms = _cat3("{\"multipleOf\":", vec_get(mv, mi + 1), "}");
+        var want = 0;
+        if (streq(vec_get(mv, mi + 2), "1") == 1) { want = 1; }
+        assert_eq(_ok(ms, vec_get(mv, mi)), want, _cat3(_cat3("multipleOf: ", vec_get(mv, mi), " of "), vec_get(mv, mi + 1), ""));
+        mi = mi + 3;
+    }
+    _ase(_v0("{\"multipleOf\":2}", "7"), "v: not a multiple of multipleOf", "multipleOf: the violation");
+    assert(_ok("{\"multipleOf\":0}", "0") == 0 && _ok("{\"multipleOf\":0}", "5") == 0, "multipleOf: 0, which no number meets, as the official client has it");
+    assert(_ok("{\"multipleOf\":-3}", "6") == 1 && _ok("{\"multipleOf\":-3}", "7") == 0, "multipleOf: below 0, judged by its size, as the client judges it");
+    assert(_ok("{\"multipleOf\":123456789012345678}", "1") == 1, "multipleOf: past 17 significant digits judges nothing");
+    assert(_ok("{\"multipleOf\":\"2\"}", "1") == 1, "multipleOf: one that is no number judges nothing");
+    assert(_ok("{\"multipleOf\":2}", "\"3\"") == 1 && _ok("{\"multipleOf\":2}", "true") == 1, "multipleOf: numbers only");
+    assert(_ok("{\"type\":\"integer\",\"multipleOf\":5,\"maximum\":20}", "25") == 0 && _ok("{\"type\":\"integer\",\"multipleOf\":5,\"maximum\":20}", "15") == 1, "multipleOf: beside the bounds");
+    dispatcher_register_tool(d, tool_def_new("t_mul", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"price\":{\"type\":\"number\",\"multipleOf\":0.01}}}")), &h_tool);
+    assert(_has(_call(d, "t_mul", "{\"price\":19.99}"), "\"text\":\"ok\"") == 1, "multipleOf: 19.99 for 0.01 met, which the official client's doubles refuse");
+    assert(_has(_call(d, "t_mul", "{\"price\":19.995}"), "price: not a multiple of multipleOf") == 1, "multipleOf: ...19.995 refused");
+
+    # ---- the budget ----
+    var big = str_builder_new();
+    str_builder_add_cstr(big, "\"");
+    var bi = 0;
+    while (bi < 60000) { str_builder_add_cstr(big, "a"); bi = bi + 1; }
+    str_builder_add_cstr(big, "!\"");
+    var bigs = str_data(str_builder_build(big));
+    assert(_ok("{\"pattern\":\"^(a|b)*!$\"}", bigs) == 1, "budget: one pattern over 60 KB, judged");
+    var alt = str_builder_new();
+    str_builder_add_cstr(alt, "{\"anyOf\":[");
+    bi = 0;
+    while (bi < 256) { if (bi > 0) { str_builder_add_cstr(alt, ","); } str_builder_add_cstr(alt, "{\"pattern\":\"^(a|aa)*c\"}"); bi = bi + 1; }
+    str_builder_add_cstr(alt, "]}");
+    var ap = parse_property(str_data(str_builder_build(alt)));
+    var av = _sch_check_value_a(bote_req_begin(), ap, "v", bigs);
+    assert(av != 0 && streq(vec_get(av, vec_len(av) - 1), "v: more work to judge than its size allows") == 1, "budget: 256 patterns over 60 KB refused as too much to judge");
+    assert(_ns3(ap, bigs) < 64 * _ns3(parse_property("{\"anyOf\":[{\"pattern\":\"^(a|aa)*c\"}]}"), bigs), "budget: ...in under 64 times one pattern's time");
+    var dg = str_builder_new();
+    str_builder_add_cstr(dg, "1");
+    bi = 0;
+    while (bi < 200000) { str_builder_add_cstr(dg, "0000000000"); bi = bi + 10; }
+    var digs = str_data(str_builder_build(dg));
+    var ma = str_builder_new();
+    str_builder_add_cstr(ma, "{\"anyOf\":[");
+    bi = 0;
+    while (bi < 256) { if (bi > 0) { str_builder_add_cstr(ma, ","); } str_builder_add_cstr(ma, "{\"multipleOf\":7}"); bi = bi + 1; }
+    str_builder_add_cstr(ma, "]}");
+    var mp = parse_property(str_data(str_builder_build(ma)));
+    var mvv = _sch_check_value_a(bote_req_begin(), mp, "v", digs);
+    assert(mvv != 0 && streq(vec_get(mvv, vec_len(mvv) - 1), "v: more work to judge than its size allows") == 1, "budget: a 200,000-digit number under 256 multipleOf alternatives refused");
+    assert(_ns3(mp, digs) < 64 * _ns3(parse_property("{\"anyOf\":[{\"multipleOf\":7}]}"), digs), "budget: ...in under 64 times one alternative's time");
+
+    # ---- the WARNs ----
+    _lc_begin();
+    var wd = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_p", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"pattern\":\"(?<=x)y\"},\"b\":{\"pattern\":\"[\"},\"c\":{\"pattern\":5},\"d\":{\"multipleOf\":\"2\"},\"e\":{\"multipleOf\":0},\"f\":{\"multipleOf\":-2},\"g\":{\"multipleOf\":0.01},\"h\":{\"multipleOf\":123456789012345678}}}"), &h_ret);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_ok", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"pattern\":\"^[a-z]+$\"},\"b\":{\"multipleOf\":5},\"c\":{\"multipleOf\":2.5e1}}}"), &h_ret);
+    _lc_end();
+    assert(_lc_find("pattern bote's engine does not take, for a lookbehind") != 0, "warn: a pattern the engine declines, and why");
+    assert(_lc_find("pattern bote's engine does not take, for an unterminated character class") != 0, "warn: ...one no client compiles");
+    assert(_lc_find("pattern that is no string") != 0, "warn: a pattern that is no string");
+    assert(_lc_find("multipleOf that is no number") != 0, "warn: a multipleOf that is no number");
+    assert(_lc_find("multipleOf 0, which no number meets") != 0, "warn: 0");
+    assert(_lc_find("multipleOf below 0") != 0, "warn: below 0");
+    assert(_lc_find("multipleOf that is no integer") != 0, "warn: a fraction, which a client's doubles may judge otherwise");
+    assert(_lc_find("multipleOf of more than 17 significant digits") != 0, "warn: too many digits");
+    assert(_lc_find("tool=w_ok") == 0, "warn: none for a pattern taken, an integer multipleOf, 2.5e1");
+    assert(_lc_find("keyword=pattern") == 0 && _lc_find("keyword=multipleOf") == 0, "warn: neither as unenforced");
+
+    # ---- the heap and the arena ----
+    var hm = _msg("tools/call", "\"name\":\"t_pat\",\"arguments\":{\"slug\":\"A--b\"}");
+    codec_process_message_a(bote_req_begin(), hm, d, 0);
+    var h0 = alloc_used();
+    var wi = 0;
+    while (wi < 50) { codec_process_message_a(bote_req_begin(), hm, d, 0); wi = wi + 1; }
+    assert_eq(alloc_used() - h0, 0, "heap: fifty calls refused by a pattern keep nothing");
+    var hm2 = _msg("tools/call", "\"name\":\"t_mul\",\"arguments\":{\"price\":19.995}");
+    codec_process_message_a(bote_req_begin(), hm2, d, 0);
+    var h1 = alloc_used();
+    wi = 0;
+    while (wi < 50) { codec_process_message_a(bote_req_begin(), hm2, d, 0); wi = wi + 1; }
+    assert_eq(alloc_used() - h1, 0, "heap: ...and fifty by multipleOf");
+    var fa = bote_req_arena_new();
+    var fb = bote_req_arena_bytes(fa);
+    assert(_sch_check_value_a(fa, parse_property("{\"type\":\"array\",\"items\":{\"anyOf\":[{\"pattern\":\"^x\"},{\"pattern\":\"^[0-9]+$\"}]}}"), "v", _many(5000, "\"12\"")) == 0, "arena: 5,000 items meeting the second of two patterns");
+    assert_eq(bote_req_arena_bytes(fa), fb, "arena: ...each match's arrays given back, the first chunk");
+    var cc = _compile_object_body("{\"type\":\"object\",\"properties\":{\"l\":{\"type\":\"array\",\"items\":{\"pattern\":\"^[0-9]+$\",\"multipleOf\":3}}}}");
+    var cv = _cat3("{\"l\":", _many(2000, "\"9\""), "}");
+    assert_eq(vec_len(compiled_validate(cc, cv)), 0, "heap form: 2,000 strings through a pattern");
+    var hh = alloc_used();
+    wi = 0;
+    while (wi < 5) { compiled_validate(cc, cv); wi = wi + 1; }
+    assert((alloc_used() - hh) / 5 < 256, "heap form: ...keeping only its answer");
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit_group(rc);

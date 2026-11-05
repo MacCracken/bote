@@ -608,7 +608,7 @@ src/main_common.cyr        Entry helpers (dispatcher, mode selection, env bearer
 Dependencies rehydrate into `lib/` (gitignored) via `cyrius deps`.
 Cross-project deps **libro and majra** are git-pinned via
 `[deps.<name>]` in `cyrius.cyml`. Two consumer bundles ship in `dist/`:
-`bote.cyr` (full, 38 modules) and `bote-core.cyr` (core 13,
+`bote.cyr` (full, 40 modules) and `bote-core.cyr` (core 14,
 transport-free) — see [DEPS-PATTERN.md](DEPS-PATTERN.md). Both state
 **cyrius ≥ 6.7.13** on the `# Minimum cyrius:` line near the top of each (`bote-core.cyr` alone still builds from 6.7.2);
 a repo that copies the core bundle rather than pinning it must also declare
@@ -618,9 +618,9 @@ a repo that copies the core bundle rather than pinning it must also declare
 
 ## Verification
 
-### Tests — 6747 total across thirty-three files (+ a core-only drift smoke)
+### Tests — 6976 total across thirty-five files (+ a core-only drift smoke)
 
-Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 6747 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
+Green on **x86_64 and aarch64** (`cyrius test --aarch64 <file>`; all 6976 run under `qemu-aarch64`). Every entry and every test / bench / fuzz unit also compiles for the **agnos** target (`cyrius build --agnos`) with zero undefined functions — CI-gated since 3.3.12; the Unix transport fail-closes there, agnos having no `AF_UNIX`.
 
 ```sh
 cyrius test tests/bote.tcyr               # 991 — core protocol/dispatch/codec/schema/session/transports
@@ -647,7 +647,9 @@ cyrius test tests/bote_request_keys.tcyr  # 92 — a request naming a key twice,
 cyrius test tests/bote_schema_eq.tcyr     # 92 — const, enum of any value, uniqueItems and type arrays, by JSON Schema's equality
 cyrius test tests/bote_schema_parts.tcyr  # 77 — prefixItems, contains, propertyNames and the dependent keywords; quiet judgements
 cyrius test tests/bote_schema_comp.tcyr   # 135 — allOf, anyOf, oneOf, not, if / then / else; the budget; keywords by dialect
-cyrius test tests/bote_schema_ref.tcyr    # 120 — $ref within its document, registration's refusals, the depth
+cyrius test tests/bote_schema_ref.tcyr    # 169 — $ref within its document, registration's refusals, the depth
+cyrius test tests/bote_regex.tcyr         # 100 — the pattern engine: syntax, matching as JavaScript does, linear time
+cyrius test tests/bote_schema_pattern.tcyr # 79 — pattern and multipleOf through the schema
 cyrius test tests/bote_progress.tcyr      # 110 — progress on a request's own stream: the writer, stdio, unix, WebSocket, HTTP's SSE response
 cyrius test tests/bote_pkce.tcyr          # 17 — RFC 7636 PKCE-S256
 cyrius test tests/bote_sandbox.tcyr       # 13 — kavach-shaped runner adapter

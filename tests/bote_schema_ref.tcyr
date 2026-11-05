@@ -37,6 +37,7 @@ include "src/log.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
+include "src/regex.cyr"
 include "src/registry.cyr"
 include "src/prompts.cyr"
 include "src/resources.cyr"
@@ -179,6 +180,66 @@ fn _iwhy(js) {
     return w;
 }
 
+# A tools/call of t_zod: an expression `levels` deep, its innermost number padded with `pad`
+# spaces, each level's op last, so each alternative judges its left side before it fails.
+fn _zod_msg(levels, pad) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"t_zod\",\"arguments\":{\"expr\":");
+    var i = 0;
+    while (i < levels) { str_builder_add_cstr(sb, "{\"left\":"); i = i + 1; }
+    str_builder_add_cstr(sb, "1");
+    i = 0;
+    while (i < pad) { str_builder_add_cstr(sb, " "); i = i + 1; }
+    i = 0;
+    while (i < levels) { str_builder_add_cstr(sb, ",\"right\":2,\"op\":\"mul\"}"); i = i + 1; }
+    str_builder_add_cstr(sb, "}}}");
+    return str_data(str_builder_build(sb));
+}
+# A tools/call of t_arr: arrays `levels` deep, the innermost number padded with `pad` spaces,
+# each array's "mul" last, so each alternative judges the items before it finds none it needs.
+fn _arr_msg(levels, pad) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"t_arr\",\"arguments\":{\"e\":");
+    var i = 0;
+    while (i < levels) { str_builder_add_cstr(sb, "["); i = i + 1; }
+    str_builder_add_cstr(sb, "1");
+    i = 0;
+    while (i < pad) { str_builder_add_cstr(sb, " "); i = i + 1; }
+    i = 0;
+    while (i < levels) { str_builder_add_cstr(sb, ",\"x\"]"); i = i + 1; }
+    str_builder_add_cstr(sb, "}}}");
+    return str_data(str_builder_build(sb));
+}
+# A tools/call of t_inh: a chain `levels` deep, each node a key of `klen` k's and its children.
+fn _inh_msg(levels, klen) {
+    var key = str_builder_new();
+    var j = 0;
+    while (j < klen) { str_builder_add_cstr(key, "k"); j = j + 1; }
+    var ks = str_data(str_builder_build(key));
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"t_inh\",\"arguments\":");
+    var i = 0;
+    while (i < levels) { str_builder_add_cstr(sb, "{\""); str_builder_add_cstr(sb, ks); str_builder_add_cstr(sb, "\":0,\"size\":\"x\",\"children\":["); i = i + 1; }
+    str_builder_add_cstr(sb, "{}");
+    i = 0;
+    while (i < levels) { str_builder_add_cstr(sb, "]}"); i = i + 1; }
+    str_builder_add_cstr(sb, "}}");
+    return str_data(str_builder_build(sb));
+}
+# The fewest nanoseconds of three runs of the message `m` through the codec.
+fn _msg_ns(d, m) {
+    var best = 0;
+    var i = 0;
+    while (i < 3) {
+        var t = clock_now_ns();
+        codec_process_message_a(bote_req_begin(), m, d, 0);
+        var dt = clock_now_ns() - t;
+        if (i == 0 || dt < best) { best = dt; }
+        i = i + 1;
+    }
+    return best;
+}
+
 var _th_schema = 0;
 var _th_value = 0;
 var _th_out = 0;
@@ -288,18 +349,21 @@ fn main() {
     _ase(_why("{\"$defs\":{\"a\":{\"$anchor\":\"x y\"}}}"), "the outputSchema names an anchor that is not a valid anchor name", "refuse: ...with no reference, as Ajv refuses it");
     _ase(_why("{\"$defs\":{\"a\":{\"$anchor\":5}},\"$ref\":\"#/$defs/a\"}"), "(none)", "refuse: an $anchor that is no string is ignored, as Ajv ignores it");
     _ase(_why("{\"$defs\":{\"a\":{\"$anchor\":\"\\ud800\"}}}"), "the outputSchema names an anchor that is not a valid anchor name", "refuse: ...one that is no text is no name");
-    _ase(_why("{\"$defs\":{\"a\":{\"$anchor\":\"A\"},\"b\":{\"$anchor\":\"A\"}}}"), "the outputSchema names one anchor for two schemas", "refuse: one anchor twice");
-    _ase(_why("{\"$defs\":{\"a\":{\"$id\":\"other.json\",\"$defs\":{\"x\":{}},\"$ref\":\"#/$defs/x\"}}}"), "the outputSchema holds a $ref, and a schema below its root that names a resource of its own with $id, which bote does not resolve against", "refuse: a resource of its own below the root");
+    _ase(_why("{\"$defs\":{\"a\":{\"$anchor\":\"A\"},\"b\":{\"$anchor\":\"A\"}}}"), "the outputSchema names one anchor twice, which the official client refuses", "refuse: one anchor twice");
+    _ase(_why("{\"$ref\":\"#/$defs/a\",\"$defs\":{\"a\":{\"$id\":\"other.json\",\"$defs\":{\"x\":{}},\"$ref\":\"#/$defs/x\"}}}"), "the outputSchema holds a $ref, and a schema below its root that names a resource of its own with $id, which bote does not resolve against", "refuse: a resource of its own below the root");
     _ase(_why("{\"$defs\":{\"a\":{\"$id\":\"other.json\"}}}"), "(none)", "refuse: ...but not without a reference");
     _ase(_why("{\"$defs\":{\"a\":{\"$id\":\"#frag\",\"type\":\"string\"}},\"$ref\":\"#frag\"}"), "(none)", "refuse: ...nor for an $id that is a fragment");
-    _ase(_why("{\"$defs\":{\"unused\":{\"$ref\":\"#/$defs/gone\"}}}"), "the outputSchema holds a $ref that names nothing in its document: #/$defs/gone", "refuse: a broken reference nothing names");
+    # (3.8.11, from the 3.8.10 review) Ajv compiles a definition only when something names it.
+    _ase(_why("{\"$defs\":{\"unused\":{\"$ref\":\"#/$defs/gone\"}}}"), "(none)", "refuse: a broken reference nothing names is not compiled, by the client or here");
+    _ase(_why("{\"$ref\":\"#/$defs/used\",\"$defs\":{\"used\":{\"$ref\":\"#/$defs/gone\"}}}"), "the outputSchema holds a $ref that names nothing in its document: #/$defs/gone", "refuse: ...one something names is");
     assert(dispatcher_register_tool(rd, tool_def_with_output_schema(tool_def_new("t_bad", "d", schema_new("object", 0, vec_new())), "{\"$ref\":\"#/x\"}"), &h_ret) != 0, "refuse: registration refused");
     assert(_has(codec_process_message(_msg("tools/list", ""), rd, 0), "t_bad") == 0, "refuse: ...and nothing listed");
 
     # ---- cycles that judge a value by itself ----
     var cyc = "the outputSchema holds a $ref that leads back to itself with no part of the value judged in between";
     _ase(_why("{\"$ref\":\"#\"}"), cyc, "cycle: the root to itself");
-    _ase(_why("{\"$defs\":{\"a\":{\"$ref\":\"#/$defs/a\"}}}"), cyc, "cycle: a definition to itself, named by nothing");
+    _ase(_why("{\"$defs\":{\"a\":{\"$ref\":\"#/$defs/a\"}}}"), "(none)", "cycle: a definition to itself that nothing names is never compiled (3.8.11)");
+    _ase(_why("{\"properties\":{\"p\":{\"$ref\":\"#/$defs/a\"}},\"$defs\":{\"a\":{\"$ref\":\"#/$defs/a\"}}}"), cyc, "cycle: ...one a property names is");
     _ase(_why("{\"$defs\":{\"a\":{\"$ref\":\"#/$defs/b\"},\"b\":{\"allOf\":[{\"$ref\":\"#/$defs/a\"}]}},\"$ref\":\"#/$defs/a\"}"), cyc, "cycle: through allOf");
     _ase(_why("{\"anyOf\":[{\"type\":\"string\"},{\"$ref\":\"#\"}]}"), cyc, "cycle: through anyOf");
     _ase(_why("{\"oneOf\":[{\"$ref\":\"#\"}]}"), cyc, "cycle: through oneOf");
@@ -308,7 +372,7 @@ fn main() {
     _ase(_why("{\"if\":{},\"then\":{\"$ref\":\"#\"}}"), cyc, "cycle: through then");
     _ase(_why("{\"if\":{},\"else\":{\"$ref\":\"#\"}}"), cyc, "cycle: through else");
     _ase(_why("{\"dependentSchemas\":{\"a\":{\"$ref\":\"#\"}}}"), cyc, "cycle: through dependentSchemas");
-    _ase(_why("{\"$defs\":{\"a\":{\"$anchor\":\"A\",\"allOf\":[{\"$ref\":\"#A\"}]}}}"), cyc, "cycle: through an anchor");
+    _ase(_why("{\"$ref\":\"#A\",\"$defs\":{\"a\":{\"$anchor\":\"A\",\"allOf\":[{\"$ref\":\"#A\"}]}}}"), cyc, "cycle: through an anchor");
     _ase(_why("{\"items\":{\"$ref\":\"#\"}}"), "(none)", "cycle: items judges a part, no cycle");
     _ase(_why("{\"properties\":{\"a\":{\"$ref\":\"#\"}},\"additionalProperties\":{\"$ref\":\"#\"},\"propertyNames\":{\"$ref\":\"#/$defs/s\"},\"$defs\":{\"s\":{\"type\":\"string\"}}}"), "(none)", "cycle: properties, additionalProperties, propertyNames");
     _ase(_why("{\"prefixItems\":[{\"$ref\":\"#\"}],\"contains\":{\"$ref\":\"#\"}}"), "(none)", "cycle: prefixItems, contains");
@@ -381,6 +445,120 @@ fn main() {
     var dch2 = _cat("{\"type\":\"object\",", _chain(100, "{\"type\":\"object\"}", 0) + 1);
     dispatcher_register_tool(dd, tool_def_new("t_deep2", "d", tool_schema_from_json(dch2)), &h_tool);
     assert(_has(_call(dd, "t_deep2", "{}"), "\"text\":\"ok\"") == 1, "depth: ...and a chain of 100 met");
+
+    # ---- (3.8.11, from the 3.8.10 review) registration as the official client's Ajv reads it ----
+    _ase(_why("{\"$anchor\":\"tree\",\"type\":\"object\",\"properties\":{\"kids\":{\"type\":\"array\",\"items\":{\"$ref\":\"#tree\"}}}}"),
+        "the outputSchema holds a $ref to an anchor on its root, which the official client does not resolve (write it #): #tree", "ajv: an anchor on the root, refused (the client cannot compile it)");
+    _ase(_why("{\"$dynamicAnchor\":\"t\",\"properties\":{\"k\":{\"$ref\":\"#t\"}}}"), "the outputSchema holds a $ref to an anchor on its root, which the official client does not resolve (write it #): #t", "ajv: ...a $dynamicAnchor");
+    _ase(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"$id\":\"#t\",\"properties\":{\"k\":{\"$ref\":\"#t\"}}}"), "the outputSchema holds a $ref to an anchor on its root, which the official client does not resolve (write it #): #t", "ajv: ...draft-07's $id");
+    assert(_ok("{\"$anchor\":\"tree\",\"properties\":{\"k\":{\"$ref\":\"#tree\",\"type\":\"string\"}}}", "{\"k\":1}") == 0, "ajv: (judged by its sibling, the reference resolving to nothing)");
+    _ase(_why("{\"type\":\"object\",\"properties\":{\"t\":{\"prefixItems\":[{\"$anchor\":\"x\",\"type\":\"string\"}],\"items\":{\"$ref\":\"#x\"}}}}"), "the outputSchema holds a $ref that does not resolve within its document: #x", "ajv: an anchor under prefixItems, which the client's walk does not reach");
+    _ase(_why("{\"$defs\":{\"a\":{\"$anchor\":\"A\",\"$dynamicAnchor\":\"A\"}}}"), "the outputSchema names one anchor twice, which the official client refuses", "ajv: $anchor and $dynamicAnchor of one name on one schema");
+    _ase(_why("{\"$defs\":{\"a\":{\"$id\":\"#A\",\"$anchor\":\"A\"}}}"), "the outputSchema names one anchor twice, which the official client refuses", "ajv: ...an $id fragment and an $anchor");
+    _ase(_why("{\"x-defs\":{\"u\":{\"$anchor\":\"u\",\"type\":\"string\"}},\"properties\":{\"a\":{\"$ref\":\"#u\"}}}"), "(none)", "ajv: an anchor under a keyword it does not know, which its walk reaches");
+    assert(_ok("{\"x-defs\":{\"u\":{\"$anchor\":\"u\",\"type\":\"string\"}},\"properties\":{\"a\":{\"$ref\":\"#u\"}}}", "{\"a\":1}") == 0, "ajv: ...and judged by it");
+    _ase(_why("{\"contentSchema\":{\"$anchor\":\"c\"},\"properties\":{\"a\":{\"$ref\":\"#c\"}}}"), "(none)", "ajv: ...under contentSchema");
+    _ase(_why("{\"default\":{\"$anchor\":\"d\"},\"properties\":{\"a\":{\"$ref\":\"#d\"}}}"), "the outputSchema holds a $ref that does not resolve within its document: #d", "ajv: ...but not under default, which its walk skips");
+    var rel = "{\"$id\":\"http://x.test/s/r.json\",\"$defs\":{\"s\":{\"type\":\"string\"}},\"properties\":{\"a\":{\"$ref\":\"r.json#/$defs/s\"},\"b\":{\"$ref\":\"./r.json#/$defs/s\"},\"c\":{\"$ref\":\"/s/r.json#/$defs/s\"},\"d\":{\"$ref\":\"HTTP://X.TEST/s/r.json#/$defs/s\"},\"e\":{\"$ref\":\"../s/r.json#/$defs/s\"}}}";
+    _ase(_why(rel), "(none)", "ajv: references relative to the root's $id, and the scheme and host in another case");
+    assert(_ok(rel, "{\"a\":1}") == 0 && _ok(rel, "{\"b\":1}") == 0 && _ok(rel, "{\"c\":1}") == 0 && _ok(rel, "{\"d\":1}") == 0 && _ok(rel, "{\"e\":1}") == 0, "ajv: ...each judged by the definition");
+    _ase(_why("{\"$id\":\"http://x.test/s/r.json\",\"$ref\":\"other.json#/x\"}"), "the outputSchema holds a $ref that does not resolve within its document: other.json#/x", "ajv: ...another document, refused");
+    _ase(_why("{\"properties\":{\"a\":{\"$ref\":\"\"}},\"type\":\"object\"}"), "(none)", "ajv: an empty $ref is the root");
+    _ase(_why("{\"then\":{\"$ref\":\"#\"}}"), "(none)", "ajv: then without if is never judged, so no cycle");
+    _ase(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"dependentSchemas\":{\"a\":{\"$ref\":\"#\"}}}"), "(none)", "ajv: draft-07 has no dependentSchemas, so no cycle");
+    _ase(_why("{\"dependencies\":{\"a\":{\"$ref\":\"#\"}}}"), cyc, "ajv: dependencies is compiled in 2020-12 too, a cycle");
+    _ase(_why("{\"additionalItems\":{\"$ref\":\"#/nope\"}}"), "(none)", "ajv: 2020-12 does not compile additionalItems");
+    _ase(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"prefixItems\":[{\"$ref\":\"#/nope\"}],\"unevaluatedProperties\":{\"$ref\":\"#/nope\"}}"), "(none)", "ajv: nor draft-07 prefixItems and unevaluatedProperties");
+    _ase(_why("{\"unevaluatedProperties\":{\"$ref\":\"#/nope\"}}"), "the outputSchema holds a $ref that names nothing in its document: #/nope", "ajv: ...which 2020-12 compiles");
+    _ase(_why("{\"properties\":{\"a\":{\"$ref\":5}}}"), "the outputSchema holds a $ref that is not a string", "ajv: a $ref no string, where it is compiled");
+    _ase(_why("{\"$defs\":{\"a\":{\"$ref\":5}}}"), "(none)", "ajv: ...and not where it is not");
+
+    # ---- (3.8.11, from the 3.8.10 review) work bounded by the bytes walked ----
+    var zod = "{\"type\":\"object\",\"properties\":{\"expr\":{\"$ref\":\"#/$defs/Expr\"}},\"required\":[\"expr\"],\"$defs\":{\"Expr\":{\"anyOf\":[{\"type\":\"object\",\"properties\":{\"op\":{\"type\":\"string\",\"const\":\"add\"},\"left\":{\"$ref\":\"#/$defs/Expr\"},\"right\":{\"$ref\":\"#/$defs/Expr\"}},\"required\":[\"op\",\"left\",\"right\"],\"additionalProperties\":false},{\"type\":\"object\",\"properties\":{\"op\":{\"type\":\"string\",\"const\":\"mul\"},\"left\":{\"$ref\":\"#/$defs/Expr\"},\"right\":{\"$ref\":\"#/$defs/Expr\"}},\"required\":[\"op\",\"left\",\"right\"],\"additionalProperties\":false},{\"type\":\"number\"}]}}}";
+    var zd = dispatcher_new(tool_registry_new());
+    assert(dispatcher_register_tool(zd, tool_def_new("t_zod", "d", tool_schema_from_json(zod)), &h_tool) == 0, "walk: a recursive union as zod writes one");
+    assert(_has(_call(zd, "t_zod", "{\"expr\":{\"op\":\"add\",\"left\":1,\"right\":{\"op\":\"mul\",\"left\":2,\"right\":3}}}"), "\"text\":\"ok\"") == 1, "walk: ...met by an expression");
+    var zm1 = _zod_msg(30, 15000);
+    var zm4 = _zod_msg(30, 60000);
+    var zr = codec_process_message(zm4, zd, 0);
+    assert(_has(zr, "more work to judge than its size allows") == 1, "walk: 30 levels over 60 KB of padding refused as too much to judge");
+    var zt1 = _msg_ns(zd, zm1);
+    var zt4 = _msg_ns(zd, zm4);
+    assert(zt4 < 8 * zt1, "walk: ...in time growing with the size, not its square (21 s through 3.8.10)");
+    # The same of arrays: each alternative judges an array's items, then finds it has the wrong
+    # number of them. (A keyword that reads each item's bytes, as `contains` with `const` does,
+    # is charged already, and bounded the work without the walk's charge: this one is not.)
+    var arr = "{\"type\":\"object\",\"properties\":{\"e\":{\"$ref\":\"#/$defs/N\"}},\"$defs\":{\"N\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/N\"},\"maxItems\":1},{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/N\"},\"minItems\":3},{\"type\":\"number\"},{\"type\":\"string\"}]}}}";
+    dispatcher_register_tool(zd, tool_def_new("t_arr", "d", tool_schema_from_json(arr)), &h_tool);
+    assert(_has(_call(zd, "t_arr", "{\"e\":[\"a\",2,[3]]}"), "\"text\":\"ok\"") == 1, "walk: a recursive union of arrays, met");
+    var am1 = _arr_msg(30, 15000);
+    var am4 = _arr_msg(30, 60000);
+    assert(_has(codec_process_message(am4, zd, 0), "more work to judge than its size allows") == 1, "walk: ...30 levels over 60 KB refused");
+    assert(_msg_ns(zd, am4) < 8 * _msg_ns(zd, am1), "walk: ...in time growing with the size, not its square");
+
+    # ---- (3.8.11, from the 3.8.10 review) a long key's copy given back ----
+    var inh = "{\"type\":\"object\",\"$ref\":\"#/$defs/node\",\"$defs\":{\"base\":{\"properties\":{\"b1\":{},\"b2\":{},\"b3\":{},\"b4\":{},\"b5\":{},\"b6\":{},\"b7\":{},\"b8\":{},\"children\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/node\"}}}},\"node\":{\"allOf\":[{\"$ref\":\"#/$defs/base\"}],\"properties\":{\"children\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/node\"}},\"size\":{\"type\":\"integer\"}}}}}";
+    var id = dispatcher_new(tool_registry_new());
+    assert(dispatcher_register_tool(id, tool_def_new("t_inh", "d", tool_schema_from_json(inh)), &h_tool) == 0, "keys: allOf inheritance with nine properties");
+    var im = _inh_msg(20, 2000);
+    codec_process_message_a(bote_req_begin(), im, id, 0);
+    var ih0 = alloc_used();
+    var ii = 0;
+    while (ii < 5) { codec_process_message_a(bote_req_begin(), im, id, 0); ii = ii + 1; }
+    assert_eq(alloc_used() - ih0, 0, "keys: twenty levels of 2,000-byte keys keep nothing (204 MB through 3.8.10)");
+    # Ten levels of 6,000-byte keys: 128 KB of the arena with each copy given back, 320 KB
+    # kept, both bounded since by the walk's charge (through 3.8.10, hundreds of megabytes).
+    var ia = bote_req_arena_new();
+    var iab = bote_req_arena_bytes(ia);
+    codec_process_message_a(ia, _inh_msg(10, 6000), id, 0);
+    assert(bote_req_arena_bytes(ia) - iab < 262144, "keys: ...and ten of 6,000-byte keys under 256 KB of the arena, each copy given back");
+
+    # ---- (3.8.11, from the 3.8.10 review) an integer past a handler's range, taken only as one ----
+    var od = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(od, tool_def_new("t_ia", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"x\":{\"anyOf\":[{\"type\":\"integer\",\"maximum\":100},{\"type\":\"number\"}]},\"y\":{\"anyOf\":[{\"type\":\"integer\"},{\"type\":\"null\"}]},\"z\":{\"anyOf\":[{\"type\":\"integer\"},{\"type\":\"number\"}]}}}")), &h_tool);
+    dispatcher_register_tool(od, tool_def_new("t_ib", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"xs\":{\"type\":\"array\",\"contains\":{\"type\":\"integer\"}},\"c\":{\"type\":\"number\",\"not\":{\"type\":\"integer\",\"maximum\":0}},\"e\":{\"type\":\"number\",\"if\":{\"type\":\"integer\"},\"then\":{\"minimum\":0}}}}")), &h_tool);
+    dispatcher_register_tool(od, tool_def_new("t_id", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"d\":{\"oneOf\":[{\"type\":\"integer\",\"minimum\":0,\"maximum\":9},{\"type\":\"number\",\"minimum\":10}]},\"o\":{\"oneOf\":[{\"type\":\"integer\"},{\"type\":\"string\"}]}}}")), &h_tool);
+    assert(_has(_call(od, "t_ia", "{\"x\":1e30}"), "\"text\":\"ok\"") == 1, "range: anyOf, taken as a number by the second (3.8.9 took it, 3.8.10 refused it)");
+    assert(_has(_call(od, "t_ia", "{\"z\":1e30}"), "\"text\":\"ok\"") == 1, "range: ...anyOf of integer and number");
+    assert(_has(_call(od, "t_ia", "{\"y\":1e30}"), "integer out of range") == 1, "range: ...anyOf of integer and null still refused");
+    assert(_has(_call(od, "t_ib", "{\"xs\":[1e30,5]}"), "\"text\":\"ok\"") == 1, "range: contains, which types no item");
+    assert(_has(_call(od, "t_ib", "{\"c\":1e30}"), "\"text\":\"ok\"") == 1, "range: not");
+    assert(_has(_call(od, "t_ib", "{\"e\":1e30}"), "\"text\":\"ok\"") == 1, "range: if");
+    assert(_has(_call(od, "t_id", "{\"d\":1e30}"), "\"text\":\"ok\"") == 1, "range: oneOf, met by the number");
+    assert(_has(_call(od, "t_id", "{\"o\":-1e30}"), "integer out of range") == 1, "range: ...oneOf met only by the integer, refused");
+
+    # ---- (3.8.11, from the 3.8.10 review) an inputSchema root's const and enum ----
+    dispatcher_register_tool(od, tool_def_new("t_rc", "d", tool_schema_from_json("{\"type\":\"object\",\"const\":{\"a\":1}}")), &h_tool);
+    dispatcher_register_tool(od, tool_def_new("t_re", "d", tool_schema_from_json("{\"type\":\"object\",\"enum\":[{\"a\":1},{\"b\":2}]}")), &h_tool);
+    assert(_has(_call(od, "t_rc", "{\"a\":2}"), "not the const value") == 1 && _has(_call(od, "t_rc", "{\"a\":1}"), "\"text\":\"ok\"") == 1, "root: const judged");
+    assert(_has(_call(od, "t_re", "{\"a\":2}"), "value not in enum") == 1 && _has(_call(od, "t_re", "{\"b\":2}"), "\"text\":\"ok\"") == 1, "root: enum judged");
+
+    # ---- (3.8.11, from the 3.8.10 review) a batch's results apart from its arguments ----
+    var bd = dispatcher_new(tool_registry_new());
+    var wide = str_builder_new();
+    str_builder_add_cstr(wide, "{\"type\":\"object\",\"properties\":{\"l\":{\"type\":\"array\",\"items\":{\"anyOf\":[");
+    var pwi = 0;
+    while (pwi < 256) { if (pwi > 0) { str_builder_add_cstr(wide, ","); } str_builder_add_cstr(wide, "{\"type\":\"string\",\"maxLength\":"); str_builder_add_int(wide, pwi); str_builder_add_cstr(wide, "}"); pwi = pwi + 1; }
+    str_builder_add_cstr(wide, ",{\"type\":\"integer\"}]}}}}");
+    dispatcher_register_tool(bd, tool_def_new("t_heavy", "d", tool_schema_from_json(str_data(str_builder_build(wide)))), &h_tool);
+    var rws = str_builder_new();
+    str_builder_add_cstr(rws, "{\"type\":\"object\",\"properties\":{\"r\":{\"type\":\"array\",\"items\":{\"anyOf\":[");
+    pwi = 0;
+    while (pwi < 200) { if (pwi > 0) { str_builder_add_cstr(rws, ","); } str_builder_add_cstr(rws, "{\"type\":\"string\",\"maxLength\":"); str_builder_add_int(rws, pwi); str_builder_add_cstr(rws, "}"); pwi = pwi + 1; }
+    str_builder_add_cstr(rws, ",{\"type\":\"integer\"}]}}}}");
+    dispatcher_register_tool(bd, tool_def_with_output_schema(tool_def_new("t_res", "d", schema_new("object", 0, vec_new())), str_data(str_builder_build(rws))), &h_ret);
+    _ret = _cat3("{\"content\":[],\"structuredContent\":{\"r\":", _many(300, "1"), "}}");
+    var res1 = _msg("tools/call", "\"name\":\"t_res\",\"arguments\":{}");
+    assert(_has(codec_process_message(res1, bd, 0), "isError") == 0, "pool: the result passes alone");
+    var hv = _msg("tools/call", _cat3("\"name\":\"t_heavy\",\"arguments\":", _cat3("{\"l\":", _many(400, "1"), "}"), ""));
+    var bres = codec_process_message(_cat3(_cat3("[", hv, ","), res1, "]"), bd, 0);
+    assert(_has(bres, "does not match the outputSchema") == 0, "pool: ...and in a batch after a call whose arguments spent their base");
+
+    # ---- (3.8.11, from the 3.8.10 review) a violation names what it names ----
+    var nd = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(nd, tool_def_new("t_nm", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\": x\":{\"type\":\"string\"}},\"additionalProperties\":{\"type\":\"string\"}}")), &h_tool);
+    assert(_has(_call(nd, "t_nm", "{\": x\":1}"), "': : x: expected string") == 1, "names: a member named ': x' named so, not as x");
+    assert(_has(_call(nd, "t_nm", "{\"\":1}"), "': : expected string") == 1, "names: ...and one named \"\" (through additionalProperties), from the empty path");
 
     # ---- the WARNs ----
     _lc_begin();

@@ -38,6 +38,7 @@ include "src/log.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
+include "src/regex.cyr"
 include "src/registry.cyr"
 include "src/prompts.cyr"
 include "src/resources.cyr"
@@ -271,10 +272,11 @@ fn main() {
 
     # ---- What registration warns of ----
     _lc_begin();
-    dispatcher_register_tool(d, _tool("t_warn", "{\"type\":\"string\",\"pattern\":\"^a\",\"properties\":{\"n\":{\"type\":\"number\",\"multipleOf\":2,\"const\":4},\"k\":{\"type\":[\"string\",\"null\"]}}}"), &h_ret);
+    # (3.8.11) pattern and multipleOf are judged now; format and unevaluatedProperties are not.
+    dispatcher_register_tool(d, _tool("t_warn", "{\"type\":\"string\",\"format\":\"email\",\"properties\":{\"n\":{\"type\":\"number\",\"unevaluatedProperties\":false,\"const\":4},\"k\":{\"type\":[\"string\",\"null\"]}}}"), &h_ret);
     _lc_end();
-    assert(_has(_lc_find("property=outputSchema keyword=pattern"), "schema keyword not enforced") == 1, "warn: a keyword at the root");
-    assert(_lc_find("property=outputSchema.n keyword=multipleOf") != 0, "warn: a keyword on a property");
+    assert(_has(_lc_find("property=outputSchema keyword=format"), "schema keyword not enforced") == 1, "warn: a keyword at the root");
+    assert(_lc_find("property=outputSchema.n keyword=unevaluatedProperties") != 0, "warn: a keyword on a property");
     assert(_lc_find("keyword=const") == 0, "warn: const is judged, and warned of no longer (3.8.7)");
     assert(_lc_find("property=outputSchema.k keyword=") == 0, "warn: a type array is judged, and warned of no longer (3.8.7)");
 

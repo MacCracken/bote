@@ -1,0 +1,128 @@
+# regex_diff.cyr — bote's regular-expression engine (src/regex.cyr) against JavaScript's
+# RegExp under the u flag, case by case, from what tests/fixtures/regex_diff_gen.mjs wrote to
+# build/regex-diff/cases.txt (scripts/regex-diff.sh runs both). It prints what disagrees and
+# a summary, and exits 1 on any verdict that differs, any pattern JavaScript refuses and bote
+# takes, and any it takes that bote refuses as a syntax error. A pattern bote declines for a
+# construct its engine does not take (lookaround, backreferences, \p, modifiers, its bounds)
+# is counted, not failed.
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/regex.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _line(txt, i, len) { var j = i; while (j < len && load8(txt + j) != 10) { j = j + 1; } return j; }
+fn _tab(txt, i, e) { var j = i; while (j < e && load8(txt + j) != 9) { j = j + 1; } return j; }
+fn _has(s, sub) { if (s != 0 && strstr(s, sub) >= 0) { return 1; } return 0; }
+fn _allowed(why) {
+    if (_has(why, "lookahead") == 1 || _has(why, "lookbehind") == 1 || _has(why, "Unicode property") == 1) { return 1; }
+    if (_has(why, "backreference") == 1 || _has(why, "inline modifier") == 1 || _has(why, "group name") == 1 || _has(why, "bound") == 1) { return 1; }
+    return 0;
+}
+fn main() {
+    alloc_init();
+    var lo[8];
+    var txt = file_read_whole("build/regex-diff/cases.txt", &lo);
+    var len = load64(&lo);
+    if (txt == 0 || len == 0) { println("regex_diff: no build/regex-diff/cases.txt"); return 2; }
+    var i = 0;
+    var rx = 0;
+    var pats = 0; var strs = 0; var bad = 0; var declined = 0; var lenient = 0; var strict = 0;
+    var curp = 0;
+    while (i < len) {
+        var e = _line(txt, i, len);
+        var t1 = _tab(txt, i + 2, e);
+        var raw = _slice_cstr(default_alloc(), txt, i + 2, t1 - i - 2);
+        var flag = load8(txt + e - 1) - 48;
+        if (load8(txt + i) == 80) {
+            pats = pats + 1;
+            curp = raw;
+            var pt = _sch_str_dec_a(default_alloc(), raw);
+            rx = 0;
+            if (pt == 0) { println(_cat("NOTEXT ", raw)); }
+            else {
+                var c = bote_rx_compile(pt);
+                if (flag == 0 && bote_rx_why(c) == 0) { lenient = lenient + 1; if (lenient < 15) { println(_cat("LENIENT ", raw)); } }
+                if (flag == 1 && bote_rx_why(c) != 0) {
+                    if (_allowed(bote_rx_why(c)) == 1) { declined = declined + 1; }
+                    else { strict = strict + 1; if (strict < 15) { println(_cat(_cat("STRICT ", raw), _cat(" : ", bote_rx_why(c)))); } }
+                }
+                if (flag == 1 && bote_rx_why(c) == 0) { rx = c; }
+            }
+        } elif (rx != 0) {
+            strs = strs + 1;
+            var a = bote_req_begin();
+            var got = bote_rx_test_a(a, rx, raw, 1, strlen(raw) - 1, 0);
+            if (got != flag) { bad = bad + 1; if (bad < 25) { println(_cat(_cat(_cat("MISMATCH ", curp), " on "), _cat(raw, _cat(" js=", _sch_itoa(flag))))); } }
+        }
+        i = e + 1;
+    }
+    println(_cat("patterns ", _sch_itoa(pats)));
+    println(_cat("strings judged ", _sch_itoa(strs)));
+    println(_cat("verdict mismatches ", _sch_itoa(bad)));
+    println(_cat("lenient (js refuses, bote takes) ", _sch_itoa(lenient)));
+    println(_cat("strict (js takes, bote refuses as syntax) ", _sch_itoa(strict)));
+    println(_cat("declined as unsupported ", _sch_itoa(declined)));
+    if (bad != 0 || lenient != 0 || strict != 0) { return 1; }
+    return 0;
+}
+var rc = main();
+sys_exit_group(rc);

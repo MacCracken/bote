@@ -123,6 +123,7 @@ src/
 ├── error.cyr               — BoteErrTag (12 variants), rpc_code, format
 ├── protocol.cyr            — JsonRpcRequest / Response / Error data types
 ├── jsonx.cyr               — nested-aware JSON extractor + jsonx_valid (RFC 8259 syntax check) + bote_json_escape
+├── regex.cyr               — (3.8.11) ECMA-262 patterns under the u flag, a Thompson machine linear in the string
 ├── registry.cyr            — ToolDef (+profile tags), ToolSchema (or its own JSON, 3.8.3), ToolAnnotations, ToolRegistry
 ├── prompts.cyr             — PromptDef / PromptArgument / PromptRegistry (prompts/list + get)
 ├── resources.cyr           — ResourceDef / ResourceRegistry (resources/list + read;
@@ -204,7 +205,9 @@ tests/
 ├── bote_schema_eq.tcyr        — 92 (3.8.7: const, enum of any value, uniqueItems and type arrays, by JSON Schema's equality)
 ├── bote_schema_parts.tcyr     — 77 (3.8.8: prefixItems, contains, propertyNames, dependentRequired and dependentSchemas)
 ├── bote_schema_comp.tcyr      — 135 (3.8.9: allOf, anyOf, oneOf, not, if / then / else, the budget, keywords by dialect)
-├── bote_schema_ref.tcyr       — 120 (3.8.10: $ref within its document, registration's refusals, the depth)
+├── bote_schema_ref.tcyr       — 169 (3.8.10: $ref within its document, registration's refusals, the depth)
+├── bote_regex.tcyr            — 100 (3.8.11: the pattern engine, matching as JavaScript does, linear time)
+├── bote_schema_pattern.tcyr   — 79 (3.8.11: pattern and multipleOf through the schema)
 ├── bote_pkce.tcyr             — 17 (RFC 7636 PKCE-S256)
 ├── bote_sandbox.tcyr          — 13 (sandbox runner adapter)
 ├── bote_streamable.tcyr       — 64 (streamable HTTP / SSE)

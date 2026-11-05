@@ -20,6 +20,7 @@ include "src/log.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
+include "src/regex.cyr"
 include "src/registry.cyr"
 # dispatch.cyr references the prompt/* and resource/* registries, so
 # without these the harness compiled with 18 undefined functions and

@@ -24,7 +24,7 @@ enum SchemaTypeTag {
 }
 
 # ================================================================
-# PropertyDef (280 bytes):
+# PropertyDef (296 bytes):
 #   +0  type_tag         i64
 #   +8  description      cstr or 0
 #   +16 enum_values      vec of cstrs (string only) or 0
@@ -63,6 +63,9 @@ enum SchemaTypeTag {
 #   +264 composes       1 when any of +208 to +240, or +272, is set
 #   +272 ref            (3.8.10) the PropertyDef its `$ref` names, resolved in its document
 #                       at registration, or 0; judged as an `allOf` of one is
+#   +280 pattern        (3.8.11) the `pattern` compiled (src/regex.cyr), or 0 for none or
+#                       one bote's engine does not take
+#   +288 multiple_of    (3.8.11) the `multipleOf` as bote judges it (_sch_multiple_of), or 0
 #
 # (3.8.5) Each keyword applies to a value of its kind whatever the schema's `type`, as in
 # JSON Schema: `{"maxLength":3}` judges a string and passes a number. The type is a check of
@@ -70,7 +73,7 @@ enum SchemaTypeTag {
 # ================================================================
 
 fn prop_new(tag) {
-    var p = alloc(280);
+    var p = alloc(296);
     store64(p, tag);
     var k = 8;
     while (k < 96) { store64(p + k, 0); k = k + 8; }
@@ -79,7 +82,7 @@ fn prop_new(tag) {
     store64(p + 192, 0 - 1);
     store64(p + 200, 0 - 1);
     k = 208;
-    while (k < 280) { store64(p + k, 0); k = k + 8; }
+    while (k < 296) { store64(p + k, 0); k = k + 8; }
     return p;
 }
 
@@ -118,6 +121,8 @@ fn prop_then(p) { return load64(p + 248); }
 fn prop_else(p) { return load64(p + 256); }
 fn prop_composes(p) { return load64(p + 264); }
 fn prop_ref(p) { return load64(p + 272); }
+fn prop_pattern(p) { return load64(p + 280); }
+fn prop_multiple_of(p) { return load64(p + 288); }
 
 # ================================================================
 # CompiledSchema (112 bytes):
@@ -456,6 +461,58 @@ fn _sch_num_cmp(a, b) {
 # what _sch_num_parse holds. An integer inside that range compares exactly as a value,
 # whatever the value it is compared with, since a value held at SCH_NUM_SAT is still on
 # the right side of it, and costs no decimal compare. 0 for those.
+# `multipleOf` as bote judges it (3.8.11), from its raw JSON: 0 for none, a value that is no
+# number, or one of more than 17 significant digits, each of which judges nothing (and
+# registration warns); else 24 bytes: +0 1, or 2 for zero, which no number meets, as the
+# official client has it; +8 its significant digits as an integer, +16 the power of ten
+# they are times. A negative one is judged by its size, as the client judges it.
+fn _sch_multiple_of(raw) {
+    if (raw == 0 || _sch_is_number_text(raw) == 0) { return 0; }
+    var o[64];
+    if (_sch_num_norm(raw, &o) == 0) { return 0; }
+    var m = alloc(24);
+    memset(m, 0, 24);
+    if (load64(&o) == 0) { store64(m, 2); return m; }
+    var first = load64(&o + 48);
+    var last = load64(&o + 56);
+    var nd = last - first;
+    if (nd > 17) { return 0; }
+    var d = 0;
+    var k = first;
+    while (k < last) { d = d * 10 + (_sch_num_digit(raw, &o, k) - 48); k = k + 1; }
+    store64(m, 1);
+    store64(m + 8, d);
+    store64(m + 16, load64(&o + 8) - nd);
+    return m;
+}
+
+# 1 when the JSON number at `v` is a multiple of `m` (_sch_multiple_of), exactly: a value
+# D x 10^p, D its significant digits, is one of M x 10^q when D x 10^(p - q) is divisible
+# by M. With p < q it is not, as D ends in no zero; a power of ten past 64 divides as 64
+# does, M (under 10^17) holding fewer twos and fives than that. The official client divides
+# as doubles, and finds 19.99 no multiple of 0.01; registration warns of a fractional one.
+fn _sch_is_multiple(v, m) {
+    if (load64(m) == 2) { return 0; }
+    var o[64];
+    if (_sch_num_norm(v, &o) == 0) { return 0; }
+    if (load64(&o) == 0) { return 1; }
+    var first = load64(&o + 48);
+    var last = load64(&o + 56);
+    var e = load64(&o + 8) - (last - first) - load64(m + 16);
+    if (e < 0) { return 0; }
+    var dm = load64(m + 8);
+    var r = 0;
+    var k = first;
+    while (k < last) {
+        r = (r * 10 + (_sch_num_digit(v, &o, k) - 48)) % dm;
+        k = k + 1;
+    }
+    if (e > 64) { e = 64; }
+    while (e > 0 && r != 0) { r = (r * 10) % dm; e = e - 1; }
+    if (r == 0) { return 1; }
+    return 0;
+}
+
 fn _sch_bound_text(b) {
     var t[8];
     if (_sch_num_parse(b, &t) == 2 && load64(&t) < SCH_NUM_SAT && load64(&t) > 0 - SCH_NUM_SAT) { return 0; }
@@ -566,7 +623,7 @@ fn _sch_dialect(raw_json) {
 }
 fn _sch_from_2019(d) { if (d == 2019 || d == 2020) { return 1; } return 0; }
 
-# A compile's context (3.8.10, 64 bytes), which carries what a subschema needs of its
+# A compile's context (3.8.10, 72 bytes), which carries what a subschema needs of its
 # document: its dialect, and where its references point.
 #   +0  d        the dialect (_sch_dialect), the root's and so every subschema's (3.8.9)
 #   +8  root     the document's text, which a `$ref` is resolved in, or 0 until
@@ -583,9 +640,10 @@ fn _sch_from_2019(d) { if (d == 2019 || d == 2020) { return 1; } return 0; }
 #                words each, compiled once the schema that named it is (_sch_cx_drain), or 0:
 #                compiled where it is named, a chain of references recursed once a link,
 #                and 5,000 of them overflowed a worker's stack
+#   +64 nested   (3.8.11) 1 when a schema below the root names a resource of its own (`$id`)
 fn _sch_cx_new(root, d) {
-    var cx = alloc(64);
-    memset(cx, 0, 64);
+    var cx = alloc(72);
+    memset(cx, 0, 72);
     store64(cx, d);
     store64(cx + 8, root);
     return cx;
@@ -649,26 +707,7 @@ fn _sch_fill(p, raw_json, cx) {
     store64(p, tag);
     store64(p + 144, tmask);
     store64(p + 8, jsonx_get_str(raw_json, "description"));
-    # (3.8.7) `enum` and `const`, for any type: each value as written, and the enum's strings
-    # decoded, which a string is compared with as it decodes. Through 3.8.6 enum was judged
-    # only where the type was string, and const not at all.
-    var enum_raw = jsonx_get_raw(raw_json, "enum");
-    if (enum_raw != 0 && _vp_first_nonws(enum_raw) == 91) {
-        var vals = vec_new();
-        var elems = _sch_split_array(enum_raw);
-        var ne = vec_len(elems);
-        var ei = 0;
-        while (ei < ne) {
-            var ev = vec_get(elems, ei);
-            var dv = 0;
-            if (_sch_is_string(ev) == 1) { dv = _sch_str_dec_a(default_alloc(), ev); }
-            if (dv != 0) { vec_push(vals, dv); }
-            ei = ei + 1;
-        }
-        store64(p + 16, vals);
-        store64(p + 160, elems);
-    }
-    store64(p + 152, jsonx_get_raw(raw_json, "const"));
+    _sch_fill_eq(p, raw_json);
     var uq = jsonx_get_raw(raw_json, "uniqueItems");
     if (uq != 0 && streq(uq, "true") == 1) { store64(p + 168, 1); }
 
@@ -691,6 +730,14 @@ fn _sch_fill(p, raw_json, cx) {
     if (xmax != 0 && _sch_is_number_text(xmax) == 1) { store64(p + 136, xmax); }
     store64(p + 96, _sch_count_kw(raw_json, "minLength"));
     store64(p + 104, _sch_count_kw(raw_json, "maxLength"));
+    # (3.8.11) `pattern`, compiled once; one bote's engine does not take judges nothing, and
+    # registration warns of it. `multipleOf`, read into the integer and power of ten it is.
+    var pat = _sch_kw_str(raw_json, "pattern");
+    if (pat != 0) {
+        var rx = bote_rx_compile(pat);
+        if (bote_rx_why(rx) == 0) { store64(p + 280, rx); }
+    }
+    store64(p + 288, _sch_multiple_of(jsonx_get_raw(raw_json, "multipleOf")));
     store64(p + 112, _sch_count_kw(raw_json, "minItems"));
     store64(p + 120, _sch_count_kw(raw_json, "maxItems"));
     var items_raw = jsonx_get_raw(raw_json, "items");
@@ -716,6 +763,30 @@ fn _sch_fill(p, raw_json, cx) {
         store64(p + 72, _compile_object_body_c(raw_json, cx));
     }
     return p;
+}
+
+# (3.8.7) `enum` and `const` into `p`, for any type: each value as written, and the enum's
+# strings decoded, which a string is compared with as it decodes. Through 3.8.6 enum was judged
+# only where the type was string, and const not at all. (3.8.11) For an inputSchema's root too.
+fn _sch_fill_eq(p, raw_json) {
+    var enum_raw = jsonx_get_raw(raw_json, "enum");
+    if (enum_raw != 0 && _vp_first_nonws(enum_raw) == 91) {
+        var vals = vec_new();
+        var elems = _sch_split_array(enum_raw);
+        var ne = vec_len(elems);
+        var ei = 0;
+        while (ei < ne) {
+            var ev = vec_get(elems, ei);
+            var dv = 0;
+            if (_sch_is_string(ev) == 1) { dv = _sch_str_dec_a(default_alloc(), ev); }
+            if (dv != 0) { vec_push(vals, dv); }
+            ei = ei + 1;
+        }
+        store64(p + 16, vals);
+        store64(p + 160, elems);
+    }
+    store64(p + 152, jsonx_get_raw(raw_json, "const"));
+    return 0;
 }
 
 # (3.8.9) The composition keywords of `raw_json` into the PropertyDef `p`: `allOf`, `anyOf`
@@ -984,8 +1055,8 @@ fn _sch_ref_target(cx, ref) {
     return t;
 }
 
-# The root's `$id` up to its fragment, which an absolute reference into the document starts
-# with, or 0.
+# The root's `$id` without its fragment (Ajv's normalizeId takes off `#` and `#/`), which a
+# reference into the document resolves against, or 0.
 fn _sch_base(root) {
     var id = _sch_kw_str(root, "$id");
     if (id == 0) { return 0; }
@@ -995,22 +1066,119 @@ fn _sch_base(root) {
     return id;
 }
 
+# Where a URI's scheme ends (its `:`), or -1 when it has none (RFC 3986 §3.1).
+fn _sch_uri_scheme(u) {
+    var c = load8(u);
+    if ((c < 65 || c > 90) && (c < 97 || c > 122)) { return 0 - 1; }
+    var i = 1;
+    c = load8(u + i);
+    while ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 43 || c == 45 || c == 46) { i = i + 1; c = load8(u + i); }
+    if (c == 58) { return i; }
+    return 0 - 1;
+}
+
+# Where the path of the URI `u` begins: past its scheme and its authority (`//...`), if any.
+fn _sch_uri_path_at(u) {
+    var i = _sch_uri_scheme(u) + 1;
+    if (load8(u + i) == 47 && load8(u + i + 1) == 47) {
+        i = i + 2;
+        while (load8(u + i) != 0 && load8(u + i) != 47 && load8(u + i) != 63) { i = i + 1; }
+    }
+    return i;
+}
+
+# The path `p` with its `.` and `..` segments taken out (RFC 3986 §5.2.4), a new cstr.
+fn _sch_uri_dots(p) {
+    var segs = vec_new();
+    var n = strlen(p);
+    var i = 0;
+    if (load8(p) == 47) { i = 1; }
+    var lead = i;
+    while (i <= n) {
+        var j = i;
+        while (j < n && load8(p + j) != 47) { j = j + 1; }
+        var seg = _slice_cstr(default_alloc(), p, i, j - i);
+        if (streq(seg, "..") == 1) { if (vec_len(segs) > 0) { vec_pop(segs); } }
+        elif (streq(seg, ".") == 0) { vec_push(segs, seg); }
+        elif (j == n) { vec_push(segs, ""); }
+        i = j + 1;
+    }
+    var sb = str_builder_new();
+    if (lead == 1) { str_builder_add_cstr(sb, "/"); }
+    var k = 0;
+    while (k < vec_len(segs)) {
+        if (k > 0) { str_builder_add_cstr(sb, "/"); }
+        str_builder_add_cstr(sb, vec_get(segs, k));
+        k = k + 1;
+    }
+    return str_data(str_builder_build(sb));
+}
+
+# The reference `r` (its fragment taken off) resolved against the base `b` (RFC 3986 §5.2.2,
+# as Ajv's uriResolver resolves it), a new cstr.
+fn _sch_uri_resolve(b, r) {
+    if (_sch_uri_scheme(r) >= 0) {
+        var ra = _sch_uri_path_at(r);
+        return _cat_a(default_alloc(), _slice_cstr(default_alloc(), r, 0, ra), _sch_uri_dots(r + ra));
+    }
+    if (load8(r) == 0) { return b; }
+    var bs = _sch_uri_scheme(b) + 1;
+    if (load8(r) == 47 && load8(r + 1) == 47) { return _cat_a(default_alloc(), _slice_cstr(default_alloc(), b, 0, bs), r); }
+    var bp = _sch_uri_path_at(b);
+    var auth = _slice_cstr(default_alloc(), b, 0, bp);
+    if (load8(r) == 47) { return _cat_a(default_alloc(), auth, _sch_uri_dots(r)); }
+    var path = b + bp;
+    var q = strchr(path, 63);
+    var bpath = path;
+    if (q >= 0) { bpath = _slice_cstr(default_alloc(), path, 0, q); }
+    if (load8(r) == 63) { return _cat_a(default_alloc(), auth, _cat_a(default_alloc(), bpath, r)); }
+    # Merged: the base's path up to its last `/`, then the reference.
+    var last = 0 - 1;
+    var k = 0;
+    while (load8(bpath + k) != 0) { if (load8(bpath + k) == 47) { last = k; } k = k + 1; }
+    var dir = "/";
+    if (last >= 0) { dir = _slice_cstr(default_alloc(), bpath, 0, last + 1); }
+    elif (bp == bs) { dir = ""; }
+    return _cat_a(default_alloc(), auth, _sch_uri_dots(_cat_a(default_alloc(), dir, r)));
+}
+
+# 1 when the URIs `x` and `y` name one resource: the same, but for the case of the scheme
+# and the authority, which a URI does not distinguish (RFC 3986 §6.2.2.1) and Ajv folds.
+fn _sch_uri_same(x, y) {
+    var px = _sch_uri_path_at(x);
+    var py = _sch_uri_path_at(y);
+    if (px != py || streq(x + px, y + py) == 0) { return 0; }
+    var i = 0;
+    while (i < px) {
+        var a = load8(x + i);
+        var c = load8(y + i);
+        if (a >= 65 && a <= 90) { a = a + 32; }
+        if (c >= 65 && c <= 90) { c = c + 32; }
+        if (a != c) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 # The canonical JSON Pointer of the schema the reference `ref` names in `cx`'s document,
 # whether or not anything is there: "" for the root, else each part "/" and its name with `~`
 # written `~0` and `/` written `~1`, so two spellings of one place are one key. 0 for a
-# reference outside the document, or one that cannot be read.
+# reference outside the document, or one that cannot be read. (3.8.11, from the 3.8.10
+# review) A reference that is not a fragment is resolved against the root's `$id` as a URI
+# is, relative ones and other spellings of the scheme and host included, as Ajv resolves
+# it; and "" names the root.
 fn _sch_ref_ptr(cx, ref) {
     var frag = 0;
     if (load8(ref) == 35) { frag = ref + 1; }
+    elif (load8(ref) == 0) { frag = ref; }
     else {
         var base = _sch_base(_sch_cx_root(cx));
         if (base == 0) { return 0; }
-        var bl = strlen(base);
-        if (strlen(ref) < bl || memeq(ref, base, bl) == 0) { return 0; }
-        var c = load8(ref + bl);
-        if (c == 0) { frag = ref + bl; }
-        elif (c == 35) { frag = ref + bl + 1; }
-        else { return 0; }
+        var h = strchr(ref, 35);
+        var rp = ref;
+        frag = "";
+        if (h >= 0) { rp = _slice_cstr(default_alloc(), ref, 0, h); frag = ref + h + 1; }
+        if (_sch_uri_same(_sch_uri_resolve(base, rp), base) == 0) { return 0; }
     }
     # Ajv reads `#` and `#/` as the root (normalizeId).
     if (load8(frag) == 0 || streq(frag, "/") == 1) { return ""; }
@@ -1164,68 +1332,72 @@ fn _sch_ptr_raw(cx, ptr) {
     return cur;
 }
 
-# The keywords whose value is a schema, an array of schemas, or an object of them, which a
-# document's walk descends: json-schema-traverse's, as Ajv walks a schema for its anchors.
-var BOTE_SCH_KW_ONE = "additionalItems additionalProperties contains propertyNames not if then else unevaluatedItems unevaluatedProperties items ";
-var BOTE_SCH_KW_ARRAY = "allOf anyOf oneOf prefixItems items ";
-var BOTE_SCH_KW_MAP = "$defs definitions properties patternProperties dependentSchemas dependencies ";
+# How json-schema-traverse 1.0.0 walks a schema, as Ajv walks one for its anchors and `$id`s
+# (getSchemaRefs, `allKeys`): an array only under these keywords, each object of these
+# keywords' objects, and any other key's object unless the key is one of the last list.
+var BOTE_SCH_TR_ARRAY = "items allOf anyOf oneOf ";
+var BOTE_SCH_TR_MAP = "$defs definitions properties patternProperties dependencies ";
+var BOTE_SCH_TR_SKIP = "default enum const required maximum minimum exclusiveMaximum exclusiveMinimum multipleOf maxLength minLength pattern format maxItems minItems uniqueItems maxProperties minProperties ";
 
-# Every schema in the document `root`, its pointer and its raw JSON, two words each: the
-# root and each schema a keyword of one holds. Walked with a stack of its own, as deep as the
-# document is.
-fn _sch_positions(root) {
+fn _sch_in_words(ws, k) {
+    var i = 0;
+    while (i < vec_len(ws)) { if (streq(vec_get(ws, i), k) == 1) { return 1; } i = i + 1; }
+    return 0;
+}
+
+# Every object below the root of the document `root` that Ajv's walk reaches, its pointer and
+# its raw JSON, two words each (3.8.11, from the 3.8.10 review): the root itself is left out,
+# as Ajv registers nothing on it, and so are `prefixItems`' schemas, an array the walk does
+# not know, while an object under an unknown keyword is reached. Through 3.8.10 an anchor on
+# the root or under `prefixItems` resolved here, and the client refused the schema.
+fn _sch_ajv_nodes(root) {
     var out = vec_new();
     if (root == 0) { return out; }
-    var one = _reg_words(BOTE_SCH_KW_ONE);
-    var arr = _reg_words(BOTE_SCH_KW_ARRAY);
-    var mp = _reg_words(BOTE_SCH_KW_MAP);
+    var tarr = _reg_words(BOTE_SCH_TR_ARRAY);
+    var tmap = _reg_words(BOTE_SCH_TR_MAP);
+    var tskip = _reg_words(BOTE_SCH_TR_SKIP);
     var todo = vec_new();
     vec_push(todo, "");
     vec_push(todo, root);
     while (vec_len(todo) > 0) {
         var raw = vec_pop(todo);
         var ptr = vec_pop(todo);
-        vec_push(out, ptr);
-        vec_push(out, raw);
-        if (_vp_first_nonws(raw) == 123) {
-            var k = 0;
-            while (k < vec_len(one)) {
-                var v = jsonx_get_raw(raw, vec_get(one, k));
-                if (v != 0 && _vp_first_nonws(v) == 123) { vec_push(todo, _sch_ptr_join(ptr, vec_get(one, k))); vec_push(todo, v); }
-                k = k + 1;
-            }
-            k = 0;
-            while (k < vec_len(arr)) {
-                var av = jsonx_get_raw(raw, vec_get(arr, k));
-                if (av != 0 && _vp_first_nonws(av) == 91) {
-                    var el = _sch_split_array(av);
+        if (load8(ptr) != 0) { vec_push(out, ptr); vec_push(out, raw); }
+        var mem = _jx_members(raw);
+        var mi = 0;
+        while (mi < vec_len(mem)) {
+            var k = vec_get(mem, mi);
+            var v = vec_get(mem, mi + 1);
+            var c = _vp_first_nonws(v);
+            if (c == 91) {
+                if (_sch_in_words(tarr, k) == 1) {
+                    var el = _sch_split_array(v);
                     var ei = 0;
                     while (ei < vec_len(el)) {
                         if (_vp_first_nonws(vec_get(el, ei)) == 123) {
-                            vec_push(todo, _sch_ptr_join(_sch_ptr_join(ptr, vec_get(arr, k)), _sch_itoa(ei)));
+                            vec_push(todo, _sch_ptr_join(_sch_ptr_join(ptr, k), _sch_itoa(ei)));
                             vec_push(todo, vec_get(el, ei));
                         }
                         ei = ei + 1;
                     }
                 }
-                k = k + 1;
-            }
-            k = 0;
-            while (k < vec_len(mp)) {
-                var mv = jsonx_get_raw(raw, vec_get(mp, k));
-                if (mv != 0 && _vp_first_nonws(mv) == 123) {
-                    var mem = _jx_members(mv);
-                    var mi = 0;
-                    while (mi < vec_len(mem)) {
-                        if (_vp_first_nonws(vec_get(mem, mi + 1)) == 123) {
-                            vec_push(todo, _sch_ptr_join(_sch_ptr_join(ptr, vec_get(mp, k)), vec_get(mem, mi)));
-                            vec_push(todo, vec_get(mem, mi + 1));
+            } elif (_sch_in_words(tmap, k) == 1) {
+                if (c == 123) {
+                    var sub = _jx_members(v);
+                    var si = 0;
+                    while (si < vec_len(sub)) {
+                        if (_vp_first_nonws(vec_get(sub, si + 1)) == 123) {
+                            vec_push(todo, _sch_ptr_join(_sch_ptr_join(ptr, k), vec_get(sub, si)));
+                            vec_push(todo, vec_get(sub, si + 1));
                         }
-                        mi = mi + 2;
+                        si = si + 2;
                     }
                 }
-                k = k + 1;
+            } elif (c == 123 && _sch_in_words(tskip, k) == 0) {
+                vec_push(todo, _sch_ptr_join(ptr, k));
+                vec_push(todo, v);
             }
+            mi = mi + 2;
         }
     }
     return out;
@@ -1260,6 +1432,9 @@ fn _sch_itoa(v) {
     return o;
 }
 
+# (3.8.11, from the 3.8.10 review) A name Ajv is handed twice, even for one schema (an
+# `$anchor` and a `$dynamicAnchor`, or an `$id` fragment and an `$anchor`), is refused there:
+# "resolves to more than one schema".
 fn _sch_anchor_add(cx, an, name, checked, ptr) {
     if (name == 0 || load8(name) == 0) { return 0; }
     if (checked == 1 && _sch_anchor_ok(name) == 0) {
@@ -1267,7 +1442,7 @@ fn _sch_anchor_add(cx, an, name, checked, ptr) {
         return 0;
     }
     if (map_has(an, name) == 1) {
-        if (streq(map_get(an, name), ptr) == 0 && load64(cx + 48) == 0) { store64(cx + 48, "names one anchor for two schemas"); }
+        if (load64(cx + 48) == 0) { store64(cx + 48, "names one anchor twice, which the official client refuses"); }
         return 0;
     }
     map_set(an, name, ptr);
@@ -1285,142 +1460,211 @@ fn _sch_anchor_kw(cx, an, raw, kw, ptr) {
 }
 
 # The anchors of `cx`'s document, a map from each name to its schema's pointer, read the
-# first time one is named: `$anchor` and `$dynamicAnchor` in any dialect, as Ajv reads both,
-# and an `$id` that is a fragment, draft-07's way. A name that is not one, or one named for
-# two schemas, is noted in the context for registration to refuse.
+# first time one is named, from what Ajv's walk reaches (_sch_ajv_nodes): `$anchor` and
+# `$dynamicAnchor` in any dialect, as Ajv reads both, and an `$id` that is a fragment,
+# draft-07's way. A name that is not one, or one named twice, is noted in the context for
+# registration to refuse, and an `$id` naming a resource of its own (+64).
 fn _sch_cx_anchors(cx) {
     if (load64(cx + 24) != 0) { return load64(cx + 24); }
     var an = map_new();
     store64(cx + 24, an);
-    var pos = _sch_positions(_sch_cx_root(cx));
+    var pos = _sch_ajv_nodes(_sch_cx_root(cx));
     var i = 0;
     while (i < vec_len(pos)) {
         var ptr = vec_get(pos, i);
         var raw = vec_get(pos, i + 1);
-        if (_vp_first_nonws(raw) == 123) {
-            _sch_anchor_kw(cx, an, raw, "$anchor", ptr);
-            _sch_anchor_kw(cx, an, raw, "$dynamicAnchor", ptr);
-            var id = _sch_kw_str(raw, "$id");
-            if (id != 0 && load8(id) == 35) { _sch_anchor_add(cx, an, id + 1, 0, ptr); }
-        }
+        var id = _sch_kw_str(raw, "$id");
+        if (id != 0 && load8(id) == 35) {
+            if (load8(id + 1) != 0 && streq(id, "#/") == 0) { _sch_anchor_add(cx, an, id + 1, 0, ptr); }
+        } elif (id != 0) { store64(cx + 64, 1); }
+        _sch_anchor_kw(cx, an, raw, "$anchor", ptr);
+        _sch_anchor_kw(cx, an, raw, "$dynamicAnchor", ptr);
         i = i + 2;
     }
     return an;
 }
 
-# Why the document `doc` cannot be registered for its references, or 0 (3.8.10): a `$ref`
-# that is no string, that names nothing in the document or something there that is no
-# schema, or one outside it; an anchor that is no name, or one name for two schemas; a
-# schema below the root that names a resource of its own (`$id`), against which its
-# references would resolve; and a reference that leads back to where it is with no part of
-# the value judged in between, which judges a value forever. Each makes the official
-# client's Ajv refuse the schema, or never finish with it. The answer reads as the end of a
-# sentence about the schema: "holds a $ref ...".
-fn _sch_refs_why(doc) {
-    if (doc == 0) { return 0; }
-    if (strstr(doc, "$ref") < 0 && strstr(doc, "nchor") < 0 && strstr(doc, "$id") < 0 && strstr(doc, "\\u") < 0) { return 0; }
-    var cx = _sch_cx_new(doc, _sch_dialect(doc));
-    var pos = _sch_positions(doc);
-    var refs = vec_new();
-    var nested = 0;
-    var i = 0;
-    while (i < vec_len(pos)) {
-        var ptr = vec_get(pos, i);
-        var raw = vec_get(pos, i + 1);
-        if (_vp_first_nonws(raw) == 123) {
-            if (jsonx_has(raw, "$ref") == 1) {
-                var rs = _sch_kw_str(raw, "$ref");
-                if (rs == 0) { return "holds a $ref that is not a string"; }
-                vec_push(refs, rs);
-            }
-            if (load8(ptr) != 0) {
-                var id = _sch_kw_str(raw, "$id");
-                if (id != 0 && load8(id) != 35) { nested = 1; }
-            }
-        }
-        i = i + 2;
-    }
-    _sch_cx_anchors(cx);
-    if (load64(cx + 48) != 0) { return load64(cx + 48); }
-    if (vec_len(refs) == 0) { return 0; }
-    if (nested == 1) { return "holds a $ref, and a schema below its root that names a resource of its own with $id, which bote does not resolve against"; }
-    var ri = 0;
-    while (ri < vec_len(refs)) {
-        var rp = _sch_ref_ptr(cx, vec_get(refs, ri));
-        if (rp == 0) { return _dsp_named_msg("holds a $ref that does not resolve within its document: ", vec_get(refs, ri), 0); }
-        var rr = _sch_ptr_raw(cx, rp);
-        if (rr == 0) { return _dsp_named_msg("holds a $ref that names nothing in its document: ", vec_get(refs, ri), 0); }
-        if (_sch_is_schema_text(rr) == 0) { return _dsp_named_msg("holds a $ref that names no schema: ", vec_get(refs, ri), 0); }
-        ri = ri + 1;
-    }
-    if (_sch_ref_cycle(cx, refs) == 1) { return "holds a $ref that leads back to itself with no part of the value judged in between"; }
+# 1 when the root of `cx`'s document names the anchor `name`, which Ajv does not register.
+fn _sch_root_anchor(cx, name) {
+    var root = _sch_cx_root(cx);
+    var a1 = _sch_kw_str(root, "$anchor");
+    var a2 = _sch_kw_str(root, "$dynamicAnchor");
+    var id = _sch_kw_str(root, "$id");
+    if (a1 != 0 && streq(a1, name) == 1) { return 1; }
+    if (a2 != 0 && streq(a2, name) == 1) { return 1; }
+    if (id != 0 && load8(id) == 35 && streq(id + 1, name) == 1) { return 1; }
     return 0;
 }
 
-# The pointers of the schemas that judge the very value the schema at `ptr` judges, not a
-# part of it: its `$ref`, `allOf`, `anyOf`, `oneOf`, `not`, `if`, `then`, `else`,
-# `dependentSchemas` and draft-07's `dependencies`, in any dialect, as a client may have them.
-fn _sch_same_edges(cx, ptr) {
+# Each `$ref` the document's dialect's engine reaches from the root, two words each: its
+# string (0 for one that is no string) and the pointer of the schema holding it (3.8.11,
+# from the 3.8.10 review). Ajv compiles a subschema only under a keyword its engine has
+# (_sch_kids), and a `$ref` it never compiles, in a definition nothing names or under a
+# keyword its dialect lacks, is never resolved, so registration judges only these.
+fn _sch_reach(cx) {
     var out = vec_new();
-    var raw = _sch_ptr_raw(cx, ptr);
+    var seen = map_new();
+    var todo = vec_new();
+    map_set(seen, "", 1);
+    vec_push(todo, "");
+    while (vec_len(todo) > 0) {
+        var ptr = vec_pop(todo);
+        var raw = _sch_ptr_raw(cx, ptr);
+        if (raw != 0 && _vp_first_nonws(raw) == 123) {
+            if (jsonx_has(raw, "$ref") == 1) {
+                vec_push(out, _sch_kw_str(raw, "$ref"));
+                vec_push(out, ptr);
+            }
+            var kids = _sch_kids(cx, ptr, raw, 0);
+            var k = 0;
+            while (k < vec_len(kids)) {
+                var kp = vec_get(kids, k);
+                if (map_has(seen, kp) == 0) { map_set(seen, kp, 1); vec_push(todo, kp); }
+                k = k + 1;
+            }
+        }
+    }
+    return out;
+}
+
+# Push onto `out` the pointer of each schema under the keyword `kw` of `raw` (at `ptr`): its
+# one schema (`how` 0), each of its array's (1), or each of its object's members' (2).
+fn _sch_kids_kw(out, ptr, raw, kw, how) {
+    var v = jsonx_get_raw(raw, kw);
+    if (v == 0) { return 0; }
+    var c = _vp_first_nonws(v);
+    if (how == 0) {
+        if (c == 123) { vec_push(out, _sch_ptr_join(ptr, kw)); }
+        return 0;
+    }
+    if (how == 1) {
+        if (c != 91) { return 0; }
+        var el = _sch_split_array(v);
+        var ei = 0;
+        while (ei < vec_len(el)) {
+            if (_vp_first_nonws(vec_get(el, ei)) == 123) { vec_push(out, _sch_ptr_join(_sch_ptr_join(ptr, kw), _sch_itoa(ei))); }
+            ei = ei + 1;
+        }
+        return 0;
+    }
+    if (c != 123) { return 0; }
+    var mem = _jx_members(v);
+    var mi = 0;
+    while (mi < vec_len(mem)) {
+        if (_vp_first_nonws(vec_get(mem, mi + 1)) == 123) { vec_push(out, _sch_ptr_join(_sch_ptr_join(ptr, kw), vec_get(mem, mi))); }
+        mi = mi + 2;
+    }
+    return 0;
+}
+
+# The pointers of the schemas the engine for `cx`'s dialect compiles under the schema `raw`
+# at `ptr` (Ajv 8's vocabularies): with `same` 1, only those that judge the very value it
+# judges (`$ref`, `allOf`, `anyOf`, `oneOf`, `not`, `if`, `then` and `else` beside `if`,
+# `dependencies`, and from 2019-09 `dependentSchemas`), else every one, those judging a
+# part of it too. draft-07 and draft-06 (the client's draft-07 engine) and 2019-09 have
+# `additionalItems` and an array `items`, 2020-12 `prefixItems`, 2019-09 and 2020-12 the
+# `unevaluated*` keywords.
+fn _sch_kids(cx, ptr, raw, same) {
+    var d = load64(cx);
+    var out = vec_new();
     if (raw == 0 || _vp_first_nonws(raw) != 123) { return out; }
     var rs = _sch_kw_str(raw, "$ref");
     if (rs != 0) {
         var t = _sch_ref_ptr(cx, rs);
         if (t != 0) { vec_push(out, t); }
     }
-    var arr = _reg_words("allOf anyOf oneOf ");
-    var k = 0;
-    while (k < vec_len(arr)) {
-        var av = jsonx_get_raw(raw, vec_get(arr, k));
-        if (av != 0 && _vp_first_nonws(av) == 91) {
-            var el = _sch_split_array(av);
-            var ei = 0;
-            while (ei < vec_len(el)) {
-                if (_vp_first_nonws(vec_get(el, ei)) == 123) { vec_push(out, _sch_ptr_join(_sch_ptr_join(ptr, vec_get(arr, k)), _sch_itoa(ei))); }
-                ei = ei + 1;
-            }
-        }
-        k = k + 1;
+    _sch_kids_kw(out, ptr, raw, "allOf", 1);
+    _sch_kids_kw(out, ptr, raw, "anyOf", 1);
+    _sch_kids_kw(out, ptr, raw, "oneOf", 1);
+    _sch_kids_kw(out, ptr, raw, "not", 0);
+    if (jsonx_has(raw, "if") == 1) {
+        _sch_kids_kw(out, ptr, raw, "if", 0);
+        _sch_kids_kw(out, ptr, raw, "then", 0);
+        _sch_kids_kw(out, ptr, raw, "else", 0);
     }
-    var one = _reg_words("not if then else ");
-    k = 0;
-    while (k < vec_len(one)) {
-        var ov = jsonx_get_raw(raw, vec_get(one, k));
-        if (ov != 0 && _vp_first_nonws(ov) == 123) { vec_push(out, _sch_ptr_join(ptr, vec_get(one, k))); }
-        k = k + 1;
+    _sch_kids_kw(out, ptr, raw, "dependencies", 2);
+    if (_sch_from_2019(d) == 1) { _sch_kids_kw(out, ptr, raw, "dependentSchemas", 2); }
+    if (same == 1) { return out; }
+    _sch_kids_kw(out, ptr, raw, "properties", 2);
+    _sch_kids_kw(out, ptr, raw, "patternProperties", 2);
+    _sch_kids_kw(out, ptr, raw, "additionalProperties", 0);
+    _sch_kids_kw(out, ptr, raw, "propertyNames", 0);
+    _sch_kids_kw(out, ptr, raw, "contains", 0);
+    _sch_kids_kw(out, ptr, raw, "items", 0);
+    if (d == 2020) { _sch_kids_kw(out, ptr, raw, "prefixItems", 1); }
+    else {
+        _sch_kids_kw(out, ptr, raw, "items", 1);
+        _sch_kids_kw(out, ptr, raw, "additionalItems", 0);
     }
-    var mp = _reg_words("dependentSchemas dependencies ");
-    k = 0;
-    while (k < vec_len(mp)) {
-        var mv = jsonx_get_raw(raw, vec_get(mp, k));
-        if (mv != 0 && _vp_first_nonws(mv) == 123) {
-            var mem = _jx_members(mv);
-            var mi = 0;
-            while (mi < vec_len(mem)) {
-                if (_vp_first_nonws(vec_get(mem, mi + 1)) == 123) { vec_push(out, _sch_ptr_join(_sch_ptr_join(ptr, vec_get(mp, k)), vec_get(mem, mi))); }
-                mi = mi + 2;
-            }
-        }
-        k = k + 1;
+    if (_sch_from_2019(d) == 1) {
+        _sch_kids_kw(out, ptr, raw, "unevaluatedItems", 0);
+        _sch_kids_kw(out, ptr, raw, "unevaluatedProperties", 0);
     }
     return out;
 }
 
-# 1 when a reference in `refs` leads back to a schema on its own path with only keywords
-# that judge the same value between (_sch_same_edges). A cycle holds a reference, the only
-# edge that can point back, so a search from each one's target finds every cycle. Iterative,
-# its stack its own: a chain of references is as long as the document makes it.
-fn _sch_ref_cycle(cx, refs) {
-    var color = map_new();
+# Why the document `doc` cannot be registered for its references, or 0 (3.8.10; 3.8.11
+# reads it as the official client's Ajv does, from its review). Refused, each of which makes
+# the client's Ajv refuse the schema, never finish with it, or (the last) resolve it
+# otherwise than bote: an anchor that is no name, or one named twice; of the references the
+# dialect's engine reaches from the root (_sch_reach), one that is no string, one that names
+# nothing in the document or something there that is no schema, one outside it, one to an
+# anchor on the root (which Ajv does not register), one that leads back to where it is with
+# no part of the value judged in between; and, beside them, a schema below the root naming
+# a resource of its own with `$id`. The answer reads as the end of a sentence about the
+# schema: "holds a $ref ...".
+fn _sch_refs_why(doc) {
+    if (doc == 0) { return 0; }
+    if (strstr(doc, "$ref") < 0 && strstr(doc, "nchor") < 0 && strstr(doc, "$id") < 0 && strstr(doc, "\\u") < 0) { return 0; }
+    var cx = _sch_cx_new(doc, _sch_dialect(doc));
+    _sch_cx_anchors(cx);
+    if (load64(cx + 48) != 0) { return load64(cx + 48); }
+    var refs = _sch_reach(cx);
+    if (vec_len(refs) == 0) { return 0; }
+    var i = 0;
+    while (i < vec_len(refs)) {
+        if (vec_get(refs, i) == 0) { return "holds a $ref that is not a string"; }
+        i = i + 2;
+    }
+    if (load64(cx + 64) == 1) { return "holds a $ref, and a schema below its root that names a resource of its own with $id, which bote does not resolve against"; }
+    var starts = vec_new();
     var ri = 0;
     while (ri < vec_len(refs)) {
-        var start = _sch_ref_ptr(cx, vec_get(refs, ri));
-        if (start != 0 && map_has(color, start) == 0) {
+        var r = vec_get(refs, ri);
+        var rp = _sch_ref_ptr(cx, r);
+        if (rp == 0) {
+            if (load8(r) == 35 && load8(r + 1) != 47 && load8(r + 1) != 0) {
+                var nm = _sch_pct_dec(r + 1, strlen(r + 1));
+                if (nm != 0 && _sch_root_anchor(cx, nm) == 1) {
+                    return _dsp_named_msg("holds a $ref to an anchor on its root, which the official client does not resolve (write it #): ", r, 0);
+                }
+            }
+            return _dsp_named_msg("holds a $ref that does not resolve within its document: ", r, 0);
+        }
+        var rr = _sch_ptr_raw(cx, rp);
+        if (rr == 0) { return _dsp_named_msg("holds a $ref that names nothing in its document: ", r, 0); }
+        if (_sch_is_schema_text(rr) == 0) { return _dsp_named_msg("holds a $ref that names no schema: ", r, 0); }
+        vec_push(starts, rp);
+        ri = ri + 2;
+    }
+    if (_sch_ref_cycle(cx, starts) == 1) { return "holds a $ref that leads back to itself with no part of the value judged in between"; }
+    return 0;
+}
+
+# 1 when a schema in `starts` (references' targets) leads back to one on its own path with
+# only keywords that judge the same value between (_sch_kids, same 1). A cycle holds a
+# reference, the only edge that can point back, so a search from each target finds every
+# one. Iterative, its stack its own: a chain of references is as long as the document makes it.
+fn _sch_ref_cycle(cx, starts) {
+    var color = map_new();
+    var ri = 0;
+    while (ri < vec_len(starts)) {
+        var start = vec_get(starts, ri);
+        if (map_has(color, start) == 0) {
             var st = vec_new();
             map_set(color, start, 1);
             vec_push(st, start);
-            vec_push(st, _sch_same_edges(cx, start));
+            vec_push(st, _sch_kids(cx, start, _sch_ptr_raw(cx, start), 1));
             vec_push(st, 0);
             while (vec_len(st) > 0) {
                 var top = vec_len(st) - 3;
@@ -1439,7 +1683,7 @@ fn _sch_ref_cycle(cx, refs) {
                     } else {
                         map_set(color, nx, 1);
                         vec_push(st, nx);
-                        vec_push(st, _sch_same_edges(cx, nx));
+                        vec_push(st, _sch_kids(cx, nx, _sch_ptr_raw(cx, nx), 1));
                         vec_push(st, 0);
                     }
                 }
@@ -1465,8 +1709,11 @@ fn compiled_compile(schema) {
         # keywords beside it compiled into the body; (3.8.10) its `$ref` among them.
         var rp = prop_new(SCH_ANY);
         _sch_compile_comp_c(rp, js, jcx);
+        # (3.8.11, from the 3.8.10 review) And its `const` and `enum`, judged nowhere through
+        # 3.8.10: `{"type":"object","const":{"a":1}}` ran its handler for `{"a":2}`.
+        _sch_fill_eq(rp, js);
         _sch_cx_drain(jcx);
-        if (prop_composes(rp) == 1) { store64(c0 + 104, rp); }
+        if (prop_composes(rp) == 1 || prop_const_raw(rp) != 0 || prop_enum_raw(rp) != 0) { store64(c0 + 104, rp); }
         return c0;
     }
     var c = compiled_new();
@@ -1528,11 +1775,19 @@ fn _sch_budget(n) { return BOTE_SCH_BUDGET_BASE + BOTE_SCH_BUDGET_PER_BYTE * n; 
 # references is as long as a document makes it, where a value's nesting is bounded by the
 # codec (JSONX_MAX_DEPTH) and a schema's by its own. Past it the judgement stops and the
 # root refuses the value as too deeply nested to judge, as it refuses one past its budget.
-# 512 is eight steps for each level of a value the codec admits; the stack it takes was
-# measured at 3.8.10, the deepest shape (a chain of references through `anyOf`) needing
-# more than 256 KB and less than 512 KB, a quarter of a worker thread's 2 MB.
+# 512 is eight steps for each level of a value the codec admits. The stack it takes, measured
+# at 3.8.10 and by its review: 219 KB for a bare chain of references, 267 KB through `anyOf`
+# or `if`, 283 KB through `not`, and 375 KB through `dependentSchemas`, the deepest, under a
+# fifth of a worker thread's 2 MB. (3.8.10 named `anyOf` the deepest.)
 var BOTE_SCH_MAX_DEPTH = 512;
 var BOTE_SCH_TOO_DEEP = "nested too deep to judge";
+
+# (3.8.11, from the 3.8.10 review) How many bytes of a walk cost one more of the budget: an
+# object's or an array's walk reads each of its members to find where the next begins, and
+# a `$ref` makes a schema judge one object many times over. Charged by the value through
+# 3.8.10, a recursive union over 60 KB took 21 s. One for four bytes keeps a value judged
+# once, 64 levels deep, under the budget its size allows.
+var BOTE_SCH_WALK_BYTES = 4;
 
 # A judgement's budget block, 56 bytes, on its root's stack and shared by every quiet
 # judgement inside it:
@@ -1554,7 +1809,10 @@ fn _sch_root_budget(bud, n, args) {
     # bote_req_state(), without its call for the process's own block.
     var pool = &_bote_req_g;
     if (_bote_req_state_fp != 0) { pool = fncall0(_bote_req_state_fp); }
-    pool = pool + BOTE_REQ_STATE_POOL;
+    # (3.8.11, from the 3.8.10 review) The arguments of a batch share one base and its results
+    # another: through 3.8.10 one, and a call whose arguments spent it had another's valid
+    # result refused.
+    if (args == 1) { pool = pool + BOTE_REQ_STATE_POOL; } else { pool = pool + BOTE_REQ_STATE_POOL_OUT; }
     var pw = load64(pool);
     if (pw > 0) { base = pw - 1; } else { pool = 0; }
     store64(bud, base + BOTE_SCH_BUDGET_PER_BYTE * n);
@@ -1583,8 +1841,18 @@ fn _sch_root_done(bud, n) {
 }
 
 # Open a batch's shared base, and close it (the codec's, around a batch's requests).
-fn _sch_pool_open() { store64(bote_req_state() + BOTE_REQ_STATE_POOL, BOTE_SCH_BUDGET_BASE + 1); return 0; }
-fn _sch_pool_close() { store64(bote_req_state() + BOTE_REQ_STATE_POOL, 0); return 0; }
+fn _sch_pool_open() {
+    var st = bote_req_state();
+    store64(st + BOTE_REQ_STATE_POOL, BOTE_SCH_BUDGET_BASE + 1);
+    store64(st + BOTE_REQ_STATE_POOL_OUT, BOTE_SCH_BUDGET_BASE + 1);
+    return 0;
+}
+fn _sch_pool_close() {
+    var st = bote_req_state();
+    store64(st + BOTE_REQ_STATE_POOL, 0);
+    store64(st + BOTE_REQ_STATE_POOL_OUT, 0);
+    return 0;
+}
 
 # The refusal a judgement's budget block calls for at its root, or 0.
 fn _sch_spent(bud) {
@@ -1607,6 +1875,14 @@ fn _sv_charge(slot, k) {
 # arguments, the block says so and the root refuses the arguments. Through 3.8.9 the
 # commonest shape of all, `anyOf: [{"type": "integer"}, {"type": "null"}]`, handed a handler
 # 1e30 as an integer.
+# Mark the judgement as having taken an argument's integer past a handler's range, as
+# _sv_int_ok marks it, from a composition that takes the value only so.
+fn _sv_range_taken(slot) {
+    var bud = load64(slot + 40);
+    if (bud != 0 && load64(bud + 24) == 1) { store64(bud + 32, 1); }
+    return 0;
+}
+
 fn _sv_int_ok(slot, f, iv) {
     if (iv < SCH_NUM_SAT && iv > 0 - SCH_NUM_SAT) { return 1; }
     if (load64(slot + 24) == 0) {
@@ -1754,6 +2030,10 @@ fn _sv_path_a(a, f) {
 fn _sv_violation(slot, f, msg) {
     if (_vs_full(slot) == 1) { return 0; }
     if (_vs_quiet(slot) == 1) { return _vs_hit(slot); }
+    # (3.8.11, from the 3.8.10 review) The arguments' own, bare; a result's root is named from
+    # ": " (_sch_check_value_a joins it). 3.8.10 stripped ": " from every argument's violation,
+    # so a member named "" was no member, and one named ": x" read as "x".
+    if (f == 0 && load64(slot + 24) == 0) { return _violation_push(slot, msg); }
     if (f == 0) { return _violation(slot, "", msg); }
     return _violation(slot, _sv_path_a(_vs_alloc(slot), f), msg);
 }
@@ -2320,37 +2600,49 @@ fn _sv_comp(slot, f, buf, n, vs, ve, prop) {
     }
     var any = prop_any_of(prop);
     if (any != 0) {
+        # (3.8.11, from the 3.8.10 review) An argument's integer past a handler's range is
+        # refused only when every schema that takes the value takes it as an integer: one
+        # taking it as a number serves. Through 3.8.10 the first sight of it refused it.
         var hit = 0;
         var ni = 0;
-        while (ni < vec_len(any) && hit == 0) {
-            if (_sv_matches(slot, buf, n, vs, ve, vec_get(any, ni)) == 1) { hit = 1; }
+        while (ni < vec_len(any) && hit != 1) {
+            var mr = _sv_matches(slot, buf, n, vs, ve, vec_get(any, ni));
+            if (mr == 1) { hit = 1; }
+            elif (mr == 2) { hit = 2; }
             ni = ni + 1;
         }
         if (hit == 0) { _sv_violation(slot, f, "matches no schema in anyOf"); }
+        if (hit == 2) { _sv_range_taken(slot); }
     }
     var one = prop_one_of(prop);
     if (one != 0) {
         var met = 0;
+        var taken = 0;
         var oi = 0;
         while (oi < vec_len(one) && met < 2) {
-            if (_sv_matches(slot, buf, n, vs, ve, vec_get(one, oi)) == 1) { met = met + 1; }
+            var om = _sv_matches(slot, buf, n, vs, ve, vec_get(one, oi));
+            if (om >= 1) { met = met + 1; }
+            if (om == 2) { taken = 1; }
             oi = oi + 1;
         }
         if (met == 0) { _sv_violation(slot, f, "matches no schema in oneOf"); }
         if (met > 1) { _sv_violation(slot, f, "matches more than one schema in oneOf"); }
+        if (met == 1 && taken == 1) { _sv_range_taken(slot); }
     }
     var nt = prop_not(prop);
-    if (nt != 0 && _sv_matches(slot, buf, n, vs, ve, nt) == 1) { _sv_violation(slot, f, "matches the schema in not"); }
+    if (nt != 0 && _sv_matches(slot, buf, n, vs, ve, nt) >= 1) { _sv_violation(slot, f, "matches the schema in not"); }
     var iff = prop_if(prop);
     if (iff != 0) {
         var br = prop_else(prop);
-        if (_sv_matches(slot, buf, n, vs, ve, iff) == 1) { br = prop_then(prop); }
+        if (_sv_matches(slot, buf, n, vs, ve, iff) >= 1) { br = prop_then(prop); }
         if (br != 0 && _vs_full(slot) == 0) { _sv_value(slot, f, buf, n, vs, ve, br); }
     }
     return 0;
 }
 
-# 1 when the value [s, e) of `buf` meets `prop` (3.8.8): judged on a quiet slot, which stops
+# 1 when the value [s, e) of `buf` meets `prop`, 2 when it meets it by taking an argument's
+# integer past what a handler holds as an integer (3.8.11; _sv_int_ok), 0 when it does not
+# (3.8.8): judged on a quiet slot, which stops
 # at the first violation and builds nothing, so `contains` and `propertyNames` ask of every
 # item and key what they need and keep nothing of it. The slot judges as `slot` does, a
 # result's integers as a result's; what the judgement takes of the arena is given back.
@@ -2368,10 +2660,19 @@ fn _sv_matches(slot, buf, n, s, e, prop) {
     # judges a value directly, that refusal stands.
     store64(&qs + 24, 1);
     store64(&qs + 32, 1);
-    store64(&qs + 40, load64(slot + 40));
+    var bud = load64(slot + 40);
+    store64(&qs + 40, bud);
+    # (3.8.11, from the 3.8.10 review) Whether this judgement took an argument's integer past
+    # what a handler holds as one, apart from what judgements around it took.
+    var held = 0;
+    if (bud != 0) { held = load64(bud + 32); store64(bud + 32, 0); }
     _sv_value(&qs, 0, buf, n, s, e, prop);
     var ok = 0;
     if (load64(&qs + 16) == BOTE_SCH_MAX_VIOLATIONS - 1) { ok = 1; }
+    if (bud != 0) {
+        if (ok == 1 && load64(bud + 32) == 1) { ok = 2; }
+        store64(bud + 32, held);
+    }
     bote_arena_release(a, &mk);
     return ok;
 }
@@ -2454,11 +2755,24 @@ fn _sv_string(slot, f, buf, vs, ve, prop) {
         if (mn >= 0 && len < mn) { _sv_violation(slot, f, "shorter than minLength"); }
         if (mx >= 0 && len > mx) { _sv_violation(slot, f, "longer than maxLength"); }
     }
+    # (3.8.11) `pattern`, anywhere in the string, each step of the match charged to the
+    # budget; one the budget stops is refused by the root.
+    var rx = prop_pattern(prop);
+    if (rx != 0 && bote_rx_test_a(_vs_alloc(slot), rx, buf, vs + 1, ve - 1, load64(slot + 40)) == 0) {
+        _sv_violation(slot, f, "does not match the pattern");
+    }
     return 0;
 }
 
 fn _sv_number(slot, f, buf, vs, ve, prop) {
     var v = buf + vs;
+    # (3.8.11) `multipleOf`, exactly, its digits read once and charged.
+    var mo = prop_multiple_of(prop);
+    if (mo != 0) {
+        var mb = load64(slot + 40);
+        if (mb != 0) { store64(mb, load64(mb) - (ve - vs)); }
+        if (_sch_is_multiple(v, mo) == 0) { _sv_violation(slot, f, "not a multiple of multipleOf"); }
+    }
     if (prop_has_min(prop) == 0 && prop_has_max(prop) == 0 && prop_exclusive_min_raw(prop) == 0 && prop_exclusive_max_raw(prop) == 0) { return 0; }
     # (3.8.10) Each bound reads the value's digits.
     var bud = load64(slot + 40);
@@ -2508,6 +2822,8 @@ fn _sv_array(slot, f, buf, n, vs, ve, prop) {
     var count = 0;
     var i = _jx_skip_ws(buf, n, vs + 1);
     while (i < ve && load8(buf + i) != 93) {
+        # Full, nothing more is said: the walk stops, and a quiet judgement's first miss ends it.
+        if (_vs_full(slot) == 1) { break; }
         var es = i;
         var ee = _jx_skip_value(buf, n, es);
         # (3.8.8) An item a `prefixItems` schema covers is judged by it, and `items` judges the rest.
@@ -2516,11 +2832,12 @@ fn _sv_array(slot, f, buf, n, vs, ve, prop) {
         if (ip != 0 && _vs_full(slot) == 0) {
             _sv_value(slot, _sv_frame(&fr, f, 3, 0, count), buf, n, es, ee, ip);
         }
-        if (cn != 0 && _sv_matches(slot, buf, n, es, ee, cn) == 1) { matched = matched + 1; }
+        if (cn != 0 && _sv_matches(slot, buf, n, es, ee, cn) >= 1) { matched = matched + 1; }
         count = count + 1;
         i = _jx_skip_ws(buf, n, ee);
         if (i < ve && load8(buf + i) == 44) { i = _jx_skip_ws(buf, n, i + 1); }
     }
+    _sv_charge(slot, (i - vs) / BOTE_SCH_WALK_BYTES);
     if (mn >= 0 && count < mn) { _sv_violation(slot, f, "fewer items than minItems"); }
     if (mx >= 0 && count > mx) { _sv_violation(slot, f, "more items than maxItems"); }
     if (uq == 1 && count > 1 && _vs_full(slot) == 0) { _sv_unique(slot, f, buf, n, vs, ve, count); }
@@ -2586,6 +2903,7 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
     var count = 0;
     var i = _jx_skip_ws(buf, n, vs + 1);
     while (i < ve && load8(buf + i) == 34) {
+        if (_vs_full(slot) == 1) { break; }
         var ke = _jx_skip_string(buf, n, i);
         var kp = buf + i + 1;
         var kl = ke - i - 2;
@@ -2616,7 +2934,9 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
             }
         } else {
             key = &kb;
-            if (kl >= 256) { key = alloc_via(a, kl + 1); }
+            var kmk[16];
+            var klong = 0;
+            if (kl >= 256) { bote_arena_mark(a, &kmk); key = alloc_via(a, kl + 1); klong = 1; }
             if (_jx_has_escape(kp, kl) == 1) {
                 dl = _jx_unescape_into(kp, kl, key);
             } else {
@@ -2625,6 +2945,15 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
             }
             kind = 2;
             if (dl == strlen(key)) { w = map_get(watch, key); }
+            # (3.8.11, from the 3.8.10 review) A long key's copy, given back once looked up, and
+            # its path written from the key as written. Kept, it was a copy for every
+            # judgement of the object, and with `$ref` a 40 KB call kept 204 MB.
+            if (klong == 1) {
+                bote_arena_release(a, &kmk);
+                key = kp;
+                dl = kl;
+                kind = 4;
+            }
         }
         # (3.8.8) Every key, each time it is written, a string `propertyNames` judges.
         if (pnames != 0 && _vs_full(slot) == 0 && _sv_matches(slot, buf, n, kp - buf - 1, ke, pnames) == 0) {
@@ -2653,6 +2982,7 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
         i = _jx_skip_ws(buf, n, mve);
         if (i < ve && load8(buf + i) == 44) { i = _jx_skip_ws(buf, n, i + 1); }
     }
+    _sv_charge(slot, (i - vs) / BOTE_SCH_WALK_BYTES);
     # Each required name, met when its slot was seen.
     var req = compiled_required(comp);
     var reqw = load64(comp + 72);
@@ -2733,7 +3063,18 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
     if (mx >= 0 && count > mx) { _sv_violation(slot, f, "more properties than maxProperties"); }
     # (3.8.9) An inputSchema root's composition, the arguments judged as a whole.
     var rcp = load64(comp + 104);
-    if (rcp != 0 && _vs_full(slot) == 0) { _sv_comp(slot, f, buf, n, vs, ve, rcp); }
+    if (rcp != 0 && _vs_full(slot) == 0) {
+        var rcr = prop_const_raw(rcp);
+        if (rcr != 0) {
+            _sv_charge(slot, ve - vs);
+            if (_sv_eq(a, buf, n, vs, rcr, strlen(rcr), 0, 1) == 0) { _sv_violation(slot, f, "not the const value"); }
+        }
+        if (prop_enum_raw(rcp) != 0) {
+            _sv_charge(slot, ve - vs);
+            _sv_enum(slot, f, buf, n, vs, ve, rcp);
+        }
+        if (prop_composes(rcp) == 1 && _vs_full(slot) == 0) { _sv_comp(slot, f, buf, n, vs, ve, rcp); }
+    }
     if (nb > 64 && load64(slot + 16) == sv0) { bote_arena_release(a, &smk); }
     return 0;
 }
@@ -2868,17 +3209,5 @@ fn compiled_check_a(a, compiled, params_cstr) {
     if (load64(&bud + 48) != 0) { _sch_root_done(&bud, pn); }
     # Too deep sets what is left below 0 too.
     if (load64(&bud) < 0 || load64(&bud + 32) == 1) { _violation_force(&slot, _sch_spent(&bud)); }
-    # (3.8.10, from the 3.8.9 review) A violation of the arguments themselves is named from
-    # the empty path, ": ..." as a result's root joins it; here it was sent as
-    # "for tool 't': : ...".
-    var vs = load64(&slot);
-    if (vs != 0) {
-        var i = 0;
-        while (i < vec_len(vs)) {
-            var v = vec_get(vs, i);
-            if (load8(v) == 58 && load8(v + 1) == 32) { vec_set(vs, i, v + 2); }
-            i = i + 1;
-        }
-    }
-    return vs;
+    return load64(&slot);
 }

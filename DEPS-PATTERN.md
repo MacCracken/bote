@@ -33,8 +33,8 @@ bote ships **two** distribution artifacts:
 
 | Artifact              | Profile  | Modules | Use when                                     |
 |-----------------------|----------|---------|----------------------------------------------|
-| `dist/bote.cyr`       | default  | 33      | Consumer needs bote's full transport surface |
-| `dist/bote-core.cyr`  | `core`   | 13      | Consumer wraps Dispatcher / Registry / Prompts / Resources / Content / Audit but supplies its own transport |
+| `dist/bote.cyr`       | default  | 40      | Consumer needs bote's full transport surface |
+| `dist/bote-core.cyr`  | `core`   | 14      | Consumer wraps Dispatcher / Registry / Prompts / Resources / Content / Audit but supplies its own transport |
 
 - Every tagged release must commit **both** artifacts.
 - Each bundle is a single `.cyr` file. Every public function /
@@ -351,6 +351,16 @@ value, draft-06's `if` / `then` / `else` are judged, and an argument's integer p
 holds is refused through `anyOf` and `oneOf` too: each refuses what 3.8.9 passed. A PropertyDef is
 280 bytes; `prop_new` sets the new word, zeroed. The request state is 176 bytes.
 
+(3.8.11) `pattern` and `multipleOf` are judged, so a schema that names them refuses what it
+passed through 3.8.10. A pattern is read as the official client reads it, under the `u` flag;
+one bote's engine declines (lookaround, backreferences, `\p{...}`, modifiers) judges nothing, and
+registration warns. `multipleOf` is exact, where the client divides as doubles: a fractional one
+is warned of. The core bundle holds 14 modules, `src/regex.cyr` after `jsonx.cyr`, and a
+consumer that copies it gets the engine with it. A PropertyDef is 296 bytes. From the review of
+3.8.10: registration reads a `$ref` as the official client's Ajv does, so it refuses a reference
+to an anchor on the root (write it `#`) and takes a reference relative to the root's `$id`, and
+the request state is 184 bytes.
+
 ## How to produce both bundles
 
 `cyrius distlib` reads `[lib]` (default) or `[lib.<profile>]`
@@ -395,7 +405,7 @@ transports. The same jump unblocked folding bote's own three
 per-transport binaries back into one; that is still in place and
 is a 3.4.x roadmap item. The bundles are unaffected either way.
 
-## What lives in the core 13?
+## What lives in the core 14?
 
 | #  | File                  | Role                                          |
 |----|-----------------------|-----------------------------------------------|
@@ -403,19 +413,21 @@ is a 3.4.x roadmap item. The bundles are unaffected either way.
 | 1  | `src/error.cyr`       | `BoteError` tagged enum                       |
 | 2  | `src/protocol.cyr`    | `JsonRpcRequest` / `Response` / `Error`       |
 | 3  | `src/jsonx.cyr`       | JSON helpers                                  |
-| 4  | `src/registry.cyr`    | `ToolRegistry`                                |
-| 5  | `src/prompts.cyr`     | `PromptRegistry` (MCP prompts capability)     |
-| 6  | `src/resources.cyr`   | `ResourceRegistry` (MCP resources capability) |
-| 7  | `src/events.cyr`      | `EventSink`                                   |
-| 8  | `src/audit.cyr`       | `AuditLogger` / `AuditSink`                   |
-| 9  | `src/dispatch.cyr`    | `Dispatcher` (2.0 handler ABI)                |
-| 10 | `src/codec.cyr`       | Encoder / decoder                             |
-| 11 | `src/schema.cyr`      | Schema compile                                |
-| 12 | `src/content.cyr`     | Typed MCP content blocks + annotations        |
+| 4  | `src/regex.cyr`       | `pattern`'s regular expressions (3.8.11)      |
+| 5  | `src/registry.cyr`    | `ToolRegistry`                                |
+| 6  | `src/prompts.cyr`     | `PromptRegistry` (MCP prompts capability)     |
+| 7  | `src/resources.cyr`   | `ResourceRegistry` (MCP resources capability) |
+| 8  | `src/events.cyr`      | `EventSink`                                   |
+| 9  | `src/audit.cyr`       | `AuditLogger` / `AuditSink`                   |
+| 10 | `src/dispatch.cyr`    | `Dispatcher` (2.0 handler ABI)                |
+| 11 | `src/codec.cyr`       | Encoder / decoder                             |
+| 12 | `src/schema.cyr`      | Schema compile                                |
+| 13 | `src/content.cyr`     | Typed MCP content blocks + annotations        |
 
 (The core profile grew 9 → 11 at 3.0.0, when the MCP prompts and
 resources capabilities landed, 11 → 12 at **3.3.6** with
-`content.cyr`, and 12 → 13 at **3.4.0** with `log.cyr`, listed first:
+`content.cyr`, 12 → 13 at **3.4.0** with `log.cyr`, listed first, and 13 → 14 at **3.8.11**
+with `regex.cyr`, after `jsonx.cyr`, which `schema.cyr`'s `pattern` needs and which adds no stdlib leaf:
 `codec.cyr` emits a DEBUG line per request through it, so a core
 consumer that sets sakshi to DEBUG sees its dispatch traffic. bote
 never configures sakshi from library code — the consumer's
@@ -442,7 +454,7 @@ core through `jsonx.cyr`; since 3.4.6 an alias of the public
 it appends a cstr as a JSON string body, escaping every control byte as
 RFC 8259 §7 requires.
 
-Stdlib footprint of the 13 modules: `string`, `fmt`, `alloc`,
+Stdlib footprint of the 14 modules: `string`, `fmt`, `alloc`,
 `vec`, `str`, `tagged`, `assert`, `fnptr`, `hashmap`, `bayan`,
 `chrono`, `freelist`, `sakshi`. `sakshi` is not on the sidecar: distlib's
 verify finds it already in scope through `lib/patra.cyr`'s own include

@@ -1,0 +1,254 @@
+# bote_regex.tcyr — the regular-expression engine behind `pattern` (3.8.11): what it compiles
+# and why it declines, each refusal of the u flag's syntax; matching as JavaScript matches
+# under the u flag (code points, line terminators, white space, word boundaries, classes,
+# escapes in the pattern and in the JSON string, bytes that are no UTF-8); linear time on the
+# patterns a backtracking engine takes exponential time over; the budget; the arena and heap.
+#
+# Run: cyrius test tests/bote_regex.tcyr
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/fnptr.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/async.cyr"
+include "lib/fdlopen.cyr"
+include "lib/tls.cyr"
+include "lib/sandhi.cyr"
+include "lib/freelist.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"  # sigil 3.7.14 TLS crypto_scratch — SIGILL guard
+include "lib/sakshi.cyr"
+include "lib/sigil.cyr"
+include "lib/patra.cyr"
+include "lib/libro.cyr"
+include "lib/majra.cyr"
+include "lib/assert.cyr"
+include "src/log.cyr"
+include "src/error.cyr"
+include "src/protocol.cyr"
+include "src/jsonx.cyr"
+include "src/regex.cyr"
+include "src/registry.cyr"
+include "src/prompts.cyr"
+include "src/resources.cyr"
+include "src/events.cyr"
+include "src/audit.cyr"
+include "src/audit_libro.cyr"
+include "src/events_majra.cyr"
+include "src/dispatch.cyr"
+include "src/codec.cyr"
+include "src/schema.cyr"
+include "src/stream.cyr"
+include "src/session.cyr"
+include "src/discovery.cyr"
+include "src/auth.cyr"
+include "src/conn.cyr"
+include "src/fetch.cyr"
+include "src/http_era.cyr"
+include "src/oauth_metadata.cyr"
+include "src/listen.cyr"
+include "src/transport_stdio.cyr"
+include "src/transport_http.cyr"
+include "src/transport_unix.cyr"
+include "src/bridge.cyr"
+include "src/transport_streamable.cyr"
+include "src/transport_ws.cyr"
+
+
+fn _cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+fn _cat3(a, b, c) { return _cat(_cat(a, b), c); }
+fn _why(p) {
+    var w = bote_rx_why(bote_rx_compile(p));
+    if (w == 0) { return "(none)"; }
+    return w;
+}
+fn _ase(got, want, name) {
+    if (got == 0 || want == 0) { return assert(got == want, name); }
+    return assert_streq(got, want, name);
+}
+# 1 when the pattern `p` (its text) matches the JSON string body `s`, 0 when it does not.
+fn _m(p, s) {
+    var rx = bote_rx_compile(p);
+    if (bote_rx_why(rx) != 0) { return 0 - 9; }
+    return bote_rx_test_a(bote_req_begin(), rx, s, 0, strlen(s), 0);
+}
+fn _rep(s, n) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < n) { str_builder_add_cstr(sb, s); i = i + 1; }
+    return str_data(str_builder_build(sb));
+}
+fn _ns(rx, s) {
+    var best = 0;
+    var i = 0;
+    while (i < 3) {
+        var t = clock_now_ns();
+        bote_rx_test_a(bote_req_begin(), rx, s, 0, strlen(s), 0);
+        var dt = clock_now_ns() - t;
+        if (i == 0 || dt < best) { best = dt; }
+        i = i + 1;
+    }
+    return best;
+}
+
+fn main() {
+    alloc_init();
+
+    # ---- what it declines, a pattern JavaScript takes ----
+    _ase(_why("a(?=b)"), "a lookahead", "decline: lookahead");
+    _ase(_why("a(?!b)"), "a lookahead", "decline: negative lookahead");
+    _ase(_why("(?<=a)b"), "a lookbehind", "decline: lookbehind");
+    _ase(_why("(?<!a)b"), "a lookbehind", "decline: negative lookbehind");
+    _ase(_why("\\p{L}"), "a Unicode property escape", "decline: \\p");
+    _ase(_why("[\\P{Lu}]"), "a Unicode property escape", "decline: \\P in a class");
+    _ase(_why("(a)\\1"), "a backreference", "decline: a backreference");
+    _ase(_why("(?<n>a)\\k<n>"), "a named backreference", "decline: a named one");
+    _ase(_why("(?i:a)"), "an inline modifier or a group bote's engine does not take", "decline: a modifier");
+    _ase(_why("(?<\xc3\xa9>a)"), "a group name bote's engine does not take", "decline: a name past ASCII");
+    _ase(_why("a{10001}"), "a quantifier past bote's bound", "decline: a bound past 10,000");
+    _ase(_why("a{5000}"), "a program past bote's bound of 4,096 steps", "decline: a program past 4,096 steps");
+    _ase(_why("(a{100}){100}"), "a program past bote's bound of 4,096 steps", "decline: ...nested");
+    _ase(_why(_cat(_rep("(", 65), _rep(")", 65))), "groups nested past bote's bound", "decline: 65 groups deep");
+    _ase(_why(_cat(_rep("(", 64), _rep(")", 64))), "(none)", "decline: ...64 taken");
+
+    # ---- what the u flag refuses ----
+    _ase(_why("\\a"), "an escape the u flag refuses", "syntax: an escape of a letter that means nothing");
+    _ase(_why("\\-"), "an escape the u flag refuses", "syntax: \\- outside a class");
+    _ase(_why("a{"), "a { that begins no quantifier", "syntax: a lone {");
+    _ase(_why("a{,2}"), "a { that begins no quantifier", "syntax: {,n}");
+    _ase(_why("a{1,2"), "a { that begins no quantifier", "syntax: an unclosed quantifier");
+    _ase(_why("]"), "a lone {, } or ], which the u flag refuses", "syntax: a lone ]");
+    _ase(_why("}"), "a lone {, } or ], which the u flag refuses", "syntax: a lone }");
+    _ase(_why("{1}"), "a lone {, } or ], which the u flag refuses", "syntax: a quantifier on nothing, written in braces");
+    _ase(_why("^*"), "a quantifier on an assertion", "syntax: ^*");
+    _ase(_why("\\b+"), "a quantifier on an assertion", "syntax: \\b+");
+    _ase(_why("*a"), "a quantifier on nothing", "syntax: *a");
+    _ase(_why("a|*"), "a quantifier on nothing", "syntax: |*");
+    _ase(_why("a**"), "a quantifier on a quantifier", "syntax: a**");
+    _ase(_why("a???"), "a quantifier on a quantifier", "syntax: a??? (a?? is lazy)");
+    _ase(_why("a{2,1}"), "a quantifier whose bounds are out of order", "syntax: {2,1}");
+    _ase(_why("(a"), "an unterminated group", "syntax: an unclosed group");
+    _ase(_why("a)"), "an unmatched )", "syntax: an unopened one");
+    _ase(_why("[a"), "an unterminated character class", "syntax: an unclosed class");
+    _ase(_why("[z-a]"), "a range out of order", "syntax: z-a");
+    _ase(_why("[\\d-z]"), "a range with a class escape at an end, which the u flag refuses", "syntax: \\d-z");
+    _ase(_why("[a-\\w]"), "a range with a class escape at an end, which the u flag refuses", "syntax: a-\\w");
+    _ase(_why("a\\"), "a pattern that ends in a backslash", "syntax: a trailing backslash");
+    _ase(_why("\\c1"), "a \\c not followed by a letter", "syntax: \\c1");
+    _ase(_why("\\x4"), "a \\x not followed by two hex digits", "syntax: \\x4");
+    _ase(_why("\\u12"), "a \\u not followed by four hex digits", "syntax: \\u12");
+    _ase(_why("\\u{110000}"), "a \\u{...} past U+10FFFF", "syntax: \\u{110000}");
+    _ase(_why("\\u{}"), "a \\u{ not closed by hex digits and }", "syntax: \\u{}");
+    _ase(_why("\\01"), "a \\0 followed by a digit, which the u flag refuses", "syntax: \\01");
+    _ase(_why("[\\1]"), "a decimal escape in a class, which the u flag refuses", "syntax: [\\1]");
+    _ase(_why("(?x)"), "an inline modifier or a group bote's engine does not take", "syntax: (?x)");
+
+    # ---- what it takes ----
+    var ok = vec_new();
+    vec_push(ok, "");
+    vec_push(ok, "^[a-z0-9-]{3,32}$");
+    vec_push(ok, "^\\d{4}-\\d{2}-\\d{2}$");
+    vec_push(ok, "(?:a|b)*c?");
+    vec_push(ok, "(?<year>\\d+)");
+    vec_push(ok, "[\\]\\\\\\-^]");
+    vec_push(ok, "[-a][a-][\\b][^]");
+    vec_push(ok, "\\/\\.\\*\\+\\?\\(\\)\\[\\]\\{\\}\\|\\^\\$");
+    vec_push(ok, "a{0}b{0,}c{2,}?");
+    vec_push(ok, "\\t\\n\\r\\f\\v\\0\\cZ\\x7f\\u00e9\\u{1F600}");
+    vec_push(ok, "[[]");
+    var oi = 0;
+    while (oi < vec_len(ok)) { _ase(_why(vec_get(ok, oi)), "(none)", _cat("takes: ", vec_get(ok, oi))); oi = oi + 1; }
+
+    # ---- matching, as JavaScript matches under the u flag ----
+    assert(_m("b", "abc") == 1 && _m("^b", "abc") == 0 && _m("c$", "abc") == 1 && _m("b$", "abc") == 0, "match: anywhere, unless anchored");
+    assert(_m("^$", "") == 1 && _m("", "anything") == 1 && _m("a", "") == 0, "match: the empty string and the empty pattern");
+    assert(_m("^.$", "\xc3\xa9") == 1 && _m("^.$", "\xf0\x9f\x98\x80") == 1 && _m("^..$", "\xf0\x9f\x98\x80") == 0, "match: . is one code point, an astral one too");
+    assert(_m("^.$", "\\ud83d\\ude00") == 1, "match: ...a pair written as two escapes is one");
+    assert(_m("^.$", "\\ud800") == 1 && _m("^..$", "\\ud800\\ud800") == 1, "match: ...a lone surrogate is one");
+    assert(_m(".", "\\n") == 0 && _m(".", "\\r") == 0 && _m(".", "\xe2\x80\xa8") == 0 && _m(".", "\\u2029") == 0, "match: . is no line terminator");
+    assert(_m("^[^]$", "\\n") == 1 && _m("^[\\s\\S]$", "\\u2028") == 1, "match: [^] and [\\s\\S] are any");
+    assert(_m("^\\s$", "\\ufeff") == 1 && _m("^\\s$", "\xc2\xa0") == 1 && _m("^\\s$", "\\u3000") == 1 && _m("^\\s$", "\\u000b") == 1, "match: \\s is ECMA-262's white space");
+    assert(_m("\\s", "\\u200b") == 0 && _m("^\\S$", "\\ufeff") == 0, "match: ...and nothing else");
+    assert(_m("\\w", "\xc3\xa9") == 0 && _m("^\\w+$", "a_Z9") == 1, "match: \\w is ASCII's");
+    assert(_m("\\d", "\xd9\xa3") == 0 && _m("^\\d$", "7") == 1, "match: \\d is ASCII's digits");
+    assert(_m("\\ba", "\xc3\xa9a") == 1 && _m("\\Ba", "ba") == 1 && _m("\\ba", "ba") == 0, "match: \\b between a word character and another");
+    assert(_m("a\\b", "a") == 1 && _m("^\\b", "") == 0 && _m("^\\B$", "") == 1, "match: ...the ends are no word");
+    assert(_m("^[\xc3\xa9-\xc3\xbc]$", "\xc3\xb6") == 1 && _m("^[\xc3\xa9-\xc3\xbc]$", "z") == 0, "match: a range past ASCII");
+    assert(_m("^[\xf0\x9f\x98\x80-\xf0\x9f\x98\x82]$", "\xf0\x9f\x98\x81") == 1, "match: an astral range");
+    assert(_m("^[\\b]$", "\\b") == 1 && _m("^[^a-c]$", "d") == 1 && _m("^[^a-c]$", "b") == 0, "match: [\\b] is a backspace, [^...] the rest");
+    assert(_m("^\\u{1F600}$", "\xf0\x9f\x98\x80") == 1 && _m("^\\ud83d\\ude00$", "\\ud83d\\ude00") == 1, "match: \\u{...} and a pair of \\u escapes");
+    assert(_m("^\\x41\\cJ\\/$", "A\\n/") == 1 && _m("^\\0$", "\\u0000") == 1, "match: \\x, \\c, \\/ and \\0");
+    assert(_m("^\"\\\\$", "\\\"\\\\") == 1, "match: a quote and a backslash, escaped in the JSON");
+    assert(_m("^a{2,3}$", "aa") == 1 && _m("^a{2,3}$", "aaa") == 1 && _m("^a{2,3}$", "a") == 0 && _m("^a{2,3}$", "aaaa") == 0, "match: {2,3}");
+    assert(_m("^a{2}$", "aa") == 1 && _m("^a{2,}$", "aaaaa") == 1 && _m("^a{0}$", "") == 1, "match: {2}, {2,}, {0}");
+    assert(_m("^(ab)*$", "abab") == 1 && _m("^(ab)*$", "aba") == 0 && _m("^(a|bc)+d?$", "abca") == 1, "match: groups, alternation");
+    assert(_m("^a+?$", "aaa") == 1 && _m("^a*?b$", "aab") == 1, "match: lazy matches what greedy does");
+    assert(_m("^(a*)*$", "aaa") == 1 && _m("^(a*)*$", "aab") == 0 && _m("^(?:)*$", "") == 1, "match: a loop that may match nothing");
+    assert(_m("^(?:^a)$", "a") == 1 && _m("x|^a", "ba") == 0 && _m("x|^a", "ab") == 1, "match: ^ inside a group and an alternative");
+    assert(_m("^\\uFFFD$", "\xff") == 1 && _m("^.$", "\xe2\x82") == 1 && _m("^..$", "\xe2\x82\xff") == 1, "match: bytes that are no UTF-8, a U+FFFD for each maximal part");
+    assert(_m("^.$", "\xed\xa0\x80") == 0 && _m("^...$", "\xed\xa0\x80") == 1, "match: an encoded surrogate is three");
+
+    # ---- linear time: what backtracks exponentially elsewhere ----
+    var aa = _cat(_rep("a", 30000), "!");
+    var plain = bote_rx_compile("z");
+    var ns0 = _ns(plain, aa);
+    var bad = vec_new();
+    vec_push(bad, "(a*)*b");
+    vec_push(bad, "(a|a)*b");
+    vec_push(bad, "^(a+)+$");
+    vec_push(bad, "(a|aa)+c");
+    var bi = 0;
+    while (bi < vec_len(bad)) {
+        var brx = bote_rx_compile(vec_get(bad, bi));
+        assert_eq(bote_rx_test_a(bote_req_begin(), brx, aa, 0, strlen(aa), 0), 0, _cat("linear: no match, ", vec_get(bad, bi)));
+        assert(_ns(brx, aa) < 40 * ns0 + 2000000, _cat("linear: ...in a few times a one-step pattern's time, ", vec_get(bad, bi)));
+        bi = bi + 1;
+    }
+
+    # ---- the budget ----
+    var bud[48];
+    store64(&bud, 1000);
+    var lrx = bote_rx_compile("(a|b)*c");
+    assert_eq(bote_rx_test_a(bote_req_begin(), lrx, aa, 0, strlen(aa), &bud), 0 - 1, "budget: a match past its budget stops, -1");
+    assert(load64(&bud) < 0, "budget: ...spent");
+    store64(&bud, 100000000);
+    assert_eq(bote_rx_test_a(bote_req_begin(), lrx, _cat(aa, "c"), 0, strlen(aa) + 1, &bud), 1, "budget: within it, a match");
+    assert(load64(&bud) < 100000000 - 60000, "budget: ...each code point charged its steps");
+
+    # ---- the arena and the heap ----
+    var fa = bote_req_arena_new();
+    var fb = bote_req_arena_bytes(fa);
+    var hrx = bote_rx_compile("^[a-z]+(?:-[a-z]+)*$");
+    var hs = _rep("abc-", 2000);
+    var h0 = alloc_used();
+    var hi = 0;
+    while (hi < 1000) { bote_rx_test_a(fa, hrx, hs, 0, strlen(hs), 0); hi = hi + 1; }
+    assert_eq(alloc_used() - h0, 0, "heap: 1,000 matches keep nothing");
+    assert_eq(bote_req_arena_bytes(fa), fb, "arena: ...and give the arena back, its first chunk");
+    var big = bote_rx_compile(_rep("a?", 2000));
+    assert_eq(bote_rx_why(big), 0, "arena: (a 4,001-step program)");
+    var bb = bote_req_arena_bytes(fa);
+    bote_rx_test_a(fa, big, "aaaa", 0, 4, 0);
+    var used = bote_req_arena_bytes(fa);
+    bote_rx_test_a(fa, big, "aaaa", 0, 4, 0);
+    assert_eq(bote_req_arena_bytes(fa), used, "arena: a large program's arrays given back for the next");
+    assert(used - bb < 200000, "arena: ...about 160 KB for 4,001 steps");
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit_group(rc);

@@ -23,6 +23,7 @@ include "src/log.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
+include "src/regex.cyr"
 include "src/registry.cyr"
 include "src/prompts.cyr"
 include "src/resources.cyr"
@@ -247,6 +248,18 @@ fn b_validate_compiled_nested() {
     return vec_len(compiled_validate(_b_compiled_nested, _b_compiled_nested_params));
 }
 
+# -- 3.8.11 --
+# A slug's pattern on a 27-character slug, the engine alone; and a call's arguments judged
+# by that pattern and a multipleOf of 0.01.
+var _b_rx_slug = 0;
+var _b_rx_arena = 0;
+var _b_slug = "\"weekly-report-2026-q4-final\"";
+var _b_compiled_text = 0;
+var _b_text_params = "{\"slug\":\"weekly-report-2026-q4\",\"price\":19.99}";
+fn b_regex_slug() { return bote_rx_test_a(_b_rx_arena, _b_rx_slug, _b_slug, 1, 28, 0); }
+fn b_validate_compiled_text() { return vec_len(compiled_validate(_b_compiled_text, _b_text_params)); }
+# -- end 3.8.11 --
+
 fn b_schema_compile_simple() {
     return compiled_compile(_b_schema_simple);
 }
@@ -444,6 +457,14 @@ fn _bench_setup() {
     vec_push(pn, schema_prop_new("config",
     "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"}},\"required\":[\"host\"]}"));
     _b_compiled_nested = compiled_compile(schema_new("object", pn, vec_new()));
+    # -- 3.8.11 --
+    _b_rx_slug = bote_rx_compile("^[a-z0-9]+(?:-[a-z0-9]+)*$");
+    _b_rx_arena = bote_req_arena_new();
+    var pt = vec_new();
+    vec_push(pt, schema_prop_new("slug", "{\"type\":\"string\",\"pattern\":\"^[a-z0-9]+(?:-[a-z0-9]+)*$\"}"));
+    vec_push(pt, schema_prop_new("price", "{\"type\":\"number\",\"multipleOf\":0.01}"));
+    _b_compiled_text = compiled_compile(schema_new("object", pt, vec_new()));
+    # -- end 3.8.11 --
 
     # Fresh (uncompiled) schemas for the schema_compile bench. Built
     # once at setup so the bench callback measures pure compile cost
@@ -697,6 +718,14 @@ fn main() {
     var b48 = bench_new("libro_export_100");
     bench_run(b48, &b_libro_export_100, 1000);
     vec_push(benches, b48);
+    # -- 3.8.11 --
+    var b49 = bench_new("regex_slug");
+    bench_run(b49, &b_regex_slug, 100000);
+    vec_push(benches, b49);
+    var b50 = bench_new("validate_compiled_text");
+    bench_run(b50, &b_validate_compiled_text, 10000);
+    vec_push(benches, b50);
+    # -- end 3.8.11 --
     bote_req_begin();
     bote_conn_arm();
     thread_join(thread_create(&_b_thread_nop, 0));

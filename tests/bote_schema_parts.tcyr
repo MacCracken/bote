@@ -35,6 +35,7 @@ include "src/log.cyr"
 include "src/error.cyr"
 include "src/protocol.cyr"
 include "src/jsonx.cyr"
+include "src/regex.cyr"
 include "src/registry.cyr"
 include "src/prompts.cyr"
 include "src/resources.cyr"
@@ -183,7 +184,9 @@ fn main() {
     assert(_ok(pe, "{\"a\":1,\"b\":2}") == 1 && _ok(pe, "{\"c\":1}") == 0, "names: an enum of them");
     assert(_ok(pe, "{\"\\u0061\":1}") == 1, "names: a key as it decodes");
     assert(_ok("{\"propertyNames\":false}", "{}") == 1 && _ok("{\"propertyNames\":false}", "{\"a\":1}") == 0, "names: false allows none");
-    assert(_ok("{\"propertyNames\":{\"pattern\":\"^x\"}}", "{\"a\":1}") == 1, "names: a keyword bote does not judge judges nothing");
+    # (3.8.11) pattern is judged now; format is not.
+    assert(_ok("{\"propertyNames\":{\"format\":\"email\"}}", "{\"a\":1}") == 1, "names: a keyword bote does not judge judges nothing");
+    assert(_ok("{\"propertyNames\":{\"pattern\":\"^x\"}}", "{\"a\":1}") == 0, "names: ...and pattern, judged since 3.8.11");
     assert(_ok("{\"type\":\"object\",\"properties\":{\"o\":{\"propertyNames\":{\"maxLength\":1}}}}", "{\"o\":{\"ab\":1}}") == 0, "names: nested");
     var pn300 = str_builder_new();
     str_builder_add_cstr(pn300, "{\"");

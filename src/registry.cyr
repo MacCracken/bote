@@ -712,8 +712,8 @@ fn _reg_warn_kw(tool, key, kw) {
 # exclusiveMinimum, exclusiveMaximum and additionalProperties are judged, and no longer here.
 # (3.8.7) const and uniqueItems too. (3.8.8) prefixItems, contains, propertyNames,
 # dependentRequired and dependentSchemas. (3.8.9) allOf, anyOf, oneOf, not, if, then, else.
-# (3.8.10) $ref, within its document.
-var BOTE_UNENFORCED = "$dynamicRef $recursiveRef pattern multipleOf patternProperties unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
+# (3.8.10) $ref, within its document. (3.8.11) pattern and multipleOf.
+var BOTE_UNENFORCED = "$dynamicRef $recursiveRef patternProperties unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
 
 # Every WARN the schema `v`, at `key` of tool `tool`, earns: each keyword in `kws` it
 # holds, a type bote does not know, alone or in a type array, and a keyword it judges with a
@@ -755,6 +755,29 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
     # client's engine for them judges each, as bote does: clients read such a schema two ways.
     if ((d == 6 || d == 7) && jsonx_has(v, "$ref") == 1 && _reg_ref_siblings(v) == 1) {
         _reg_warn_kw(tool, key, "keywords beside $ref, which this schema's dialect ignores and bote judges");
+    }
+    # (3.8.11) A `pattern` bote's engine does not take, and a `multipleOf` it does not judge, or
+    # judges as a client holding doubles may not.
+    var pr = jsonx_get_raw(v, "pattern");
+    if (pr != 0) {
+        var pt = 0;
+        if (_sch_is_string(pr) == 1) { pt = _sch_str_dec_a(default_alloc(), pr); }
+        if (pt == 0) { _reg_warn_kw(tool, key, "pattern that is no string, or no text"); }
+        else {
+            var pw = bote_rx_why(bote_rx_compile(pt));
+            if (pw != 0) { _reg_warn_kw(tool, key, _dsp_named_msg("pattern bote's engine does not take, for ", pw, 0)); }
+        }
+    }
+    var mr = jsonx_get_raw(v, "multipleOf");
+    if (mr != 0) {
+        var mm = _sch_multiple_of(mr);
+        if (_sch_is_number_text(mr) == 0) { _reg_warn_kw(tool, key, "multipleOf that is no number"); }
+        elif (mm == 0) { _reg_warn_kw(tool, key, "multipleOf of more than 17 significant digits, which bote does not judge"); }
+        elif (load64(mm) == 2) { _reg_warn_kw(tool, key, "multipleOf 0, which no number meets"); }
+        else {
+            if (_sch_first_nonws(mr) == 45) { _reg_warn_kw(tool, key, "multipleOf below 0, judged by its size, as the official client judges it"); }
+            if (load64(mm + 16) < 0) { _reg_warn_kw(tool, key, "multipleOf that is no integer, which bote judges exactly and a client holding numbers as doubles may not"); }
+        }
     }
     var ty = jsonx_get_str_dec_a(default_alloc(), v, "type");
     if (ty != 0 && _reg_type_known(ty) == 0) { _reg_warn_kw(tool, key, "an unknown type"); }

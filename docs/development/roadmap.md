@@ -33,14 +33,13 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.11 — JSON Schema coverage, its sixth bite: `multipleOf` and `pattern`.** `multipleOf` is exact
-arithmetic on the decimals bote already compares (`_sch_num_cmp`); `pattern` is an engine of its own, the
-ECMA-262 subset JSON Schema names, matched in time linear in the string, never by backtracking a client's
-input can make exponential, and charged to the budget per byte it reads as 3.8.10's keywords are. A pattern
-the engine does not take is warned of and judges nothing, as now. Then `patternProperties` (and
-`additionalProperties` beside it, which turns on it), `format` (the official client enforces it through
-ajv-formats, so its list is the one to match), `$recursiveRef` / `$dynamicRef`, and the `unevaluated*`
-keywords, which need to know what every other keyword judged.
+**3.8.12 — JSON Schema coverage, its seventh bite: `patternProperties`.** 3.8.11's engine judges a key as
+it judges a string, so a member a pattern names is judged by that schema, and `additionalProperties` beside
+`patternProperties` covers only the members neither names (it is not judged there today, with a WARN). Each
+key's matches are charged to the budget, a schema with many patterns over an object with many members being
+the product of both. Then `format` (the official client enforces ajv-formats' list, so that list is the one to
+match), `$recursiveRef` / `$dynamicRef`, and the `unevaluated*` keywords, which need to know what every other
+keyword judged.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
@@ -56,8 +55,9 @@ stdio's) are each one connection's, and a worker per connection would need a hom
   Schema's equality, `const`, `enum` of any value and `uniqueItems`, and type arrays; since 3.8.8
   `prefixItems`, `contains` with its counts, `propertyNames`, `dependentRequired` and `dependentSchemas`; since
   3.8.9 composition, `allOf`, `anyOf`, `oneOf`, `not`, `if` / `then` / `else`, under a budget of work; since
-  3.8.10 `$ref` within its document, under a depth. It still
-  warns at registration of what it lists and does not judge: `$dynamicRef`, `$recursiveRef`, `pattern`, `multipleOf`, `format` (which the
+  3.8.10 `$ref` within its document, under a depth; since 3.8.11 `pattern`, by an engine of bote's own held to
+  JavaScript's, and `multipleOf`, exactly. It still
+  warns at registration of what it lists and does not judge: `$dynamicRef`, `$recursiveRef`, `format` (which the
   official client enforces), `patternProperties` (and `additionalProperties` beside it), the `unevaluated*`
   keywords, draft-07's array `items`, `additionalItems` and `dependencies`. Numbers
   are compared exactly, where a client holding them as doubles may find two equal that bote does not: past 15

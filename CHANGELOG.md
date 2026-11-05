@@ -18,7 +18,212 @@ have per release.
 
 _(empty)_
 
+## [3.8.11] — 2026-11-04 · Patterns and multiples
+
+**`pattern` is judged**, by an engine of bote's own (`src/regex.cyr`, a core module). It reads a pattern as the
+official client's Ajv compiles it, `new RegExp(pattern, "u")`. It matches code points, so `^.{3}$` takes
+"été", and it takes the `u` flag's stricter syntax: an escape of a letter that means nothing, a lone `{`, `}` or
+`]`, or a quantifier on an assertion is no pattern. A pattern compiles once, at registration, to a program for a
+Thompson machine. The machine follows every way the pattern can match at once, one code point at a time, so a
+string costs its length times the program's length at most. No pattern can be made to backtrack: `(a*)*b`
+against 30,000 `a`s takes a few times what `z` does. Each step is charged to the judgement's budget.
+Backreferences, lookahead and lookbehind, `\p{...}`, inline modifiers and programs past 4,096 steps are not taken.
+Such a pattern judges nothing, and registration says why.
+
+Against JavaScript itself (`scripts/regex-diff.sh`, which runs node; not CI), 60,000 random patterns over every
+construct the engine parses or declines, each with ten strings:
+- every one of 280,920 verdicts the same;
+- no pattern JavaScript refuses taken;
+- none it takes refused as a syntax error;
+- 1,013 declined for a construct the engine does not take.
+
+**Seven defects in 3.8.10 land beside it**, from an independent review of that release, which drew random schemas
+with references against the official client's Ajv. The worst two are denials of service that `$ref` opened. One call
+of 60 KB took 21 s, as a walk's bytes went uncharged. A 40 KB call kept 204 MB, as long keys were copied for every
+judgement. See the correction notice in 3.8.10.
+
+**`multipleOf` is judged, exactly**: a value is a multiple when dividing it by `multipleOf` leaves an integer, read
+as decimals of any length. `19.99` is a multiple of `0.01` here. The official client divides as doubles, and finds
+`19.99` no multiple of `0.01` (`1998.9999999999998`), so registration warns of a `multipleOf` that is no integer.
+`multipleOf: 0` refuses every number, as the client's does; a negative one is judged by its size, as the client
+judges it.
+
+The stated minimum cyrius (6.7.13) is unchanged.
+
+### Added
+
+- **`src/regex.cyr`** (core, after `jsonx.cyr` in both profiles: the core bundle has 14 modules, the full one 40):
+  - `bote_rx_compile(src)`, `bote_rx_why(rx)` (0, or why the engine does not take it), `bote_rx_count(rx)`.
+  - `bote_rx_test_a(a, rx, buf, s, e, bud)`: 1 when the pattern matches somewhere in the JSON string body
+    `[s, e)`, 0 when it does not, -1 when the budget `bud` ran out first. Its four arrays come from `a` and are
+    given back, so nothing stays on the heap.
+  - The string is read as `_sv_strlen` reads it: escapes decoded, a surrogate pair one code point, a lone
+    surrogate itself, and bytes that are no UTF-8 a U+FFFD for each maximal part.
+  - Supported: classes (ranges, `\d \w \s` and their complements, `[^]`), `.` (no line terminator), `^ $ \b \B`,
+    groups (capturing, `(?:`, `(?<name>`), alternation, and every quantifier, lazy ones matching what greedy
+    ones do.
+  - lib/regex.cyr is not used: it matches bytes, keeps its compile and match state in globals that worker threads
+    would share, and allocates on the heap for every match. Filed in cyrius.
+- **`pattern` and `multipleOf`** (`src/schema.cyr`): PropertyDef is 296 bytes, +280 the compiled pattern and +288
+  `multipleOf` (`_sch_multiple_of`: its significant digits as an integer, at most 17, and the power of ten they
+  are times). `_sch_is_multiple` divides exactly: D × 10^p is a multiple of M × 10^q when M divides
+  D × 10^(p−q), never when p < q, and a power of ten past 64 divides as 64 does. A violation reads `does not
+  match the pattern` or `not a multiple of multipleOf`.
+- **`scripts/regex-diff.sh`**, with `tests/fixtures/regex_diff_gen.mjs` and `tests/fixtures/regex_diff.cyr`: the
+  differential against JavaScript. CI builds the comparison program.
+
+### Fixed
+
+From the review of 3.8.10:
+
+- **A walk's bytes were uncharged** (HIGH). `_sv_object` and `_sv_array` charge the budget one for every four bytes
+  their walk reads (`BOTE_SCH_WALK_BYTES`), and stop once their slot is full. That is what a quiet judgement's
+  first miss does. The 60 KB recursive union is refused as too much to judge, its time growing with its size, as
+  is the same of arrays.
+- **A long key's copy was kept for every judgement** (HIGH). It is given back once the key is looked up, and its
+  path is written from the key as written. Twenty levels of 2,000-byte keys keep nothing on the heap, and take under
+  a megabyte of the arena.
+- **Registration read references otherwise than the official client** (MEDIUM). It reads them as Ajv 8 does:
+  - anchors and `$id`s from what json-schema-traverse reaches (`_sch_ajv_nodes`): nothing on the root, no array
+    but under `items` and the composition keywords, and any other key's object but those it skips;
+  - one name twice refused, even on one schema;
+  - only the references the dialect's engine compiles, reached from the root (`_sch_reach`, `_sch_kids`): 2020-12
+    without `additionalItems`, draft-07 without `prefixItems`, `dependentSchemas` or the `unevaluated*` keywords,
+    `then` and `else` only beside `if`, `dependencies` in each;
+  - a reference resolved against the root's `$id` as a URI is resolved (relative, absolute-path, dot segments, the
+    scheme and host in any case), and `""` as the root;
+  - a reference to an anchor on the root refused with a word on how to write it: `#`.
+- **An argument's integer past a handler's range was refused on sight** (LOW). A quiet judgement reports whether it
+  took one as an integer (`_sv_matches` 2). `anyOf` refuses it only when every schema taking the value took it so,
+  and `oneOf` when its one match did. `not`, `if` and `contains` pass it by, as they type nothing.
+- **An inputSchema root's `const` and `enum` judged nothing** (LOW, older than 3.8.10). Each is judged
+  (`_sch_fill_eq`), so `{"type":"object","const":{"a":1}}` refuses `{"a":2}`.
+- **A batch's results drew on its arguments' base** (LOW). They share a base of their own
+  (`BOTE_REQ_STATE_POOL_OUT`, the request state's +176, 184 bytes).
+- **A violation's name** (LOW): the arguments' own is pushed bare, and nothing is stripped from another's.
+  A member named `": x"` reads `: x: expected string`.
+
+### Changed
+
+- Registration no longer warns of `pattern` or `multipleOf` as unenforced. It warns of:
+  - a pattern the engine does not take, and why (`pattern bote's engine does not take, for a lookbehind`);
+  - a pattern that is no string;
+  - a `multipleOf` that is no number, 0, below 0, of more than 17 significant digits, or no integer.
+
+### Tests
+
+- **`tests/bote_regex.tcyr`**, 100, new:
+  - Each construct declined, and each the `u` flag refuses, by its reason.
+  - Eleven kinds of pattern taken.
+  - Matching as JavaScript matches: anywhere unless anchored; the empty string; code points, astral and lone
+    surrogates; `.` and the four line terminators; `\s` as ECMA-262's white space; `\w` and `\d` as ASCII's;
+    word boundaries at the ends; ranges past ASCII and astral; `[\b]`; `\u{...}`, pairs, `\x`, `\c`, `\/`, `\0`;
+    JSON escapes in the value; every quantifier, lazy ones; loops that may match nothing; `^` in a group;
+    bytes that are no UTF-8.
+  - Four patterns that backtrack exponentially elsewhere, linear here.
+  - The budget stopping a match, and charging each step.
+  - 0 heap bytes for 1,000 matches; the arena given back, a 4,001-step program's arrays too.
+- **`tests/bote_schema_pattern.tcyr`**, 79, new:
+  - `pattern` on strings only, decoded as JSON, anywhere, by code points; one declined, one no client
+    compiles and one that is no string, each judging nothing; beside the lengths; under `anyOf` and `not`; on
+    `propertyNames`, decoded; through the dispatcher and a result.
+  - `multipleOf` on 32 pairs, exactly, past 2^64, past a double's range, with exponents and fractions; zero,
+    negative, 17 and 18 digits, no number; numbers only; beside the bounds; 19.99 for 0.01 through the dispatcher.
+  - The budget: 256 patterns over 60 KB, and a 200,000-digit number under 256 `multipleOf`s, each refused, in
+    under 64 times one alternative's time.
+  - The WARNs; 0 heap bytes for refused calls; the arena's first chunk; the heap form.
+- **`tests/bote_schema_ref.tcyr`**, 169, from 120, the review of 3.8.10:
+  - Registration as the client's Ajv reads it: an anchor on the root (three kinds), under `prefixItems`, one name
+    twice two ways, under an unknown keyword and `contentSchema` but not `default`; references relative to the
+    root's `$id` four ways and in another case, another document refused, `""`; `then` without `if`, draft-07's
+    `dependentSchemas`, 2020-12's `dependencies`; keywords a dialect's engine does not compile; a `$ref` that is no
+    string, where it is compiled and where it is not.
+  - A recursive union of objects and one of arrays over 60 KB, each refused, its time four times its quarter's at
+    most.
+  - Twenty levels of 2,000-byte keys keeping nothing on the heap, and under a megabyte of the arena.
+  - `1e30` under `anyOf` of integer and number, `contains`, `not`, `if` and `oneOf` taken; under `anyOf` of integer
+    and null, and a `oneOf` met only by the integer, refused.
+  - A root's `const` and `enum`; a batch's valid result after a call whose arguments spent their base; violation
+    names.
+  - Five expectations changed with the reading: a definition nothing names compiles nothing.
+- **`tests/bote.tcyr`**, **`tests/bote_output.tcyr`**, **`tests/bote_schema_parts.tcyr`** (78, from 77): their
+  examples of a keyword bote does not judge are `patternProperties`, `format` and `unevaluatedProperties` now.
+  `propertyNames` with a `pattern` is judged.
+- **45 mutants, 45 killed**, in the engine (each op of the machine, each assertion, the closure's split, the loops a
+  quantifier compiles to, the code point decoder, the class escapes, each refusal of the `u` flag's syntax, the
+  bounds, the budget and the arena), the schema's two keywords (the exponent loop and the 17-digit bound among
+  them, each found untested while the list was written and tested before the run) and the WARNs.
+- **31 mutants of the review's fixes, 31 killed.** Two survived the first run, each a gap now tested:
+  - Dropping the array walk's charge: the test's arrays met `contains` with `const`, which charges each item's bytes
+    and bounded the work by itself. Its arrays now fail `maxItems` and `minItems`, which read nothing. Without the
+    charge, 60 KB takes 36 s.
+  - Dropping a long key's release: the walk's charge now bounds how often an object is judged, so 2,000-byte keys
+    showed nothing. Ten levels of 6,000-byte keys and a 256 KB arena bound do: 128 KB with the release, 320 KB
+    without.
+- **`fuzz/regex.fcyr`**, new: random pattern trees written in every spelling the `u` flag takes, random strings
+  raw and escaped, each judged by the tree by a reference that shares none of the engine. 77,065 matches and
+  82,935 misses a run.
+- **`fuzz/schema_walk.fcyr`**: `multipleOf` of 2, 3 or 0.5, and five patterns, each judged by hand.
+
+### Performance
+
+**A call costs what it did; a pattern costs its match.** Interleaved A/B against 3.8.10, 15 rounds pinned to one
+core, the working tree's benches on both sides (the two new ones on this side only). Minimums, in ns:
+
+| Bench | 3.8.10 | 3.8.11 | Delta |
+|---|---:|---:|---:|
+| `codec_process_message` | 4,344 | 4,385 | +0.9% |
+| `dispatch_tools_call` | 2,661 | 2,700 | +1.5% |
+| `dispatch_tools_call_result` | 2,380 | 2,401 | +0.9% |
+| `dispatch_tools_call_structured` | 3,959 | 4,499 | +13.6% |
+| `dispatch_tools_call_output` | 5,908 | 6,412 | +8.5% |
+| `validate_compiled_simple` | 562 | 562 | +0.0% |
+| `validate_compiled_nested` | 1,047 | 1,113 | +6.3% |
+| `libro_export_100` | 1,839,000 | 1,846,000 | +0.4% |
+| `fs_read_64k` | 3,724,000 | 3,731,000 | +0.2% |
+| `schema_compile_simple` | 14,412 | 15,634 | +8.5% |
+| `schema_compile_nested` | 33,248 | 34,713 | +4.4% |
+| `regex_slug` (new) | | 2,431 | |
+| `validate_compiled_text` (new) | | 2,858 | |
+
+- **The structured rows' 13.6% and 8.5% are where dispatch's code now sits, not work.** Nothing on that path changed,
+  and it allocates the 216 bytes a call it did. Code that is never called, appended to `registry.cyr` in a copy of
+  this tree, takes the structured call from 4,420 ns to between 3,930 and 3,970 at each of five sizes, where 3.8.10
+  is 3,990 to 4,030.
+- **`validate_compiled_nested`'s 6.3% is position too.** 3.8.10 with `src/regex.cyr` included and never called runs
+  it at 1,146 ns, against 1,057 without and 3.8.11's 1,129. `jsonx_get_str_flat` and `codec_serialize_response`,
+  which nothing touches, moved −6.5% and −6.3% the same way, and at 3.8.7 +12% and +7%.
+- **A slug's pattern on 27 characters is 2.4 µs** (`regex_slug`): the Thompson machine reading 27 code points
+  against a 15-step program, its arrays taken from the arena and given back.
+- **Registration compiles a pattern and reads `multipleOf`**, about 1.1 µs more a property, paid once a
+  definition, never for a call.
+
 ## [3.8.10] — 2026-11-04 · References
+
+> ⚠ **Corrected at 3.8.11.** These claims below were not true, found by an independent review of this release.
+> - "`uniqueItems` over 64 KB under 256 alternatives is refused as too much to judge ... each well under a second"
+>   holds, but the budget still did not bound what a judgement reads. Each object's and array's walk read its members
+>   uncharged, and `$ref` lets a small schema judge one object many times. A recursive union shaped as zod writes one,
+>   over 60 KB of arguments, took 21 s for one call.
+> - Nothing kept on the heap: a key of 256 bytes or more, in an object whose schema names more than eight
+>   properties, was copied for every judgement of it and never given back. With `allOf` inheritance through `$ref`,
+>   a 40 KB call kept 204 MB.
+> - "Each is resolved at registration, as the official client's Ajv resolves it". Not as Ajv reads them:
+>   - Taken here and not compilable by the client, which then cannot call the tool: an anchor on the root (Ajv
+>     registers nothing there), one under `prefixItems` (its walk does not reach it), and one name used twice on one
+>     schema.
+>   - Refused here and compiled by the client: an anchor under an unknown keyword; a reference relative to the root's
+>     `$id`, or with its scheme and host in another case; `$ref: ""`; `then` without `if`, and draft-07's
+>     `dependentSchemas`, counted as cycles; and a reference in a definition nothing names, or under a keyword its
+>     dialect's engine does not compile.
+> - "A quiet judgement still takes it as JSON Schema does, and ... the root refuses the arguments". It marked the
+>   arguments on sight of the integer. `1e30` under `anyOf: [{"type":"integer","maximum":100},{"type":"number"}]`,
+>   `contains`, `not`, `oneOf` and `if` was refused where 3.8.9 and the client take it.
+> - "A batch's judgements share one" base. A batch's results shared its arguments' base, so a valid result was
+>   refused after another call's arguments spent it.
+> - "A violation of the arguments as a whole is named once". It was named by stripping `": "` from every violation,
+>   so a member named `""` read as the arguments, and one named `": x"` read as `x`.
+> - The stack the depth takes: `dependentSchemas` is the deepest shape, at 375 KB, not `anyOf`.
 
 **`$ref` is judged, within its document**: `#`, a JSON Pointer into `$defs` or anywhere else (`#/$defs/node`,
 `#/properties/a`, `#/allOf/0`), an anchor (`#node`, from `$anchor`, `$dynamicAnchor` or draft-07's `$id: "#node"`),
