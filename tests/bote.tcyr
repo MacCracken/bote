@@ -2732,8 +2732,8 @@ fn main() {
     assert_eq(vec_len(compiled_validate(fcomp, "{\"other\":1}")), 0, "schema: ...and is only about its own key");
     var wprops = vec_new();
     # (3.8.5) maxLength is judged now; pattern is not. (3.8.7) Nor format; a type array is.
-    # (3.8.11) pattern is judged now; patternProperties is not.
-    vec_push(wprops, schema_prop_new("p", "{\"type\":\"object\",\"patternProperties\":{\"^a\":{}}}"));
+    # (3.8.11) pattern is judged now; patternProperties is not. (3.8.12) It is too; unevaluatedProperties is not.
+    vec_push(wprops, schema_prop_new("p", "{\"type\":\"object\",\"unevaluatedProperties\":false}"));
     vec_push(wprops, schema_prop_new("q", "{\"type\":[\"string\",\"null\"],\"format\":\"email\"}"));
     var loose_reg = tool_registry_new();
     _lc_begin();

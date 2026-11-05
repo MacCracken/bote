@@ -215,16 +215,20 @@ jobs:
             exit 1
           fi
 
-      - name: Regex differential builds
-        # tests/fixtures/regex_diff.cyr is run by hand, through scripts/regex-diff.sh, because
-        # its cases come from node. Building it here keeps it from rotting.
+      - name: Differentials build
+        # tests/fixtures/regex_diff.cyr and ref_diff.cyr are run by hand, through
+        # scripts/regex-diff.sh and scripts/ref-diff.sh, because their cases come from node
+        # (and the second's from the client's own Ajv). Building them here keeps them from
+        # rotting.
         run: |
-          out=$(cyrius build tests/fixtures/regex_diff.cyr build/regex-diff-compare 2>&1)
-          echo "$out" | tail -1
-          if echo "$out" | grep -q 'undefined function'; then
-            echo "$out" | grep 'undefined function'
-            exit 1
-          fi
+          for unit in regex_diff ref_diff; do
+            out=$(cyrius build "tests/fixtures/$unit.cyr" "build/$unit-compare" 2>&1)
+            echo "$unit: $(echo "$out" | tail -1)"
+            if echo "$out" | grep -q 'undefined function'; then
+              echo "$out" | grep 'undefined function'
+              exit 1
+            fi
+          done
 
       - name: Verify ELF
         run: xxd -l 4 build/bote | grep -q "7f45 4c46"

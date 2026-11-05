@@ -112,6 +112,12 @@ fn _many(n, item) {
 }
 
 var _lc_all = 0;
+fn _rep_s(x, n) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < n) { str_builder_add_cstr(sb, x); i = i + 1; }
+    return str_data(str_builder_build(sb));
+}
 fn _lc_hook(ts, level, category, msg, msg_len, sixth) {
     var n = msg_len;
     if (n > 1023) { n = 1023; }
@@ -281,6 +287,8 @@ fn main() {
     var wd = dispatcher_new(tool_registry_new());
     dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_p", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"pattern\":\"(?<=x)y\"},\"b\":{\"pattern\":\"[\"},\"c\":{\"pattern\":5},\"d\":{\"multipleOf\":\"2\"},\"e\":{\"multipleOf\":0},\"f\":{\"multipleOf\":-2},\"g\":{\"multipleOf\":0.01},\"h\":{\"multipleOf\":123456789012345678}}}"), &h_ret);
     dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_ok", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"pattern\":\"^[a-z]+$\"},\"b\":{\"multipleOf\":5},\"c\":{\"multipleOf\":2.5e1}}}"), &h_ret);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_pp", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"patternProperties\":{\"(?<=x)y\":{}},\"additionalProperties\":false},\"b\":{\"patternProperties\":[1]}}}"), &h_ret);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_ppok", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"patternProperties\":{\"^x\":{}},\"additionalProperties\":false}"), &h_ret);
     _lc_end();
     assert(_lc_find("pattern bote's engine does not take, for a lookbehind") != 0, "warn: a pattern the engine declines, and why");
     assert(_lc_find("pattern bote's engine does not take, for an unterminated character class") != 0, "warn: ...one no client compiles");
@@ -292,6 +300,113 @@ fn main() {
     assert(_lc_find("multipleOf of more than 17 significant digits") != 0, "warn: too many digits");
     assert(_lc_find("tool=w_ok") == 0, "warn: none for a pattern taken, an integer multipleOf, 2.5e1");
     assert(_lc_find("keyword=pattern") == 0 && _lc_find("keyword=multipleOf") == 0, "warn: neither as unenforced");
+    assert(_lc_find("a patternProperties pattern bote's engine does not take, for a lookbehind") != 0, "warn: patternProperties declining a pattern, and why (3.8.12)");
+    assert(_lc_find("additionalProperties beside a pattern bote's engine does not take, which judges nothing") != 0, "warn: ...and additionalProperties beside it");
+    assert(_lc_find("patternProperties that is no object") != 0, "warn: patternProperties that is no object");
+    assert(_lc_find("tool=w_ppok") == 0, "warn: none for patternProperties and additionalProperties both judged");
+    # (3.8.12, from the 3.8.11 review) An integer multipleOf a double holds inexactly, or not at all.
+    _lc_begin();
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_m53", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"multipleOf\":1e20}}}"), &h_ret);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_minf", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"multipleOf\":1e400}}}"), &h_ret);
+    dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_mfit", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"properties\":{\"a\":{\"multipleOf\":9007199254740992}}}"), &h_ret);
+    _lc_end();
+    var l53 = _lc_find("tool=w_m53");
+    assert(l53 != 0 && _has(l53, "multipleOf past 2^53") == 1, "warn: multipleOf 1e20, past 2^53");
+    var linf = _lc_find("tool=w_minf");
+    assert(linf != 0 && _has(linf, "multipleOf past a double's range") == 1, "warn: multipleOf 1e400, past a double's range");
+    assert(_lc_find("tool=w_mfit") == 0, "warn: none for 2^53 itself");
+    var msz = vec_new();
+    vec_push(msz, "9007199254740992"); vec_push(msz, 0);
+    vec_push(msz, "9007199254740993"); vec_push(msz, 1);
+    vec_push(msz, "900719925474099e1"); vec_push(msz, 0);
+    vec_push(msz, "900719925474100e1"); vec_push(msz, 1);
+    vec_push(msz, "999999999999999"); vec_push(msz, 0);
+    vec_push(msz, "1e16"); vec_push(msz, 1);
+    vec_push(msz, "1e15"); vec_push(msz, 0);
+    vec_push(msz, "1e308"); vec_push(msz, 1);
+    vec_push(msz, "1.7976931348623157e308"); vec_push(msz, 1);
+    vec_push(msz, "1.7976931348623158e308"); vec_push(msz, 2);
+    vec_push(msz, "1e309"); vec_push(msz, 2);
+    vec_push(msz, "17"); vec_push(msz, 0);
+    vec_push(msz, "0.5"); vec_push(msz, 0);
+    var mzi = 0;
+    while (mzi < vec_len(msz)) {
+        assert_eq(_reg_multiple_size(_sch_multiple_of(vec_get(msz, mzi))), vec_get(msz, mzi + 1), _cat("warn: the size of multipleOf ", vec_get(msz, mzi)));
+        mzi = mzi + 2;
+    }
+    # (3.8.12, from the 3.8.11 review) Exponents of seven digits and more: each was read as its
+    # first six, so 1e1000000 equalled 1e100000.
+    assert_eq(_sch_num_cmp("1e1000000", "1e100000"), 1, "exponents: 1e1000000 above 1e100000 (they were equal)");
+    assert_eq(_sch_num_cmp("1e-1000000", "1e-100000"), 0 - 1, "exponents: 1e-1000000 below 1e-100000");
+    assert_eq(_sch_num_cmp("1e1500000", "1e150000"), 1, "exponents: 1e1500000 above 1e150000");
+    assert_eq(_sch_num_cmp("2e999999999999999", "1e999999999999999"), 1, "exponents: 15 digits of them");
+    assert_eq(_sch_num_cmp("1e200000", "1e150000"), 1, "exponents: six digits, as before");
+    assert(_ok("{\"maximum\":1e100000}", "1e1000000") == 0, "exponents: 1e1000000 past maximum 1e100000, refused (it met it)");
+    assert(_ok("{\"multipleOf\":1e100000}", "1e1000000") == 1 && _ok("{\"multipleOf\":1e1000000}", "1e100000") == 0, "exponents: multipleOf across them (1e100000 was a multiple of 1e1000000)");
+
+    # ---- (3.8.12) patternProperties ----
+    var ppx = "{\"patternProperties\":{\"^s_\":{\"type\":\"string\"},\"^n_\":{\"type\":\"integer\"}}}";
+    assert(_ok(ppx, "{\"s_a\":\"x\",\"n_b\":1,\"other\":true}") == 1, "patternProperties: each member by the pattern its key matches, the rest free");
+    _ase(_v0(ppx, "{\"s_a\":1}"), "v.s_a: expected string", "patternProperties: ...a value refused, at its key");
+    _ase(_v0(ppx, "{\"n_b\":\"x\"}"), "v.n_b: expected integer", "patternProperties: ...by the other pattern");
+    var p2 = "{\"patternProperties\":{\"^a\":{\"maxLength\":3},\"b$\":{\"minLength\":2}}}";
+    assert(_ok(p2, "{\"ab\":\"abc\"}") == 1, "patternProperties: two patterns matching one key, both met");
+    assert(_ok(p2, "{\"ab\":\"abcd\"}") == 0 && _ok(p2, "{\"ab\":\"a\"}") == 0, "patternProperties: ...each judging it");
+    var p3 = "{\"properties\":{\"ax\":{\"type\":\"string\"}},\"patternProperties\":{\"^a\":{\"maxLength\":1}}}";
+    assert(_ok(p3, "{\"ax\":\"long\"}") == 0 && _ok(p3, "{\"ax\":1}") == 0 && _ok(p3, "{\"ax\":\"l\"}") == 1, "patternProperties: beside properties, a member judged by both");
+    var p4 = "{\"properties\":{\"id\":{}},\"patternProperties\":{\"^x-\":{}},\"additionalProperties\":false}";
+    assert(_ok(p4, "{\"id\":1,\"x-a\":2}") == 1, "patternProperties: additionalProperties false takes what properties and the patterns name");
+    _ase(_v0(p4, "{\"id\":1,\"y\":2}"), "v.y: additional property not allowed", "patternProperties: ...and refuses the rest");
+    var p5 = "{\"patternProperties\":{\"^n\":{\"type\":\"integer\"}},\"additionalProperties\":{\"type\":\"string\"}}";
+    assert(_ok(p5, "{\"n1\":1,\"s\":\"x\"}") == 1 && _ok(p5, "{\"n1\":\"x\"}") == 0 && _ok(p5, "{\"s\":1}") == 0, "patternProperties: an additionalProperties schema judges only the unmatched");
+    assert(_ok("{\"patternProperties\":{\"^ab$\":{\"type\":\"string\"}}}", "{\"\\u0061b\":1}") == 0, "patternProperties: a key as it decodes");
+    assert(_ok("{\"patternProperties\":{\"^.{2}$\":{\"type\":\"string\"}}}", "{\"\xc3\xa9\xf0\x9f\x98\x80\":1}") == 0, "patternProperties: ...by code points");
+    assert(_ok("{\"patternProperties\":{\"b\":{\"type\":\"string\"}}}", "{\"abc\":1}") == 0 && _ok("{\"patternProperties\":{\"^b\":{\"type\":\"string\"}}}", "{\"abc\":1}") == 1, "patternProperties: anywhere in the key, unless anchored");
+    var lk = str_builder_new();
+    str_builder_add_cstr(lk, "{\"properties\":{\"a1\":{},\"a2\":{},\"a3\":{},\"a4\":{},\"a5\":{},\"a6\":{},\"a7\":{},\"a8\":{},\"a9\":{}},\"patternProperties\":{\"^k+$\":{\"type\":\"string\"}},\"additionalProperties\":false}");
+    var lv = str_builder_new();
+    str_builder_add_cstr(lv, "{\"");
+    var li = 0;
+    while (li < 300) { str_builder_add_cstr(lv, "k"); li = li + 1; }
+    str_builder_add_cstr(lv, "\":1}");
+    assert(_ok(str_data(str_builder_build(lk)), str_data(str_builder_build(lv))) == 0, "patternProperties: a 300-byte key past eight names, matched");
+    assert(_ok("{\"patternProperties\":{\"(?=a)\":{\"type\":\"string\"}}}", "{\"ab\":1}") == 1, "patternProperties: a pattern the engine declines judges nothing");
+    assert(_ok("{\"patternProperties\":{\"(?=a)\":{},\"^z\":{\"type\":\"string\"}}}", "{\"z\":1}") == 0, "patternProperties: ...the others judge");
+    var ppa = "{\"anyOf\":[{\"patternProperties\":{\"^a\":{\"type\":\"string\"}},\"required\":[\"a\"]},{\"patternProperties\":{\"^b\":{\"type\":\"integer\"}},\"required\":[\"b\"]}]}";
+    assert(_ok(ppa, "{\"a\":\"x\"}") == 1 && _ok(ppa, "{\"b\":1}") == 1 && _ok(ppa, "{\"a\":1}") == 0, "patternProperties: under anyOf, quietly");
+    dispatcher_register_tool(d, tool_def_new("t_pp", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"}},\"patternProperties\":{\"^tag_[a-z]+$\":{\"type\":\"string\",\"maxLength\":8}},\"additionalProperties\":false}")), &h_tool);
+    assert(_has(_call(d, "t_pp", "{\"name\":\"n\",\"tag_env\":\"prod\"}"), "\"text\":\"ok\"") == 1, "patternProperties: arguments met, through the dispatcher");
+    assert(_has(_call(d, "t_pp", "{\"tag_env\":\"production-eu\"}"), "tag_env: longer than maxLength") == 1, "patternProperties: ...a pattern's schema refusing one");
+    assert(_has(_call(d, "t_pp", "{\"tag_1\":\"x\"}"), "tag_1: additional property not allowed") == 1, "patternProperties: ...a key no pattern matches");
+    dispatcher_register_tool(d, tool_def_with_output_schema(tool_def_new("t_ppo", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"patternProperties\":{\"^m_\":{\"type\":\"number\"}}}"), &h_ret);
+    _ret = "{\"content\":[],\"structuredContent\":{\"m_a\":1.5}}";
+    assert(_has(_call(d, "t_ppo", "{}"), "isError") == 0, "patternProperties: a result met");
+    _ret = "{\"content\":[],\"structuredContent\":{\"m_a\":\"x\"}}";
+    assert(_has(_call(d, "t_ppo", "{}"), "structuredContent.m_a: expected number") == 1, "patternProperties: ...and refused");
+    # The budget: every key against every pattern, each step of each match charged.
+    var bpp = str_builder_new();
+    str_builder_add_cstr(bpp, "{\"patternProperties\":{");
+    li = 0;
+    while (li < 64) { if (li > 0) { str_builder_add_cstr(bpp, ","); } str_builder_add_cstr(bpp, "\"^(a|aa)*c"); str_builder_add_int(bpp, li); str_builder_add_cstr(bpp, "\":{}"); li = li + 1; }
+    str_builder_add_cstr(bpp, "}}");
+    var bkv = str_builder_new();
+    str_builder_add_cstr(bkv, "{");
+    li = 0;
+    while (li < 100) {
+        if (li > 0) { str_builder_add_cstr(bkv, ","); }
+        str_builder_add_cstr(bkv, "\"");
+        var lj = 0;
+        while (lj < 500) { str_builder_add_cstr(bkv, "a"); lj = lj + 1; }
+        str_builder_add_int(bkv, li);
+        str_builder_add_cstr(bkv, "\":0");
+        li = li + 1;
+    }
+    str_builder_add_cstr(bkv, "}");
+    var bpv = str_data(str_builder_build(bkv));
+    var bpp1 = parse_property(str_data(str_builder_build(bpp)));
+    var bvv = _sch_check_value_a(bote_req_begin(), bpp1, "v", bpv);
+    assert(bvv != 0 && streq(vec_get(bvv, vec_len(bvv) - 1), "v: more work to judge than its size allows") == 1, "patternProperties: 100 long keys against 64 patterns refused as too much to judge");
+    assert(_ns3(bpp1, bpv) < 64 * _ns3(parse_property("{\"patternProperties\":{\"^(a|aa)*c\":{}}}"), bpv), "patternProperties: ...in under 64 times one pattern's time");
 
     # ---- the heap and the arena ----
     var hm = _msg("tools/call", "\"name\":\"t_pat\",\"arguments\":{\"slug\":\"A--b\"}");
@@ -306,10 +421,23 @@ fn main() {
     wi = 0;
     while (wi < 50) { codec_process_message_a(bote_req_begin(), hm2, d, 0); wi = wi + 1; }
     assert_eq(alloc_used() - h1, 0, "heap: ...and fifty by multipleOf");
+    var hm3 = _msg("tools/call", "\"name\":\"t_pp\",\"arguments\":{\"tag_env\":\"production-eu\",\"tag_1\":1}");
+    codec_process_message_a(bote_req_begin(), hm3, d, 0);
+    var h3 = alloc_used();
+    wi = 0;
+    while (wi < 50) { codec_process_message_a(bote_req_begin(), hm3, d, 0); wi = wi + 1; }
+    assert_eq(alloc_used() - h3, 0, "heap: ...and fifty by patternProperties (3.8.12)");
     var fa = bote_req_arena_new();
     var fb = bote_req_arena_bytes(fa);
     assert(_sch_check_value_a(fa, parse_property("{\"type\":\"array\",\"items\":{\"anyOf\":[{\"pattern\":\"^x\"},{\"pattern\":\"^[0-9]+$\"}]}}"), "v", _many(5000, "\"12\"")) == 0, "arena: 5,000 items meeting the second of two patterns");
     assert_eq(bote_req_arena_bytes(fa), fb, "arena: ...each match's arrays given back, the first chunk");
+    var pkv = str_builder_new();
+    str_builder_add_cstr(pkv, "{");
+    wi = 0;
+    while (wi < 2000) { if (wi > 0) { str_builder_add_cstr(pkv, ","); } str_builder_add_cstr(pkv, "\"k"); str_builder_add_int(pkv, wi); str_builder_add_cstr(pkv, "\":\"x\""); wi = wi + 1; }
+    str_builder_add_cstr(pkv, "}");
+    assert(_sch_check_value_a(fa, parse_property("{\"patternProperties\":{\"^k[0-9]+$\":{\"type\":\"string\"},\"^z\":{}}}"), "v", str_data(str_builder_build(pkv))) == 0, "arena: 2,000 keys against two patterns (3.8.12)");
+    assert_eq(bote_req_arena_bytes(fa), fb, "arena: ...each match's arrays given back");
     var cc = _compile_object_body("{\"type\":\"object\",\"properties\":{\"l\":{\"type\":\"array\",\"items\":{\"pattern\":\"^[0-9]+$\",\"multipleOf\":3}}}}");
     var cv = _cat3("{\"l\":", _many(2000, "\"9\""), "}");
     assert_eq(vec_len(compiled_validate(cc, cv)), 0, "heap form: 2,000 strings through a pattern");
@@ -317,6 +445,69 @@ fn main() {
     wi = 0;
     while (wi < 5) { compiled_validate(cc, cv); wi = wi + 1; }
     assert((alloc_used() - hh) / 5 < 256, "heap form: ...keeping only its answer");
+
+    # ---- (3.8.12, from the 3.8.11 review) a root handed the heap ----
+    # A dispatcher's plain form judges on the heap allocator: what the walk makes went there
+    # and stayed, 128 KB a string for `^.{0,2000}$`. It is judged on the scratch now, and only
+    # the answer copied out.
+    var lp = parse_property("{\"type\":\"array\",\"items\":{\"type\":\"string\",\"pattern\":\"^.{0,2000}$\"}}");
+    var lsv = _many(100, "\"x\"");
+    assert(_sch_check_value_a(default_alloc(), lp, "v", lsv) == 0, "heap root: 100 strings through a 4,003-step pattern, met");
+    var hr = alloc_used();
+    wi = 0;
+    while (wi < 5) { _sch_check_value_a(default_alloc(), lp, "v", lsv); wi = wi + 1; }
+    assert_eq(alloc_used() - hr, 0, "heap root: ...keeping nothing (12.8 MB a call through 3.8.11)");
+    var lbad = _cat3("[\"x\",\"", _rep_s("y", 2001), "\"]");
+    var lr = _sch_check_value_a(default_alloc(), lp, "v", lbad);
+    assert(lr != 0 && vec_len(lr) == 1 && streq(vec_get(lr, 0), "v[1]: does not match the pattern") == 1, "heap root: a violation copied out whole");
+    hr = alloc_used();
+    _sch_check_value_a(default_alloc(), lp, "v", lbad);
+    assert(alloc_used() - hr < 256, "heap root: ...and only it kept");
+    var lc = _compile_object_body("{\"type\":\"object\",\"properties\":{\"l\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"pattern\":\"^.{0,2000}$\"}}}}");
+    var largs = _cat3("{\"l\":", lsv, "}");
+    assert(compiled_check_a(default_alloc(), lc, largs) == 0, "heap root: compiled_check_a, met");
+    hr = alloc_used();
+    wi = 0;
+    while (wi < 5) { compiled_check_a(default_alloc(), lc, largs); wi = wi + 1; }
+    assert_eq(alloc_used() - hr, 0, "heap root: ...keeping nothing");
+    # A walk that makes a table, uniqueItems over 1,000 integers: on the heap it was kept.
+    var uc = _compile_object_body("{\"type\":\"object\",\"properties\":{\"u\":{\"type\":\"array\",\"uniqueItems\":true}}}");
+    var usb = str_builder_new();
+    str_builder_add_cstr(usb, "[");
+    wi = 0;
+    while (wi < 1000) { if (wi > 0) { str_builder_add_cstr(usb, ","); } str_builder_add_int(usb, wi); wi = wi + 1; }
+    str_builder_add_cstr(usb, "]");
+    var uval = str_data(str_builder_build(usb));
+    var uargs = _cat3("{\"u\":", uval, "}");
+    assert(compiled_check_a(default_alloc(), uc, uargs) == 0, "heap root: compiled_check_a, 1,000 integers judged unique");
+    hr = alloc_used();
+    wi = 0;
+    while (wi < 5) { compiled_check_a(default_alloc(), uc, uargs); wi = wi + 1; }
+    assert_eq(alloc_used() - hr, 0, "heap root: ...keeping none of the walk's table");
+    var up = parse_property("{\"type\":\"array\",\"uniqueItems\":true}");
+    assert(_sch_check_value_a(default_alloc(), up, "v", uval) == 0, "heap root: _sch_check_value_a, the same array");
+    hr = alloc_used();
+    wi = 0;
+    while (wi < 5) { _sch_check_value_a(default_alloc(), up, "v", uval); wi = wi + 1; }
+    assert_eq(alloc_used() - hr, 0, "heap root: ...keeping none of it either");
+    var lcr = compiled_check_a(default_alloc(), lc, _cat3("{\"l\":", lbad, "}"));
+    assert(lcr != 0 && vec_len(lcr) == 1 && streq(vec_get(lcr, 0), "l[1]: does not match the pattern") == 1, "heap root: compiled_check_a's violation copied out");
+    var ld = dispatcher_new(tool_registry_new());
+    dispatcher_register_tool(ld, tool_def_new("t_long", "d", tool_schema_from_json("{\"type\":\"object\",\"properties\":{\"l\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"pattern\":\"^.{0,2000}$\"}}}}")), &h_tool);
+    var lreq = codec_parse_request(_msg("tools/call", _cat3("\"name\":\"t_long\",\"arguments\":", largs, "")));
+    var lresp = dispatcher_dispatch(ld, lreq, 0);
+    assert(lresp != 0, "heap root: dispatcher_dispatch, the plain form, answers");
+    hr = alloc_used();
+    wi = 0;
+    while (wi < 5) { dispatcher_dispatch(ld, lreq, 0); wi = wi + 1; }
+    assert((alloc_used() - hr) / 5 < 8192, "heap root: ...keeping its reply and not the walk's arrays");
+
+    # ---- (3.8.12, from the 3.8.11 review) making ready, charged through a schema ----
+    var ep = parse_property(_cat3("{\"type\":\"array\",\"items\":{\"type\":\"string\",\"pattern\":\"", _rep_s("a|", 1000), "\"}}"));
+    var ev = _many(20000, "\"\"");
+    var er = _sch_check_value_a(bote_req_begin(), ep, "v", ev);
+    assert(er != 0 && streq(vec_get(er, vec_len(er) - 1), "v: more work to judge than its size allows") == 1, "budget: 20,000 empty strings asked of 3,000 steps each, refused as too much to judge");
+    assert(_ns3(ep, ev) < 16 * _ns3(parse_property("{\"type\":\"array\",\"items\":{\"type\":\"string\",\"pattern\":\"^$\"}}"), ev) + 2000000, "budget: ...in a few times a one-step pattern's time over them");
     return assert_summary();
 }
 

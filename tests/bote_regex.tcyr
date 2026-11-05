@@ -2,7 +2,9 @@
 # and why it declines, each refusal of the u flag's syntax; matching as JavaScript matches
 # under the u flag (code points, line terminators, white space, word boundaries, classes,
 # escapes in the pattern and in the JSON string, bytes that are no UTF-8); linear time on the
-# patterns a backtracking engine takes exponential time over; the budget; the arena and heap.
+# patterns a backtracking engine takes exponential time over; the budget; the arena and heap;
+# (3.8.12, from the 3.8.11 review) the heap handed in, making ready charged, what matches only
+# the empty string, a name two groups share, a class sorted and merged.
 #
 # Run: cyrius test tests/bote_regex.tcyr
 
@@ -104,6 +106,31 @@ fn _ns(rx, s) {
     }
     return best;
 }
+# The best of three compiles of `p`, in ns.
+fn _cns(p) {
+    var best = 0;
+    var i = 0;
+    while (i < 3) {
+        var t = clock_now_ns();
+        bote_rx_compile(p);
+        var dt = clock_now_ns() - t;
+        if (i == 0 || dt < best) { best = dt; }
+        i = i + 1;
+    }
+    return best;
+}
+# The code point `cp` onto `sb` as UTF-8 (below U+10000).
+fn _u8(sb, cp) {
+    if (cp < 128) { str_builder_add_byte(sb, cp); }
+    elif (cp < 2048) { str_builder_add_byte(sb, 192 + cp / 64); str_builder_add_byte(sb, 128 + cp % 64); }
+    else {
+        str_builder_add_byte(sb, 224 + cp / 4096);
+        str_builder_add_byte(sb, 128 + (cp / 64) % 64);
+        str_builder_add_byte(sb, 128 + cp % 64);
+    }
+    return 0;
+}
+fn _u8s(cp) { var sb = str_builder_new(); _u8(sb, cp); return str_data(str_builder_build(sb)); }
 
 fn main() {
     alloc_init();
@@ -246,7 +273,93 @@ fn main() {
     var used = bote_req_arena_bytes(fa);
     bote_rx_test_a(fa, big, "aaaa", 0, 4, 0);
     assert_eq(bote_req_arena_bytes(fa), used, "arena: a large program's arrays given back for the next");
-    assert(used - bb < 200000, "arena: ...about 160 KB for 4,001 steps");
+    assert(used - bb < 200000, "arena: ...about 190 KB for 4,001 steps");
+
+    # ---- (3.8.12, from the 3.8.11 review) handed the heap ----
+    bote_rx_test_a(default_alloc(), big, "aaaa", 0, 4, 0);
+    var hh = alloc_used();
+    hi = 0;
+    while (hi < 100) { bote_rx_test_a(default_alloc(), big, "aaaa", 0, 4, 0); hi = hi + 1; }
+    assert_eq(alloc_used() - hh, 0, "heap: handed the heap, 100 matches of 4,001 steps keep nothing (the request arena's, given back)");
+    assert_eq(bote_rx_test_a(default_alloc(), big, "aaaa", 0, 4, 0), 1, "heap: ...and still match");
+
+    # ---- (3.8.12, from the 3.8.11 review) making ready, charged ----
+    # An empty string asked of 4,001 steps: their marks cleared, 500 of the budget, and its one
+    # first step.
+    var xr = bote_rx_compile(_rep("x", 4000));
+    store64(&bud, 450);
+    assert_eq(bote_rx_test_a(bote_req_begin(), xr, "", 0, 0, &bud), 0 - 1, "budget: an empty string asked of 4,001 steps is charged their clearing, -1");
+    store64(&bud, 600);
+    assert_eq(bote_rx_test_a(bote_req_begin(), xr, "", 0, 0, &bud), 0, "budget: ...within it, no match");
+    assert(load64(&bud) <= 600 - 501 && load64(&bud) > 0, "budget: ...an eighth of a step a mark, and the first step");
+    var ea = bote_rx_compile(_rep("a|", 1000));
+    var ean = bote_rx_count(ea);
+    assert(ean > 2000, "budget: (1,001 alternatives, the last empty)");
+    store64(&bud, 1000);
+    assert_eq(bote_rx_test_a(bote_req_begin(), ea, "", 0, 0, &bud), 0 - 1, "budget: the first turn's 2,000 steps, charged before they decide a match");
+    store64(&bud, ean * 3);
+    assert_eq(bote_rx_test_a(bote_req_begin(), ea, "", 0, 0, &bud), 1, "budget: ...within them, the empty string matches");
+
+    # ---- (3.8.12, from the 3.8.11 review) what matches only the empty string ----
+    assert_eq(bote_rx_count(bote_rx_compile("(?:){10000}")), 1, "empty: (?:){10000} is the match alone");
+    assert_eq(bote_rx_count(bote_rx_compile("a{0}")), 1, "empty: a{0} is the match alone");
+    assert_eq(bote_rx_count(bote_rx_compile("(?:|){5000}")), 1, "empty: an alternation of nothing, repeated, is nothing");
+    assert_eq(_why("(?:|){5000}"), "(none)", "empty: ...where 5,000 copies of its split were past the bound");
+    assert_eq(_why("(?:){0,10000}"), "(none)", "empty: (?:){0,10000} compiles, no 10,000 splits");
+    var cn0 = _cns("a{100}");
+    var e1 = "(((a{0}){10000}){10000}){10000}";
+    assert(_cns(e1) < 20 * cn0 + 2000000, "empty: three levels of 10,000 copies of a{0} compile in a few times a{100}'s time");
+    assert(_m(e1, "") == 1 && _m(e1, "xyz") == 1, "empty: ...and match every string, as JavaScript does");
+    var e2 = "(((?:){10000}){10000}){10000}";
+    assert(_cns(e2) < 20 * cn0 + 2000000, "empty: ...of an empty group");
+    var e3 = "((((?:)(?:)){10000}){10000}){10000}";
+    assert(_cns(e3) < 20 * cn0 + 2000000, "empty: ...of two empty groups in a row");
+    assert(_m("x(?:){3}y", "xy") == 1 && _m("^(?:a{0}b)$", "b") == 1 && _m("^(?:a{0}|c)d$", "d") == 1, "empty: matching unchanged around it");
+    assert(_m("^a{0}$", "") == 1 && _m("^a{0}$", "a") == 0 && _m("^(?:a{0,0})b$", "b") == 1, "empty: a{0} matches only the empty string");
+    assert(_m("(?:)^a", "ba") == 0 && _m("(?:)^a", "ab") == 1, "empty: a ^ after an empty group still anchors");
+    _ase(_why("(?:){2,1}"), "a quantifier whose bounds are out of order", "empty: its quantifier still read, bounds out of order");
+    _ase(_why("(?:)**"), "a quantifier on a quantifier", "empty: ...a quantifier on a quantifier");
+
+    # ---- (3.8.12, from the 3.8.11 review) a name two groups share ----
+    var dup = "two groups named alike that can both match, which the u flag refuses";
+    _ase(_why("(?<a>x)(?<a>y)"), dup, "names: two in a row");
+    _ase(_why("((?<a>x)|y)(?<a>z)"), dup, "names: one in an alternative, one after it");
+    _ase(_why("(?<a>(?<a>x))"), dup, "names: one inside the other");
+    _ase(_why("(?<a>x)|(?<a>(?<a>y))"), dup, "names: two inside one alternative");
+    _ase(_why("(?:(?<a>x)|y)(?:(?<a>z)|w)"), dup, "names: in two disjunctions one after the other");
+    _ase(_why("((?<a>x)|(?<b>y))(?<b>z)"), dup, "names: the second of two names");
+    _ase(_why("(?<a>x)|(?<a>y)"), "(none)", "names: in two alternatives, taken");
+    _ase(_why("(?:(?<a>x)|(?<a>y))"), "(none)", "names: in two alternatives of a group");
+    _ase(_why("(?<a>x)|((?<a>y)|(?<a>z))"), "(none)", "names: three, each in an alternative of its own");
+    _ase(_why("(?<a>x)|y|(?<a>z)"), "(none)", "names: the first and third alternatives");
+    _ase(_why("(?<ab>x)(?<a>y)"), "(none)", "names: a name and its prefix are two");
+    _ase(_why("(?<ab>x)(?<ac>y)"), "(none)", "names: two names of one length");
+    _ase(_why("(?<a>x){2}"), "(none)", "names: one group repeated is one");
+    assert(_m("(?<a>x)|(?<a>y)", "y") == 1 && _m("(?<a>x)|(?<a>y)", "z") == 0, "names: two alternatives match each");
+
+    # ---- (3.8.12, from the 3.8.11 review) a class's members, sorted and merged ----
+    assert(_m("^[a-zc-d]$", "n") == 1 && _m("^[c-da-z]$", "n") == 1 && _m("^[c-da-z]$", "{") == 0, "class: overlapping ranges merged, n in a-z beside c-d");
+    assert(_m("^[zyxa]$", "y") == 1 && _m("^[zyxa]$", "a") == 1 && _m("^[zyxa]$", "b") == 0 && _m("^[zyxa]$", "z") == 1, "class: members out of order");
+    assert(_m("^[\\D\\d]$", "5") == 1 && _m("^[\\D\\d]$", "\\ud83d\\ude00") == 1, "class: a class and its complement are everything");
+    assert(_m("^[^\\D\\d]$", "5") == 0 && _m("^[^\\D\\d]$", "x") == 0, "class: negated, nothing");
+    assert(_m("^[\\s\\w]$", " ") == 1 && _m("^[\\s\\w]$", "_") == 1 && _m("^[\\s\\w]$", "-") == 0 && _m("^[\\w\\s]$", "\\u3000") == 1, "class: two escapes' ranges interleaved");
+    assert(_m("^[a-cb-ex-z]$", "e") == 1 && _m("^[a-cb-ex-z]$", "f") == 0 && _m("^[a-cd-f]$", "d") == 1 && _m("^[x-za-c]$", "w") == 0, "class: chains and adjacent ranges");
+    var wsb = str_builder_new();
+    str_builder_add_cstr(wsb, "[");
+    var wi = 0;
+    while (wi < 4000) { _u8(wsb, 256 + wi * 2); wi = wi + 1; }
+    str_builder_add_cstr(wsb, "]");
+    var wide = bote_rx_compile(str_data(str_builder_build(wsb)));
+    assert_eq(bote_rx_why(wide), 0, "class: (4,000 members)");
+    var narrow = bote_rx_compile("[\\u0100\\u0102\\u0104\\u0106]");
+    var w0 = _u8s(256);
+    var wl = _u8s(256 + 3999 * 2);
+    var wm = _u8s(256 + 2001 * 2);
+    var wg = _u8s(256 + 2001 * 2 + 1);
+    assert(bote_rx_test_a(bote_req_begin(), wide, w0, 0, strlen(w0), 0) == 1 && bote_rx_test_a(bote_req_begin(), wide, wl, 0, strlen(wl), 0) == 1, "class: its first and last members");
+    assert(bote_rx_test_a(bote_req_begin(), wide, wm, 0, strlen(wm), 0) == 1 && bote_rx_test_a(bote_req_begin(), wide, wg, 0, strlen(wg), 0) == 0, "class: ...one in the middle, and the code point after it");
+    var wa = _rep("a", 20000);
+    assert(_ns(wide, wa) < 6 * _ns(narrow, wa) + 1000000, "class: 4,000 members asked of 20,000 code points in a few times 4 members' time");
     return assert_summary();
 }
 

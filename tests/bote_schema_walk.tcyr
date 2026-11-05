@@ -223,7 +223,10 @@ fn main() {
     var aps = "{\"type\":\"object\",\"properties\":{\"a\":{}},\"additionalProperties\":{\"type\":\"string\"}}";
     assert_eq(_ok(aps, "{\"a\":1,\"b\":\"x\"}"), 1, "additional: a schema judges the rest");
     _ase(_v0(aps, "{\"a\":1,\"b\":2}"), "v.b: expected string", "additional: ...and names what fails it");
-    assert_eq(_ok("{\"type\":\"object\",\"patternProperties\":{\"^x\":{}},\"additionalProperties\":false}", "{\"xa\":1,\"b\":2}"), 1, "additional: beside patternProperties not judged");
+    # (3.8.12) Judged beside patternProperties since, which covers what its patterns match.
+    assert_eq(_ok("{\"type\":\"object\",\"patternProperties\":{\"^x\":{}},\"additionalProperties\":false}", "{\"xa\":1,\"b\":2}"), 0, "additional: beside patternProperties, judged (3.8.12)");
+    assert_eq(_ok("{\"type\":\"object\",\"patternProperties\":{\"^x\":{}},\"additionalProperties\":false}", "{\"xa\":1}"), 1, "additional: ...a member a pattern covers is no additional one");
+    assert_eq(_ok("{\"type\":\"object\",\"patternProperties\":{\"(?=x)\":{}},\"additionalProperties\":false}", "{\"b\":2}"), 1, "additional: ...beside a pattern the engine declines, still not judged");
     var rq = "{\"type\":\"object\",\"required\":[\"r\"],\"additionalProperties\":false}";
     _ase(_v0(rq, "{\"r\":1}"), "v.r: additional property not allowed", "additional: a required name no property names is still additional");
     var mp = "{\"type\":\"object\",\"minProperties\":1,\"maxProperties\":2}";
@@ -311,8 +314,8 @@ fn main() {
     dispatcher_register_tool(wd, tool_def_with_output_schema(tool_def_new("w_pat", "d", schema_new("object", 0, vec_new())), "{\"type\":\"object\",\"patternProperties\":{\"^x\":{}},\"additionalProperties\":false}"), &h_ret);
     _lc_end();
     assert(_lc_find("tool=w_now") == 0, "warn: none for a keyword judged now");
-    assert(_lc_find("tool=w_pat property=outputSchema keyword=\"additionalProperties beside patternProperties\"") != 0, "warn: additionalProperties beside patternProperties");
-    assert(_lc_find("tool=w_pat property=outputSchema keyword=patternProperties") != 0, "warn: ...and patternProperties");
+    # (3.8.12) Both judged, and warned of no longer.
+    assert(_lc_find("tool=w_pat") == 0, "warn: none for additionalProperties beside patternProperties, judged (3.8.12)");
 
     # ---- The heap: judging allocates on the arena only ----
     var hs = parse_property(_many(12));

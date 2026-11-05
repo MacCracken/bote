@@ -125,7 +125,7 @@ fn prop_pattern(p) { return load64(p + 280); }
 fn prop_multiple_of(p) { return load64(p + 288); }
 
 # ================================================================
-# CompiledSchema (112 bytes):
+# CompiledSchema (128 bytes):
 #   +0  properties  hashmap: name_cstr -> PropertyDef ptr
 #   +8  required    vec of name_cstrs
 #   +16 names       vec of name_cstrs (insertion order)
@@ -149,13 +149,17 @@ fn prop_multiple_of(p) { return load64(p + 288); }
 #                       and its schema's PropertyDef; or 0
 #   +104 composition    (3.8.9) a PropertyDef holding an inputSchema root's composition
 #                       (compiled_compile), judged after its members, or 0
+#   +112 patterns       (3.8.12) vec of each `patternProperties` pattern bote's engine
+#                       takes, compiled, and its schema's PropertyDef, two words each, or 0
+#   +120 declined       1 when one of its patterns is one the engine does not take: which
+#                       members it covers is unknown, so `additionalProperties` judges nothing
 #
 # An object is judged in one walk of its members (_sv_object): each is looked up in `watch`
 # once, for its property and its slot, and a required name is met when its slot was seen.
 # ================================================================
 
 fn compiled_new() {
-    var c = alloc(112);
+    var c = alloc(128);
     store64(c, map_new());
     store64(c + 8, vec_new());
     store64(c + 16, vec_new());
@@ -170,6 +174,8 @@ fn compiled_new() {
     store64(c + 88, 0);
     store64(c + 96, 0);
     store64(c + 104, 0);
+    store64(c + 112, 0);
+    store64(c + 120, 0);
     return c;
 }
 
@@ -353,7 +359,9 @@ fn _sch_num_parse(v, val_out) {
 # value is 0.d1d2... x 10^E, o+16 and o+24 where the integer digits start and how many,
 # o+32 and o+40 the fraction's, o+48 the index of the first significant digit among
 # those, o+56 one past the last. 0 when v does not begin with a number, else 1. The
-# grammar is _sch_num_parse's; an exponent past 100000 is held at 100000.
+# grammar is _sch_num_parse's; an exponent of more than 15 digits is held there.
+# (3.8.12, from the 3.8.11 review) It stopped at 100000, so one of seven digits or more was
+# read as its first six: 1e1000000 equalled 1e100000.
 fn _sch_num_norm(v, o) {
     if (v == 0) { return 0; }
     var i = 0;
@@ -382,7 +390,7 @@ fn _sch_num_norm(v, o) {
         elif (load8(v + i) == 45) { eneg = 1; i = i + 1; }
         if (_sch_is_digit(load8(v + i)) == 0) { return 0; }
         while (_sch_is_digit(load8(v + i)) == 1) {
-            if (e < 100000) { e = e * 10 + (load8(v + i) - 48); }
+            if (e < 1000000000000000) { e = e * 10 + (load8(v + i) - 48); }
             i = i + 1;
         }
         if (eneg == 1) { e = 0 - e; }
@@ -813,7 +821,10 @@ fn _sch_compile_comp_c(p, raw_json, cx) {
     # (3.8.10, from the 3.8.9 review) In draft-06 too: it has no `if`, and the official
     # client judges a draft-06 schema with its draft-07 engine, which does; through 3.8.9 a
     # result it refused passed here.
-    if (ifr != 0 && _sch_is_schema_text(ifr) == 1) {
+    # (3.8.12, from the 3.8.11 review) Only beside a `then` or an `else` that can fail, as
+    # Ajv compiles it and as registration reaches it (_sch_kids): an `if` that leads back to
+    # its own schema beside none is no loop the client sees.
+    if (ifr != 0 && _sch_is_schema_text(ifr) == 1 && (_sch_can_fail(d, jsonx_get_raw(raw_json, "then")) == 1 || _sch_can_fail(d, jsonx_get_raw(raw_json, "else")) == 1)) {
         store64(p + 240, _sch_parse_c(ifr, cx));
         var th = jsonx_get_raw(raw_json, "then");
         if (th != 0 && _sch_is_schema_text(th) == 1) { store64(p + 248, _sch_parse_c(th, cx)); }
@@ -896,14 +907,15 @@ fn _sch_has_object_kw(raw_json) {
     if (jsonx_has(raw_json, "additionalProperties") == 1) { return 1; }
     if (jsonx_has(raw_json, "minProperties") == 1 || jsonx_has(raw_json, "maxProperties") == 1) { return 1; }
     if (jsonx_has(raw_json, "propertyNames") == 1 || jsonx_has(raw_json, "dependentRequired") == 1) { return 1; }
-    if (jsonx_has(raw_json, "dependentSchemas") == 1) { return 1; }
+    if (jsonx_has(raw_json, "dependentSchemas") == 1 || jsonx_has(raw_json, "patternProperties") == 1) { return 1; }
     return 0;
 }
 
 # Compile an object schema's body into a fresh CompiledSchema: its `properties`,
 # `required`, and (3.8.5) `additionalProperties`, `minProperties` and `maxProperties`.
-# `additionalProperties` beside `patternProperties` is not judged: which members it covers
-# depends on patterns bote does not match, and registration warns of them.
+# (3.8.12) And `patternProperties`, each pattern compiled by src/regex.cyr; `additionalProperties`
+# then covers the members neither names. Beside a pattern the engine does not take it judges
+# nothing, as which members that pattern covers is unknown, and registration warns.
 fn _compile_object_body(raw_json) {
     var cx = _sch_cx_new(raw_json, _sch_dialect(raw_json));
     var c = _compile_object_body_c(raw_json, cx);
@@ -936,8 +948,25 @@ fn _compile_object_body_c(raw_json, cx) {
         }
         compiled_set_required(c, req_vec);
     }
+    var pp = jsonx_get_raw(raw_json, "patternProperties");
+    var declined = 0;
+    if (pp != 0 && _vp_first_nonws(pp) == 123) {
+        var pmem = _jx_members(pp);
+        var pv = vec_new();
+        var pmi = 0;
+        while (pmi < vec_len(pmem)) {
+            var prx = bote_rx_compile(vec_get(pmem, pmi));
+            if (bote_rx_why(prx) == 0) {
+                vec_push(pv, prx);
+                vec_push(pv, _sch_parse_c(vec_get(pmem, pmi + 1), cx));
+            } else { declined = 1; }
+            pmi = pmi + 2;
+        }
+        if (vec_len(pv) > 0) { store64(c + 112, pv); }
+        store64(c + 120, declined);
+    }
     var ap = jsonx_get_raw(raw_json, "additionalProperties");
-    if (ap != 0 && jsonx_has(raw_json, "patternProperties") == 0) {
+    if (ap != 0 && declined == 0) {
         if (streq(ap, "false") == 1) { store64(c + 40, prop_new(SCH_NEVER)); }
         elif (_vp_first_nonws(ap) == 123) { store64(c + 40, _sch_parse_c(ap, cx)); }
     }
@@ -1087,8 +1116,16 @@ fn _sch_uri_path_at(u) {
     return i;
 }
 
-# The path `p` with its `.` and `..` segments taken out (RFC 3986 §5.2.4), a new cstr.
+# The path `p` with its `.` and `..` segments taken out (RFC 3986 §5.2.4), a new cstr; a
+# query after it is kept as it is. (3.8.12, from the 3.8.11 review) A last `..` leaves the
+# path ending in `/`, as a last `.` does, and the query's slashes are no segments: "a/b/.."
+# read as "a", and "/a?b/../../y" as "/y", so bote found in the document a resource the
+# client's resolver does not.
 fn _sch_uri_dots(p) {
+    var qa = strchr(p, 63);
+    if (qa >= 0) {
+        return _cat_a(default_alloc(), _sch_uri_dots(_slice_cstr(default_alloc(), p, 0, qa)), p + qa);
+    }
     var segs = vec_new();
     var n = strlen(p);
     var i = 0;
@@ -1098,7 +1135,10 @@ fn _sch_uri_dots(p) {
         var j = i;
         while (j < n && load8(p + j) != 47) { j = j + 1; }
         var seg = _slice_cstr(default_alloc(), p, i, j - i);
-        if (streq(seg, "..") == 1) { if (vec_len(segs) > 0) { vec_pop(segs); } }
+        if (streq(seg, "..") == 1) {
+            if (vec_len(segs) > 0) { vec_pop(segs); }
+            if (j == n) { vec_push(segs, ""); }
+        }
         elif (streq(seg, ".") == 0) { vec_push(segs, seg); }
         elif (j == n) { vec_push(segs, ""); }
         i = j + 1;
@@ -1143,17 +1183,31 @@ fn _sch_uri_resolve(b, r) {
 }
 
 # 1 when the URIs `x` and `y` name one resource: the same, but for the case of the scheme
-# and the authority, which a URI does not distinguish (RFC 3986 §6.2.2.1) and Ajv folds.
+# and the host, which a URI does not distinguish (RFC 3986 §6.2.2.1) and Ajv folds.
+# (3.8.12, from the 3.8.11 review) A userinfo's case counts, as it does for the client's
+# resolver: bote folded the whole authority.
 fn _sch_uri_same(x, y) {
     var px = _sch_uri_path_at(x);
     var py = _sch_uri_path_at(y);
     if (px != py || streq(x + px, y + py) == 0) { return 0; }
+    # The userinfo, compared exactly: from past `//` to the authority's last `@`.
+    var ua = 0;
+    var ue = 0;
+    var bs = _sch_uri_scheme(x) + 1;
+    if (load8(x + bs) == 47 && load8(x + bs + 1) == 47) {
+        ua = bs + 2;
+        ue = ua;
+        var k = ua;
+        while (k < px) { if (load8(x + k) == 64) { ue = k; } k = k + 1; }
+    }
     var i = 0;
     while (i < px) {
         var a = load8(x + i);
         var c = load8(y + i);
-        if (a >= 65 && a <= 90) { a = a + 32; }
-        if (c >= 65 && c <= 90) { c = c + 32; }
+        if (i < ua || i >= ue) {
+            if (a >= 65 && a <= 90) { a = a + 32; }
+            if (c >= 65 && c <= 90) { c = c + 32; }
+        }
         if (a != c) { return 0; }
         i = i + 1;
     }
@@ -1468,12 +1522,15 @@ fn _sch_cx_anchors(cx) {
     if (load64(cx + 24) != 0) { return load64(cx + 24); }
     var an = map_new();
     store64(cx + 24, an);
+    var rid = _sch_kw_str(_sch_cx_root(cx), "$id");
+    if (rid != 0 && _sch_id_ok(rid) == 0) { store64(cx + 48, _sch_id_why); }
     var pos = _sch_ajv_nodes(_sch_cx_root(cx));
     var i = 0;
     while (i < vec_len(pos)) {
         var ptr = vec_get(pos, i);
         var raw = vec_get(pos, i + 1);
         var id = _sch_kw_str(raw, "$id");
+        if (id != 0 && _sch_id_ok(id) == 0 && load64(cx + 48) == 0) { store64(cx + 48, _sch_id_why); }
         if (id != 0 && load8(id) == 35) {
             if (load8(id + 1) != 0 && streq(id, "#/") == 0) { _sch_anchor_add(cx, an, id + 1, 0, ptr); }
         } elif (id != 0) { store64(cx + 64, 1); }
@@ -1482,6 +1539,107 @@ fn _sch_cx_anchors(cx) {
         i = i + 2;
     }
     return an;
+}
+
+# (3.8.12) An `$id` the official client's resolver, fast-uri under Ajv, cannot read: it throws
+# when it resolves one, or a URN it reads two ways, and Ajv compiles nothing of the schema.
+# Measured against the client's own Ajv (scripts/ref-diff.sh), refused here if it is any of
+# these, a few the client takes among them: a control, a space, DEL or one of `"<>\^`{|}`;
+# a `%` before no two hex digits; a colon before the first `/`, `?` or `#` that ends no
+# scheme; an authority whose host is no domain, dotted quad or IPv6 literal (as a website
+# URL's, _bote_authority_ok), whose port is no number to 65535, or whose userinfo holds what
+# none may; a path holding an empty segment (`//`); and a `urn:` whose name is no `nid:nss` as fast-uri's URN_REG reads one, that
+# holds a `%`, or a `.` or `..` segment.
+var _sch_id_why = "names in $id a URI the official client's resolver does not take";
+
+fn _sch_id_ok(u) {
+    var n = strlen(u);
+    var i = 0;
+    while (i < n) {
+        var b = load8(u + i);
+        if (b <= 32 || b == 127 || b == 34 || b == 60 || b == 62 || b == 92 || b == 94 || b == 96 || b == 123 || b == 124 || b == 125) { return 0; }
+        if (b == 37 && (i + 2 >= n || _sch_hexval(load8(u + i + 1)) < 0 || _sch_hexval(load8(u + i + 2)) < 0)) { return 0; }
+        i = i + 1;
+    }
+    var sc = _sch_uri_scheme(u);
+    var k = 0;
+    while (k < n && load8(u + k) != 47 && load8(u + k) != 63 && load8(u + k) != 35) {
+        if (load8(u + k) == 58 && sc < 0) { return 0; }
+        k = k + 1;
+    }
+    if (sc == 3 && (load8(u) | 32) == 117 && (load8(u + 1) | 32) == 114 && (load8(u + 2) | 32) == 110) { return _sch_urn_ok(u + 4); }
+    var at = sc + 1;
+    if (load8(u + at) == 47 && load8(u + at + 1) == 47) {
+        var ae = at + 2;
+        while (ae < n && load8(u + ae) != 47 && load8(u + ae) != 63 && load8(u + ae) != 35) { ae = ae + 1; }
+        var hs = at + 2;
+        var j = hs;
+        var last = 0 - 1;
+        while (j < ae) { if (load8(u + j) == 64) { last = j; } j = j + 1; }
+        if (last >= 0) {
+            j = hs;
+            while (j < last) {
+                var c = load8(u + j);
+                if (c >= 128 || c == 91 || c == 93 || c == 64) { return 0; }
+                j = j + 1;
+            }
+            hs = last + 1;
+        }
+        # An empty authority, as in `file:///a`, the client takes.
+        if (ae > hs && _bote_authority_ok(u + hs, ae - hs) == 0) { return 0; }
+        if (ae == hs && last >= 0) { return 0; }
+        at = ae;
+    }
+    # An empty segment in the path: one starting `//` with a dot segment after it, the client
+    # reads as an authority once the dots are taken out.
+    var pe = at;
+    while (pe < n && load8(u + pe) != 63 && load8(u + pe) != 35) { pe = pe + 1; }
+    var q = at;
+    while (q + 1 < pe) {
+        if (load8(u + q) == 47 && load8(u + q + 1) == 47) { return 0; }
+        q = q + 1;
+    }
+    return 1;
+}
+
+# 1 when `s`, what follows `urn:`, is a URN the client's resolver reads one way: a name of
+# 1 to 32 letters, digits and `-` (not first), a colon, and at least one of `\w`, the marks
+# `!$'()*+,-./:;=@`; then perhaps a query and a fragment; no `%`, and no `.` or `..` segment.
+fn _sch_urn_ok(s) {
+    var n = strlen(s);
+    var e = 0;
+    while (e < n && load8(s + e) != 63 && load8(s + e) != 35) { e = e + 1; }
+    var i = 0;
+    while (i < e && load8(s + i) != 58) {
+        var c = load8(s + i) | 32;
+        if ((c < 97 || c > 122) && (load8(s + i) < 48 || load8(s + i) > 57) && (load8(s + i) != 45 || i == 0)) { return 0; }
+        i = i + 1;
+    }
+    if (i == 0 || i > 32 || i >= e) { return 0; }
+    var ns = i + 1;
+    if (ns >= e) { return 0; }
+    var j = ns;
+    while (j < e) {
+        var b = load8(s + j);
+        var ok = 0;
+        if ((b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95) { ok = 1; }
+        if (b == 33 || b == 36 || b == 39 || b == 40 || b == 41 || b == 42 || b == 43 || b == 44 || b == 45 || b == 46 || b == 47 || b == 58 || b == 59 || b == 61 || b == 64) { ok = 1; }
+        if (ok == 0) { return 0; }
+        j = j + 1;
+    }
+    # A `.` or `..` segment, between slashes or at either end of one.
+    var ss = ns;
+    j = ns;
+    while (j <= e) {
+        if (j == e || load8(s + j) == 47) {
+            var sl = j - ss;
+            if ((sl == 1 && load8(s + ss) == 46) || (sl == 2 && load8(s + ss) == 46 && load8(s + ss + 1) == 46)) { return 0; }
+            ss = j + 1;
+        }
+        j = j + 1;
+    }
+    if (strchr(s, 37) >= 0) { return 0; }
+    return 1;
 }
 
 # 1 when the root of `cx`'s document names the anchor `name`, which Ajv does not register.
@@ -1557,6 +1715,32 @@ fn _sch_kids_kw(out, ptr, raw, kw, how) {
     return 0;
 }
 
+# The keywords Ajv 8 compiles code for (RULES.all) in each dialect bote reads: a schema
+# naming none of them, or `{}`, or `true`, never fails (alwaysValidSchema).
+var BOTE_SCH_RULES_07 = "$comment $ref additionalItems additionalProperties allOf anyOf const contains dependencies else enum exclusiveMaximum exclusiveMinimum format id if items maxItems maxLength maxProperties maximum minItems minLength minProperties minimum multipleOf not nullable oneOf pattern patternProperties properties propertyNames required then type uniqueItems ";
+var BOTE_SCH_RULES_2019 = "$dynamicAnchor $dynamicRef $recursiveAnchor $recursiveRef dependentRequired dependentSchemas maxContains minContains unevaluatedItems unevaluatedProperties ";
+
+# 1 when the schema `raw` (or 0, none) can fail a value in the dialect `d`, as Ajv reads it.
+fn _sch_can_fail(d, raw) {
+    if (raw == 0) { return 0; }
+    var c = _vp_first_nonws(raw);
+    if (c == 116) { return 0; }
+    if (c != 123) { return 1; }
+    var mem = _jx_members(raw);
+    var r07 = _reg_words(BOTE_SCH_RULES_07);
+    var r19 = _reg_words(BOTE_SCH_RULES_2019);
+    var i = 0;
+    while (i < vec_len(mem)) {
+        var k = vec_get(mem, i);
+        if (_sch_in_words(r07, k) == 1) {
+            if (d != 2020 || streq(k, "additionalItems") == 0) { return 1; }
+        }
+        if (_sch_from_2019(d) == 1 && (_sch_in_words(r19, k) == 1 || (d == 2020 && streq(k, "prefixItems") == 1))) { return 1; }
+        i = i + 2;
+    }
+    return 0;
+}
+
 # The pointers of the schemas the engine for `cx`'s dialect compiles under the schema `raw`
 # at `ptr` (Ajv 8's vocabularies): with `same` 1, only those that judge the very value it
 # judges (`$ref`, `allOf`, `anyOf`, `oneOf`, `not`, `if`, `then` and `else` beside `if`,
@@ -1577,7 +1761,9 @@ fn _sch_kids(cx, ptr, raw, same) {
     _sch_kids_kw(out, ptr, raw, "anyOf", 1);
     _sch_kids_kw(out, ptr, raw, "oneOf", 1);
     _sch_kids_kw(out, ptr, raw, "not", 0);
-    if (jsonx_has(raw, "if") == 1) {
+    # (3.8.12, from the 3.8.11 review) Ajv compiles `if` only beside a `then` or an `else`
+    # that can fail (if.ts, alwaysValidSchema): with none, nothing under it is reached.
+    if (jsonx_has(raw, "if") == 1 && (_sch_can_fail(d, jsonx_get_raw(raw, "then")) == 1 || _sch_can_fail(d, jsonx_get_raw(raw, "else")) == 1)) {
         _sch_kids_kw(out, ptr, raw, "if", 0);
         _sch_kids_kw(out, ptr, raw, "then", 0);
         _sch_kids_kw(out, ptr, raw, "else", 0);
@@ -1789,7 +1975,7 @@ var BOTE_SCH_TOO_DEEP = "nested too deep to judge";
 # once, 64 levels deep, under the budget its size allows.
 var BOTE_SCH_WALK_BYTES = 4;
 
-# A judgement's budget block, 56 bytes, on its root's stack and shared by every quiet
+# A judgement's budget block, 64 bytes, on its root's stack and shared by every quiet
 # judgement inside it:
 #   +0  left     what it may still spend: a value judged costs one, and (3.8.10, from the
 #                3.8.9 review) each byte a keyword reads costs one more (_sv_charge)
@@ -1800,6 +1986,10 @@ var BOTE_SCH_WALK_BYTES = 4;
 #                handler holds as one (_sv_int_ok)
 #   +40 base     the part of +0 it began with that was the base, not its bytes'
 #   +48 pool     the batch's shared base it drew on (the request state's word), or 0
+#   +56 refused  (3.8.12, from the 3.8.11 review) 1 once a quiet judgement under such a root
+#                has refused a value for taking such an integer as one: `not` of a schema
+#                that took it so. The judgement around it failed by that integer, and a `not`
+#                or an `if` around that one passes by it (_sv_matches 3)
 #
 # (3.8.10, from the 3.8.9 review) The judgements of one batch share one base (the request
 # state's BOTE_REQ_STATE_POOL, _sch_pool_open): each root had its own, and a batch of a
@@ -1822,6 +2012,7 @@ fn _sch_root_budget(bud, n, args) {
     store64(bud + 32, 0);
     store64(bud + 40, base);
     store64(bud + 48, pool);
+    store64(bud + 56, 0);
     return 0;
 }
 
@@ -1880,6 +2071,14 @@ fn _sv_charge(slot, k) {
 fn _sv_range_taken(slot) {
     var bud = load64(slot + 40);
     if (bud != 0 && load64(bud + 24) == 1) { store64(bud + 32, 1); }
+    return 0;
+}
+
+# (3.8.12, from the 3.8.11 review) A refusal that took an argument's integer past a
+# handler's range as an integer: the block's +56, for the quiet judgement around it.
+fn _sv_range_refused(slot) {
+    var bud = load64(slot + 40);
+    if (bud != 0 && load64(bud + 24) == 1) { store64(bud + 56, 1); }
     return 0;
 }
 
@@ -2604,45 +2803,91 @@ fn _sv_comp(slot, f, buf, n, vs, ve, prop) {
         # refused only when every schema that takes the value takes it as an integer: one
         # taking it as a number serves. Through 3.8.10 the first sight of it refused it.
         var hit = 0;
+        var nby = 0;
         var ni = 0;
         while (ni < vec_len(any) && hit != 1) {
             var mr = _sv_matches(slot, buf, n, vs, ve, vec_get(any, ni));
             if (mr == 1) { hit = 1; }
             elif (mr == 2) { hit = 2; }
+            elif (mr == 3) { nby = 1; }
             ni = ni + 1;
         }
-        if (hit == 0) { _sv_violation(slot, f, "matches no schema in anyOf"); }
+        if (hit == 0) {
+            _sv_violation(slot, f, "matches no schema in anyOf");
+            if (nby == 1) { _sv_range_refused(slot); }
+        }
         if (hit == 2) { _sv_range_taken(slot); }
     }
     var one = prop_one_of(prop);
     if (one != 0) {
         var met = 0;
         var taken = 0;
+        var oby = 0;
         var oi = 0;
         while (oi < vec_len(one) && met < 2) {
             var om = _sv_matches(slot, buf, n, vs, ve, vec_get(one, oi));
-            if (om >= 1) { met = met + 1; }
+            if (om == 1 || om == 2) { met = met + 1; }
             if (om == 2) { taken = 1; }
+            if (om == 3) { oby = 1; }
             oi = oi + 1;
         }
-        if (met == 0) { _sv_violation(slot, f, "matches no schema in oneOf"); }
-        if (met > 1) { _sv_violation(slot, f, "matches more than one schema in oneOf"); }
-        if (met == 1 && taken == 1) { _sv_range_taken(slot); }
+        if (met == 0) {
+            _sv_violation(slot, f, "matches no schema in oneOf");
+            if (oby == 1) { _sv_range_refused(slot); }
+        }
+        if (met > 1) {
+            _sv_violation(slot, f, "matches more than one schema in oneOf");
+            if (taken == 1) { _sv_range_refused(slot); }
+        }
+        # (3.8.12, from the 3.8.11 review) One met with another refused for taking the integer
+        # as one: the match stands by that refusal.
+        if (met == 1 && (taken == 1 || oby == 1)) { _sv_range_taken(slot); }
     }
     var nt = prop_not(prop);
-    if (nt != 0 && _sv_matches(slot, buf, n, vs, ve, nt) >= 1) { _sv_violation(slot, f, "matches the schema in not"); }
+    if (nt != 0) {
+        # (3.8.12, from the 3.8.11 review) `not` types a value as its schema does, the other way
+        # round: one refused for matching a schema that took an argument's integer as one is
+        # refused by that integer, and one passed because its schema refused such an integer
+        # (`not` of `not` an integer) passes by taking it as one. Through 3.8.11 `not` typed
+        # nothing, and `{"not":{"not":{"type":"integer"}}}` took 1e30 for a handler.
+        var nm = _sv_matches(slot, buf, n, vs, ve, nt);
+        if (nm == 1 || nm == 2) {
+            _sv_violation(slot, f, "matches the schema in not");
+            if (nm == 2) { _sv_range_refused(slot); }
+        }
+        if (nm == 3) { _sv_range_taken(slot); }
+    }
     var iff = prop_if(prop);
     if (iff != 0) {
+        var im = _sv_matches(slot, buf, n, vs, ve, iff);
         var br = prop_else(prop);
-        if (_sv_matches(slot, buf, n, vs, ve, iff) >= 1) { br = prop_then(prop); }
+        var other = prop_then(prop);
+        if (im == 1 || im == 2) { br = prop_then(prop); other = prop_else(prop); }
+        var before = load64(slot + 16);
         if (br != 0 && _vs_full(slot) == 0) { _sv_value(slot, f, buf, n, vs, ve, br); }
+        # (3.8.12, from the 3.8.11 review) An `if` decided by taking an argument's integer as one
+        # (2), or by refusing one for being one (3), decides by it where its branches would
+        # decide otherwise: the branch taken passing, the value is taken by that integer; failing,
+        # refused by it.
+        if (im == 2 || im == 3) {
+            var passed = 0;
+            if (load64(slot + 16) == before) { passed = 1; }
+            var opass = 1;
+            if (other != 0) {
+                var oo = _sv_matches(slot, buf, n, vs, ve, other);
+                if (oo == 0 || oo == 3) { opass = 0; }
+            }
+            if (passed == 1 && opass == 0) { _sv_range_taken(slot); }
+            if (passed == 0 && opass == 1) { _sv_range_refused(slot); }
+        }
     }
     return 0;
 }
 
 # 1 when the value [s, e) of `buf` meets `prop`, 2 when it meets it by taking an argument's
 # integer past what a handler holds as an integer (3.8.11; _sv_int_ok), 0 when it does not
-# (3.8.8): judged on a quiet slot, which stops
+# (3.8.8), and 3 when it does not by refusing such an integer for being one (3.8.12, from the
+# 3.8.11 review; _sv_range_refused): judged on a quiet slot, which stops
 # at the first violation and builds nothing, so `contains` and `propertyNames` ask of every
 # item and key what they need and keep nothing of it. The slot judges as `slot` does, a
 # result's integers as a result's; what the judgement takes of the arena is given back.
@@ -2665,13 +2910,21 @@ fn _sv_matches(slot, buf, n, s, e, prop) {
     # (3.8.11, from the 3.8.10 review) Whether this judgement took an argument's integer past
     # what a handler holds as one, apart from what judgements around it took.
     var held = 0;
-    if (bud != 0) { held = load64(bud + 32); store64(bud + 32, 0); }
+    var held_r = 0;
+    if (bud != 0) {
+        held = load64(bud + 32);
+        held_r = load64(bud + 56);
+        store64(bud + 32, 0);
+        store64(bud + 56, 0);
+    }
     _sv_value(&qs, 0, buf, n, s, e, prop);
     var ok = 0;
     if (load64(&qs + 16) == BOTE_SCH_MAX_VIOLATIONS - 1) { ok = 1; }
     if (bud != 0) {
         if (ok == 1 && load64(bud + 32) == 1) { ok = 2; }
+        if (ok == 0 && load64(bud + 56) == 1) { ok = 3; }
         store64(bud + 32, held);
+        store64(bud + 56, held_r);
     }
     bote_arena_release(a, &mk);
     return ok;
@@ -2872,10 +3125,11 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
     # A schema that judges no member, requires none and counts none has nothing to walk for.
     var req0 = compiled_required(comp);
     var pnames = load64(comp + 80);
+    var pats = load64(comp + 112);
     # (3.8.10) Nor a root's composition: through 3.8.9 this returned before judging it, so an
     # inputSchema whose root's `anyOf`, `oneOf`, `not` or `if` stood with no property judged
     # nothing of the arguments.
-    if (nw == 0 && additional == 0 && mn < 0 && mx < 0 && (req0 == 0 || vec_len(req0) == 0) && pnames == 0 && load64(comp + 96) == 0 && load64(comp + 104) == 0) { return 0; }
+    if (nw == 0 && additional == 0 && mn < 0 && mx < 0 && (req0 == 0 || vec_len(req0) == 0) && pnames == 0 && load64(comp + 96) == 0 && load64(comp + 104) == 0 && load64(comp + 112) == 0) { return 0; }
     # A bit for each slot (3.8.7, from the 3.8.6 review): 512 of them on the stack, so a
     # schema of that many names takes nothing of the arena or, through the heap forms
     # (compiled_validate, registry_validate_params), of the heap, where a mark and a release
@@ -2971,7 +3225,21 @@ fn _sv_object(slot, f, buf, n, vs, ve, comp) {
             if (w != 0) { prop = load64(w + 8); }
             if (prop != 0) {
                 _sv_value(slot, _sv_frame(&fr, f, kind, key, dl), buf, n, mvs, mve, prop);
-            } elif (additional != 0) {
+            }
+            # (3.8.12) Each pattern the key matches, as the string it decodes to, judges the
+            # value too; each step of each match is charged to the budget.
+            var pmatched = 0;
+            if (pats != 0) {
+                var pk = 0;
+                while (pk < vec_len(pats) && _vs_full(slot) == 0) {
+                    if (bote_rx_test_a(a, vec_get(pats, pk), buf, kp - buf, kp - buf + kl, load64(slot + 40)) == 1) {
+                        pmatched = 1;
+                        _sv_value(slot, _sv_frame(&fr, f, kind, key, dl), buf, n, mvs, mve, vec_get(pats, pk + 1));
+                    }
+                    pk = pk + 2;
+                }
+            }
+            if (prop == 0 && pmatched == 0 && additional != 0 && _vs_full(slot) == 0) {
                 if (prop_tag(additional) == SCH_NEVER) {
                     _sv_violation(slot, _sv_frame(&fr, f, kind, key, dl), "additional property not allowed");
                 } else {
@@ -3124,6 +3392,20 @@ fn _sch_heap_strs(v) {
     return out;
 }
 
+# A vec on `a` of copies on `a` of each cstr in `v`, or 0 for none: an answer judged on the
+# scratch, handed back on the caller's allocator.
+fn _sch_strs_to_a(a, v) {
+    if (v == 0) { return 0; }
+    var out = vec_new_a(a);
+    var i = 0;
+    while (i < vec_len(v)) {
+        var t = vec_get(v, i);
+        vec_push_a(a, out, _slice_cstr(a, t, 0, strlen(t)));
+        i = i + 1;
+    }
+    return out;
+}
+
 # Public entry: validate `params_cstr` against `compiled`.
 # Returns vec of violation cstrs (empty vec == ok), on the heap: judged on the scratch arena.
 fn compiled_validate(compiled, params_cstr) {
@@ -3144,8 +3426,23 @@ fn compiled_validate(compiled, params_cstr) {
 # ": expected object" at the root, "[0].id: ..." under it in an array, a bare
 # "missing required field: x" for the root's own, and "a.b: ..." elsewhere.
 fn _sch_check_value_a(a, prop, root, value) {
+    # (3.8.12, from the 3.8.11 review) Handed an allocator that is no bote arena, the heap a
+    # dispatcher's plain form passes, it judges on the heap forms' scratch and copies out only
+    # its answer, as compiled_validate does: every table, quiet judgement and regex array a
+    # walk makes was kept, 128 KB a string for `^.{0,2000}$`.
+    if (_bote_ar_is(a) == 0) {
+        var m[16];
+        var sa = _sch_scratch_take(&m);
+        var out = _sch_strs_to_a(a, _sch_check_value_on(sa, prop, root, value));
+        _sch_scratch_give(&m);
+        return out;
+    }
+    return _sch_check_value_on(a, prop, root, value);
+}
+
+fn _sch_check_value_on(a, prop, root, value) {
     var slot[48];
-    var bud[56];
+    var bud[64];
     store64(&slot, 0);
     store64(&slot + 8, a);
     store64(&slot + 16, 0);
@@ -3189,10 +3486,21 @@ fn _sch_starts(s, lit) {
 }
 
 # compiled_validate without the empty vec: the violations, on `a`, or 0 when
-# there are none.
+# there are none. On the scratch when `a` is no bote arena, as _sch_check_value_a is.
 fn compiled_check_a(a, compiled, params_cstr) {
+    if (_bote_ar_is(a) == 0) {
+        var m[16];
+        var sa = _sch_scratch_take(&m);
+        var out = _sch_strs_to_a(a, _compiled_check_on(sa, compiled, params_cstr));
+        _sch_scratch_give(&m);
+        return out;
+    }
+    return _compiled_check_on(a, compiled, params_cstr);
+}
+
+fn _compiled_check_on(a, compiled, params_cstr) {
     var slot[48];
-    var bud[56];
+    var bud[64];
     store64(&slot, 0);
     store64(&slot + 8, a);
     store64(&slot + 16, 0);

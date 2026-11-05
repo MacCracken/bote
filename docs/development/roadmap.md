@@ -33,13 +33,13 @@ from the authorization server's `jwks_uri`.
 
 ## Next patch
 
-**3.8.12 — JSON Schema coverage, its seventh bite: `patternProperties`.** 3.8.11's engine judges a key as
-it judges a string, so a member a pattern names is judged by that schema, and `additionalProperties` beside
-`patternProperties` covers only the members neither names (it is not judged there today, with a WARN). Each
-key's matches are charged to the budget, a schema with many patterns over an object with many members being
-the product of both. Then `format` (the official client enforces ajv-formats' list, so that list is the one to
-match), `$recursiveRef` / `$dynamicRef`, and the `unevaluated*` keywords, which need to know what every other
-keyword judged.
+**3.8.13 — JSON Schema coverage, its eighth bite: `format`.** The official client registers ajv-formats in
+its full mode, so a `format` it knows is enforced and one it does not is ignored; that list (`date`, `time`,
+`date-time`, `duration`, `uri`, `uri-reference`, `uri-template`, `email`, `hostname`, `ipv4`, `ipv6`, `regex`,
+`uuid`, the JSON Pointers, the numeric and binary ones) and its definitions are the ones to match, each as its own
+checker, a byte at a time and charged to the budget. `regex` is 3.8.11's engine; `hostname` and `email` follow
+the RFCs ajv-formats reads. A format bote does not judge is warned of, as now. Then `$recursiveRef` /
+`$dynamicRef`, and the `unevaluated*` keywords, which need to know what every other keyword judged.
 
 Not planned, because the current spec removes or deprecates them: the held-open `GET`,
 `resources/subscribe`, `logging/setLevel`, and new work on `Last-Event-ID` resumption. Nor workers
@@ -56,16 +56,20 @@ stdio's) are each one connection's, and a worker per connection would need a hom
   `prefixItems`, `contains` with its counts, `propertyNames`, `dependentRequired` and `dependentSchemas`; since
   3.8.9 composition, `allOf`, `anyOf`, `oneOf`, `not`, `if` / `then` / `else`, under a budget of work; since
   3.8.10 `$ref` within its document, under a depth; since 3.8.11 `pattern`, by an engine of bote's own held to
-  JavaScript's, and `multipleOf`, exactly. It still
+  JavaScript's, and `multipleOf`, exactly; since 3.8.12 `patternProperties`, with `additionalProperties` beside it. It still
   warns at registration of what it lists and does not judge: `$dynamicRef`, `$recursiveRef`, `format` (which the
-  official client enforces), `patternProperties` (and `additionalProperties` beside it), the `unevaluated*`
+  official client enforces), the `unevaluated*`
   keywords, draft-07's array `items`, `additionalItems` and `dependencies`. Numbers
   are compared exactly, where a client holding them as doubles may find two equal that bote does not: past 15
   significant digits or a double's range (`1e400`, `1e-400`), a result's `uniqueItems` array could be refused by a client and passed here. Enforce the
   rest in bites. The budget charges a value one and each byte a keyword reads one more (3.8.10); a refusal for
   work can turn on the order of a value's members, as a quiet judgement stops at its first violation. A
   reference into another document is refused at registration, as bote fetches nothing on a schema's word; inline
-  it. The warnings cover a schema's root and its properties, not what is nested below them. And the
+  it. So is an `$id` the client's resolver cannot read, and a few it can (a path with an empty segment or a `|`, a
+  URN with a `.` segment): `scripts/ref-diff.sh` counts 9,430 schemas of 100,000 bote refuses and the client takes,
+  each an odd spelling; narrow that by the differential, never past what the client compiles. An argument's integer
+  past a handler's range is refused wherever a schema types it as one, `contains` excepted: it counts a match that
+  took the integer as any match, so `{"contains":{"type":"integer"}}` passes `[1e30]` to a handler. The warnings cover a schema's root and its properties, not what is nested below them. And the
   repeated-key check over a result's `structuredContent` (3.8.1) is a walk of its own, 240 µs of `libro_export`'s
   100 entries beside the validator's 280: fold it into the one walk where the schema covers the value.
   Registration's compile is still a scan per keyword: `parse_property` looks for each of about twenty keywords in a

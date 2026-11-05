@@ -18,7 +18,267 @@ have per release.
 
 _(empty)_
 
+## [3.8.12] — 2026-11-04 · Pattern properties
+
+**`patternProperties` is judged**, by 3.8.11's engine: a member whose key matches a pattern, anywhere in the key and
+by the code points it decodes to, is judged by that pattern's schema. Every pattern it matches judges it, and so
+does `properties` when it names the key too. **`additionalProperties` beside it is judged**, covering only the
+members neither names: `{"properties":{"id":{}},"patternProperties":{"^x-":{}},"additionalProperties":false}` takes
+`{"id":1,"x-a":2}` and refuses `{"y":2}`. Through 3.8.11 both were warned of and judged nothing. Each key's match
+against each pattern is charged to the judgement's budget, step by step: 100 keys of 500 bytes against 64 patterns
+are refused as too much to judge, in under 64 times one pattern's time.
+
+A pattern the engine does not take (lookaround, backreferences, `\p{...}`) judges nothing, with a WARN. Which members
+it covers is then unknown, so `additionalProperties` beside it judges nothing either, and registration says so.
+
+**Nine defects in 3.8.11 land beside it**, from an independent review of that release and from two differentials,
+one repaired and one new. See the correction notice in 3.8.11. Four are denials of service in the engine:
+- a registration that never ended;
+- work a match did and never charged;
+- a class read member by member;
+- 12.8 MB kept a call through a dispatcher's plain form.
+
+**A second differential holds registration to the official client's own validator** (`scripts/ref-diff.sh`, which
+needs the client that `./scripts/conformance.sh` installs; not CI). 100,000 random root `$id`s, well formed and not,
+and references through them are each compiled by the client's `AjvJsonSchemaValidator`, with the Ajv it bundles, and
+checked by bote's registration:
+- none bote takes is one the client cannot compile;
+- 9,430 bote refuses are ones the client takes. Each is an odd spelling the client folds, or an `$id` the client
+  takes that bote cannot be sure it reads one way. Registration says why.
+
+The regex differential, its generator repaired, now draws 48,781 distinct patterns of 60,000, with 212,680 strings:
+- every verdict is the same as ECMA-262's search;
+- no pattern JavaScript refuses is taken;
+- none it takes is refused as a syntax error;
+- 1,580 are declined for a construct the engine does not take.
+
+On four strings V8's own `test` departs from that search, and bote is held to the search. JavaScript's engine,
+anchored at each code point in turn, gives the spec's answer:
+- `[^a-z]$` refuses "😁" (which `^[^a-z]$` takes);
+- `\B` matches between the two halves of a surrogate pair.
+
+The stated minimum cyrius (6.7.13) is unchanged.
+
+### Added
+
+- **`patternProperties`** (core, `src/schema.cyr`): CompiledSchema is 128 bytes, +112 each pattern the engine takes,
+  compiled, beside its schema, and +120 whether one was declined. `_sv_object` tests every member's key against
+  every pattern, on the key as written in the document, each step charged.
+- **`scripts/ref-diff.sh`**, with `tests/fixtures/ref_diff_gen.cjs` (it drives the client's own
+  `AjvJsonSchemaValidator`, a fresh one for each schema, as the client caches one by its `$id`) and
+  `tests/fixtures/ref_diff.cyr`. It fails on a schema bote takes that
+  the client cannot compile, and writes each disagreement to `build/ref-diff/`. CI's "Differentials build" step
+  (renamed from "Regex differential builds") builds both comparison programs.
+- **Registration refuses an `$id` the client's resolver cannot read** (`_sch_id_ok`, from the new differential): the
+  client's Ajv throws on one and compiles nothing of the schema, or reads one two ways. Every `$id` its walk reaches is
+  checked, the root's and those below it, refs or not. It refuses any of these, a few the client takes among them:
+  - a control, a space, DEL, or one of `` "<>\^`{|} ``;
+  - a `%` before no two hex digits;
+  - a colon before the first `/`, `?` or `#` that ends no scheme;
+  - an authority whose host is no domain, dotted quad or IPv6 literal (as a website URL's), whose port is no number
+    to 65535, or whose userinfo holds `[`, `]`, `@` or a byte past ASCII;
+  - a path holding an empty segment;
+  - a `urn:` whose name is no `nid:nss` as fast-uri's URN_REG reads one, or that holds a `%`, or a `.` or `..`
+    segment.
+
+  It reads `the outputSchema names in $id a URI the official client's resolver does not take`.
+- **Registration warns of an integer `multipleOf` a double holds inexactly or not at all** (`_reg_multiple_size`):
+  - past 2^53, `multipleOf past 2^53, judged exactly here and perhaps not by a client holding doubles`;
+  - past a double's range, `multipleOf past a double's range, which a client holding doubles reads as infinite`.
+
+### Fixed
+
+- **A quantifier compiled every copy of what matches only the empty string** (MEDIUM). Registration of
+  `(((a{0}){10000}){10000}){10000}` made 10^12 copies of nothing and never ended. What matches only the empty string
+  is now one EMPTY node:
+  - a concatenation leaves it out;
+  - a quantifier on it, or one with a bound of 0, is it;
+  - so is an alternation of nothing else.
+
+  So every other node compiles to a step at least, and copies are bounded by the program's 4,096 steps. Three such
+  levels compile in a few times `a{100}`'s time. `(?:){0,10000}` and `(?:|){5000}` compile, where they were past the
+  bound.
+- **A match's making ready went uncharged** (MEDIUM). It cleared an array as long as the program at every call, and
+  the first turn's steps were charged only when a second followed. 20,000 empty strings against a 3,000-step
+  alternation cleared 60 million words and took 40 million steps free.
+  - The clearing is charged, one for every eight marks (`BOTE_RX_CLEAR_WORDS`): a cleared word is a store, about an
+    eighth of a step.
+  - The first turn is charged before it decides.
+
+  Those 20,000 strings are refused as too much to judge in a few times a one-step pattern's time. 100 short strings
+  against `^.{0,2000}$`, a common bound, are judged. Charging the clearing in full refused those 100. A sparse set,
+  which needs no clearing, cost every short pattern a fifth more: the slug's match went from 2.5 to 3.1 µs.
+- **A class read its members one by one** (MEDIUM). Its ranges are sorted and merged at compile, and a code point is
+  looked for by halving. A 4,000-member class against 20,000 code points takes 1.5 ms, 1.5 times a 4-member class's
+  1.0 ms. Through 3.8.11 it took 162 ms, 175 times the 4-member class's 0.92 ms.
+- **Judged on the heap allocator, a judgement kept what it made** (MEDIUM). A dispatcher's plain form passes the
+  heap allocator, where a release does nothing.
+  - `bote_rx_test_a` handed an allocator that is no bote arena takes its arrays from the calling thread's request
+    arena and gives them back.
+  - `compiled_check_a` and `_sch_check_value_a`, so handed, judge on the heap forms' scratch and copy out only
+    their answer (`_sch_strs_to_a`), as `compiled_validate` has since 3.8.8.
+
+  `dispatcher_dispatch` of 100 strings through `^.{0,2000}$` keeps its reply, where it kept 12.8 MB. It also keeps
+  none of the tables and quiet judgements 3.8.10's plain-form walks kept.
+- **Two groups of one name that can both match were taken** (LOW). JavaScript refuses such a pattern
+  (MightBothParticipate), so the client compiled none of the schema. The parser keeps the alternatives each named
+  group is in, and refuses a name given twice outside two alternatives of one disjunction:
+  `two groups named alike that can both match, which the u flag refuses`. `(?<a>x)|(?<a>y)` is still taken.
+- **Registration resolved references otherwise than the client's resolver** (LOW). Each of these is read as fast-uri
+  reads it now:
+  - a last `..` leaves its slash (`a/b/..` against `http://x/a` is `/a/`, not `/a`);
+  - a query's slashes are no segments (`/a?b/../../y` read as `/y`);
+  - a userinfo's case counts.
+
+  In each case bote found in the document a resource the client cannot, and the client compiled none of the schema.
+- **Registration and the judgement followed an `if` Ajv ignores** (LOW). Ajv compiles `if` only beside a `then` or
+  an `else` that can fail: one that is no `true`, no `{}`, and names a keyword Ajv compiles in its dialect
+  (`_sch_can_fail`, from Ajv's own `RULES.all`).
+  - `{"if":{"$ref":"#"}}` was refused as a cycle. It is taken, as the client takes it.
+  - A loop through such an `if` no longer makes every value too deep to judge.
+- **An exponent of seven digits or more was read as its first six** (LOW, older: 3.8.2). `_sch_num_norm` stopped
+  reading one at 100,000, so `1e1000000` met `maximum: 1e100000`, and `1e100000` was a multiple of `1e1000000`. It
+  reads 15 digits of them.
+- **`not` and `if` typed nothing** (LOW). The budget block is 64 bytes: +56 is set when a quiet judgement refuses an
+  argument's integer past a handler's range for being one. `_sv_matches` returns 3 for a failure by that.
+  - `not` of a schema that took the integer refuses by it.
+  - `not` of one that refused it takes the value by it, so `{"not":{"not":{"type":"integer"}}}` refuses `1e30` for
+    a handler.
+  - An `if` decided by the integer decides by it where its branches would decide otherwise.
+  - `anyOf` and `oneOf` pass a refusal by it outward.
+
+  `contains` still counts a match that took the integer as any match. A schema that says only that some item is an
+  integer passes `[1e30]` to a handler.
+- **The regex differential drew 307 patterns** (tooling): `Math.imul` in the generator's step. It also judges bote by
+  ECMA-262's search where V8's unanchored `test` departs from it, and counts the departures.
+
+### Changed
+
+- `additionalProperties` beside `patternProperties` is judged, unless a pattern is one the engine declines.
+- Registration warns of a `patternProperties` pattern the engine does not take, and why (`a patternProperties
+  pattern bote's engine does not take, for a lookbehind`), of `additionalProperties` beside one, and of a
+  `patternProperties` that is no object. It no longer warns of `patternProperties` as unenforced, nor of
+  `additionalProperties` beside it.
+
+### Tests
+
+- **`tests/bote_regex.tcyr`**, 146, from 100, the review of 3.8.11:
+  - Handed the heap, 100 matches of 4,001 steps keep nothing.
+  - An empty string against 4,001 steps is charged an eighth of a step for each mark cleared, and its first step.
+  - The first turn charged before it decides.
+  - What matches only the empty string: `(?:){10000}`, `a{0}`, `(?:|){5000}` and `(?:){0,10000}` one step. Three
+    levels of 10,000 copies, of `a{0}`, an empty group and two in a row, compile in a few times `a{100}`'s time.
+    Matching unchanged around them, `^` still anchoring, and their quantifiers still read.
+  - Names: six kinds of pattern refused, seven taken (V8's verdicts).
+  - Classes: overlapping, out of order, complements, interleaved escapes, chains and adjacent ranges. A 4,000-member
+    class at its ends, its middle and between members, timed against a 4-member one.
+- **`tests/bote_schema_ref.tcyr`**, 240, from 169, the review of 3.8.11:
+  - `if` beside nothing that can fail, in every dialect, as Ajv reads it, and judged.
+  - References resolved as fast-uri resolves them.
+  - Twenty-one `$id`s refused (fifteen the client's Ajv refuses, six on bote's stricter side) and thirteen taken,
+    each checked against the client. One with no `$ref`, and one below the root.
+  - `not` and `if` typing an argument's `1e30`: twelve schemas through the dispatcher, and a result's taken.
+- **`tests/bote_schema_pattern.tcyr`**, 147, from 79:
+  - Members by the pattern their key matches; two patterns on one key; a key judged by `properties` and a pattern.
+  - `additionalProperties` false and a schema, each beside patterns.
+  - Keys as they decode, by code points, unanchored and anchored; a 300-byte key past eight names.
+  - A declined pattern judging nothing while the others judge.
+  - Under `anyOf`; arguments through the dispatcher; a result.
+  - 100 long keys against 64 patterns refused in time.
+  - The four WARNs; 0 heap bytes for fifty refused calls; 2,000 keys against two patterns on the arena's first
+    chunk.
+  - (the review of 3.8.11) `_sch_check_value_a`, `compiled_check_a` and `dispatcher_dispatch` handed the heap keep
+    only their answers, each violation copied out whole.
+  - 20,000 empty strings against a 3,000-step alternation refused in time.
+  - `multipleOf` past 2^53 and past a double's range warned of, 2^53 itself not, and thirteen sizes at and either
+    side of each bound.
+  - Exponents of seven digits and of 15 compared, judged by `maximum` and `multipleOf`.
+  - `uniqueItems` over 1,000 integers through `compiled_check_a` and `_sch_check_value_a` handed the heap, keeping
+    none of the walk's table.
+- **`tests/bote_schema_walk.tcyr`**, 125, from 124: `additionalProperties` beside `patternProperties` judged, and
+  beside a declined pattern not; no WARN for either.
+- **`tests/bote.tcyr`**: its example of a keyword bote does not judge is `unevaluatedProperties`.
+- **`tests/bote_schema_comp.tcyr`**: the budget's two-second bound, the host's figure, is a ratio to an `anyOf` of
+  two over the same items, timed in the same process. `qemu-aarch64` met two seconds at 1.98 s for 3.8.11 and missed
+  it at 2.05 s here. The ratio is 13.5 on x86 and 12 on aarch64, where judging all 12.9 million would be about 50.
+- **`tests/bote.bcyr`**: `validate_pattern_props`, a call's arguments judged by `patternProperties` beside
+  `properties` and `additionalProperties` false.
+- **14 mutants of `patternProperties`, 14 killed.**
+- **55 mutants of the review's fixes, 55 killed.** Two survived the first run, each a gap now tested:
+  - `compiled_check_a` handed the heap without the scratch passed, as the engine's own fix left the schema under
+    test nothing else to keep: a `uniqueItems` row, whose table it kept, 162 KB for five calls;
+  - the exponent bound restored passed, which showed the release's own first claim wrong. Six digits were always read
+    (`1e200000` was never `1e150000`); seven or more were read as six. The rows compare seven digits.
+- **`fuzz/schema_walk.fcyr`**: `patternProperties` of `^a`, `b$` and `x`, with `additionalProperties` beside, the
+  reference judging each matched member and leaving it out of the additional ones. It found a generator that drew
+  one pattern twice, an object bayan refuses, before release.
+
+### Performance
+
+3.8.11 against this release, 15 alternating rounds on one core, minimums (`ab`; `validate_pattern_props` is new and
+runs here only). Every other row is within ±3.4%:
+
+| Bench | 3.8.11 | 3.8.12 | Δ |
+|-------|-------:|-------:|--:|
+| `regex_slug` | 2,473 ns | 2,327 ns | −5.9% |
+| `validate_compiled_text` | 2,899 ns | 2,862 ns | −1.3% |
+| `validate_pattern_props` | — | 1,557 ns | new |
+| `schema_compile_simple` | 15,838 ns | 16,754 ns | +5.8% |
+| `schema_compile_nested` | 35,235 ns | 36,703 ns | +4.2% |
+| `fs_read_64k` | 3.77 ms | 3.98 ms | +5.4% |
+| `jwt_cached_es256` | 2,022 ns | 2,589 ns | +28.0% |
+| `dispatch_tools_call_structured` | 4,558 ns | 4,123 ns | −9.5% |
+| `dispatch_tools_call_output` | 6,512 ns | 6,225 ns | −4.4% |
+
+- **A 4,000-member class against 20,000 code points is 1.5 ms, from 162 ms**, now that classes are found by halving
+  (the Fixed entry).
+- **The engine's per-match cost is where it was.** A sparse set of steps seen, which needs no clearing, was tried
+  for the making-ready fix. It took `regex_slug` from 2.44 to 2.96 µs in the first A/B, a fifth more, and was
+  replaced by the cleared marks charged an eighth of a step each, which run it 5.9% faster than 3.8.11.
+- **Registration compiles an object about a microsecond slower** (`schema_compile_*`). It looks for
+  `patternProperties` in each object it compiles. That is paid once per registration, never per call.
+- **`fs_read_64k`'s 5.4% is where the code now sits, not work.** Its path changed by one load a member. Alone, it is
+  3.76 ms against 3.96 ms. 3.8.11 with only 3.8.12's `src/regex.cyr` swapped in is 3.91 ms, and that path never calls
+  the engine. The structured rows' −9.5% and −4.4%, on the same path in both runs, read the same way.
+- **`jwt_cached_es256`'s 28% is one fast baseline round** (2,022 ns, its range 2,022–2,856). Nothing on the JWT path
+  changed. The first A/B of this release had it at −1.0% (2,467 against 2,442 ns).
+
 ## [3.8.11] — 2026-11-04 · Patterns and multiples
+
+> ⚠ **Corrected at 3.8.12.** These claims below were not true, found by an independent review of this release and by
+> the differentials 3.8.12 added or repaired.
+> - "60,000 random patterns ... every one of 280,920 verdicts the same". The generator multiplied its seed as a double
+>   past 2^53, and the sequence repeated: the 60,000 were 307 distinct patterns over 1,453 distinct strings. Drawn
+>   properly, as 48,781 distinct patterns, they found eight that JavaScript refuses taken here: two groups of one
+>   name that can both match. They also found four verdicts that differ, each V8 departing from ECMA-262, where bote
+>   matches the spec's search (see 3.8.12).
+> - "a string costs its length times the program's length at most" and "each step is charged". Not all of the work
+>   was charged:
+>   - each match cleared an array as long as the program, and charged none of it;
+>   - the first turn's steps were charged only when a second turn followed;
+>   - so 20,000 empty strings against a 3,000-step alternation cleared 60 million words and took 40 million steps,
+>     none of it charged;
+>   - a class read its members one by one for each code point, uncharged: all 4,000 of a 4,000-member class.
+> - "A pattern compiles once, at registration". It compiled each copy a quantifier makes, of nothing too:
+>   `(((a{0}){10000}){10000}){10000}` never finished registering.
+> - "Its four arrays come from `a` and are given back, so nothing stays on the heap". On the heap allocator, which a
+>   dispatcher's plain form (`dispatcher_dispatch`) judges on, a release does nothing: `^.{0,2000}$` kept 128 KB a
+>   string, 12.8 MB for a call of 100. Every table and quiet judgement a walk made through that form was kept the same
+>   way, since 3.8.8 moved only `compiled_validate` and `registry_validate_params` to the scratch.
+> - "registration's reference check as Ajv 8 reads it". Its resolver read three spellings otherwise than the
+>   client's (fast-uri) does:
+>   - a last `..` dropped its slash;
+>   - a query's slashes were read as path segments;
+>   - a userinfo's case was folded.
+>
+>   It also followed an `if` beside no `then` or `else` that can fail, which Ajv compiles none of, and took an `$id`
+>   the client's resolver cannot read: the client then compiles nothing of the schema.
+> - "`not`, `if` and `contains` pass it by, as they type nothing". `not` of `not` an integer is an integer, and an
+>   `if` can decide by one: `{"not":{"not":{"type":"integer"}}}` took `1e30` for a handler. (`contains` still counts
+>   a match that takes it; see 3.8.12.)
+> - Exactness past an exponent of 100,000, older than this release (3.8.2): `_sch_num_norm` stopped reading an
+>   exponent there, so one of seven digits or more was read as its first six, and `1e1000000` met
+>   `maximum: 1e100000`.
 
 **`pattern` is judged**, by an engine of bote's own (`src/regex.cyr`, a core module). It reads a pattern as the
 official client's Ajv compiles it, `new RegExp(pattern, "u")`. It matches code points, so `^.{3}$` takes

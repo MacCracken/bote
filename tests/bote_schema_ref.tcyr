@@ -368,7 +368,21 @@ fn main() {
     _ase(_why("{\"anyOf\":[{\"type\":\"string\"},{\"$ref\":\"#\"}]}"), cyc, "cycle: through anyOf");
     _ase(_why("{\"oneOf\":[{\"$ref\":\"#\"}]}"), cyc, "cycle: through oneOf");
     _ase(_why("{\"not\":{\"$ref\":\"#\"}}"), cyc, "cycle: through not");
-    _ase(_why("{\"if\":{\"$ref\":\"#\"}}"), cyc, "cycle: through if");
+    _ase(_why("{\"if\":{\"$ref\":\"#\"},\"then\":{\"type\":\"string\"}}"), cyc, "cycle: through if");
+    # (3.8.12, from the 3.8.11 review) Ajv compiles `if` only beside a `then` or an `else`
+    # that can fail, so a loop or a reference that names nothing under one beside none is no
+    # refusal of the client's, and judges nothing here either.
+    _ase(_why("{\"if\":{\"$ref\":\"#\"}}"), "(none)", "if beside no then or else: no loop");
+    _ase(_why("{\"if\":{\"$ref\":\"#\"},\"then\":true,\"else\":{}}"), "(none)", "if beside a true then and an empty else: no loop");
+    _ase(_why("{\"if\":{\"$ref\":\"#\"},\"then\":{\"description\":\"x\",\"title\":\"y\"}}"), "(none)", "if beside a then of annotations: no loop");
+    _ase(_why("{\"if\":{\"$ref\":\"#/nope\"}}"), "(none)", "if beside no then: its reference to nothing not reached");
+    _ase(_why("{\"if\":{\"$ref\":\"#\"},\"else\":false}"), cyc, "if beside a false else: a loop");
+    _ase(_why("{\"if\":{\"$ref\":\"#\"},\"then\":{\"$comment\":\"x\"}}"), cyc, "if beside a then of $comment, which Ajv compiles: a loop");
+    _ase(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"if\":{\"$ref\":\"#\"},\"then\":{\"dependentRequired\":{}}}"), "(none)", "draft-07: a then of dependentRequired, no keyword there, can never fail");
+    _ase(_why("{\"if\":{\"$ref\":\"#\"},\"then\":{\"dependentRequired\":{}}}"), cyc, "2020-12: a then of dependentRequired can fail: a loop");
+    _ase(_why("{\"if\":{\"$ref\":\"#\"},\"then\":{\"additionalItems\":false}}"), "(none)", "2020-12: additionalItems is no keyword: no loop");
+    assert_eq(_ok("{\"if\":{\"$ref\":\"#\"}}", "5"), 1, "if beside no then: every value passes, as the client's");
+    assert_eq(_ok("{\"if\":{\"$ref\":\"#\"},\"then\":{\"title\":\"t\"}}", "[1,{\"a\":2}]"), 1, "if beside a then of annotations: passes, not too deep");
     _ase(_why("{\"if\":{},\"then\":{\"$ref\":\"#\"}}"), cyc, "cycle: through then");
     _ase(_why("{\"if\":{},\"else\":{\"$ref\":\"#\"}}"), cyc, "cycle: through else");
     _ase(_why("{\"dependentSchemas\":{\"a\":{\"$ref\":\"#\"}}}"), cyc, "cycle: through dependentSchemas");
@@ -463,6 +477,75 @@ fn main() {
     _ase(_why(rel), "(none)", "ajv: references relative to the root's $id, and the scheme and host in another case");
     assert(_ok(rel, "{\"a\":1}") == 0 && _ok(rel, "{\"b\":1}") == 0 && _ok(rel, "{\"c\":1}") == 0 && _ok(rel, "{\"d\":1}") == 0 && _ok(rel, "{\"e\":1}") == 0, "ajv: ...each judged by the definition");
     _ase(_why("{\"$id\":\"http://x.test/s/r.json\",\"$ref\":\"other.json#/x\"}"), "the outputSchema holds a $ref that does not resolve within its document: other.json#/x", "ajv: ...another document, refused");
+    # (3.8.12, from the 3.8.11 review) Resolved as the client's resolver (fast-uri) resolves:
+    # a last `..` leaves a slash, a query's slashes are no segments, a userinfo's case counts.
+    var nr = "the outputSchema holds a $ref that does not resolve within its document: ";
+    _ase(_why("{\"$id\":\"http://x/a\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"a/b/..#/$defs/d\"}}}"), _cat(nr, "a/b/..#/$defs/d"), "uri: a/b/.. is /a/, not /a (it was taken)");
+    _ase(_why("{\"$id\":\"http://x/a/\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"b/..#/$defs/d\"}}}"), "(none)", "uri: ...which /a/ is");
+    _ase(_why("{\"$id\":\"http://x/a/.\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"http://x/a/#/$defs/d\"}}}"), _cat(nr, "http://x/a/#/$defs/d"), "uri: an $id is compared as written, a spelling the client folds refused (bote's stricter side)");
+    _ase(_why("{\"$id\":\"http://x/y\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"http://x/a?b/../../y#/$defs/d\"}}}"), _cat(nr, "http://x/a?b/../../y#/$defs/d"), "uri: a query's slashes are no segments (it was read as /y)");
+    _ase(_why("{\"$id\":\"http://x/a?q/../r\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"http://x/a?q/../r#/$defs/d\"}}}"), "(none)", "uri: ...the query kept as it is");
+    _ase(_why("{\"$id\":\"http://x/b/\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"/b/c/..?#/$defs/d\"}}}"), _cat(nr, "/b/c/..?#/$defs/d"), "uri: a query after a last ..");
+    _ase(_why("{\"$id\":\"http://U@x/a\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"http://u@x/a#/$defs/d\"}}}"), _cat(nr, "http://u@x/a#/$defs/d"), "uri: a userinfo in another case is another resource (it was folded)");
+    _ase(_why("{\"$id\":\"http://U:P@x/a\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"HTTP://U:P@X/a#/$defs/d\"}}}"), "(none)", "uri: ...its scheme and host still folded");
+    # (3.8.12) An $id the client's resolver cannot read: it compiles nothing of the schema.
+    # Each of the first fifteen the client's own Ajv refuses (scripts/ref-diff.sh).
+    var bid = "the outputSchema names in $id a URI the official client's resolver does not take";
+    var bids = vec_new();
+    vec_push(bids, "urn:x");
+    vec_push(bids, "urn:-a:b");
+    vec_push(bids, "urn:ab:");
+    vec_push(bids, "urn:ab:c/..");
+    vec_push(bids, "urn:ab:c%41");
+    vec_push(bids, "urn:ab:c?%41");
+    vec_push(bids, "urn:ab:\u00e9");
+    vec_push(bids, "urn:abcdefghijklmnopqrstuvwxyz0123456:x");
+    vec_push(bids, "http://x y/");
+    vec_push(bids, "http://[::g]/");
+    vec_push(bids, "http://x:99999/");
+    vec_push(bids, "http://x:-1/");
+    vec_push(bids, "http://x/%zz");
+    vec_push(bids, "http://x/%2");
+    vec_push(bids, "1a:b");
+    # Refused though the client takes them, bote's stricter side: what fast-uri reads one way
+    # only with what bote does not check, or not at all.
+    var bmore = vec_new();
+    vec_push(bmore, "urn:ab:c/./d");
+    vec_push(bmore, "http://x/a b");
+    vec_push(bmore, "http://x//./a");
+    vec_push(bmore, "http://u[@x/a");
+    vec_push(bmore, "http://@/a");
+    vec_push(bmore, "http://x/a|b");
+    var bm = 0;
+    while (bm < vec_len(bmore)) { vec_push(bids, vec_get(bmore, bm)); bm = bm + 1; }
+    var bi2 = 0;
+    while (bi2 < vec_len(bids)) {
+        var bsch = _cat3("{\"$id\":\"", vec_get(bids, bi2), "\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"#/$defs/d\"}}}");
+        _ase(_why(bsch), bid, _cat("uri: an $id refused, ", vec_get(bids, bi2)));
+        bi2 = bi2 + 1;
+    }
+    _ase(_why("{\"$id\":\"urn:x\",\"type\":\"object\"}"), bid, "uri: ...with no $ref too, which the client compiles none of");
+    _ase(_why("{\"$id\":\"http://x/a\",\"properties\":{\"p\":{\"$id\":\"//x y/\"}}}"), bid, "uri: ...one below the root, which the client resolves");
+    var gids = vec_new();
+    vec_push(gids, "urn:ab:c");
+    vec_push(gids, "urn:a:b");
+    vec_push(gids, "URN:Ab:C?q");
+    vec_push(gids, "urn:a-:b");
+    vec_push(gids, "urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
+    vec_push(gids, "urn:abcdefghijklmnopqrstuvwxyz012345:x");
+    vec_push(gids, "file:///a");
+    vec_push(gids, "https://example.com/schemas/a.json");
+    vec_push(gids, "https://u:p@example.com:8443/a/b?c=1#");
+    vec_push(gids, "tag:example.com,2026:x");
+    vec_push(gids, "http://[::1]:8080/a");
+    vec_push(gids, "http://127.0.0.1/a/%41");
+    vec_push(gids, "http://x:/a");
+    var gi = 0;
+    while (gi < vec_len(gids)) {
+        var gsch = _cat3("{\"$id\":\"", vec_get(gids, gi), "\",\"$defs\":{\"d\":{\"type\":\"string\"}},\"properties\":{\"p\":{\"$ref\":\"#/$defs/d\"}}}");
+        _ase(_why(gsch), "(none)", _cat("uri: an $id taken, ", vec_get(gids, gi)));
+        gi = gi + 1;
+    }
     _ase(_why("{\"properties\":{\"a\":{\"$ref\":\"\"}},\"type\":\"object\"}"), "(none)", "ajv: an empty $ref is the root");
     _ase(_why("{\"then\":{\"$ref\":\"#\"}}"), "(none)", "ajv: then without if is never judged, so no cycle");
     _ase(_why("{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"dependentSchemas\":{\"a\":{\"$ref\":\"#\"}}}"), "(none)", "ajv: draft-07 has no dependentSchemas, so no cycle");
@@ -526,6 +609,27 @@ fn main() {
     assert(_has(_call(od, "t_ib", "{\"e\":1e30}"), "\"text\":\"ok\"") == 1, "range: if");
     assert(_has(_call(od, "t_id", "{\"d\":1e30}"), "\"text\":\"ok\"") == 1, "range: oneOf, met by the number");
     assert(_has(_call(od, "t_id", "{\"o\":-1e30}"), "integer out of range") == 1, "range: ...oneOf met only by the integer, refused");
+    # (3.8.12, from the 3.8.11 review) `not` and `if` type a value too: by a schema refusing
+    # the integer for being one, or taking it as one, where that decides.
+    var tie = "{\"type\":\"object\",\"properties\":{\"nn\":{\"not\":{\"not\":{\"type\":\"integer\"}}},\"ie\":{\"if\":{\"type\":\"integer\"},\"then\":true,\"else\":false},\"ib\":{\"if\":{\"type\":\"integer\"},\"then\":{\"minimum\":0},\"else\":{\"minimum\":0}},\"in\":{\"if\":{\"not\":{\"type\":\"integer\"}},\"then\":false},\"ni\":{\"not\":{\"if\":{\"type\":\"integer\"},\"then\":false}},\"an\":{\"not\":{\"anyOf\":[{\"not\":{\"type\":\"integer\"}},{\"type\":\"string\"}]}},\"oo\":{\"oneOf\":[{\"type\":\"number\"},{\"not\":{\"type\":\"integer\"}}]},\"no\":{\"not\":{\"oneOf\":[{\"type\":\"integer\"},{\"type\":\"number\"}]}},\"on\":{\"oneOf\":[{\"type\":\"string\"},{\"not\":{\"not\":{\"type\":\"integer\"}}}]},\"nz\":{\"not\":{\"oneOf\":[{\"not\":{\"type\":\"integer\"}},{\"type\":\"string\"}]}}}}";
+    dispatcher_register_tool(od, tool_def_new("t_ie", "d", tool_schema_from_json(tie)), &h_tool);
+    var rng = "integer out of range";
+    assert(_has(_call(od, "t_ie", "{\"nn\":1e30}"), rng) == 1, "range: not of not an integer, refused (3.8.11 took it)");
+    assert(_has(_call(od, "t_ie", "{\"nn\":5}"), "\"text\":\"ok\"") == 1 && _has(_call(od, "t_ie", "{\"nn\":1.5}"), "matches the schema in not") == 1, "range: ...5 taken, 1.5 refused");
+    assert(_has(_call(od, "t_ie", "{\"ie\":1e30}"), rng) == 1, "range: if an integer, then true, else false: decided by the integer, refused");
+    assert(_has(_call(od, "t_ie", "{\"ie\":5}"), "\"text\":\"ok\"") == 1, "range: ...5 taken");
+    assert(_has(_call(od, "t_ie", "{\"ib\":1e30}"), "\"text\":\"ok\"") == 1, "range: an if whose branches agree decides nothing by it, taken");
+    assert(_has(_call(od, "t_ie", "{\"in\":1e30}"), rng) == 1, "range: if not an integer, then false: decided by refusing the integer, refused");
+    assert(_has(_call(od, "t_ie", "{\"ni\":1e30}"), rng) == 1, "range: not of if an integer then false, refused");
+    assert(_has(_call(od, "t_ie", "{\"an\":1e30}"), rng) == 1, "range: not of anyOf refused only by the integer, refused");
+    assert(_has(_call(od, "t_ie", "{\"an\":\"s\"}"), "matches the schema in not") == 1, "range: ...a string refused by it");
+    assert(_has(_call(od, "t_ie", "{\"oo\":1e30}"), rng) == 1, "range: oneOf met once only because the other refused the integer, refused");
+    assert(_has(_call(od, "t_ie", "{\"oo\":5}"), "\"text\":\"ok\"") == 1 && _has(_call(od, "t_ie", "{\"oo\":1.5}"), "more than one schema in oneOf") == 1, "range: ...5 taken, 1.5 met twice");
+    assert(_has(_call(od, "t_ie", "{\"no\":1e30}"), rng) == 1, "range: not of oneOf met twice by the integer, refused");
+    assert(_has(_call(od, "t_ie", "{\"on\":1e30}"), rng) == 1, "range: oneOf met by not of not an integer, refused");
+    assert(_has(_call(od, "t_ie", "{\"nz\":1e30}"), rng) == 1, "range: not of oneOf met by none, one refusing the integer, refused");
+    assert(_has(_call(od, "t_ie", "{\"nz\":5}"), "\"text\":\"ok\"") == 1, "range: ...5 taken");
+    assert(_ok("{\"not\":{\"not\":{\"type\":\"integer\"}}}", "1e30") == 1 && _ok("{\"if\":{\"type\":\"integer\"},\"then\":true,\"else\":false}", "1e30") == 1, "range: a result's 1e30 is an integer, as JSON Schema types it");
 
     # ---- (3.8.11, from the 3.8.10 review) an inputSchema root's const and enum ----
     dispatcher_register_tool(od, tool_def_new("t_rc", "d", tool_schema_from_json("{\"type\":\"object\",\"const\":{\"a\":1}}")), &h_tool);

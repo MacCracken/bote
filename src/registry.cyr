@@ -693,6 +693,35 @@ fn _reg_log_refused(tool_def, why) {
 # does not enforce, so that a schema's author is told, and the tool still works:
 # extra keywords are the client's to read. See the validator's subset in
 # schema.cyr. A non-string `enum` and a type array are the same gap.
+# Of a `multipleOf` (_sch_multiple_of) that is an integer: 2 when it is past a double's
+# range, 1 when it is past 2^53, which a double does not hold exactly, else 0.
+fn _reg_multiple_size(mm) {
+    var d = load64(mm + 8);
+    var p = load64(mm + 16);
+    if (p < 0) { return 0; }
+    var nd = 0;
+    var t = d;
+    while (t > 0) { nd = nd + 1; t = t / 10; }
+    var digits = nd + p;
+    if (digits > 309) { return 2; }
+    if (digits == 309) {
+        # Its first 17 digits against the largest double's, 1.7976931348623157e308.
+        var lead = d;
+        var k = nd;
+        while (k < 17) { lead = lead * 10; k = k + 1; }
+        if (lead > 17976931348623157) { return 2; }
+        return 1;
+    }
+    if (digits > 16) { return 1; }
+    if (digits == 16) {
+        var v = d;
+        var q = 0;
+        while (q < p) { v = v * 10; q = q + 1; }
+        if (v > 9007199254740992) { return 1; }
+    }
+    return 0;
+}
+
 fn _reg_warn_kw(tool, key, kw) {
     var ln[BOTE_LOG_LINE_BYTES];
     bote_log_line(&ln, SK_WARN, "schema keyword not enforced");
@@ -712,8 +741,8 @@ fn _reg_warn_kw(tool, key, kw) {
 # exclusiveMinimum, exclusiveMaximum and additionalProperties are judged, and no longer here.
 # (3.8.7) const and uniqueItems too. (3.8.8) prefixItems, contains, propertyNames,
 # dependentRequired and dependentSchemas. (3.8.9) allOf, anyOf, oneOf, not, if, then, else.
-# (3.8.10) $ref, within its document. (3.8.11) pattern and multipleOf.
-var BOTE_UNENFORCED = "$dynamicRef $recursiveRef patternProperties unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
+# (3.8.10) $ref, within its document. (3.8.11) pattern and multipleOf. (3.8.12) patternProperties.
+var BOTE_UNENFORCED = "$dynamicRef $recursiveRef unevaluatedProperties unevaluatedItems format additionalItems dependencies ";
 
 # Every WARN the schema `v`, at `key` of tool `tool`, earns: each keyword in `kws` it
 # holds, a type bote does not know, alone or in a type array, and a keyword it judges with a
@@ -777,6 +806,10 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
         else {
             if (_sch_first_nonws(mr) == 45) { _reg_warn_kw(tool, key, "multipleOf below 0, judged by its size, as the official client judges it"); }
             if (load64(mm + 16) < 0) { _reg_warn_kw(tool, key, "multipleOf that is no integer, which bote judges exactly and a client holding numbers as doubles may not"); }
+            # (3.8.12, from the 3.8.11 review) An integer a double holds inexactly, or not at all.
+            var mw = _reg_multiple_size(mm);
+            if (mw == 2) { _reg_warn_kw(tool, key, "multipleOf past a double's range, which a client holding doubles reads as infinite"); }
+            elif (mw == 1) { _reg_warn_kw(tool, key, "multipleOf past 2^53, judged exactly here and perhaps not by a client holding doubles"); }
         }
     }
     var ty = jsonx_get_str_dec_a(default_alloc(), v, "type");
@@ -875,10 +908,29 @@ fn _reg_warn_schema_d(tool, key, v, kws, d) {
     }
     var it = jsonx_get_raw_a(default_alloc(), v, "items");
     if (it != 0 && load8(it) == 91) { _reg_warn_kw(tool, key, "items as an array"); }
-    # (3.8.5) Which members additionalProperties covers turns on patterns bote does not match,
-    # so beside patternProperties it is not judged.
-    if (jsonx_has(v, "additionalProperties") == 1 && jsonx_has(v, "patternProperties") == 1) {
-        _reg_warn_kw(tool, key, "additionalProperties beside patternProperties");
+    # (3.8.5) Which members additionalProperties covers turns on patternProperties, which
+    # (3.8.12) is judged since, each pattern by src/regex.cyr: one it does not take judges nothing,
+    # and `additionalProperties` beside it nothing either, as which members that pattern covers
+    # is unknown.
+    var ppv = jsonx_get_raw(v, "patternProperties");
+    if (ppv != 0) {
+        if (_sch_first_nonws(ppv) != 123) { _reg_warn_kw(tool, key, "patternProperties that is no object"); }
+        else {
+            var ppm = _jx_members(ppv);
+            var ppi = 0;
+            var ppd = 0;
+            while (ppi < vec_len(ppm)) {
+                var ppw = bote_rx_why(bote_rx_compile(vec_get(ppm, ppi)));
+                if (ppw != 0) {
+                    ppd = 1;
+                    _reg_warn_kw(tool, key, _dsp_named_msg("a patternProperties pattern bote's engine does not take, for ", ppw, 0));
+                }
+                ppi = ppi + 2;
+            }
+            if (ppd == 1 && jsonx_has(v, "additionalProperties") == 1) {
+                _reg_warn_kw(tool, key, "additionalProperties beside a pattern bote's engine does not take, which judges nothing");
+            }
+        }
     }
     # (3.8.6, from the 3.8.5 review) A keyword bote judges, with a value it cannot judge by,
     # judges nothing, where a client's validator refuses the schema: said, as 3.8.4 said of

@@ -218,8 +218,10 @@ transports do. A consumer that hands messages to `codec_process_message` or
 `bote_req_begin()` before each one, on the thread that serves it. Without it the arena
 is never rewound, and what each message put there stays for the life of the process.
 Use the `_a` forms (`codec_process_message_a(bote_req_begin(), ...)`) to put the reply
-there too; the plain forms put it on the heap. A threaded server calls `bote_conn_arm()`
-once, before its first thread, so each thread has an arena of its own.
+there too; the plain forms put it on the heap. What a plain form judges with, a schema's
+walk and its regular expressions, is not kept there (3.8.12): it is judged on a scratch
+arena of bote's own, and only the answer is copied out. A threaded server calls
+`bote_conn_arm()` once, before its first thread, so each thread has an arena of its own.
 
 To carry `subscriptions/listen` over a connection of its own (3.7.3), such a consumer, on
 the full bundle, makes a ListenLine (`bote_listen_line_new(max)`), chains its sink into
@@ -360,6 +362,11 @@ consumer that copies it gets the engine with it. A PropertyDef is 296 bytes. Fro
 3.8.10: registration reads a `$ref` as the official client's Ajv does, so it refuses a reference
 to an anchor on the root (write it `#`) and takes a reference relative to the root's `$id`, and
 the request state is 184 bytes.
+
+(3.8.12) `patternProperties` is judged, and `additionalProperties` beside it covers the members
+neither `properties` nor a pattern names: a schema with both refuses members it passed through
+3.8.11. Beside a pattern bote's engine declines, `additionalProperties` still judges nothing. A
+CompiledSchema is 128 bytes; `compiled_new` sets the new words, zeroed.
 
 ## How to produce both bundles
 

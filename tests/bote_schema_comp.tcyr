@@ -237,11 +237,28 @@ fn main() {
     # Each item meets the last of 257 alternatives: every one is asked, and nothing fails
     # early to stop the walk, 12.9 million judgements for 100 KB.
     var nums = _many(50000, "1");
-    var t0 = clock_now_ns();
-    var bv = _sch_check_value_a(bote_req_begin(), wp, "v", nums);
-    var ms = (clock_now_ns() - t0) / 1000000;
+    # (3.8.12) Timed against the same items under an anyOf of two, in this process, so the
+    # bound holds under emulation: two seconds was the host's figure, which qemu-aarch64 met
+    # at 1.98 s for 3.8.11 and missed at 2.05 s for 3.8.12. The ratio is 13.5 on x86 and 12 on
+    # aarch64; judging all 12.9 million would be about 50.
+    var cp2 = parse_property("{\"type\":\"array\",\"items\":{\"anyOf\":[{\"type\":\"string\",\"maxLength\":0},{\"type\":\"integer\"}]}}");
+    var ns = 0;
+    var nc = 0;
+    var bv = 0;
+    var tr = 0;
+    while (tr < 3) {
+        var c0 = clock_now_ns();
+        _sch_check_value_a(bote_req_begin(), cp2, "v", nums);
+        var tc = clock_now_ns() - c0;
+        if (tr == 0 || tc < nc) { nc = tc; }
+        var t0 = clock_now_ns();
+        bv = _sch_check_value_a(bote_req_begin(), wp, "v", nums);
+        var tn = clock_now_ns() - t0;
+        if (tr == 0 || tn < ns) { ns = tn; }
+        tr = tr + 1;
+    }
     assert(bv != 0 && vec_len(bv) == 1 && streq(vec_get(bv, 0), "v: more work to judge than its size allows") == 1, "budget: 50,000 items meeting the last of 257 alternatives, refused as too much to judge");
-    assert(ms < 2000, "budget: ...stopped at its 3.3 million, in under two seconds");
+    assert(ns < 30 * nc, "budget: ...stopped at its 3.3 million, in under 30 times an anyOf of two over the same items");
     assert(_has(vec_get(_vs("{\"type\":\"array\",\"items\":{\"anyOf\":[{\"type\":\"string\"}]}}", _many(50000, "1")), 0), "v[0]: matches no schema in anyOf") == 1, "budget: failing items stop at the cap first, as ever");
     assert(_sch_check_value_a(bote_req_begin(), parse_property("{\"type\":\"array\",\"items\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"},{\"type\":\"integer\"}]}}"), "v", _many(50000, "1")) == 0, "budget: 50,000 items meeting an anyOf's third of three, well under it");
     assert(_sch_check_value_a(bote_req_begin(), wp, "v", _many(200, "1")) == 0, "budget: 200 items through the 257 alternatives, under it");

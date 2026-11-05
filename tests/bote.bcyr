@@ -260,6 +260,14 @@ fn b_regex_slug() { return bote_rx_test_a(_b_rx_arena, _b_rx_slug, _b_slug, 1, 2
 fn b_validate_compiled_text() { return vec_len(compiled_validate(_b_compiled_text, _b_text_params)); }
 # -- end 3.8.11 --
 
+# -- 3.8.12 --
+# A call's arguments judged by patternProperties beside properties and additionalProperties
+# false: three members, two of them matched by `^x-`.
+var _b_compiled_pp = 0;
+var _b_pp_params = "{\"id\":3,\"x-region\":\"eu-west\",\"x-tier\":\"gold\"}";
+fn b_validate_pattern_props() { return vec_len(compiled_validate(_b_compiled_pp, _b_pp_params)); }
+# -- end 3.8.12 --
+
 fn b_schema_compile_simple() {
     return compiled_compile(_b_schema_simple);
 }
@@ -465,6 +473,9 @@ fn _bench_setup() {
     vec_push(pt, schema_prop_new("price", "{\"type\":\"number\",\"multipleOf\":0.01}"));
     _b_compiled_text = compiled_compile(schema_new("object", pt, vec_new()));
     # -- end 3.8.11 --
+    # -- 3.8.12 --
+    _b_compiled_pp = _compile_object_body("{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}},\"patternProperties\":{\"^x-\":{\"type\":\"string\"}},\"additionalProperties\":false}");
+    # -- end 3.8.12 --
 
     # Fresh (uncompiled) schemas for the schema_compile bench. Built
     # once at setup so the bench callback measures pure compile cost
@@ -726,6 +737,11 @@ fn main() {
     bench_run(b50, &b_validate_compiled_text, 10000);
     vec_push(benches, b50);
     # -- end 3.8.11 --
+    # -- 3.8.12 --
+    var b51 = bench_new("validate_pattern_props");
+    bench_run(b51, &b_validate_pattern_props, 10000);
+    vec_push(benches, b51);
+    # -- end 3.8.12 --
     bote_req_begin();
     bote_conn_arm();
     thread_join(thread_create(&_b_thread_nop, 0));

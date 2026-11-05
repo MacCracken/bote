@@ -2,11 +2,16 @@
 // how the official MCP client's Ajv compiles a JSON Schema `pattern` (scripts/regex-diff.sh).
 // Usage: [VALID=1] node regex_diff_gen.mjs <seed> <count> > cases.txt
 // VALID=1 draws fewer pieces the u flag refuses, longer patterns and longer strings.
-// Line format: P\t<pattern as JSON>\t<1 compiles under u, else 0>, then S\t<string as JSON>\t<0/1> per string.
+// Line format: P\t<pattern as JSON>\t<1 compiles under u, else 0>, then per string
+// S\t<string as JSON>\t<RegExp.prototype.test, 0/1>\t<ECMA-262's search, 0/1>. The second is
+// JavaScript's own engine run sticky at each code point boundary in turn, as the spec's
+// RegExpBuiltinExec tries them under the u flag: V8's unanchored search departs from it on a
+// few patterns (`[^a-z]$` refuses "😁", which `^[^a-z]$` takes; `\B` matches between the two
+// halves of a surrogate pair), and bote is held to the spec's reading.
 let seed = Number(process.argv[2] || 1) >>> 0;
 const count = Number(process.argv[3] || 1000);
 const VALID = process.env.VALID === '1';
-function rnd() { seed = (seed * 1103515245 + 12345) >>> 0; return seed / 4294967296; }
+function rnd() { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed / 4294967296; }
 function r(n) { return Math.floor(rnd() * n); }
 function pick(a) { return a[r(a.length)]; }
 const lits = ['a', 'b', 'c', 'x', 'é', 'ü', '😀', '1', '9', '_', ' ', '-', ',', '/', ':', '!', '=', 'Z'];
@@ -45,6 +50,16 @@ function alt(d) { let s = ''; const n = VALID ? 1 + r(6) : r(4); for (let i = 0;
 function disj(d) { let s = alt(d); while (r(5) == 0) s += '|' + alt(d); return s; }
 const alpha = ['a', 'b', 'c', 'x', 'é', 'ü', '😀', '😁', '1', '9', '_', ' ', '-', '\n', '\r', '\t', ' ', 'A', 'Z', '\u0001', ' ', '﻿', '\ud800', '\udc00', '"', '\\', '/', ',', '.', '[', '\u0000'];
 function str() { let s = ''; const n = VALID ? r(14) : r(7); for (let i = 0; i < n; i++) s += pick(alpha); return s; }
+function spec(re, s) {
+  let i = 0;
+  for (;;) {
+    re.lastIndex = i;
+    if (re.test(s)) return 1;
+    if (i >= s.length) return 0;
+    const c = s.codePointAt(i);
+    i += c > 0xffff ? 2 : 1;
+  }
+}
 const out = [];
 for (let c = 0; c < count; c++) {
   const p = disj(0);
@@ -52,9 +67,10 @@ for (let c = 0; c < count; c++) {
   try { re = new RegExp(p, 'u'); } catch (e) { re = null; }
   out.push('P\t' + JSON.stringify(p) + '\t' + (re ? 1 : 0));
   if (re) {
+    const sticky = new RegExp(p, 'uy');
     for (let i = 0; i < 10; i++) {
       const s = str();
-      out.push('S\t' + JSON.stringify(s) + '\t' + (re.test(s) ? 1 : 0));
+      out.push('S\t' + JSON.stringify(s) + '\t' + (re.test(s) ? 1 : 0) + '\t' + spec(sticky, s));
     }
   }
 }

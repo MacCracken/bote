@@ -48,7 +48,7 @@ fn _mcp_emit_versions(sb) {
     return 0;
 }
 
-fn _bote_server_version() { return "3.8.11"; }
+fn _bote_server_version() { return "3.8.12"; }
 
 # ================================================================
 # Tool name validation

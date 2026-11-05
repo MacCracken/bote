@@ -50,6 +50,8 @@ enum BoteRxNode {
 var BOTE_RX_MAX_INSNS = 4096;
 var BOTE_RX_MAX_DEPTH = 64;
 var BOTE_RX_MAX_COUNT = 10000;
+# (3.8.12) How many of a match's marks, cleared, cost one of the budget.
+var BOTE_RX_CLEAR_WORDS = 8;
 
 # ================================================================
 # Regex (32 bytes):
@@ -68,9 +70,19 @@ fn bote_rx_count(rx) { return load64(rx + 8); }
 
 # ---- Parsing --------------------------------------------------------------------------
 #
-# The parser's state (48 bytes): +0 the pattern's code points, +8 how many, +16 where it
-# reads, +24 why it stopped, +32 how deep its groups are. A node (32 bytes): +0 its kind,
-# +8 and +16 its operands, +24 its child or its children's vec.
+# The parser's state (72 bytes): +0 the pattern's code points, +8 how many, +16 where it
+# reads, +24 why it stopped, +32 how deep its groups are, +40 the alternatives it is in (a
+# vec of two words for each disjunction around the place it reads: the disjunction's number
+# and which of its alternatives), +48 the named groups so far (three words each: where the
+# name starts, its length, the alternatives it was in, copied), +56 the next disjunction's
+# number. A node (32 bytes): +0 its kind, +8 and +16 its operands, +24 its child or its
+# children's vec.
+#
+# (3.8.12, from the 3.8.11 review) What matches only the empty string is one EMPTY node: a
+# concatenation leaves it out, a quantifier on it or with a bound of 0 is it, and so is an
+# alternation of nothing else. So every other node compiles to one step at least, and a
+# quantifier's copies are bounded by the program's: `((a{0}){10000}){10000}` compiled each
+# of its 10^8 empty copies, and a third level would not end.
 
 fn _brx_node(kind, a, b, c) {
     var n = alloc(32);
@@ -130,14 +142,28 @@ fn _brx_hex(c) {
 }
 
 fn _brx_disj(ps) {
+    var path = load64(ps + 40);
+    var id = load64(ps + 56);
+    store64(ps + 56, id + 1);
+    vec_push(path, id);
+    vec_push(path, 0);
     var first = _brx_alt(ps);
-    if (_brx_peek(ps) != 124) { return first; }
-    var v = vec_new();
-    vec_push(v, first);
-    while (_brx_peek(ps) == 124 && load64(ps + 24) == 0) {
-        _brx_take(ps);
-        vec_push(v, _brx_alt(ps));
+    var v = 0;
+    var full = 0;
+    if (load64(first) != BOTE_RXN_EMPTY) { full = 1; }
+    if (_brx_peek(ps) == 124) {
+        v = vec_new();
+        vec_push(v, first);
+        while (_brx_peek(ps) == 124 && load64(ps + 24) == 0) {
+            _brx_take(ps);
+            vec_set(path, vec_len(path) - 1, vec_get(path, vec_len(path) - 1) + 1);
+            var nx = _brx_alt(ps);
+            if (load64(nx) != BOTE_RXN_EMPTY) { full = 1; }
+            vec_push(v, nx);
+        }
     }
+    vec_truncate(path, vec_len(path) - 2);
+    if (v == 0 || full == 0) { return first; }
     return _brx_node(BOTE_RXN_ALT, 0, 0, v);
 }
 
@@ -146,7 +172,8 @@ fn _brx_alt(ps) {
     while (load64(ps + 24) == 0) {
         var c = _brx_peek(ps);
         if (c < 0 || c == 124 || c == 41) { break; }
-        vec_push(v, _brx_term(ps));
+        var t = _brx_term(ps);
+        if (load64(t) != BOTE_RXN_EMPTY) { vec_push(v, t); }
     }
     if (vec_len(v) == 0) { return _brx_node(BOTE_RXN_EMPTY, 0, 0, 0); }
     if (vec_len(v) == 1) { return vec_get(v, 0); }
@@ -225,6 +252,7 @@ fn _brx_quant(ps, atom) {
     if (_brx_peek(ps) == 63) { _brx_take(ps); }
     if (_brx_quant_next(ps) == 1) { return _brx_fail(ps, "a quantifier on a quantifier"); }
     if (mn > BOTE_RX_MAX_COUNT || mx > BOTE_RX_MAX_COUNT) { return _brx_fail(ps, "a quantifier past bote's bound"); }
+    if (load64(atom) == BOTE_RXN_EMPTY || mx == 0) { return _brx_node(BOTE_RXN_EMPTY, 0, 0, 0); }
     return _brx_node(BOTE_RXN_REP, mn, mx, atom);
 }
 
@@ -251,12 +279,16 @@ fn _brx_group(ps) {
         var g = _brx_take(ps);
         if (g == 60) {
             # A named group, matched as any group is.
+            var ns = load64(ps + 16);
             var nc = _brx_take(ps);
             if (_brx_name_start(nc) == 0) { return _brx_fail(ps, "a group name bote's engine does not take"); }
             nc = _brx_take(ps);
             while (nc != 62) {
                 if (_brx_name_start(nc) == 0 && (nc < 48 || nc > 57)) { return _brx_fail(ps, "a group name bote's engine does not take"); }
                 nc = _brx_take(ps);
+            }
+            if (_brx_name_clash(ps, ns, load64(ps + 16) - 1 - ns) == 1) {
+                return _brx_fail(ps, "two groups named alike that can both match, which the u flag refuses");
             }
         } elif (g != 58) {
             return _brx_fail(ps, "an inline modifier or a group bote's engine does not take");
@@ -268,6 +300,52 @@ fn _brx_group(ps) {
     if (load64(ps + 24) != 0) { return inner; }
     if (_brx_take(ps) != 41) { return _brx_fail(ps, "an unterminated group"); }
     return inner;
+}
+
+# (3.8.12, from the 3.8.11 review) 1 when the name of `nl` code points at `ns` was given to
+# a group before that can take part in the same match as this one, which ECMA-262 refuses
+# (MightBothParticipate): two groups may share a name only from two alternatives of one
+# disjunction. The name is recorded, with the alternatives it is in.
+fn _brx_name_clash(ps, ns, nl) {
+    var cps = load64(ps);
+    var path = load64(ps + 40);
+    var names = load64(ps + 48);
+    var clash = 0;
+    var i = 0;
+    while (i < vec_len(names) && clash == 0) {
+        var os = vec_get(names, i);
+        if (vec_get(names, i + 1) == nl && memeq(cps + os * 8, cps + ns * 8, nl * 8) == 1) {
+            if (_brx_both_match(vec_get(names, i + 2), path) == 1) { clash = 1; }
+        }
+        i = i + 3;
+    }
+    var pl = vec_len(path);
+    var snap = alloc(8 + pl * 8);
+    store64(snap, pl);
+    var k = 0;
+    while (k < pl) { store64(snap + 8 + k * 8, vec_get(path, k)); k = k + 1; }
+    vec_push(names, ns);
+    vec_push(names, nl);
+    vec_push(names, snap);
+    return clash;
+}
+
+# 1 when a group in the alternatives `snap` (copied) and one in `path` can both match: unless
+# the two part in one disjunction, each in another of its alternatives.
+fn _brx_both_match(snap, path) {
+    var na = load64(snap);
+    var nb = vec_len(path);
+    var k = 0;
+    while (k < na && k < nb) {
+        if (load64(snap + 8 + k * 8) != vec_get(path, k)) {
+            # An even word is a disjunction's number: two inside one alternative. An odd one is
+            # the alternative: one disjunction, two of its alternatives.
+            if (k % 2 == 1) { return 0; }
+            return 1;
+        }
+        k = k + 1;
+    }
+    return 1;
 }
 
 # A character escape after its backslash, `c` the character after it: the code point it
@@ -399,14 +477,68 @@ fn _brx_builtin(r, e) {
     return 0;
 }
 
-# A vec of ranges as one array: its count, then each range's two ends.
+# A vec of ranges as one array: its count, then each range's two ends, in order and apart.
+# (3.8.12, from the 3.8.11 review) Sorted and merged, so a code point is looked for by
+# halving (_brx_in): a class of 4,000 members read each of them for each code point it was
+# asked of, and none of it was charged.
 fn _brx_flat(r) {
-    var n = vec_len(r) / 2;
-    var a = alloc(8 + n * 16);
-    store64(a, n);
+    var k = vec_len(r) / 2;
+    var p = alloc(k * 16 + 16);
+    var tmp = alloc(k * 16 + 16);
     var i = 0;
-    while (i < n * 2) { store64(a + 8 + i * 8, vec_get(r, i)); i = i + 1; }
+    while (i < k * 2) { store64(p + i * 8, vec_get(r, i)); i = i + 1; }
+    var srt = _brx_sort_ranges(p, tmp, k);
+    var a = alloc(8 + k * 16);
+    var n = 0;
+    i = 0;
+    while (i < k) {
+        var lo = load64(srt + i * 16);
+        var hi = load64(srt + i * 16 + 8);
+        if (n > 0 && lo <= load64(a + n * 16) + 1) {
+            if (hi > load64(a + n * 16)) { store64(a + n * 16, hi); }
+        } else {
+            store64(a + 8 + n * 16, lo);
+            store64(a + 16 + n * 16, hi);
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    store64(a, n);
     return a;
+}
+
+# Sort the `k` ranges at `p` (two words each) by their first code point, a merge sort with
+# `tmp` as room: where they are sorted, `p` or `tmp`.
+fn _brx_sort_ranges(p, tmp, k) {
+    var src = p;
+    var dst = tmp;
+    var w = 1;
+    while (w < k) {
+        var i = 0;
+        while (i < k) {
+            var mid = i + w;
+            if (mid > k) { mid = k; }
+            var hi = i + w * 2;
+            if (hi > k) { hi = k; }
+            var x = i;
+            var y = mid;
+            var o = i;
+            while (o < hi) {
+                var from = y;
+                if (y >= hi || (x < mid && load64(src + x * 16) <= load64(src + y * 16))) { from = x; x = x + 1; }
+                else { y = y + 1; }
+                store64(dst + o * 16, load64(src + from * 16));
+                store64(dst + o * 16 + 8, load64(src + from * 16 + 8));
+                o = o + 1;
+            }
+            i = hi;
+        }
+        var t = src;
+        src = dst;
+        dst = t;
+        w = w * 2;
+    }
+    return src;
 }
 
 # One member of a class after the parser's place: its code point, -2 when it was a class
@@ -555,8 +687,10 @@ fn bote_rx_compile(src) {
     var rx = alloc(32);
     memset(rx, 0, 32);
     if (src == 0) { store64(rx + 16, "no pattern"); return rx; }
-    var ps = alloc(48);
-    memset(ps, 0, 48);
+    var ps = alloc(72);
+    memset(ps, 0, 72);
+    store64(ps + 40, vec_new());
+    store64(ps + 48, vec_new());
     var nn[8];
     store64(ps, _brx_cps(src, &nn));
     store64(ps + 8, load64(&nn));
@@ -665,13 +799,17 @@ fn _brx_word(c) {
     return 0;
 }
 
+# 1 when the code point `c` is in the class's sorted ranges: the last range starting at or
+# below it, found by halving, ends at or past it.
 fn _brx_in(ranges, c) {
-    var n = load64(ranges);
-    var i = 0;
-    while (i < n) {
-        if (c >= load64(ranges + 8 + i * 16) && c <= load64(ranges + 16 + i * 16)) { return 1; }
-        i = i + 1;
+    var lo = 0;
+    var hi = load64(ranges);
+    while (lo < hi) {
+        var mid = (lo + hi) / 2;
+        if (load64(ranges + 8 + mid * 16) <= c) { lo = mid + 1; }
+        else { hi = mid; }
     }
+    if (lo > 0 && c <= load64(ranges + lo * 16)) { return 1; }
     return 0;
 }
 
@@ -717,12 +855,17 @@ fn _brx_add(ins, list, lc, mark, gen, st, pc, prev, cur, cnt) {
 
 # 1 when `rx` matches somewhere in the JSON string body [s, e) of `buf`, 0 when it does not,
 # and -1 when the budget block `bud` (or 0 for none) was spent first: each step a thread
-# takes or a jump it follows costs one. What it needs, four arrays as long as the program,
-# it takes from `a` and gives back.
+# takes or a jump it follows costs one, and clearing the steps' marks one for every
+# BOTE_RX_CLEAR_WORDS of them. What it needs, four arrays as long as the program, it takes
+# from `a` and gives back; from the calling thread's request arena when `a` is no bote
+# arena, which cannot give them back.
 fn bote_rx_test_a(a, rx, buf, s, e, bud) {
     var n = load64(rx + 8);
     var ins = load64(rx);
     var anch = load64(rx + 24);
+    # (3.8.12, from the 3.8.11 review) On the heap a release does nothing: a dispatcher's plain
+    # form kept 128 KB for each string `^.{0,2000}$` was asked of.
+    if (_bote_ar_is(a) == 0) { a = bote_req_alloc(); }
     var mk[16];
     bote_arena_mark(a, &mk);
     var cl = alloc_via(a, n * 8 + 8);
@@ -741,6 +884,16 @@ fn bote_rx_test_a(a, rx, buf, s, e, bud) {
     var gen = 1;
     var cc = _brx_add(ins, cl, 0, mark, gen, st, 0, prev, c, &cnt);
     var res = 0 - 2;
+    # (3.8.12, from the 3.8.11 review) The marks cleared and the first turn's steps, charged
+    # before anything is decided by them: through 3.8.11 both were charged nothing for a string
+    # decided at once, and 20,000 empty strings asked of a 3,000-step alternation cleared 60
+    # million words and took 40 million steps free. A cleared word is a store, about an
+    # eighth of a step; a set that needs no clearing cost every short pattern a fifth more.
+    if (bud != 0) {
+        store64(bud, load64(bud) - n / BOTE_RX_CLEAR_WORDS - load64(&cnt));
+        store64(&cnt, 0);
+        if (load64(bud) < 0) { res = 0 - 1; }
+    }
     while (res == 0 - 2) {
         var i = 0;
         while (i < cc && res == 0 - 2) {
